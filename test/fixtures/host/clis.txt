@@ -1,0 +1,5 @@
+claude	2.1.306 (Claude Code) 
+codex	codex-cli 0.163.0 
+grok	grok 1.0.62 (1474f9cbdd91) [alpha] 
+agy	1.4.4 
+gcloud	

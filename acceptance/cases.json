@@ -1,0 +1,57 @@
+[
+  {
+    "id": "litellm-1.107.0",
+    "eco": "pypi", "name": "litellm", "good": "1.106.2", "bad": "1.107.0",
+    "source": { "type": "replay", "script": "replay/litellm-2026-10-21/run.ts" },
+    "window": { "published": "2026-10-21T11:39:00Z", "removed": "2026-10-21T13:20:00Z" },
+    "what": ".pth + sitecustomize.py credential stealer shipped through a build data include, via stolen CI tokens"
+  },
+  {
+    "id": "litellm-1.82.7",
+    "eco": "pypi", "name": "litellm", "good": "1.82.6", "bad": "1.82.7",
+    "source": { "type": "datadog", "path": "pypi/compromised_lib/litellm/1.82.7" },
+    "what": "earlier compromised LiteLLM release"
+  },
+  {
+    "id": "litellm-1.82.8",
+    "eco": "pypi", "name": "litellm", "good": "1.82.6", "bad": "1.82.8",
+    "source": { "type": "datadog", "path": "pypi/compromised_lib/litellm/1.82.8" },
+    "what": "earlier compromised LiteLLM release"
+  },
+  {
+    "id": "ultralytics-8.3.41",
+    "eco": "pypi", "name": "ultralytics", "good": "8.3.40", "bad": "8.3.41",
+    "source": { "type": "datadog", "path": "pypi/compromised_lib/ultralytics/8.3.41" },
+    "what": "crypto miner injected through CI cache poisoning"
+  },
+  {
+    "id": "tinycolor-4.1.1",
+    "eco": "npm", "name": "@ctrl/tinycolor", "good": "4.1.0", "bad": "4.1.1",
+    "source": { "type": "datadog", "path": "npm/compromised_lib/@ctrl@tinycolor/4.1.1" },
+    "what": "Shai-Hulud worm: postinstall bundle that steals tokens and republishes"
+  },
+  {
+    "id": "nx-devkit-21.5.0",
+    "eco": "npm", "name": "@nx/devkit", "good": "21.4.1", "bad": "21.5.0",
+    "source": { "type": "datadog", "path": "npm/compromised_lib/@nx@devkit/21.5.0" },
+    "what": "s1ngularity: postinstall that drives local AI CLIs to hunt secrets"
+  },
+  {
+    "id": "debug-4.4.2",
+    "eco": "npm", "name": "debug", "good": "4.4.1", "bad": "4.4.2",
+    "source": { "type": "datadog", "path": "npm/compromised_lib/debug/4.4.2" },
+    "what": "phished maintainer: browser crypto-wallet clipper in the library code, no install script"
+  },
+  {
+    "id": "eslint-config-prettier-10.1.7",
+    "eco": "npm", "name": "eslint-config-prettier", "good": "10.1.5", "bad": "10.1.7",
+    "source": { "type": "datadog", "path": "npm/compromised_lib/eslint-config-prettier/10.1.7" },
+    "what": "phished maintainer: install script loading a Windows DLL"
+  },
+  {
+    "id": "bitwarden-cli-2026.4.0",
+    "eco": "npm", "name": "@bitwarden/cli", "good": "2026.3.0", "bad": "2026.4.0",
+    "source": { "type": "datadog", "path": "npm/compromised_lib/@bitwarden@cli/2026.4.0" },
+    "what": "compromised release of a password manager CLI"
+  }
+]

@@ -1,0 +1,17 @@
+{
+  "name": "oupdate",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": { "oupdate": "src/cli.ts" },
+  "scripts": {
+    "test": "bun test --timeout 30000",
+    "typecheck": "tsc --noEmit",
+    "scan": "bun scripts/scan.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "typescript": "5.9.3"
+  }
+}

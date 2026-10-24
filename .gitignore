@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.oupdate/
+acceptance-work/
+acceptance-results/
+replay-work*/
+replay-results/
+!test/fixtures/**/*.log
