@@ -1,0 +1,88 @@
+{
+  "formulae": [
+    {
+      "name": "abseil",
+      "full_name": "abseil",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "20260817.0"
+      },
+      "installed": [
+        {
+          "version": "20260817.0",
+          "installed_on_request": true
+        }
+      ],
+      "pinned": false,
+      "outdated": false
+    },
+    {
+      "name": "brotli",
+      "full_name": "brotli",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "1.2.0"
+      },
+      "installed": [
+        {
+          "version": "1.2.0",
+          "installed_on_request": false
+        }
+      ],
+      "pinned": false,
+      "outdated": true
+    },
+    {
+      "name": "svc",
+      "full_name": "example/svc/svc",
+      "tap": "example/svc",
+      "versions": {
+        "stable": "0.7.2"
+      },
+      "installed": [
+        {
+          "version": "HEAD-a435a37",
+          "installed_on_request": true
+        }
+      ],
+      "pinned": false,
+      "outdated": true
+    },
+    {
+      "name": "example-tool",
+      "full_name": "example-tool",
+      "tap": "homebrew/core",
+      "versions": {
+        "stable": "2.1.2"
+      },
+      "installed": [
+        {
+          "version": "2.1.2",
+          "installed_on_request": true
+        }
+      ],
+      "pinned": false,
+      "outdated": false
+    }
+  ],
+  "casks": [
+    {
+      "token": "example-app",
+      "full_token": "example-app",
+      "tap": "homebrew/cask",
+      "version": "1.4.4,4783783166214144",
+      "installed": "1.4.4,4783783166214144",
+      "outdated": false,
+      "auto_updates": true
+    },
+    {
+      "token": "brave-browser",
+      "full_token": "brave-browser",
+      "tap": "homebrew/cask",
+      "version": "1.97.59.0",
+      "installed": "1.97.59.0",
+      "outdated": false,
+      "auto_updates": true
+    }
+  ]
+}

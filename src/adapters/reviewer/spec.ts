@@ -1,0 +1,41 @@
+// Reviewer specs as they appear in config or on the command line.
+
+import type { Reviewer } from "../../review.ts";
+import { commandReviewer, type CommandReviewerConfig } from "./command.ts";
+import { openaiReviewer, type OpenAIReviewerConfig } from "./openai.ts";
+
+export type ReviewerSpec = ({ type: "command" } & CommandReviewerConfig) | ({ type: "openai" } & OpenAIReviewerConfig);
+
+const isStrArray = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.every((s) => typeof s === "string");
+
+export function validateReviewerSpec(v: unknown): ReviewerSpec {
+  if (!v || typeof v !== "object") throw new Error("reviewer spec must be a JSON object");
+  const o = v as Record<string, unknown>;
+  if (typeof o.name !== "string" || !o.name) {
+    if (o.type !== "command" && o.type !== "openai") throw new Error(`reviewer type must be command or openai, got ${String(o.type)}`);
+    throw new Error("reviewer spec needs a name");
+  }
+  if (o.type === "command") {
+    if (!isStrArray(o.argv)) throw new Error("command reviewer needs argv: a non-empty string array");
+    return o as unknown as ReviewerSpec;
+  }
+  if (o.type === "openai") {
+    if (!isStrArray(o.baseUrls) || typeof o.model !== "string") throw new Error("openai reviewer needs baseUrls (string array) and model");
+    return o as unknown as ReviewerSpec;
+  }
+  throw new Error(`reviewer type must be command or openai, got ${String(o.type)}`);
+}
+
+export function parseReviewerSpec(json: string): ReviewerSpec {
+  let v: unknown;
+  try {
+    v = JSON.parse(json);
+  } catch {
+    throw new Error("--reviewer must be JSON");
+  }
+  return validateReviewerSpec(v);
+}
+
+export function makeReviewer(spec: ReviewerSpec): Reviewer {
+  return spec.type === "command" ? commandReviewer(spec) : openaiReviewer(spec);
+}

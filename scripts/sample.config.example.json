@@ -1,0 +1,10 @@
+{
+  "reviewers": [
+    {
+      "type": "openai",
+      "name": "local",
+      "baseUrls": ["${OUPDATE_EVAL_BASE_URL}"],
+      "model": "${OUPDATE_EVAL_MODEL}"
+    }
+  ]
+}
