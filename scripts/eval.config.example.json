@@ -1,0 +1,16 @@
+{
+  "reviewers": [{ "type": "openai", "name": "local", "baseUrls": ["http://127.0.0.1:8080/v1"], "model": "your-model" }],
+  "workDir": "/path/to/acceptance-work",
+  "hosts": [
+    {
+      "name": "host-a",
+      "root": "/",
+      "oupdatePlist": "/Library/LaunchDaemons/org.example.oupdate-apply.plist",
+      "previousUpdaterPlist": "/Library/LaunchDaemons/org.example.old-updater.plist",
+      "stateDir": "/var/lib/oupdate/host",
+      "waive": [{ "name": "some-pkg", "why": "manual pin" }]
+    }
+  ],
+  "landing": "/path/to/landing.json",
+  "sampleConfig": "/path/to/sample-eval.json"
+}

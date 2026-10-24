@@ -1,0 +1,21 @@
+[notify] ⚠️ hosta Type B FLAG — svc (HEAD)
+[notify] ⚠️ hosta stale keg
+  brew: upgraded: c-ares ca-certificates example-tool pkgconf example-scan; casks upgraded: example-app; STUCK: example/svc/svc=HEAD(5 runs, since 2026-10-16) ; STALE KEG: example-rt still running from a deleted keg; restarted onto new keg: example-tool [example-rt(7 runs, since 2026-10-14) ]
+  npm:  nothing to update; claude-code: 2.1.100
+  mas:  n/a — no App Store apps installed
+=== hosta summary ===
+  brew: upgraded: c-ares ca-certificates example-tool pkgconf example-scan; casks upgraded: example-app; STUCK: example/svc/svc=HEAD(5 runs, since 2026-10-16) ; STALE KEG: example-rt still running from a deleted keg; restarted onto new keg: example-tool [example-rt(7 runs, since 2026-10-14) ]
+  npm:  nothing to update; claude-code: 2.1.100
+  mas:  n/a — no App Store apps installed
+[notify] 📋 hosta host-update done
+=== host-update hosta 2026-10-21 07:00 ===
+[notify] ⚠️ hosta Type B FLAG — svc (HEAD)
+[notify] ⚠️ hosta stale keg
+  brew: upgraded: ca-certificates docker llvm example-tool python@3.11 python@3.15 example-net; restarted: example-net(sys,deferred); casks upgraded: example-app; STUCK: example/svc/svc=HEAD(6 runs, since 2026-10-16) ; STALE KEG: example-rt still running from a deleted keg; restarted onto new keg: example-tool; svc stale — restart handed to waiter (pid 4242) [example-rt(8 runs, since 2026-10-14) ]
+  npm:  nothing to update; claude-code: 2.1.101
+  mas:  n/a — no App Store apps installed
+=== hosta summary ===
+  brew: upgraded: ca-certificates docker llvm example-tool python@3.11 python@3.15 example-net; restarted: example-net(sys,deferred); casks upgraded: example-app; STUCK: example/svc/svc=HEAD(6 runs, since 2026-10-16) ; STALE KEG: example-rt still running from a deleted keg; restarted onto new keg: example-tool; svc stale — restart handed to waiter (pid 4242) [example-rt(8 runs, since 2026-10-14) ]
+  npm:  nothing to update; claude-code: 2.1.101
+  mas:  n/a — no App Store apps installed
+[notify] 📋 hosta host-update done

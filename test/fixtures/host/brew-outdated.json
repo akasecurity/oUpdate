@@ -1,0 +1,23 @@
+{
+  "formulae": [
+    {
+      "name": "brotli",
+      "installed_versions": [
+        "1.2.0"
+      ],
+      "current_version": "1.2.0_1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "example/svc/svc",
+      "installed_versions": [
+        "HEAD-a435a37"
+      ],
+      "current_version": "HEAD",
+      "pinned": false,
+      "pinned_version": null
+    }
+  ],
+  "casks": []
+}
