@@ -6,6 +6,7 @@ import { isAbsolute } from "node:path";
 import type { Caps } from "./chunked.ts";
 import type { DeferredService } from "./waiter.ts";
 import type { LabelRestart } from "./kegs.ts";
+import type { AppBundle } from "./appbundle.ts";
 import { validateReviewerSpec, type ReviewerSpec } from "../adapters/reviewer/spec.ts";
 
 export interface RestartHelper {
@@ -63,6 +64,11 @@ export interface ApplyConfig {
   labelRestart?: LabelRestart;
   /** A stale-keg label not in labelRestart: "kickstart" (the default) restarts it, "report" only names it. */
   staleKegUnlisted?: "kickstart" | "report";
+  /**
+   * Apps installed outside brew and published as a signed, notarized disk image on the project's GitHub
+   * release (see appbundle.ts). Each one is reviewed and upgraded in place; the old bundle is kept.
+   */
+  appBundles: AppBundle[];
   /** A notify command: the notice text is passed as its last argument. [] is log-only by choice; absent is "not configured". */
   notify?: string[];
   reviewer?: ReviewerSpec;
@@ -91,7 +97,7 @@ export const DEFAULTS = {
 
 const KEYS = new Set([
   "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "hostPrefixes", "pinRoots",
-  "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "notify", "reviewer", "postUpgradeCheck", "timeoutMs", "npmRegistry", "caps",
+  "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "appBundles", "notify", "reviewer", "postUpgradeCheck", "timeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
 
@@ -138,6 +144,29 @@ function service(v: unknown, i: number): DeferredService {
     out[k] = p;
   }
   return out as unknown as DeferredService;
+}
+
+const APP_KEYS = ["name", "app", "repo", "asset", "restart"];
+
+function appBundle(v: unknown, i: number): AppBundle {
+  const where = `apply.appBundles[${i}]`;
+  if (!isObj(v)) throw new Error(`${where} must be an object`);
+  for (const k of Object.keys(v)) if (!APP_KEYS.includes(k)) throw new Error(`${where}: unknown key ${k}`);
+  const name = str(v, "name", where);
+  const app = path(v, "app", where);
+  const repo = str(v, "repo", where);
+  const asset = str(v, "asset", where);
+  if (!name || !app || !repo || !asset) throw new Error(`${where}: name, app, repo and asset are required`);
+  if (!app.endsWith(".app")) throw new Error(`${where}.app must end in .app`);
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error(`${where}.repo must be owner/name`);
+  try {
+    new RegExp(asset);
+  } catch {
+    throw new Error(`${where}.asset must be a valid regular expression`);
+  }
+  const restart = list(v, "restart", where, true);
+  if (restart && !isAbsolute(restart[0]!)) throw new Error(`${where}.restart[0] must be an absolute path`);
+  return { name, app, repo, asset, ...(restart ? { restart } : {}) };
 }
 
 /** Parses the config file's text; `host` is the fallback when the file names none. */
@@ -195,6 +224,7 @@ export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfi
   }
   const staleKegUnlisted = a.staleKegUnlisted === "report" ? "report" : "kickstart";
   if (a.staleKegUnlisted !== undefined && a.staleKegUnlisted !== staleKegUnlisted) throw new Error(`${w}.staleKegUnlisted must be "kickstart" or "report"`);
+  if (a.appBundles !== undefined && !Array.isArray(a.appBundles)) throw new Error(`${w}.appBundles must be an array`);
   if (a.deferred !== undefined && !Array.isArray(a.deferred)) throw new Error(`${w}.deferred must be an array`);
   let caps: Caps | undefined;
   if (a.caps !== undefined) {
@@ -225,6 +255,7 @@ export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfi
     restartHelper,
     labelRestart,
     staleKegUnlisted,
+    appBundles: ((a.appBundles as unknown[] | undefined) ?? []).map(appBundle),
     notify: list(a, "notify", w),
     postUpgradeCheck,
     reviewer: a.reviewer === undefined ? undefined : validateReviewerSpec(a.reviewer),
