@@ -10,6 +10,7 @@
 import type { Reviewer } from "../review.ts";
 import { chunkedReview, type Caps } from "./chunked.ts";
 import { artifactKind, formulaDeps, formulaUrls, loadsOtherFiles, supportFilesChanged, urlOrigin } from "./formula-gates.ts";
+import { gatherSurface, type Surface } from "./surface.ts";
 import { tapIn } from "./taps.ts";
 
 /** The parts of `brew info --json=v2` (formulae[0]) the review reads. */
@@ -58,6 +59,8 @@ export interface FormulaReviewArgs {
   logFile?: string;
   notify: (text: string) => void | Promise<void>;
   caps?: Caps;
+  /** The tap is the upstream source repo: review the release diff's supply-chain surface, not every changed file. */
+  upstream?: boolean;
 }
 
 export interface FormulaReviewResult {
@@ -68,14 +71,22 @@ export interface FormulaReviewResult {
   reason?: string;
 }
 
+export const SURFACE_TAIL = `This is an UPSTREAM-repo tap: the diff blocks after the formula are the release's supply-chain surface (build and install scripts, manifests, lockfiles, CI/release workflows, packaging, new executables). Other source files are not shown on purpose. Besides the indicators listed after the diff, also FLAG, quoting the line:
+7. A new network-touching install or build step (curl/wget/git clone, a download or socket call in setup.py, a Makefile, a script or a build hook)
+8. A new or changed dependency from an unexpected source or version: a url, a VCS or direct reference, another index, a typosquat-like name, or a pin loosened to anything
+9. A new install/postinstall hook, an added executable or binary, or a workflow change that reads secrets, publishes, or fetches and runs code
+Ordinary version bumps, new registry-pinned dependencies of well-known packages and build-flag changes are APPROVE.`;
+
 export const VERDICT_CONTRACT = `Output format — line 1 is parsed literally, and anything unexpected there is read as FLAG:
   Line 1: the single word APPROVE or FLAG, alone. No reason, no punctuation, no package name on that line.
   Line 2 onward: your reasoning.
-In an APPROVE, do not write the words flag/flagged/hold/reject/deny/block anywhere, and do not write a "Verdict:" line — each is read as a second, contradicting verdict. Write "no attack indicators found" instead.`;
+In an APPROVE, do not write the words flag/flagged/hold/reject/deny/block/blocks anywhere, and do not write a "Verdict:" line — each is read as a second, contradicting verdict. Write "no attack indicators found" instead. Call a Ruby install or service block a "stanza", "section" or "clause", never a "block".`;
 
 const ARTIFACT_LINE = {
   prebuilt:
     "Artifact: a PREBUILT download — there is no source to review, so this formula IS the whole review. brew verifies the download against the sha256 pinned in the formula, so what matters is WHERE the url points and what the install/post_install/service sections do.",
+  upstream:
+    "Artifact: built from source, and this tap IS the upstream project repository. The release's source diff is too large to read; the supply-chain surface of it follows the formula. Review the formula and that surface, nothing else.",
   source: "Artifact: built from source (the upstream source diff is reviewed separately; review only the formula here).",
 };
 
@@ -150,6 +161,8 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
     .map((d: unknown) => (isObj(d) ? d.full_name : undefined))
     .filter((n): n is string => typeof n === "string");
 
+  let surface: Surface | undefined;
+  let surfaceWhy = "no tap revision to diff from";
   let wholeNote = "";
   let fdiff = "";
   let oldText = "";
@@ -164,8 +177,17 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
     if (!fdiff) wholeNote = `the formula file shows no change between ${oldRev.slice(0, 12)} and the current tap checkout`;
     const names = await env.git(a.tapDir, ["diff", "--name-only", `${oldRev}..${a.head}`]);
     const changed = names.out.split("\n").filter(Boolean);
-    const bad = supportFilesChanged(changed);
-    if (bad.length) return gate(`tap support files changed — manual review: ${bad.join(" ")}`);
+    if (a.upstream) {
+      const g = await gatherSurface(env.git, a.tapDir, oldRev, a.head);
+      if (!g.ok) surfaceWhy = g.why;
+      else {
+        surface = g.surface;
+        if (surface.findings.length) return gate(`upstream release surface — manual review: ${surface.findings.join("; ")}`);
+      }
+    } else {
+      const bad = supportFilesChanged(changed);
+      if (bad.length) return gate(`tap support files changed — manual review: ${bad.join(" ")}`);
+    }
     const others = changed.filter((f) => f !== rbPath);
     if (others.length && loadsOtherFiles(ftext)) {
       return gate(
@@ -173,6 +195,8 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
       );
     }
   }
+
+  if (a.upstream && !surface) return gate(`upstream tap: the release diff cannot be established (${surfaceWhy}) — manual review`);
 
   // Artifact kind and source repo, against every top-level url of the installed formula.
   const oldUrls = oldText ? formulaUrls(oldText) : [];
@@ -220,13 +244,19 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
     scope = "the whole current formula file only (no diff)";
     log.push(`formula: whole file ${rbPath} (${wholeNote})`);
   }
+  if (surface) {
+    for (const f of surface.files) body += `\n=== ${f.path} (status: release diff ${oldRev.slice(0, 12)}..HEAD) ===\n${f.diff}`;
+    body += `\n=== release surface summary (status: note) ===\n${surface.files.length} surface files shown above; ${surface.otherCount} other changed files (source code) not shown.`;
+    scope += ", then the release diff of its supply-chain surface";
+  }
   let head = `You are reviewing a third-party Homebrew FORMULA — the Ruby recipe that tells brew what to download and how to build and install it — for supply chain attack indicators.
 
 Package: ${a.pkg}
 Tap: ${a.tap} (single-maintainer / small-team third-party, NOT registry-signed)
 Upgrade: ${upgrade}
-${ARTIFACT_LINE[a.artifact]}
+${surface ? ARTIFACT_LINE.upstream : ARTIFACT_LINE[a.artifact]}
 Formula: ${rbPath} — below is ${scope}.`;
+  if (surface) head += `\n${SURFACE_TAIL}`;
   if (wholeNote) head += `\nNOTE: this is the WHOLE current formula file, not a diff, because ${wholeNote}. Judge the formula as it stands.`;
 
   const res = await chunkedReview(r, {

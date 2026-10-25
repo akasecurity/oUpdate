@@ -25,6 +25,8 @@ export interface TypeBOptions {
   /** In a dry run the caller passes a notify that only logs: the bash sent no notices then. */
   notify: (text: string) => void | Promise<void>;
   caps?: Caps;
+  /** Taps that are the upstream source repo: their release diff is reviewed by its supply-chain surface. */
+  upstreamTaps?: string[];
 }
 
 export interface TypeBReview {
@@ -57,11 +59,12 @@ export async function typeBReview(env: TypeBEnv, r: Reviewer, pkg: string, tap: 
   log.push(`--- Type B review: ${pkg} (${oldVer} → ${newVer}, tap: ${tap}) ---`);
   const stableUrl = typeof info?.urls?.stable?.url === "string" ? info.urls.stable.url : "";
   const artifact = artifactKind(stableUrl);
-  const kind = artifact === "prebuilt" ? "formula-only, prebuilt" : "formula + source";
+  const upstream = artifact === "source" && tapIn(tap, o.upstreamTaps ?? []);
+  const kind = artifact === "prebuilt" ? "formula-only, prebuilt" : upstream ? "formula + release surface" : "formula + source";
   log.push(`  review: ${artifact === "prebuilt" ? "formula-only (prebuilt)" : kind}`);
   const f = await formulaReview(env, r, {
     pkg, tap, oldVer, newVer, artifact, tapDir, head, newUrl: stableUrl,
-    officialTaps: o.officialTaps, host: o.host, logFile: o.logFile, notify: o.notify, caps: o.caps,
+    officialTaps: o.officialTaps, host: o.host, logFile: o.logFile, notify: o.notify, caps: o.caps, upstream,
   });
   log.push(...f.log);
   // The kind is reported only with a verdict: an rc 2 "no review" must not read as reviewed.
@@ -69,6 +72,10 @@ export async function typeBReview(env: TypeBEnv, r: Reviewer, pkg: string, tap: 
   if (f.rc !== 0) return { rc: f.rc, calls: f.calls, log, ...withKind };
   if (artifact === "prebuilt") {
     log.push(`  ${pkg}: formula APPROVEd — prebuilt artifact (${stableUrl}); brew verifies it against the formula's pinned sha256`);
+    return { rc: 0, calls: f.calls, log, pin: f.pin, ...withKind };
+  }
+  if (upstream) {
+    log.push(`  ${pkg}: formula and release surface APPROVEd — upstream tap ${tap}, source build of ${stableUrl}`);
     return { rc: 0, calls: f.calls, log, pin: f.pin, ...withKind };
   }
   const reason = "source-built: the source diff review is not in this oupdate version — held for manual review";

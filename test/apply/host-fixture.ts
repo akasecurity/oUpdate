@@ -152,6 +152,7 @@ export function testConfig(over: Partial<ApplyConfig> = {}): ApplyConfig {
     lsof: "/usr/sbin/lsof",
     officialTaps: ["homebrew/core", "homebrew/cask"],
     typeBTaps: ["example/svc"],
+    upstreamTaps: [],
     hostPrefixes: [],
     pinRoots: [],
     caskExclude: [],
