@@ -28,6 +28,7 @@
 // when apply.claudeCode names an executable binary.
 
 import { basename, join } from "node:path";
+import { appBundleUpgrade, realAppNet, type AppNet } from "./appbundle.ts";
 import { isStopping as execStopping } from "./exec.ts";
 import type { Reviewer } from "../review.ts";
 import { makeReviewer } from "../adapters/reviewer/spec.ts";
@@ -65,6 +66,8 @@ export interface ApplyOptions {
   /** Test seams, as the previous updater's tests mocked these functions. */
   gk?: GkOps;
   typeB?: { upgrades: typeof typeBUpgrades; awaiting: typeof awaitingTapApproval };
+  /** The app-bundle phase's network and file operations. */
+  appNet?: AppNet;
 }
 
 export interface ApplyResult {
@@ -226,6 +229,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     linkageNote: "",
     handoffNotes: [] as string[],
     stuck: [] as string[],
+    appNotes: [] as string[],
   };
   const npmFailed: string[] = [];
 
@@ -367,6 +371,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     if (!dryRun && b.started && !b.noBrew) await cleanup();
   });
   await step("brew", "deferred casks", casksSection);
+  await step("brew", "app bundles", appBundlesSection);
   await step("brew", "stale-keg check", async () => {
     if (b.noBrew) return;
     const s = await staleKegCheck(kegEnv, {
@@ -572,6 +577,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     return [
       failed.length ? `FAILED: ${failed.join(" ")}` : "",
       core.replace(/; $/, ""),
+      b.appNotes.join("; "),
       b.stuck.length ? `STUCK: ${b.stuck.join(" ")}` : "",
       b.pinned.length ? `PINNED: ${b.pinned.join(" ")}` : "",
       b.pinWarn, stale, b.linkageNote, b.waiterNote, notifyNote,
@@ -806,6 +812,25 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       return;
     }
     log.push(...(await x([cfg.brew, "cleanup"])).out.trimEnd().split("\n").slice(-5));
+  }
+
+  async function appBundlesSection() {
+    if (!cfg.appBundles.length) return;
+    log.push("", "--- app bundles ---");
+    const net = opts.appNet ?? realAppNet;
+    const env = { ...net, exec: x, git: tbEnv.git, spawnDetached: fs.spawnDetached };
+    for (const app of cfg.appBundles) {
+      const res = await appBundleUpgrade(env, r, app, {
+        dryRun, host, logFile: cfg.logFile, stateDir: cfg.stateDir, notify, caps: cfg.caps, detachedLog: join(cfg.stateDir, "restart.log"),
+      });
+      log.push(...res.log);
+      if (res.status === "held") b.flagged = true;
+      else if (res.status === "failed") {
+        b.flagged = true;
+        b.failed.push(`app:${app.name}`);
+      }
+      if (res.note) b.appNotes.push(res.note);
+    }
   }
 
   async function casksSection() {

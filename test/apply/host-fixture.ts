@@ -153,6 +153,7 @@ export function testConfig(over: Partial<ApplyConfig> = {}): ApplyConfig {
     officialTaps: ["homebrew/core", "homebrew/cask"],
     typeBTaps: ["example/svc"],
     upstreamTaps: [],
+    appBundles: [],
     hostPrefixes: [],
     pinRoots: [],
     caskExclude: [],

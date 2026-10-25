@@ -4,6 +4,7 @@
 // stuck state, the restart list and the phase order. New here: timeouts, the dry run's no-write
 // promise and the summary read back by the host shadow parser.
 import { describe, expect, test } from "bun:test";
+import type { AppNet } from "../../src/apply/appbundle.ts";
 import { applyHost, type GkOps } from "../../src/apply/run.ts";
 import { parseSuSummary } from "../../src/host/prev-log.ts";
 import { fakeHost, fakeTypeB, testConfig, type HostScript } from "./host-fixture.ts";
@@ -22,10 +23,10 @@ const APPROVED = "/conf.test/approved-taps.tsv";
 const brewLine = (summary: string[]) => summary.find((l) => l.startsWith("  brew: ")) ?? "";
 const npmLine = (summary: string[]) => summary.find((l) => l.startsWith("  npm:  ")) ?? "";
 
-async function run(script: HostScript, o: { cfg?: Parameters<typeof testConfig>[0]; dryRun?: boolean; tb?: ReturnType<typeof fakeTypeB>; gk?: GkOps } = {}) {
+async function run(script: HostScript, o: { cfg?: Parameters<typeof testConfig>[0]; dryRun?: boolean; tb?: ReturnType<typeof fakeTypeB>; gk?: GkOps; appNet?: AppNet } = {}) {
   const h = fakeHost(script);
   const tb = o.tb ?? fakeTypeB(0);
-  const res = await applyHost(testConfig(o.cfg), h.exec, h.fs, { dryRun: o.dryRun ?? false, reviewer: scripted([], "APPROVE\nno attack indicators found").r, typeB: tb.typeB, gk: o.gk, now: new Date(2026, 9, 22, 7, 0) });
+  const res = await applyHost(testConfig(o.cfg), h.exec, h.fs, { dryRun: o.dryRun ?? false, reviewer: scripted([], "APPROVE\nno attack indicators found").r, typeB: tb.typeB, gk: o.gk, appNet: o.appNet, now: new Date(2026, 9, 22, 7, 0) });
   const text = [...res.log, ...res.summary].join("\n");
   return { ...res, ...h, tb, text, brew: brewLine(res.summary), npm: npmLine(res.summary) };
 }
@@ -733,5 +734,20 @@ describe("Claude Code native update in the npm phase (port 12c, claude_step)", (
     const r2 = await applyHost(testConfig({ claudeCode: CC }), exec, g.fs, { dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB, isStopping: () => stop });
     expect(ccCalls(g.calls)).toEqual([]);
     expect(npmLine(r2.summary)).toMatch(/; claude-code: FAILED \(rc=143, on unknown\)$/);
+  });
+});
+
+describe("app bundles", () => {
+  const APP = { name: "exampleapp", app: "/Applications/Example.app", repo: "owner/exampleapp", asset: "x" };
+  const net = (releases: AppNet["releases"]): AppNet => ({ releases, download: async () => {}, sha256: async () => "", exists: async () => false, mkdir: async () => {}, remove: async () => {} });
+  test("none configured: the phase is silent", async () => {
+    const r = await run(BREW);
+    expect(r.text).not.toContain("--- app bundles ---");
+  });
+  test("a bundle that cannot be checked is FAILED in the brew line and fails the run", async () => {
+    const r = await run(BREW, { cfg: { appBundles: [APP] }, appNet: net(async () => { throw new Error("offline"); }) });
+    expect(r.text).toContain("--- app bundles ---");
+    expect(r.brew).toContain("app:exampleapp");
+    expect(r.rc).toBe(1);
   });
 });

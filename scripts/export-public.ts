@@ -118,7 +118,19 @@ function checkTarget(target: string): void {
   if (emails.length === 0 || emails.some((e) => e !== AUTHOR.email)) throw new Error("target has commits that are not an earlier export");
 }
 
-if (import.meta.main) {
+// Every commit in `range` (e.g. origin/main..HEAD) must have the noreply address as author and committer.
+export function badCommitEmails(repo: string, range: string): string[] {
+  const rows = run(repo, ["git", "log", "--format=%h %ae %ce", range]).split("\n").filter(Boolean);
+  return rows.filter((r) => r.split(" ").slice(1).some((e) => e !== AUTHOR.email));
+}
+
+if (import.meta.main && process.argv[2] === "--check-push") {
+  const [repo, range] = [process.argv[3], process.argv[4]];
+  if (!repo || !range) throw new Error("usage: bun scripts/export-public.ts --check-push <repo> <range>");
+  const bad = badCommitEmails(repo, range);
+  if (bad.length) throw new Error(`commits with a non-noreply author or committer email:\n${bad.join("\n")}`);
+  console.log("commit metadata ok");
+} else if (import.meta.main) {
   const arg = process.argv[2];
   if (!arg) throw new Error("usage: bun scripts/export-public.ts <target-dir>");
   mkdirSync(arg, { recursive: true });
