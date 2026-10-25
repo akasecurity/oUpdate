@@ -72,7 +72,7 @@ const OSV_ECOSYSTEM: Record<Ecosystem, string> = { npm: "npm", pypi: "PyPI" };
 export const VERDICT_CONTRACT = `Output format: line 1 is parsed literally, and anything unexpected there is read as FLAG.
   Line 1: the single word APPROVE or FLAG, alone. No reason, no punctuation, no package name on that line.
   Line 2 onward: your reasoning.
-In an APPROVE, do not write a "Verdict:" line, the uppercase words FLAG/HOLD/REJECT/DENY/BLOCK, or a recommendation to flag, hold, reject, block or not land the update; each is read as a second, contradicting verdict. Write "no attack indicators found" instead.`;
+In an APPROVE, do not write a "Verdict:" line, the uppercase words FLAG/HOLD/REJECT/DENY/BLOCK, or a recommendation to flag, hold, reject, block or not land the update; each is read as a second, contradicting verdict. Write "no attack indicators found" instead. Never use the word "block" or "blocks" in an APPROVE; call a code block, or a Ruby install or service block, a "stanza", "section" or "clause".`;
 
 // A contradiction is a verdict, not a word: "try block", "feature flag" and "holds a reference" are plain English (Opus calibration 10-21).
 const CONTRADICTION = [

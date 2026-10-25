@@ -107,6 +107,7 @@ It writes `DIR/inventory.json` (the snapshot for the next run) and `DIR/reports/
        "npm": "/opt/homebrew/bin/npm",
        "claudeCode": "/opt/example/bin/claude",
        "typeBTaps": ["example/tool"],
+       "upstreamTaps": ["example/tool"],
        "approvedTapsFile": "/etc/oupdate/approved-taps.tsv",
        "pinRoots": ["/srv/repos"],
        "caskExclude": ["some-huge-suite"],
@@ -185,6 +186,7 @@ launchctl bootstrap system /Library/LaunchDaemons/org.example.old-updater.plist
    - Split the rest by tap:
      - **Type A**: the official taps. A deterministic version policy holds a major increase of a sensitive package.
      - **Type B**: `typeBTaps` plus this host's rows in the approved-taps file. Each package gets its own review before it installs.
+       - **Upstream taps** (`upstreamTaps`, off by default; the tap must also be Type B): for a tap that IS the project's source repo, with a source-built formula, every release changes hundreds of non-formula files, so the "support files changed" FLAG could never pass. For a listed tap the review instead reads only the supply-chain surface of the release diff (the receipt's tap revision to the tap HEAD): the formula, install and build scripts, `setup.py`/`pyproject.toml`/`Makefile`/`CMakeLists.txt`, package manifests and lockfiles, `.github/` workflows, `packaging/`, `scripts/`, plist and shell files, and any newly executable file or symlink. Other source files are counted, not read. Before the reviewer runs, a deterministic scan of the lines the release adds to that surface FLAGs a fetch piped into a shell, an encoded payload, a new curl/wget/git clone or network call in a build step (CI workflows excepted), a dependency from a url, VCS or another index, a new npm install hook, and any added or changed binary that is not an image, font or PDF. The reviewer then reads the formula plus that surface with extra indicators for new network steps, dependency sources and hooks, and a FLAG holds the package. The formula gates (url origin, artifact kind, new off-tap dependency, formula loading other files) and the tap-unchanged and off-tap-dependency re-checks before `brew upgrade` still apply. No receipt revision, an unreadable diff or a HEAD install still holds the package. A tap not listed behaves exactly as before.
      - **Unknown taps**: an advisory review only. One notice asks for the tap's approval; nothing installs.
    - Upgrade what passed, one package at a time. Relink, then restart each upgraded service, except a deferred one: that goes to its idle waiter.
 3. **Deferred casks.** One at a time, with Gatekeeper around each upgrade: snapshot before, then release and check after.
@@ -199,7 +201,7 @@ Gatekeeper one-offs, with no review and no upgrade:
 - `oupdate host --gatekeeper-approve CASK` releases a cask nobody ever approved. The same three gates apply: one Team ID, the pinned team, and notarization.
 - `oupdate host --gatekeeper-revert CASK` puts back every quarantine value a release removed.
 
-Not in this version, and held or reported rather than skipped: the review of a HEAD install, the source-diff review of a source-built Type B package, and the App Store.
+Not in this version, and held or reported rather than skipped: the review of a HEAD install, the source-diff review of a source-built Type B package (except for an `upstreamTaps` tap, which gets the surface review above), and the App Store.
 
 The Gatekeeper one-offs exit 1 when nothing was released or restored. They log to `gatekeeper-<log file name>`, never the dated log.
 

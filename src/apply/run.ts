@@ -322,7 +322,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       return { rc: res.rc, out: res.out };
     },
   };
-  const tbOpts: TypeBOptions = { officialTaps: cfg.officialTaps, host, logFile: cfg.logFile, notify, caps: cfg.caps };
+  const tbOpts: TypeBOptions = { officialTaps: cfg.officialTaps, host, logFile: cfg.logFile, notify, caps: cfg.caps, upstreamTaps: cfg.upstreamTaps };
 
   const brewFailed = async (name: string) => {
     b.failed.push(name);
