@@ -37,6 +37,12 @@ export interface ApplyConfig {
   officialTaps: string[];
   /** Type B: trusted third-party taps, reviewed per package. */
   typeBTaps: string[];
+  /**
+   * Type B taps that ARE the upstream source repo (a source-built formula whose tap holds the project).
+   * For these only, the review reads the supply-chain surface of the release diff instead of FLAGging
+   * every changed source file. Off (empty) by default; a tap listed here must also be approved as Type B.
+   */
+  upstreamTaps: string[];
   /** Per-host tap approvals, "<tap>\t<host or *>\t<date>\t<note>" rows; adds to typeBTaps. */
   approvedTapsFile?: string;
   hostPrefixes: string[];
@@ -84,7 +90,7 @@ export const DEFAULTS = {
 };
 
 const KEYS = new Set([
-  "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "approvedTapsFile", "hostPrefixes", "pinRoots",
+  "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "hostPrefixes", "pinRoots",
   "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "notify", "reviewer", "postUpgradeCheck", "timeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
@@ -205,6 +211,7 @@ export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfi
     lsof: path(a, "lsof", w) ?? DEFAULTS.lsof,
     officialTaps: (list(a, "officialTaps", w, true) ?? DEFAULTS.officialTaps).map((t) => t.toLowerCase()),
     typeBTaps: (list(a, "typeBTaps", w) ?? []).map((t) => t.toLowerCase()),
+    upstreamTaps: (list(a, "upstreamTaps", w) ?? []).map((t) => t.toLowerCase()),
     approvedTapsFile: path(a, "approvedTapsFile", w),
     hostPrefixes: list(a, "hostPrefixes", w) ?? [],
     pinRoots: (list(a, "pinRoots", w) ?? []).map((p, i) => {
