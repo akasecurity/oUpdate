@@ -15,7 +15,7 @@ import { parseReviewerSpec, makeReviewer, type ReviewerSpec } from "./adapters/r
 import { parseScannerSpec, makeScanner, type ScannerSpec } from "./adapters/scanner/spec.ts";
 import { giteaForge } from "./adapters/forge/gitea.ts";
 import { runGate } from "./gate.ts";
-import { parseHostCommand, hostMain, applyMain } from "./host/cli.ts";
+import { parseHostCommand, hostMain, applyMain, ownerWaiterMain } from "./host/cli.ts";
 import { launchdPlist } from "./host/launchd.ts";
 import { realExec } from "./apply/exec.ts";
 import { realFs } from "./apply/fs.ts";
@@ -230,6 +230,7 @@ if (import.meta.main) {
         process.stdout.write(launchdPlist(hc.args));
         process.exit(0);
       }
+      if (hc.mode === "owner-waiter") process.exit(await ownerWaiterMain(hc, { exec: realExec }));
       if (hc.mode !== "report") {
         const { rc } = await applyMain(hc, { exec: realExec, fs: realFs });
         process.exit(rc);

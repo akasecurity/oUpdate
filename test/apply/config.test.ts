@@ -51,6 +51,21 @@ describe("parseApplyConfig", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/state.test", staleKegUnlisted: "kickstart" }), "hosta").staleKegUnlisted).toBe("kickstart");
     expect(parseApplyConfig(cfg({ stateDir: "/state.test" }), "hosta").staleKegUnlisted).toBe("kickstart");
   });
+  test("staleOwners: off by default; a list of label globs with an optional probe argv and health URL", () => {
+    expect(parseApplyConfig(cfg({ stateDir: "/state.test" }), "hosta").staleOwners).toBeUndefined();
+    const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [{ match: "org.example.*" }, { match: "org.example.svc", probe: ["/opt/svc.test/idle", "--quiet"], health: "http://127.0.0.1:8080/health" }] }), "hosta");
+    expect(c.staleOwners).toEqual([{ match: "org.example.*" }, { match: "org.example.svc", probe: ["/opt/svc.test/idle", "--quiet"], health: "http://127.0.0.1:8080/health" }]);
+  });
+  test("staleOwners restart: kickstart (default) or bootout+bootstrap of an absolute plist; healthWithinSec", () => {
+    const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [
+      { match: "org.example.k", restart: "kickstart" },
+      { match: "org.example.gate", probe: ["/usr/local/libexec/example-idle"], health: "http://127.0.0.1:8091/status", restart: { bootstrap: "/Library/LaunchDaemons/org.example.gate.plist" }, healthWithinSec: 120 },
+    ] }), "hosta");
+    expect(c.staleOwners).toEqual([
+      { match: "org.example.k", restart: "kickstart" },
+      { match: "org.example.gate", probe: ["/usr/local/libexec/example-idle"], health: "http://127.0.0.1:8091/status", restart: { bootstrap: "/Library/LaunchDaemons/org.example.gate.plist" }, healthWithinSec: 120 },
+    ]);
+  });
   test("labelRestart: a label named like a prototype key is an own label, never the prototype", () => {
     // Mutant caught: labelRestart built by assignment ("__proto__" set the object's prototype; the label was lost).
     const c = parseApplyConfig('{"apply":{"stateDir":"/state.test","labelRestart":{"__proto__":"skip","constructor":["/opt/owner.test/r"]}}}', "hosta");
@@ -85,6 +100,17 @@ describe("parseApplyConfig", () => {
     ["a staleKegUnlisted null", cfg({ stateDir: "/s", staleKegUnlisted: null }), /apply\.staleKegUnlisted must be "kickstart" or "report"/],
     ["a staleKegUnlisted that is not a string", cfg({ stateDir: "/s", staleKegUnlisted: true }), /apply\.staleKegUnlisted must be "kickstart" or "report"/],
     ["a labelRestart argv with an empty argument", cfg({ stateDir: "/s", labelRestart: { "org.example.x": ["/a", ""] } }), /labelRestart\["org\.example\.x"\] must be/],
+    ["a staleOwners that is not an array", cfg({ stateDir: "/s", staleOwners: { match: "x" } }), /apply\.staleOwners must be an array/],
+    ["a staleOwners entry that is not an object", cfg({ stateDir: "/s", staleOwners: ["org.x"] }), /apply\.staleOwners\[0\] must be an object/],
+    ["a staleOwners entry with no match", cfg({ stateDir: "/s", staleOwners: [{ probe: ["/a"] }] }), /apply\.staleOwners\[0\]\.match is required/],
+    ["a staleOwners entry with an unknown key", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", probes: ["/a"] }] }), /apply\.staleOwners\[0\]: unknown key probes/],
+    ["a staleOwners probe with a relative argv0", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", probe: ["idle.sh"] }] }), /apply\.staleOwners\[0\]\.probe\[0\] must be an absolute path/],
+    ["a staleOwners probe that is empty", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", probe: [] }] }), /apply\.staleOwners\[0\]\.probe must be a non-empty array/],
+    ["a staleOwners restart word other than kickstart", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: "bootstrap" }] }), /apply\.staleOwners\[0\]\.restart must be "kickstart" or \{"bootstrap": "<absolute plist path>"\}/],
+    ["a staleOwners bootstrap with a relative plist", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: { bootstrap: "org.x.plist" } }] }), /apply\.staleOwners\[0\]\.restart must be/],
+    ["a staleOwners restart object with another key", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: { bootstrap: "/L/org.x.plist", how: 1 } }] }), /apply\.staleOwners\[0\]\.restart must be/],
+    ["a staleOwners healthWithinSec of zero", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", healthWithinSec: 0 }] }), /apply\.staleOwners\[0\]\.healthWithinSec must be a positive integer/],
+    ["a staleOwners health that is not a URL", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", health: "localhost:8080" }] }), /apply\.staleOwners\[0\]\.health must be an http\(s\) URL/],
   ] as const) {
     test(`${label} is an error`, () => expect(() => parseApplyConfig(text, "hosta")).toThrow(err));
   }

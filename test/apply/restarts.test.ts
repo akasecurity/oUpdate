@@ -57,6 +57,16 @@ describe("restartUpgraded", () => {
     expect(calls).toEqual([]);
     expect(spawned).toEqual([]);
   });
+  test("staleOwners: a matching label is left to the stale-keg check's idle waiter, before labelRestart and the helper", async () => {
+    const { e, calls, spawned } = env(["/Library/LaunchDaemons/sh.brew.a.plist", "/home.test/Library/LaunchAgents/sh.brew.b.plist", HELPER]);
+    const out = await restartUpgraded(e, ["a", "b"], {
+      deferred: [], helper: { path: HELPER, packages: ["a"] }, labelRestart: { "sh.brew.a": "kickstart" }, staleKegUnlisted: "report", detachedLog: "/log.test",
+      staleOwners: [{ match: "sh.brew.*" }],
+    });
+    expect(out).toEqual(["a(waiting for idle restart)", "b(waiting for idle restart)"]);
+    expect(calls).toEqual([]);
+    expect(spawned).toEqual([]);
+  });
   test('staleKegUnlisted "report": an unlisted label with a plist is reported, never restarted (issue 3)', async () => {
     const { e, calls, spawned } = env(["/Library/LaunchDaemons/sh.brew.a.plist", "/Library/LaunchDaemons/sh.brew.b.plist", "/Library/LaunchDaemons/sh.brew.c.plist", HELPER]);
     const out = await restartUpgraded(e, ["a", "b", "c"], {
