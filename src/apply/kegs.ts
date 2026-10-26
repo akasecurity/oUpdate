@@ -12,7 +12,7 @@
 // a label in labelRestart is restarted; any other is named in the note. A re-scan then reports what
 // is still stale. lsof failing is a reported failure, never "nothing stale".
 
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import { isStopping, type Exec } from "./exec.ts";
 import { matchOwner, parsePrint, type QueuedOwner, type StaleOwner } from "./owner-waiter.ts";
 
@@ -91,12 +91,17 @@ export function caskRunning(lsofOut: string, caskroom: string, cask: string, app
   return [...pids].sort((a, b) => Number(a) - Number(b));
 }
 
-/** lsof's txt and mem maps, or undefined when lsof cannot run, fails or prints nothing. */
-export async function lsofMaps(env: KegEnv, bin: string, log: string[]): Promise<string | undefined> {
+/**
+ * lsof's txt and mem maps, or undefined when lsof cannot run, fails or prints nothing. `strict` (a
+ * scan a release check relies on): output without lsof's COMMAND header is unusable too, never "no
+ * process on the keg".
+ */
+export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false): Promise<string | undefined> {
   const r = await env.exec([bin, "-nP", "-w", "-d", "txt,mem"]);
   if (r.rc === 127) log.push(`  stale-keg: ${bin} is not executable`);
   else if (r.rc !== 0) log.push(`  stale-keg: ${bin} exited non-zero`);
   else if (!r.out.trim()) log.push(`  stale-keg: ${bin} returned nothing`);
+  else if (strict && !r.out.split("\n").some((l) => l.startsWith("COMMAND"))) log.push(`  stale-keg: ${bin} printed no COMMAND header`);
   else return r.out;
   return undefined;
 }
@@ -160,6 +165,12 @@ export interface KegOptions {
   ownerFailed?: ReadonlySet<string>;
   /** Labels the last waiter held as busy: queued again, counted as held busy. */
   ownerBusy?: ReadonlySet<string>;
+  /**
+   * A release check's formula racks, each with the one keg its owners must run (the candidate, or the
+   * restored version after a rollback): every other keg of the rack counts as stale though it is on
+   * disk (the previous keg the check keeps, and any older retained one).
+   */
+  releaseRacks?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -200,19 +211,41 @@ async function send(o: KegOptions, log: string[], text: string) {
   }
 }
 
-export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note: string; log: string[] }> {
+/**
+ * `scanned: false`: the cellar or lsof could not be read, so no process was looked at.
+ * `unresolved`: the keg directories with a stale process whose owner was not found (no label, an
+ * ambiguous one, a label launchd does not show running it, a job not restarted) or whose owner could
+ * not be queued: a release check on one of them cannot know its owner was restarted.
+ */
+export interface StaleKegResult {
+  note: string;
+  log: string[];
+  scanned?: false;
+  unresolved: Set<string>;
+}
+
+export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKegResult> {
   const log: string[] = o.log ?? [];
   const c = await env.exec([o.brew, "--cellar"]);
   const cellar = c.rc === 0 ? c.out.trim() : "";
-  if (!cellar || !(await env.isDir(cellar))) return { note: "", log };
-  const maps = await lsofMaps(env, o.lsof, log);
+  /** Kegs whose stale process was not resolved to an owner (see StaleKegResult). */
+  const unresolvedKegs = new Set<string>();
+  /** A keg of a release check's rack other than the one its owners must run: stale though on disk. */
+  const isRetired = (keg: string) => {
+    const expect = o.releaseRacks?.get(dirname(keg));
+    return expect !== undefined && keg !== expect;
+  };
+  if (!cellar || !(await env.isDir(cellar))) return { note: "", log, scanned: false, unresolved: unresolvedKegs };
+  // A release check's keg among them: an lsof answer that is not lsof's is no scan.
+  const strict = !!o.releaseRacks?.size;
+  const maps = await lsofMaps(env, o.lsof, log, strict);
   if (maps === undefined) {
     const note = `STALE-KEG CHECK FAILED: lsof unusable (${o.lsof})`;
     log.push(`  ${note}`);
-    return { note, log };
+    return { note, log, scanned: false, unresolved: unresolvedKegs };
   }
   const held = kegHolders(maps, cellar);
-  if (!held.length) return { note: "", log };
+  if (!held.length) return { note: "", log, unresolved: unresolvedKegs };
 
   const stale: string[] = [];
   const handed: string[] = [];
@@ -233,6 +266,7 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
   /** Per package, per category, the targets (or pids) handled that way: every one is named in the note. */
   const marks = new Map<string, Map<Category, Set<string>>>();
   const mark = (pkg: string, c: Category, id: string) => {
+    if (c === "orphans") misses++;
     let m = marks.get(pkg);
     if (!m) marks.set(pkg, (m = new Map()));
     let ids = m.get(c);
@@ -241,7 +275,12 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
   };
   /** Jobs for the owner waiter, queued once after the walk. */
   const ownerQueue: QueuedOwner[] = [];
-  const add = (list: string[], v: string) => void (list.includes(v) || list.push(v));
+  /** Counts every unresolved entry and orphan as it is recorded (deduplicated or not): a holder that added one is unresolved. */
+  let misses = 0;
+  const add = (list: string[], v: string) => {
+    if (list === unresolved) misses++;
+    if (!list.includes(v)) list.push(v);
+  };
   const ps = async (field: string, pid: string) => (await env.exec(["ps", "-o", `${field}=`, "-p", pid])).out.split("\n")[0]?.trim() ?? "";
   /** pid, then its parents up to (not including) launchd; read-only, bounded, stops on a loop. */
   const ancestry = async (pid: string) => {
@@ -291,6 +330,14 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
     }
     return undefined;
   };
+  /** Whether a launchd services query (system or the user's gui domain) failed this check, or printed no services block. */
+  const launchdUnread = async () => {
+    for (const d of ["system", `gui/${env.uid}`]) {
+      const out = await ask(["launchctl", "print", d]);
+      if (out === undefined || !out.split("\n").some((l) => l.trim() === "services = {")) return true;
+    }
+    return false;
+  };
   /** The plist-name candidates of a package, narrowed by the process name. */
   const byName = async (pkg: string, comm: string) => {
     // Every label names its package somewhere, so a glob on the name finds the candidates; the
@@ -311,6 +358,13 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
     const target = system ? `system/${label}` : `gui/${env.uid}/${label}`;
     const done = restarted.get(target);
     if (done) {
+      // Every keg the target maps keeps its association: a release check's keg needs the owner
+      // queued for it (restarted inline), whatever the first keg on this target made of it.
+      const own = await retiredOwner(pkg, label, target, helper, pid, keg);
+      if (own) {
+        own.record(pkg);
+        return;
+      }
       log.push(`    ${target} already ${done.said} this run`);
       done.record(pkg);
       return;
@@ -328,12 +382,21 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
   });
   const nothing = (said: string): Outcome => ({ said, record: () => {} });
   const restartedOutcome = (target: string): Outcome => ({ said: "restarted", record: (p) => mark(p, "restarted", target) });
-  /** Makes the restart; returns how a package on this target is accounted for. */
-  const restartOnce = async (pkg: string, label: string, target: string, system: boolean, helper: boolean, pid: string, keg: string): Promise<Outcome> => {
-    // An owner restarted at an idle moment: queued for the waiter, before any other policy.
+  /**
+   * A target already handled this run, met again on a keg a release check keeps: its owner is queued
+   * for this keg too (once per target and keg). Undefined when the label is no owner or the keg is not one.
+   */
+  const retiredOwner = async (pkg: string, label: string, target: string, helper: boolean, pid: string, keg: string): Promise<Outcome | undefined> => {
+    if (!isRetired(keg) || !matchOwner(o.staleOwners, label)) return undefined;
+    if (ownerQueue.some((q) => q.target === target && q.keg === keg)) return undefined;
+    return queueOwner(pkg, label, target, helper, pid, keg);
+  };
+  /** An owner restarted at an idle moment: queued for the waiter (a release check's, inline); undefined when the label is no owner. */
+  const queueOwner = async (pkg: string, label: string, target: string, helper: boolean, pid: string, keg: string): Promise<Outcome | undefined> => {
     const owner = matchOwner(o.staleOwners, label);
     if (owner) {
-      if (o.ownerFailed?.has(label)) {
+      // A release check's owner (on a retired keg) is restarted inline whatever an earlier run's restart did.
+      if (o.ownerFailed?.has(label) && !isRetired(keg)) {
         log.push(`    ${pkg}: ${label} restart FAILED earlier — not retried`);
         return { said: "failed earlier", record: (p) => mark(p, "failed", target) };
       }
@@ -356,6 +419,13 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
       const c: Category = o.ownerBusy?.has(label) ? "busy" : "waiting";
       return { said: "queued for an idle restart", record: (p) => mark(p, c, target) };
     }
+    return undefined;
+  };
+  /** Makes the restart; returns how a package on this target is accounted for. */
+  const restartOnce = async (pkg: string, label: string, target: string, system: boolean, helper: boolean, pid: string, keg: string): Promise<Outcome> => {
+    // An owner restarted at an idle moment: queued for the waiter, before any other policy.
+    const owned = await queueOwner(pkg, label, target, helper, pid, keg);
+    if (owned) return owned;
     const policy = Object.hasOwn(o.labelRestart ?? {}, label) ? o.labelRestart![label] : undefined;
     if (policy === "skip") {
       log.push(o.dryRun ? `    dry-run: would leave ${target} to its owner` : `    ${pkg}: ${label} restart left to its owner`);
@@ -428,16 +498,18 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
 
   // The plist-name fallback and its operator notes are once per package; launchd lookups per pid.
   const nameDone = new Set<string>();
-  for (const h of held) {
-    if (await env.isDir(h.keg)) continue; // keg still on disk: not stale
+  /** One stale holder handled; returns early once it is accounted for. */
+  const handle = async (h: Holder) => {
+    const retired = isRetired(h.keg);
+    if (!retired && (await env.isDir(h.keg))) return; // keg still on disk: not stale
     const comm = basename(await ps("comm", h.pid));
     const cmd = await ps("command", h.pid);
-    const staleLine = `  STALE KEG: ${h.pkg} — pid ${h.pid} (${cmd || "?"}) still running from ${basename(h.keg)}, which no longer exists`;
+    const staleLine = `  STALE KEG: ${h.pkg} — pid ${h.pid} (${cmd || "?"}) still running from ${basename(h.keg)}, ${retired ? "a keg a release check retires (its owners must leave it)" : "which no longer exists"}`;
     if (await isSelf(h.pid)) {
       // Restarting it would stop this run part-way; the next run starts on the new keg.
       log.push(staleLine, `    ${h.pkg}: pid ${h.pid} is this oupdate run — restarts with its next run`);
       leftAlone.add(pair(h.pid, h.pkg));
-      continue;
+      return;
     }
     // A deferred service goes to its handoff whichever stale keg pins it: its own, or a
     // dependency keg it maps. The handoff is told which service matched. One handoff per service
@@ -453,10 +525,18 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
         if (n) addNote(n);
         deferredHanded.add(svc);
       }
-      continue;
+      return;
     }
     const ppid = (await ps("ppid", h.pid)).trim();
     log.push(staleLine);
+    // On a release check's keg an unread parent is no answer (the process may be its owner's child):
+    // unresolved, never left alone.
+    if (retired && !isPid(ppid)) {
+      log.push(`    parent of pid ${h.pid} could not be read — not resolved`);
+      add(stale, h.pkg);
+      add(unresolved, `${h.pkg}(parent unreadable)`);
+      return;
+    }
 
     // A job's main pid has launchd as its parent: only then can its pid name the job (any other
     // match would be pid reuse).
@@ -465,13 +545,13 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
       if (ld === "ambiguous") {
         add(stale, h.pkg);
         add(unresolved, `${h.pkg}(ambiguous label)`);
-        continue;
+        return;
       }
       if (ld) {
         log.push(`    label ${ld.label} (from launchctl, pid ${h.pid})`);
         add(stale, h.pkg);
         await restart(h.pkg, ld.label, ld.system, false, h.pid, h.keg);
-        continue;
+        return;
       }
       // No launchd job of its own: a job runner's detached job (live work, it ends on its own)
       // is named, never restarted, not by a plist name either.
@@ -480,7 +560,7 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
         log.push(`    runner job ${job} (pid ${h.pid}) — not restarted, it ends on its own`);
         add(stale, h.pkg);
         mark(h.pkg, "jobs", `${job} (pid ${h.pid})`);
-        continue;
+        return;
       }
     }
 
@@ -504,76 +584,101 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
           break;
         }
       }
+      // On a release check's keg, launchd unread is no answer (the parent may be its owner's job):
+      // unresolved, never left alone.
+      if (parent === undefined && retired && (await launchdUnread())) {
+        log.push(`    launchd's services could not be read for pid ${h.pid}'s parents — not resolved`);
+        add(stale, h.pkg);
+        add(unresolved, `${h.pkg}(launchd unreadable)`);
+        return;
+      }
       if (parent === undefined) {
         leftAlone.add(pair(h.pid, h.pkg)); // an interactive process, or deeper under a job
-        continue;
+        return;
       }
       add(stale, h.pkg);
       // The job's restart this run (step 2's owner handoff, or this step's own outcome) covers its child.
       const target = parent.system ? `system/${parent.label}` : `gui/${env.uid}/${parent.label}`;
       const byOwner = o.ownerHanded?.get(parent.label);
       const done = byOwner !== undefined ? ownerHanded(byOwner, parent.label) : restarted.get(target);
+      // Its job handled for another keg: a release check's keg still needs the job queued for it.
+      const own = done && byOwner === undefined ? await retiredOwner(h.pkg, parent.label, target, false, ppid, h.keg) : undefined;
+      if (own) {
+        log.push(`    its job ${target} is queued for this keg too`);
+        own.record(h.pkg);
+        return;
+      }
       if (done) {
         log.push(`    its job ${target} was already ${done.said} this run`);
         done.record(h.pkg);
-        continue;
+        return;
       }
       // Never restarted through the chain: named, noticed and counted toward stuck.
       add(unresolved, `${h.pkg}(child of ${parent.label})`);
-      continue;
+      return;
     }
     const candidates = await byName(h.pkg, comm);
     add(stale, h.pkg);
     if (candidates.length === 0) {
       // An orphan: no job, no plist. Named with its pid, never restarted.
       mark(h.pkg, "orphans", h.pid);
-      if (nameDone.has(h.pkg)) continue;
+      if (nameDone.has(h.pkg)) return;
       nameDone.add(h.pkg);
       log.push("    launchd-owned (ppid 1) but no matching plist — label needs a look");
       add(unresolved, `${h.pkg}(no label found)`);
-      continue;
+      return;
     }
     if (nameDone.has(h.pkg)) {
       log.push("    already handled by the plist name this run");
-      continue;
+      return;
     }
     nameDone.add(h.pkg);
     if (candidates.length > 1) {
       log.push(`    ambiguous — ${candidates.map((p) => basename(p)).join(" ")} all match; not guessing`);
       add(unresolved, `${h.pkg}(ambiguous label)`);
-      continue;
+      return;
     }
     const plist = candidates[0]!;
     const label = basename(plist, ".plist");
     log.push(`    label ${label} (from the plist name)`);
     await restart(h.pkg, label, plist.startsWith("/Library/LaunchDaemons/"), true, h.pid, h.keg);
+  };
+  for (const h of held) {
+    const before = misses;
+    await handle(h);
+    if (misses > before) unresolvedKegs.add(h.keg);
   }
 
   if (ownerQueue.length && !o.dryRun) {
     let n: string;
     try {
-      n = o.queueOwners ? await o.queueOwners(ownerQueue) : `owner restart waiter FAILED: not wired here, ${ownerQueue.map((q) => q.label).join(" ")} not queued`;
+      if (!o.queueOwners) {
+        n = `owner restart waiter FAILED: not wired here, ${ownerQueue.map((q) => q.label).join(" ")} not queued`;
+        for (const q of ownerQueue) unresolvedKegs.add(q.keg);
+      } else n = await o.queueOwners(ownerQueue);
     } catch (e) {
       n = `owner restart waiter FAILED (${e instanceof Error ? e.message : String(e)})`;
+      // Not known to be queued: no owner of these kegs is known to restart.
+      for (const q of ownerQueue) unresolvedKegs.add(q.keg);
     }
     if (n) addNote(n);
   }
 
-  if (!stale.length) return { note: "", log };
+  if (!stale.length) return { note: "", log, unresolved: unresolvedKegs };
   const handoffNote = handoffNotes.map((n) => n.text).join("; ");
-  if (o.dryRun) return { note: handoffNote, log };
+  if (o.dryRun) return { note: handoffNote, log, unresolved: unresolvedKegs };
 
   // Verify rather than assume: a kickstart of the wrong label is a silent no-op.
-  const again = await lsofMaps(env, o.lsof, log);
+  const again = await lsofMaps(env, o.lsof, log, strict);
   if (again === undefined) {
     const failed = `STALE-KEG CHECK FAILED: lsof unusable on re-scan (${o.lsof})`;
     log.push(`  ${failed}`);
     // The handoff already happened: it stays in the note.
-    return { note: handoffNote ? `${failed}; ${handoffNote}` : failed, log };
+    return { note: handoffNote ? `${failed}; ${handoffNote}` : failed, log, unresolved: unresolvedKegs };
   }
   const still: string[] = [];
   for (const h of kegHolders(again, cellar)) {
-    if (leftAlone.has(pair(h.pid, h.pkg)) || (await env.isDir(h.keg))) continue;
+    if (leftAlone.has(pair(h.pid, h.pkg)) || (!isRetired(h.keg) && (await env.isDir(h.keg)))) continue;
     if (stale.includes(h.pkg)) add(still, h.pkg);
   }
   // A handed-off package is expected to still be stale (its handoff owns it), so it is not an
@@ -601,7 +706,7 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
   const kept = handoffNotes.filter((n) => n.pkg === undefined || !resolved.includes(n.pkg)).map((n) => n.text).join("; ");
   if (kept) note = `${note ? `${note}; ` : ""}${kept}`;
   if (stuck.length) note = `${note} [${stuck.join(" ")} ]`;
-  return { note, log };
+  return { note, log, unresolved: unresolvedKegs };
 }
 
 /** `brew linkage --test` over every installed formula: a dependent left linking a removed dylib is named and alerted. */

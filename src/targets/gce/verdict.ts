@@ -1,0 +1,23 @@
+// The patch request's verdict. Its keys, its item set and the sha's input are the broker spec; a change lands in this file only.
+// items names every candidate of the VM's latest inventory and nothing else (the review read: no other inventory is read
+// before the patch), keyed by the inventory's name strings; the sha is sha256 over each inventory answer's
+// re-serialized object (rev 14a §8.4, broker.ts evidenceText) in ascending seq, through nas/broker.ts evidenceSha.
+
+import { evidenceSha } from "../nas/broker.ts";
+import type { Inventory } from "./answer.ts";
+import type { GceSession } from "./broker.ts";
+
+export interface PatchVerdict {
+  items: Record<string, "APPROVE" | "HOLD">;
+  /** The configured reviewers' names (rev 12 §8.4, Q-9). */
+  reviewers: { primary: string; secondary: string };
+  evidence_sha256: string;
+}
+
+export function patchVerdict(inv: Inventory, approve: ReadonlySet<string>, reviewers: PatchVerdict["reviewers"], s: GceSession): PatchVerdict {
+  // Names pass PKG (lowercase first character), so no key can be "__proto__".
+  const names = [...new Set(inv.candidates.map((c) => c.name))].sort();
+  return { items: Object.fromEntries(names.map((n) => [n, approve.has(n) ? "APPROVE" : "HOLD"])), reviewers, evidence_sha256: evidenceSha({ evidence: s.evidence }) };
+}
+
+export const approvedNames = (v: PatchVerdict): string[] => Object.keys(v.items).filter((n) => v.items[n] === "APPROVE");

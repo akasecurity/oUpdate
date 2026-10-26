@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// oupdate CLI. Subcommands: review (one package update), gate (forge PRs), host (report-only shadow of the previous updater, --apply, or --launchd-plist).
+// oupdate CLI. Subcommands: review (one package update), gate (forge PRs), host (report-only shadow of the previous updater, --apply, or --launchd-plist), targets (OS targets: --apply [--dry-run] --config FILE; parity --record … --script-log … --date … --ledger …).
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,10 +17,18 @@ import { giteaForge } from "./adapters/forge/gitea.ts";
 import { runGate } from "./gate.ts";
 import { parseHostCommand, hostMain, applyMain, ownerWaiterMain } from "./host/cli.ts";
 import { launchdPlist } from "./host/launchd.ts";
-import { realExec } from "./apply/exec.ts";
+import { killLive, realExec } from "./apply/exec.ts";
 import { realFs } from "./apply/fs.ts";
 import { spawnRunner } from "./host/probe.ts";
 import { checkClientKeys, readKeyFiles, renderKeys, failing } from "./clientkeys.ts";
+import { appRev, parseTargetsCommand, targetsMain } from "./targets/cli.ts";
+import { realTargetFs } from "./targets/run.ts";
+import { realNasOsReleases } from "./targets/nas/os.ts";
+import { parityMain, parseParityCommand } from "./targets/parity-cli.ts";
+import { fetchVerified, realNpmSource } from "./targets/pins/npm.ts";
+import { realGithubSource } from "./targets/pins/github.ts";
+import { realSnapshotSource } from "./targets/pins/oci.ts";
+import { dockerHubSource } from "./adapters/oci/registry.ts";
 
 export interface ReviewArgs {
   eco: Ecosystem;
@@ -29,6 +37,9 @@ export interface ReviewArgs {
   to: string;
   oldArtifact?: string;
   newArtifact?: string;
+  /** sha512 SRI the downloaded old / new tarball must match before it is reviewed (the pins and the proposal). */
+  oldIntegrity?: string;
+  newIntegrity?: string;
   published?: Date;
   now: Date;
   only?: LayerName[];
@@ -90,11 +101,10 @@ export function parseReviewArgs(argv: string[]): ReviewArgs {
   return out;
 }
 
-async function download(url: string, dir: string): Promise<string> {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`download ${r.status} for ${url}`);
+async function download(url: string, dir: string, sri?: string): Promise<string> {
+  const bytes = await fetchVerified(fetch, url, sri);
   const file = join(dir, decodeURIComponent(new URL(url).pathname.split("/").pop() || "artifact"));
-  writeFileSync(file, new Uint8Array(await r.arrayBuffer()));
+  writeFileSync(file, bytes);
   return file;
 }
 
@@ -129,7 +139,10 @@ export async function runReview(a: ReviewArgs): Promise<ReviewResult> {
         const [oldUrl] = a.from ? await registry.artifactUrls(a.name, a.from) : [undefined];
         const [newUrl] = await registry.artifactUrls(a.name, a.to);
         if ((a.from && !oldUrl) || !newUrl) throw new Error(`no published artifact for ${!newUrl ? a.to : a.from}`);
-        return { old: oldUrl ? normalizePaths(await readArtifact(await download(oldUrl, work))) : new Map(), new: normalizePaths(await readArtifact(await download(newUrl, work))) };
+        return {
+          old: oldUrl ? normalizePaths(await readArtifact(await download(oldUrl, work, a.oldIntegrity))) : new Map(),
+          new: normalizePaths(await readArtifact(await download(newUrl, work, a.newIntegrity))),
+        };
       },
     });
   } finally {
@@ -219,11 +232,37 @@ function keysMain(argv: string[]): number {
   return fs.some(failing) ? 1 : 0;
 }
 
+const SIGNAL_RC = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 } as const;
+
+/** `oupdate targets` with the real Exec, files, sources and reviewer; a stop signal kills every running command first. */
+async function targetsCli(argv: string[]): Promise<number> {
+  if (argv[0] === "parity") return parityMain(parseParityCommand(argv.slice(1)), { fs: realTargetFs, out: (l) => console.log(l) });
+  const c = parseTargetsCommand(argv);
+  for (const [sig, code] of Object.entries(SIGNAL_RC)) process.on(sig, () => void killLive().finally(() => process.exit(code)));
+  return targetsMain(c, {
+    exec: realExec,
+    fs: realTargetFs,
+    now: new Date(),
+    rev: await appRev(realExec, join(import.meta.dir, "..")),
+    tmpDir: tmpdir(),
+    sources: { npm: realNpmSource(), github: realGithubSource, oci: dockerHubSource(), snapshot: realSnapshotSource },
+    makeReviewer,
+    releases: realNasOsReleases(),
+    reviewNpm: (spec) => (p) =>
+      runReview({
+        eco: "npm", name: p.name, from: p.from, to: p.to, oldIntegrity: p.fromIntegrity, newIntegrity: p.toIntegrity,
+        now: new Date(), cooldownDays: 0, advisoryFix: false, reviewer: spec, only: ["advisory", "prepass", "reviewer"],
+      }),
+    out: (l) => console.log(l),
+  });
+}
+
 if (import.meta.main) {
   const [cmd, ...rest] = process.argv.slice(2);
   try {
     if (cmd === "gate") process.exit(await gateMain(rest));
     if (cmd === "keys") process.exit(keysMain(rest));
+    if (cmd === "targets") process.exit(await targetsCli(rest));
     if (cmd === "host") {
       const hc = parseHostCommand(rest);
       if (hc.mode === "launchd") {
@@ -239,7 +278,7 @@ if (import.meta.main) {
       console.log(text);
       process.exit(0);
     }
-    if (cmd !== "review") throw new Error("usage: oupdate review <npm|pypi> <name> <from> <to> [--old-artifact F --new-artifact F] [--published ISO] [--now ISO] [--only layers] [--reviewer JSON] [--scanner JSON] [--advisory-fix] [--cooldown-days N] [--json FILE]");
+    if (cmd !== "review") throw new Error("usage: oupdate review <npm|pypi> <name> <from> <to> [--old-artifact F --new-artifact F] [--published ISO] [--now ISO] [--only layers] [--reviewer JSON] [--scanner JSON] [--advisory-fix] [--cooldown-days N] [--json FILE]\n       oupdate targets --apply [--dry-run] --config FILE [--target ID]...\n       oupdate targets parity --record FILE --script-log FILE --date YYYY-MM-DD --ledger FILE [--target ID]");
     const args = parseReviewArgs(rest);
     const r = await runReview(args);
     if (args.json) writeFileSync(args.json, JSON.stringify(r, null, 2) + "\n");

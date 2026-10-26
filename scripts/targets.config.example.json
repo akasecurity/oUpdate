@@ -1,0 +1,50 @@
+{
+  "logDir": "/srv/oupdate/log",
+  "reviewer": { "type": "openai", "name": "local", "baseUrls": ["https://models.example.com/v1"], "model": "example-model" },
+  "secondReviewer": { "type": "openai", "name": "secondary", "baseUrls": ["https://secondary-models.example.com/v1"], "model": "example-model" },
+  "targets": [
+    {
+      "id": "images",
+      "os": "linux",
+      "reach": { "kind": "git", "repo": "/srv/oupdate/clones/example", "remote": "origin", "base": "main" },
+      "schedule": "weekly:sun",
+      "summaryTo": "/srv/oupdate/status/images.tsv",
+      "legs": [
+        {
+          "kind": "pin-bump",
+          "pinsPath": "sandbox/base/pins.env",
+          "branchPrefix": "oupdate/",
+          "proposalDir": "/srv/oupdate/train-asks",
+          "push": false,
+          "cooldownDays": 7,
+          "groups": [
+            { "source": "oci-index", "name": "ubuntu-base", "registry": "docker-hub", "repository": "library/ubuntu", "tagKey": "UBUNTU_VERSION", "digestKey": "UBUNTU_IMAGE_DIGEST", "snapshot": { "key": "UBUNTU_APT_SNAPSHOT", "base": "https://snapshot.ubuntu.com/ubuntu", "suite": "noble" } },
+            { "source": "npm", "name": "claude-code", "package": "@anthropic-ai/claude-code", "versionKey": "CLAUDE_VERSION", "integrity": { "CLAUDE_INTEGRITY": "@anthropic-ai/claude-code@{v}", "CLAUDE_INTEGRITY_LINUX_X64": "@anthropic-ai/claude-code-linux-x64@{v}", "CLAUDE_INTEGRITY_LINUX_ARM64": "@anthropic-ai/claude-code-linux-arm64@{v}" } },
+            { "source": "npm", "name": "codex", "package": "@openai/codex", "versionKey": "CODEX_VERSION", "integrity": { "CODEX_INTEGRITY": "@openai/codex@{v}", "CODEX_INTEGRITY_LINUX_X64": "@openai/codex@{v}-linux-x64", "CODEX_INTEGRITY_LINUX_ARM64": "@openai/codex@{v}-linux-arm64" } },
+            { "source": "github-release", "name": "bun", "repo": "oven-sh/bun", "tag": "bun-v{v}", "versionKey": "BUN_VERSION", "assets": { "BUN_SHA256_AARCH64": "bun-linux-aarch64.zip", "BUN_SHA256_X64": "bun-linux-x64.zip" } },
+            { "source": "github-release", "name": "trufflehog", "repo": "trufflesecurity/trufflehog", "tag": "v{v}", "versionKey": "TRUFFLEHOG_VERSION", "assets": { "TRUFFLEHOG_SHA256_AARCH64": "trufflehog_{v}_linux_arm64.tar.gz", "TRUFFLEHOG_SHA256_X64": "trufflehog_{v}_linux_amd64.tar.gz" }, "propose": false, "note": "coupled to the keyword table; bump together by hand" }
+          ],
+          "fixed": ["UBUNTU_IMAGE_PROJECT", "DOCKER_MIN_MAJOR"],
+          "notChecked": { "TOOL_RELEASE": "no discovery source yet", "PROXY_IMAGE_DIGEST": "needs an arm64 test run before a bump" }
+        }
+      ]
+    },
+    {
+      "id": "storage-box",
+      "os": "nasos",
+      "reach": { "kind": "broker-script", "host": "storage-box", "actions": ["storage.oup.read", "storage.oup.write"], "baseUrl": "https://broker.example.com", "credreq": "/srv/oupdate/bin/credreq" },
+      "schedule": "nightly",
+      "summaryTo": "/srv/oupdate/status/storage-box-parity.tsv",
+      "parityTo": "/srv/oupdate/parity/storage-box.jsonl",
+      "legs": [{ "kind": "docker-compose", "apply": false }, { "kind": "nas-plugin", "apply": false }, { "kind": "nas-os" }]
+    },
+    {
+      "id": "cloud-vms",
+      "os": "linux",
+      "reach": { "kind": "gce-patch", "project": "example-project", "vms": ["app-vm-1", "app-vm-2"], "actions": ["cloud.osc.read", "cloud.osc.patch"], "baseUrl": "https://broker.example.com", "credreq": "/srv/oupdate/bin/credreq" },
+      "schedule": "weekly:tue",
+      "summaryTo": "/srv/oupdate/status/cloud-vms.tsv",
+      "legs": [{ "kind": "os-packages", "apply": false, "cooldownDays": 2, "seenTo": "/srv/oupdate/state/cloud-vms-seen.json", "cardWaitS": 3600 }]
+    }
+  ]
+}

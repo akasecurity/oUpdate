@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { killLive, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
 import { staleKegCheck, type KegEnv } from "../../src/apply/kegs.ts";
-import { matchOwner, ownerWaiterReport, queueOwners, makeFlockLock, realTakeLock, runOwnerWaiter, type OwnerWaiterEnv, type QueuedOwner } from "../../src/apply/owner-waiter.ts";
+import { matchOwner, ownerOps, ownerWaiterReport, queueOwners, makeFlockLock, realTakeLock, runOwnerWaiter, type OwnerWaiterEnv, type QueuedOwner } from "../../src/apply/owner-waiter.ts";
 import { handoff, mtimeDayOf, realSpawnDetached, waiterReport, type DeferredService, type WaiterEnv } from "../../src/apply/waiter.ts";
 
 const root = mkdtempSync(join(tmpdir(), "oupdate-waiter-"));
@@ -578,6 +578,28 @@ describe("owner waiter", () => {
     expect(hooked.calls).toContain("launchctl kickstart -k gui/501/org.example.svc");
     expect(hooked.outcome()).toEqual(["restarted org.example.svc"]);
   });
+  describe("review 8: a release check's owner health needs lsof's COMMAND header", () => {
+    /** The per-pid maps lsof prints for the new pid: `out` replaces them (rc 0). */
+    const perPid = (out: (pid: string) => string) => {
+      const w = owEnv();
+      const exec = w.env.exec;
+      w.env.exec = async (argv, o) => (argv[0] === "/usr/sbin/lsof" && argv.includes("-a") && argv.includes("txt,mem") ? { rc: 0, out: out(argv[argv.indexOf("-p") + 1]!), err: "" } : exec(argv, o));
+      return w;
+    };
+    const HEAD = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n";
+    for (const [name, out] of [["malformed", () => "{garbage\n"], ["empty", () => ""]] as const) {
+      test(`${name} rc-0 output is a failed scan: a required owner is never "restarted"`, async () => {
+        const w = perPid(out);
+        const r = await ownerOps(w.env, opts).job(item({ required: true }), { ignoreFailed: true });
+        expect(r.kind).toBe("failed");
+        expect(r.line).toContain("lsof failed on pid 30");
+      });
+    }
+    test("headed output with the new keg only: a required owner restarts healthy", async () => {
+      const w = perPid((pid) => `${HEAD}${maps(pid, `${CELLAR}/bun/1.1`)}`);
+      expect((await ownerOps(w.env, opts).job(item({ required: true }), { ignoreFailed: true })).kind).toBe("restarted");
+    });
+  });
   describe("restart mode bootstrap: bootout then bootstrap, never kickstart -k", () => {
     const T = "system/org.example.model-server";
     const PLIST = "/Library/LaunchDaemons/org.example.model-server.plist";
@@ -602,6 +624,15 @@ describe("owner waiter", () => {
       expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
       expect(w.outcome()[0]).toBe(`FAILED: org.example.model-server not healthy after restart (bootstrap rc 5) — bootstrap again: sudo launchctl bootstrap system ${PLIST}`);
       expect(w.files.get(`${Q}/failed`)).toBe("org.example.model-server\n");
+    });
+    test("with appendFile: a failed label is appended, never rewritten (a release check's inline restart shares the file)", async () => {
+      const w = owEnv({ bootstrapRc: 5, files: { [`${Q}/failed`]: "org.example.other\n" } });
+      const appended: string[] = [];
+      w.env.appendFile = async (p, text) => void appended.push(`${p}:${text}`);
+      w.queue(svcctl());
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(appended).toEqual([`${Q}/failed:org.example.model-server\n`]);
+      expect(w.files.get(`${Q}/failed`)).toBe("org.example.other\n");
     });
     test("healthWithinSec bounds the health wait (default 60 s)", async () => {
       const a = owEnv({ pids: { [T]: ["20", "20"] } });

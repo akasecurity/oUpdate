@@ -32,3 +32,14 @@ export function npmRegistry(deps: RegistryDeps = {}): Registry {
     },
   };
 }
+
+/**
+ * dist.integrity of one published version (the registry's per-version document), or undefined when the
+ * registry has no such version. The name goes in unencoded, as `npm view` and the build's own fetch use it.
+ */
+export async function npmIntegrity(name: string, version: string, deps: RegistryDeps = {}): Promise<string | undefined> {
+  const f = deps.fetch ?? fetch;
+  const base = deps.base ?? "https://registry.npmjs.org";
+  const doc = (await getJson(f, `${base}/${name}/${encodeURIComponent(version)}`)) as { dist?: { integrity?: string } } | undefined;
+  return doc?.dist?.integrity;
+}

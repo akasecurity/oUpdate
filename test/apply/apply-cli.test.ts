@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readdirSync } from "node:fs";
-import { closeRc, isStopping, KILL_GRACE_MS, killLive, liveGroups, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
+import { closeRc, isStopping, KILL_GRACE_MS, killLive, liveGroups, onStop, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
 import { realReleaseLock, realTakeLock } from "../../src/apply/owner-waiter.ts";
 import { applyMain, logPath, ownerWaiterArgv, ownerWaiterMain, parseHostCommand } from "../../src/host/cli.ts";
 import { parseSuSummary } from "../../src/host/prev-log.ts";
@@ -176,6 +176,41 @@ describe("the log file (slice 7 review)", () => {
     expect(handlers.size).toBe(0);
     // The prev-log parser's aborted test: a line starting "=== ABORTED:" (in a real run, process.exit follows it).
     expect(readFileSync(log, "utf8")).toMatch(/^=== ABORTED: /m);
+  });
+
+  test("a signal runs the stop tasks (a release check's owed after) and exits only after they finish", async () => {
+    const c = config({});
+    let reached!: () => void;
+    const atUpdate = new Promise<void>((res) => (reached = res));
+    let release!: () => void;
+    const hang = new Promise<void>((res) => (release = res));
+    const h = fakeHost();
+    const exec: Exec = async (argv, o) => {
+      if (argv.join(" ") === "brew update") {
+        reached();
+        await hang;
+        return { rc: 1, out: "", err: "" };
+      }
+      return h.exec(argv, o);
+    };
+    const handlers = new Map<string, () => void>();
+    const signals = { on: (s: string, f: () => void) => handlers.set(s, f), off: (s: string) => handlers.delete(s) };
+    const order: string[] = [];
+    const done = applyMain({ mode: "apply", config: c.path, dryRun: false, host: "hosta" }, {
+      exec, fs: h.fs, out: () => {}, signals, exit: (code) => void order.push(`exit ${code}`), stopLive: () => void order.push("stopLive"), now: new Date(2026, 9, 22, 7, 0),
+    });
+    await atUpdate;
+    const off = onStop(async () => {
+      await Bun.sleep(5);
+      order.push("task");
+    });
+    handlers.get("SIGTERM")!();
+    await Bun.sleep(30);
+    off();
+    expect(order).toEqual(["stopLive", "task", "exit 143"]);
+    release();
+    await done;
+    resetStopping();
   });
 
   test("2: a crash mid-run writes the ABORTED line too", async () => {
@@ -471,6 +506,12 @@ describe("closeRc", () => {
 });
 
 describe("realExec timeout", () => {
+  test("force: a command still starts while oupdate is stopping (a release check's owed after); others do not", async () => {
+    await killLive(0);
+    expect((await realExec(["/bin/echo", "x"], { force: true })).out).toBe("x\n");
+    expect((await realExec(["/bin/echo", "x"])).rc).toBe(143);
+    resetStopping();
+  });
   test("1: a grandchild holding the pipes does not keep the wait: the group is killed and it returns at once", async () => {
     // Mutant caught: kill of the direct child only, then waiting for pipe EOF (returned after the grandchild's 30 s).
     const t0 = Date.now();

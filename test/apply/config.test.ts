@@ -23,6 +23,17 @@ describe("parseApplyConfig", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/state.test" }), "hosta").postUpgradeCheck).toBeUndefined();
     expect(parseApplyConfig(cfg({ stateDir: "/state.test", postUpgradeCheck: { git: ["git", "--version"] } }), "hosta").postUpgradeCheck).toEqual({ git: ["git", "--version"] });
   });
+  test("releaseChecks: off by default; formula + command, retries 1 and timeoutSec 900 by default, optional before/after/runAs", () => {
+    expect(parseApplyConfig(cfg({ stateDir: "/state.test" }), "hosta").releaseChecks).toBeUndefined();
+    const c = parseApplyConfig(cfg({ stateDir: "/state.test", releaseChecks: [
+      { formula: "splash", command: ["/opt/gate.test/check", "--quick"] },
+      { formula: "other", command: ["/opt/gate.test/other"], retries: 0, timeoutSec: 60, before: ["svcctl", "off", "--now"], after: ["svcctl", "on"], runAs: "svc-user", owners: ["com.example.other-server"] },
+    ] }), "hosta");
+    expect(c.releaseChecks).toEqual([
+      { formula: "splash", command: ["/opt/gate.test/check", "--quick"], retries: 1, timeoutSec: 900 },
+      { formula: "other", command: ["/opt/gate.test/other"], retries: 0, timeoutSec: 60, before: ["svcctl", "off", "--now"], after: ["svcctl", "on"], runAs: "svc-user", owners: ["com.example.other-server"] },
+    ]);
+  });
   test("notify [] is kept: log-only by choice, not unconfigured", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/state.test", notify: [] }), "hosta").notify).toEqual([]);
   });
@@ -111,6 +122,19 @@ describe("parseApplyConfig", () => {
     ["a staleOwners restart object with another key", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: { bootstrap: "/L/org.x.plist", how: 1 } }] }), /apply\.staleOwners\[0\]\.restart must be/],
     ["a staleOwners healthWithinSec of zero", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", healthWithinSec: 0 }] }), /apply\.staleOwners\[0\]\.healthWithinSec must be a positive integer/],
     ["a staleOwners health that is not a URL", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", health: "localhost:8080" }] }), /apply\.staleOwners\[0\]\.health must be an http\(s\) URL/],
+    ["a releaseChecks that is not an array", cfg({ stateDir: "/s", releaseChecks: { formula: "x" } }), /apply\.releaseChecks must be an array/],
+    ["a releaseChecks entry that is not an object", cfg({ stateDir: "/s", releaseChecks: ["splash"] }), /apply\.releaseChecks\[0\] must be an object/],
+    ["a releaseChecks entry with an unknown key", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash", command: ["/c"], retry: 2 }] }), /apply\.releaseChecks\[0\]: unknown key retry/],
+    ["a releaseChecks entry with no formula", cfg({ stateDir: "/s", releaseChecks: [{ command: ["/c"] }] }), /apply\.releaseChecks\[0\]\.formula is required/],
+    ["a releaseChecks entry with no command", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash" }] }), /apply\.releaseChecks\[0\]\.command is required/],
+    ["a releaseChecks command that is empty", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash", command: [] }] }), /apply\.releaseChecks\[0\]\.command must be a non-empty array/],
+    ["a releaseChecks retries that is negative", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash", command: ["/c"], retries: -1 }] }), /apply\.releaseChecks\[0\]\.retries must be a non-negative integer/],
+    ["a releaseChecks timeoutSec of zero", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash", command: ["/c"], timeoutSec: 0 }] }), /apply\.releaseChecks\[0\]\.timeoutSec must be a positive integer/],
+    ["a releaseChecks before that is empty", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash", command: ["/c"], before: [] }] }), /apply\.releaseChecks\[0\]\.before must be a non-empty array/],
+    ["a releaseChecks runAs that is not a user name", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash", command: ["/c"], runAs: "-u root" }] }), /apply\.releaseChecks\[0\]\.runAs must be a user name/],
+    ["a releaseChecks owners that is empty", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash", command: ["/c"], owners: [] }] }), /apply\.releaseChecks\[0\]\.owners must be a non-empty array/],
+    ["a releaseChecks owners entry that is not a string", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash", command: ["/c"], owners: [1] }] }), /apply\.releaseChecks\[0\]\.owners must be a non-empty array/],
+    ["a releaseChecks formula listed twice", cfg({ stateDir: "/s", releaseChecks: [{ formula: "splash", command: ["/c"] }, { formula: "example/tap/splash", command: ["/d"] }] }), /apply\.releaseChecks\[1\]\.formula splash is listed twice/],
   ] as const) {
     test(`${label} is an error`, () => expect(() => parseApplyConfig(text, "hosta")).toThrow(err));
   }
