@@ -7,7 +7,7 @@
 // a VM the broker suspended after drift ("vm suspended", until a card acknowledges it), and a Lock epoch change right
 // before the execute send ("locked": the broker voids the intent and does not suspend the VM, rev 15 §4.3). After any of
 // these, no other VM is patched this run. A denied reply whose reason is a gce-osc §8 refusal (a job verdict refused
-// before the card) is that refusal, seq included, not a card denial (fy-crbr, CRB-b129 slice C d0e53a5; reasonRefusal).
+// before the card) is that refusal, seq included, not a card denial (CRB-b129 slice C d0e53a5; reasonRefusal).
 
 import type { Exec } from "../../apply/exec.ts";
 import { credreqCall, isObj, short, tail, type Reply } from "../credreq.ts";

@@ -1,10 +1,10 @@
 # Attack and clean-release evaluation, 26 Oct 2026
 
-oupdate reviewed 9 real supply-chain attacks and 8 clean releases with the advisory checks off, so no known-malicious list could help. It stopped all 9 attacks and let all 8 clean releases through. This page gives the sample, the method, which check stopped each attack, and what the result does not show.
+oUpdate reviewed 9 real supply-chain attacks and 8 clean releases with the advisory checks off, so no known-malicious list could help. It stopped all 9 attacks and let all 8 clean releases through. This page gives the sample, the method, which check stopped each attack, and what the result does not show.
 
 ## Sample
 
-- **One run**, 26 Oct 2026, 12:58 to 13:09 PDT, oupdate commit `5ca5e43`. An earlier run on 24 Oct, on the same cases with the same model, scored the same totals. It did not keep its per-case output, so this page reports the 26 Oct run.
+- **One run**, 26 Oct 2026, 12:58 to 13:09 PDT, oUpdate commit `5ca5e43`. An earlier run on 24 Oct, on the same cases with the same model, scored the same totals. It did not keep its per-case output, so this page reports the 26 Oct run.
 - **9 attacks.** All are real malicious releases. Eight come from DataDog's public [malicious-software-packages dataset](https://github.com/DataDog/malicious-software-packages-dataset) (`compromised_lib`). The ninth is the litellm 1.107.0 release of 21 Oct 2026, which was live on PyPI for about 1h40m.
 - **8 clean releases.** For seven of the attacked packages, the real registry release just before the attack, plus yaml 2.8.3.
 - **Model:** a local open-weights model served on our own hardware through an OpenAI-compatible endpoint. No cloud model was used.
@@ -58,7 +58,7 @@ Any layer that says stop holds the release.
 - **The model didn't read every file.** It skipped the lower-priority files of large releases: 61 files of litellm 1.82.7, and 326 files of the clean litellm 1.106.2.
 - **These are known, published attacks.** The model's training data may include write-ups of the older ones. The test didn't include attacks built to evade this reviewer, such as prompt injection aimed at the model.
 - **litellm 1.107.0 is a reconstruction.** No PyPI mirror still had the removed files. The replay rebuilt it from the 1.106.2 release plus the attacker's public commits (BerriAI/litellm `a8113b0d...20535d8f`). That replay script isn't in this repository, so a run from here counts that case as not run.
-- **Most of oupdate was switched off.** The advisory, cooldown, scanner and gate layers were off, so the test exercises the pre-pass and the reviewer alone.
+- **Most of oUpdate was switched off.** The advisory, cooldown, scanner and gate layers were off, so the test exercises the pre-pass and the reviewer alone.
 
 ## Reproduce
 

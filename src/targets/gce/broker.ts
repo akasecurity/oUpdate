@@ -6,7 +6,7 @@
 // refusal is {run_id?, seq, boot, refused: "gce-osc: <reason>"}, with no run id only before one is minted ("unknown vm",
 // "vm not set up"). A review-time refusal (unknown vm, unknown job, a job verdict refused before the card) takes a seq
 // too and comes as status "denied" with that refusal's JSON text as the reason; a card denied or expired, or a plain
-// refusal with no §8 shape, takes none (fy-crbr, CRB-b129 slice C d0e53a5; reasonRefusal). These rules are CRB-b129
+// refusal with no §8 shape, takes none (CRB-b129 slice C d0e53a5; reasonRefusal). These rules are CRB-b129
 // rev 15a §8 (Q-1); a change lands here only.
 
 import type { Exec } from "../../apply/exec.ts";
@@ -95,7 +95,7 @@ export async function gceRead(b: GceBroker, exec: Exec, s: GceSession, verb: Gce
 }
 
 /**
- * A review-time §8 refusal sent as a deny reason (fy-crbr, CRB-b129 slice C d0e53a5): the reason, trimmed, is the JSON
+ * A review-time §8 refusal sent as a deny reason (CRB-b129 slice C d0e53a5): the reason, trimmed, is the JSON
  * text of {run_id?, seq, boot, refused: "gce-osc: <reason>"} and is read as that answer, seq included. Anything else (not
  * JSON, or JSON without that shape) is undefined: a plain denial that took no seq.
  */

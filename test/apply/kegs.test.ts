@@ -774,7 +774,7 @@ describe("staleKegCheck: stale owners, oharness jobs and orphans", () => {
   const stale = (pid: string) => lsofLine(pid, `${CELLAR}/bun/1.0_old/bin/bun`);
   const KEG = `${CELLAR}/bun/1.0_old`;
   const OWNERS = [{ match: "org.example.serv*", probe: ["/opt/svc.test/idle"], health: "http://127.0.0.1:8080/health" }];
-  const ohJob = (id: string) => `/brew/Cellar/bun/1.0_old/bin/bun /home.test/.oharness/deploy/x/packages/oharness/src/cli.ts run --notify --job ${id} --agent fy-x --label w --message done`;
+  const ohJob = (id: string) => `/brew/Cellar/bun/1.0_old/bin/bun /home.test/.oharness/deploy/x/packages/oharness/src/cli.ts run --notify --job ${id} --agent agent-x --label w --message done`;
   const queueOpts = (over: Partial<KegOptions> = {}) => {
     const queued: QueuedOwner[][] = [];
     const r = opts({ staleOwners: OWNERS, queueOwners: async (q) => (queued.push(q), "owner restart waiter started (pid 4242) for org.example.serving"), ...over });
@@ -856,14 +856,14 @@ describe("staleKegCheck: stale owners, oharness jobs and orphans", () => {
     // A ppid-1 bun with no launchd label is an `oharness run --detach` job: restarting it kills live work.
     const lsof = [stale("20"), stale("22")].join("\n");
     const { env, calls } = fakeEnv({
-      lsof: [lsof], ps: { "20": { comm: "bun", command: ohJob("fy-a-1"), ppid: "1" }, "22": { comm: "bun", command: ohJob("fy-b-2"), ppid: "1" } },
+      lsof: [lsof], ps: { "20": { comm: "bun", command: ohJob("job-a-1"), ppid: "1" }, "22": { comm: "bun", command: ohJob("job-b-2"), ppid: "1" } },
       out: { [GUI]: rows("gui/501"), [PRINT]: rows("system") }, plists: { "/Library/LaunchDaemons": ["sh.brew.bun.plist"] },
     });
     const { o, notices } = opts();
     const v = await staleKegCheck(env, o);
     expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
-    expect(v.log).toContain("    oharness job fy-a-1 (pid 20) — not restarted, it ends on its own");
-    expect(v.note).toBe("STALE KEG: bun(oharness jobs on old keg 2: fy-a-1 (pid 20) fy-b-2 (pid 22)) still running from a deleted keg");
+    expect(v.log).toContain("    oharness job job-a-1 (pid 20) — not restarted, it ends on its own");
+    expect(v.note).toBe("STALE KEG: bun(oharness jobs on old keg 2: job-a-1 (pid 20) job-b-2 (pid 22)) still running from a deleted keg");
     expect(notices).toHaveLength(1);
     expect(notices[0]).not.toContain("Needs an operator");
   });
@@ -883,13 +883,13 @@ describe("staleKegCheck: stale owners, oharness jobs and orphans", () => {
       lsof: [lsof],
       ps: {
         "20": { comm: "bun", ppid: "1" }, "21": { comm: "bun", ppid: "1" }, "22": { comm: "bun", ppid: "1" },
-        "23": { comm: "bun", command: ohJob("fy-c-3"), ppid: "1" }, "25": { comm: "bun", command: "bun z.ts", ppid: "1" },
+        "23": { comm: "bun", command: ohJob("job-c-3"), ppid: "1" }, "25": { comm: "bun", command: "bun z.ts", ppid: "1" },
       },
       out: { [GUI]: rows("gui/501", ["20", "org.example.owned"], ["21", "org.example.serving"], ["22", "org.example.plain"]), [PRINT]: rows("system") },
     });
     const { o } = queueOpts({ labelRestart: { "org.example.owned": "skip" } });
     const v = await staleKegCheck(env, o);
-    expect(v.note).toStartWith("STALE KEG: bun(restarted 1, waiting for idle restart 1, oharness jobs on old keg 1: fy-c-3 (pid 23), orphans 1: pid 25, restart left to its owner) still running from a deleted keg");
+    expect(v.note).toStartWith("STALE KEG: bun(restarted 1, waiting for idle restart 1, oharness jobs on old keg 1: job-c-3 (pid 23), orphans 1: pid 25, restart left to its owner) still running from a deleted keg");
     // No ";" inside the package's outcomes: the summary parser splits the brew line there.
     expect(v.note.split("still running")[0]).not.toContain(";");
   });

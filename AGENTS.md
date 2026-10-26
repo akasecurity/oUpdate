@@ -1,14 +1,14 @@
 # AGENTS.md
 
-Instructions for a coding agent that is setting oupdate up for its user, or working on this repository. The [README](README.md) is the full reference; this file is the order to do things in.
+Instructions for a coding agent that is setting oUpdate up for its user, or working on this repository. The [README](README.md) is the full reference; this file is the order to do things in.
 
-## Setting oupdate up for a user
+## Setting oUpdate up for a user
 
 Work through these steps in order. Show the user what you found at each step, and ask before anything that changes their system outside this checkout.
 
 ### 1. Ask what they want
 
-oupdate does four separate jobs. Ask which ones the user wants, and don't set up the others.
+oUpdate does four separate jobs. Ask which ones the user wants, and don't set up the others.
 
 - **Nightly updates on a Mac (`oupdate host --apply`).** Applies Homebrew formula, cask and npm global updates after review. This is the usual choice for a Mac user.
 - **One-off review (`oupdate review`).** Reviews a single npm or PyPI update before you take it.
@@ -43,7 +43,7 @@ The reviewer spec is one JSON object:
 { "type": "openai", "name": "local", "baseUrls": ["http://127.0.0.1:8080/v1"], "model": "<model>" }
 ```
 
-Optional keys: `apiKeyEnv`, `maxTokens` (default 4096), `timeoutMs` (default 900000) and `headers`. Without a reviewer, oupdate holds every update that needs a review.
+Optional keys: `apiKeyEnv`, `maxTokens` (default 4096), `timeoutMs` (default 900000) and `headers`. Without a reviewer, oUpdate holds every update that needs a review.
 
 Check the endpoint with a known-clean update. It should end in `LAND`, with `reviewer pass ... APPROVE`:
 
@@ -63,7 +63,7 @@ If the reviewer line says `error` or the call times out, fix the endpoint before
    - An unknown key is an error, so add only keys the README documents.
 2. Run `bun src/cli.ts host --apply --dry-run`. Show the user the tier split, the holds and any notices it would have sent. Nothing changes on disk except a `dry-run-` log beside the log file. `STALE KEG` lines name running processes still on a Homebrew version that was upgraded away; a live run restarts the ones it may, so they are not an error.
 3. Run the live `bun src/cli.ts host --apply` only after the user says yes.
-4. Scheduling is optional and needs root. `bun src/cli.ts host --launchd-plist --label <label> --user <user> --at <HH:MM> --config <config> --bun <path> > <label>.plist` prints the plist. Use a stable bun path such as `/opt/homebrew/bin/bun`, never one inside a Homebrew `Cellar`. The plist runs oupdate from this checkout's path. Show the user the install commands from the README's [Schedule it](README.md#schedule-it), and get their approval before running anything as root. If they already have an update job, ask before disabling it.
+4. Scheduling is optional and needs root. `bun src/cli.ts host --launchd-plist --label <label> --user <user> --at <HH:MM> --config <config> --bun <path> > <label>.plist` prints the plist. Use a stable bun path such as `/opt/homebrew/bin/bun`, never one inside a Homebrew `Cellar`. The plist runs oUpdate from this checkout's path. Show the user the install commands from the README's [Schedule it](README.md#schedule-it), and get their approval before running anything as root. If they already have an update job, ask before disabling it.
 
 **One-off review, PR gate or hardening check.** Run the command from the README section of the same name with the reviewer spec above.
 
@@ -71,7 +71,7 @@ If the reviewer line says `error` or the call times out, fix the endpoint before
 
 - Dry run first, then the live run only with the user's yes.
 - Never store secrets in a file you create. Point to them through environment variables (`apiKeyEnv`, `${NAME}` in config values) or a token file the user makes.
-- Don't edit oupdate's source, or switch off a layer, to make a run pass. A hold is the tool working. Show it to the user.
+- Don't edit oUpdate's source, or switch off a layer, to make a run pass. A hold is the tool working. Show it to the user.
 
 ## Working on this repository
 

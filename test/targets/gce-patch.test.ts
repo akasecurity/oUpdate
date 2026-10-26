@@ -121,7 +121,7 @@ describe("gcePatch", () => {
     expect(s.seqs).toEqual([1, 2]);
   });
 
-  describe("review-time refusals in the deny reason (fy-crbr, CRB-b129 slice C d0e53a5)", () => {
+  describe("review-time refusals in the deny reason (CRB-b129 slice C d0e53a5)", () => {
     /** The patch is denied with \`reason\`; job.status by run then answers with seq \`next\`. */
     async function deniedThenStatus(reason: string, next: number) {
       const status: FakeReply = { status: "approved", result: { run_id: runOf(VM_A), seq: next, job_id: jobOf(VM_A), state: "PATCHING", instance_state: "STARTED" } };

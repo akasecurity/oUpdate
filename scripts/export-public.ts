@@ -6,13 +6,13 @@
 // Commit dates come from the source HEAD, so the same source gives the same export commit.
 //
 // usage: bun scripts/export-public.ts <target-dir>
-// The target must be missing, empty, or an earlier export (an oupdate package whose only
-// commits are by oupdate@users.noreply.github.com); its content is replaced. Nothing is pushed.
+// The target must be missing, empty, or an earlier export (an oupdate package whose only commits
+// are by 222731067+alsoknownaswill@users.noreply.github.com); its content is replaced. Nothing is pushed.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-const AUTHOR = { name: "oupdate", email: "oupdate@users.noreply.github.com" };
+const AUTHOR = { name: "Will Lin", email: "222731067+alsoknownaswill@users.noreply.github.com" };
 const SRC = resolve(dirname(import.meta.path), "..");
 
 function run(cwd: string, argv: string[], env: Record<string, string> = {}): string {
@@ -26,11 +26,11 @@ function run(cwd: string, argv: string[], env: Record<string, string> = {}): str
 const README_EDITS: [string, string][] = [
   [
     "Work in progress; the quickstart comes with the CLI.\n",
-    `Early release: the interfaces may still change.
+    `Early release, built from tools that run in production; the interfaces may still change. The easiest way to install it is to ask your coding agent to set it up; see [Set up with your agent](#set-up-with-your-agent).
 
 ## Install
 
-oupdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is no build step.
+oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is no build step.
 
 \`\`\`
 git clone https://github.com/akasecurity/oupdate.git
@@ -43,14 +43,14 @@ bun src/cli.ts review npm some-pkg 1.0.0 1.0.1
 
 ### Set up with your agent
 
-The easiest way to set it up is to ask your coding agent. Paste this:
+Paste this into your coding agent:
 
 \`\`\`
-Set up oupdate (https://github.com/akasecurity/oupdate) on this machine for me. Clone it, read its AGENTS.md and follow it step by step. Ask me before anything that changes my system.
+Set up oUpdate (https://github.com/akasecurity/oupdate) on this machine for me. Clone it, read its AGENTS.md and follow it step by step. Ask me before anything that changes my system.
 \`\`\`
 
 [AGENTS.md](AGENTS.md) gives the agent the order to work in:
-- what you want oupdate for;
+- what you want oUpdate for;
 - prerequisites, then the install;
 - a local or hosted reviewer model, checked on a known-clean update;
 - a dry run before any live run;
@@ -98,7 +98,7 @@ export function publicReadme(src: string): string {
 
 const LICENSE = `MIT License
 
-Copyright (c) 2026 oupdate contributors
+Copyright (c) 2026 oUpdate contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

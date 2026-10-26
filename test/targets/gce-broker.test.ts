@@ -197,7 +197,7 @@ describe("gceRead", () => {
     });
   });
 
-  describe("review-time refusals in the deny reason (fy-crbr, CRB-b129 slice C d0e53a5)", () => {
+  describe("review-time refusals in the deny reason (CRB-b129 slice C d0e53a5)", () => {
     const run = runOf(VM_A);
     /** job.status by job id is denied with `reason`; by vm it answers with seq `next`. inventory answers seq 1. */
     const scene = (reason: string, next: number) =>
