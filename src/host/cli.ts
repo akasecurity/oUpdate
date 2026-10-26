@@ -16,7 +16,7 @@ import { weeklyStreak } from "./compare.ts";
 import { probeHost, type Runner } from "./probe.ts";
 import type { AdvisoryFeed } from "../adapters/advisory/osv.ts";
 import { parseApplyConfig, type ApplyConfig } from "../apply/config.ts";
-import { killLive, type Exec } from "../apply/exec.ts";
+import { killLive, runStopTasks, type Exec } from "../apply/exec.ts";
 import type { ApplyFs } from "../apply/fs.ts";
 import { applyHost, gatekeeperAction } from "../apply/run.ts";
 import { ownerDir, realHttpStatus, realReleaseLock, realTakeLock, runOwnerWaiter } from "../apply/owner-waiter.ts";
@@ -166,6 +166,7 @@ export async function ownerWaiterMain(c: Extract<HostCommand, { mode: "owner-wai
       readFile: realFs.readFile,
       writeFile: realFs.writeFile,
       remove: realFs.remove,
+      appendFile: realFs.appendFile,
       listDir: realFs.listDir,
       isDir: realFs.isDir,
       now: () => Date.now(),
@@ -284,6 +285,8 @@ export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatek
       stopDone = (async () => {
         try {
           await (deps.stopLive ?? (() => killLive()))();
+          // What must still happen before the exit (a release check's after): awaited, logged.
+          await runStopTasks((l) => emit(l, true));
         } finally {
           (deps.exit ?? ((c: number) => process.exit(c)))(code);
         }

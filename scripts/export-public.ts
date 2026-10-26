@@ -33,7 +33,7 @@ const README_EDITS: [string, string][] = [
 oupdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is no build step.
 
 \`\`\`
-git clone https://github.com/akasecurity/oupdate.git   # placeholder URL; replace with the real repository
+git clone https://github.com/akasecurity/oupdate.git
 cd oupdate
 bun install
 bun src/cli.ts review npm some-pkg 1.0.0 1.0.1

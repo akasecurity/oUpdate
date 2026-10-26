@@ -1,0 +1,37 @@
+=== nas-secure-update box 2026-10-26 04:20 ===
+
+--- plugins ---
+Checking for plugin updates...
+  other.plugin: up to date (2026.08.01)
+
+--- containers ---
+
+--- layer diff ---
+  registry.example/team/app:1: running image -> candidate
+    ENTRYPOINT/CMD changed: ["/init"]|null -> ["/bin/sh","-c","/app/hooks/prestart.sh && /init"]|null
+    RUN echo v2
+
+--- LLM review (local-model) ---
+
+┌─ LLM (local-model @ https://router.example.invalid) ─────────────────
+│ 1. none
+│ 2. Verdict: APPROVE
+└───────────────────────────────────────────────────
+┌─ LLM second opinion (on-prem https://onprem.example.invalid) ───────
+│ 1. none
+│ 2. Verdict: APPROVE
+└───────────────────────────────────────────────────
+
+  STRUCTURAL PRE-GATE: layer lines matched high-signal patterns —
+    2:ENTRYPOINT/CMD changed: ["/init"]|null -> ["/bin/sh","-c","/app/hooks/prestart.sh && /init"]|null
+  FLAGging regardless of the model verdict above.
+
+--- Unraid OS ---
+Current: 7.1.4
+Latest:  7.2.0
+OS UPDATE AVAILABLE: 7.1.4 -> 7.2.0
+
+=== box summary ===
+  plugins:    nothing to update
+  containers: blocked (1 pulled — review failed)
+  OS:         UPDATE AVAILABLE: 7.1.4 -> 7.2.0

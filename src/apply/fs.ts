@@ -1,6 +1,6 @@
 // The small file-system surface of the host apply, so a run can be scripted in tests.
 
-import { accessSync, constants, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, constants, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
 import { readPinFiles, type PinFile } from "./pins.ts";
@@ -17,9 +17,15 @@ export interface ApplyFs {
   listDir(path: string): Promise<string[]>;
   /** The text, or undefined when the file is missing or cannot be read. */
   readFile(path: string): Promise<string | undefined>;
+  /** A state file: undefined only when it is missing; any other read failure throws (an unread state is never no state). */
+  readState?(path: string): Promise<string | undefined>;
+  /** A state directory: [] only when it is missing; any other read failure throws. */
+  listState?(path: string): Promise<string[]>;
   /** Replaces the file whole (write to a temporary name, then rename). */
   writeFile(path: string, text: string): Promise<void>;
   remove(path: string): Promise<void>;
+  /** Appends in one write (O_APPEND): two processes adding a line each never lose one. */
+  appendFile?(path: string, text: string): Promise<void>;
   /** Modification date, YYYY-MM-DD local. */
   mtimeDay(path: string): Promise<string>;
   /** Starts argv in its own process group, stderr appended to a file; returns the pid. */
@@ -67,6 +73,22 @@ export const realFs: ApplyFs = {
       return undefined;
     }
   },
+  readState: async (p) => {
+    try {
+      return readFileSync(p, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw e;
+    }
+  },
+  listState: async (p) => {
+    try {
+      return readdirSync(p);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw e;
+    }
+  },
   writeFile: async (p, text) => {
     mkdirSync(dirname(p), { recursive: true });
     const tmp = `${p}.new.${process.pid}`;
@@ -74,6 +96,10 @@ export const realFs: ApplyFs = {
     renameSync(tmp, p);
   },
   remove: async (p) => rmSync(p, { force: true }),
+  appendFile: async (p, text) => {
+    mkdirSync(dirname(p), { recursive: true });
+    appendFileSync(p, text);
+  },
   mtimeDay: mtimeDayOf,
   spawnDetached: realSpawnDetached,
   pinFiles: readPinFiles,

@@ -20,6 +20,30 @@ export interface RestartHelper {
   delaySec?: number;
 }
 
+/** A gated formula: after its upgrade and owner restart, a quality check; a confirmed fail rolls it back and holds the release (release-checks.ts). */
+export interface ReleaseCheck {
+  /** Bare or tap-qualified; matched on its last segment. */
+  formula: string;
+  /** Run with GATE_VERSION=<the installed version>: exit 0 PASS, 1 FAIL, anything else (or a timeout) could not run. */
+  command: string[];
+  /** FAIL is rerun this many more times; FAIL on every attempt is a confirmed fail (default 1). */
+  retries: number;
+  /** Per attempt, and per before/after command (default 900). */
+  timeoutSec: number;
+  /** Run right before the formula's upgrade (only when it is upgraded this run). */
+  before?: string[];
+  /** Run once the check passed, could not run, or the restored version passed; also when the run stops before any verdict. */
+  after?: string[];
+  /** before, command and after run as this user: sudo -n -u <user> -H --preserve-env=GATE_VERSION -- <argv>. */
+  runAs?: string;
+  /**
+   * launchd labels (matched literally) whose restart the check always needs, found by the stale-keg
+   * scan or not: system/<label> when /Library/LaunchDaemons/<label>.plist exists, else gui/<uid>/<label>
+   * when a LaunchAgent plist does, else system/<label>. Not running or not found is a restart failure.
+   */
+  owners?: string[];
+}
+
 export interface ApplyConfig {
   host: string;
   /** Stuck state and the Gatekeeper team pins and release log live here. */
@@ -84,6 +108,8 @@ export interface ApplyConfig {
    * counted as FAILED in the brew line; it never aborts the run. Absent: no check runs.
    */
   postUpgradeCheck?: Record<string, string[]>;
+  /** Release checks of gated formulae (see ReleaseCheck and release-checks.ts). Absent: none. */
+  releaseChecks?: ReleaseCheck[];
   /** Per command; a command past it is killed and its phase marked failed. */
   timeoutMs: number;
   npmRegistry: string;
@@ -103,7 +129,7 @@ export const DEFAULTS = {
 
 const KEYS = new Set([
   "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "hostPrefixes", "pinRoots",
-  "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "timeoutMs", "npmRegistry", "caps",
+  "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
 
@@ -198,6 +224,33 @@ function staleOwner(v: unknown, i: number): StaleOwner {
   };
 }
 
+const CHECK_KEYS = ["formula", "command", "retries", "timeoutSec", "before", "after", "runAs", "owners"];
+
+function releaseCheck(v: unknown, i: number, seen: Set<string>): ReleaseCheck {
+  const where = `apply.releaseChecks[${i}]`;
+  if (!isObj(v)) throw new Error(`${where} must be an object`);
+  for (const k of Object.keys(v)) if (!CHECK_KEYS.includes(k)) throw new Error(`${where}: unknown key ${k}`);
+  const formula = str(v, "formula", where);
+  if (!formula) throw new Error(`${where}.formula is required`);
+  const short = formula.split("/").at(-1)!;
+  if (seen.has(short)) throw new Error(`${where}.formula ${short} is listed twice`);
+  seen.add(short);
+  const command = list(v, "command", where, true);
+  if (!command) throw new Error(`${where}.command is required`);
+  let retries = 1;
+  if (v.retries !== undefined) {
+    if (typeof v.retries !== "number" || !Number.isInteger(v.retries) || v.retries < 0) throw new Error(`${where}.retries must be a non-negative integer`);
+    retries = v.retries;
+  }
+  const timeoutSec = posInt(v, "timeoutSec", where) ?? 900;
+  const before = list(v, "before", where, true);
+  const after = list(v, "after", where, true);
+  const runAs = str(v, "runAs", where);
+  const owners = list(v, "owners", where, true);
+  if (runAs !== undefined && !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(runAs)) throw new Error(`${where}.runAs must be a user name`);
+  return { formula, command: [...command], retries, timeoutSec, ...(before ? { before: [...before] } : {}), ...(after ? { after: [...after] } : {}), ...(runAs ? { runAs } : {}), ...(owners ? { owners: [...owners] } : {}) };
+}
+
 /** Parses the config file's text; `host` is the fallback when the file names none. */
 export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfig {
   let root: unknown;
@@ -255,6 +308,8 @@ export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfi
   if (a.staleKegUnlisted !== undefined && a.staleKegUnlisted !== staleKegUnlisted) throw new Error(`${w}.staleKegUnlisted must be "kickstart" or "report"`);
   if (a.appBundles !== undefined && !Array.isArray(a.appBundles)) throw new Error(`${w}.appBundles must be an array`);
   if (a.deferred !== undefined && !Array.isArray(a.deferred)) throw new Error(`${w}.deferred must be an array`);
+  if (a.releaseChecks !== undefined && !Array.isArray(a.releaseChecks)) throw new Error(`${w}.releaseChecks must be an array`);
+  const seenChecks = new Set<string>();
   if (a.staleOwners !== undefined && !Array.isArray(a.staleOwners)) throw new Error(`${w}.staleOwners must be an array`);
   let caps: Caps | undefined;
   if (a.caps !== undefined) {
@@ -289,6 +344,7 @@ export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfi
     appBundles: ((a.appBundles as unknown[] | undefined) ?? []).map(appBundle),
     notify: list(a, "notify", w),
     postUpgradeCheck,
+    ...(a.releaseChecks !== undefined ? { releaseChecks: (a.releaseChecks as unknown[]).map((v, i) => releaseCheck(v, i, seenChecks)) } : {}),
     reviewer: a.reviewer === undefined ? undefined : validateReviewerSpec(a.reviewer),
     timeoutMs: posInt(a, "timeoutMs", w) ?? DEFAULTS.timeoutMs,
     npmRegistry: str(a, "npmRegistry", w) ?? DEFAULTS.npmRegistry,
