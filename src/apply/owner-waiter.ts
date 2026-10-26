@@ -62,6 +62,17 @@ export interface QueuedOwner {
   health?: string;
   restart?: OwnerRestart;
   healthWithinSec?: number;
+  /**
+   * Always restarted and health-checked (a release check's named owner): never "already on the new
+   * keg" from its own pid's maps, as a shell or supervisor maps no keg while its child runs the old one.
+   */
+  required?: boolean;
+  /**
+   * The keg the job must run after its restart (a release check's: the candidate, or the restored
+   * version after a rollback): any other keg of the formula mapped is stale too, an older retained
+   * keg as much as `keg`, so "off the previous keg" is never taken for "on the expected version".
+   */
+  expect?: string;
 }
 
 const globRe = (g: string) => new RegExp(`^${[...g].map((c) => (c === "*" ? ".*" : c === "?" ? "." : c.replace(/[\\^$.|+()[\]{}]/g, "\\$&"))).join("")}$`);
@@ -158,6 +169,12 @@ export interface OwnerWaiterEnv {
   readFile(path: string): Promise<string | undefined>;
   writeFile(path: string, text: string): Promise<void>;
   remove(path: string): Promise<void>;
+  /**
+   * Appends in one write. The failed file is shared by this waiter and a run's inline release-check
+   * restarts, which do not hold the lock: an append never loses the other's line. Absent (tests):
+   * read, then rewrite.
+   */
+  appendFile?(path: string, text: string): Promise<void>;
   listDir(path: string): Promise<string[]>;
   isDir(path: string): Promise<boolean>;
   now(): number;
@@ -240,35 +257,49 @@ export async function runOwnerWaiter(env: OwnerWaiterEnv, o: OwnerWaiterOptions)
   }
 }
 
-async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<number> {
+/** How one job ended: restarted, already on the new keg, not running, held busy, failed, or skipped (its label already failed). */
+export type OwnerJobKind = "restarted" | "already" | "not-running" | "busy" | "failed" | "skipped";
+
+export interface OwnerJobResult {
+  kind: OwnerJobKind;
+  /** The outcome line; none for a skipped job. */
+  line?: string;
+}
+
+/**
+ * The per-job steps of the waiter, shared by the waiter's queue and by the run's release checks
+ * (which restart their formula's owner inline, so their check runs after it).
+ */
+export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
   const f = ownerFiles(o.dir);
   const idleMs = o.idleMs ?? 60_000;
   const sampleMs = o.sampleMs ?? 3_000;
   const bound = o.busyBoundMs ?? BUSY_BOUND_MS;
   const healthMs = o.healthMs ?? 60_000;
   const pollMs = o.healthPollMs ?? 2_000;
-  const id = o.id ?? process.pid;
-  let seq = 0;
-  /** One file per result, never appended to: the report reads and removes each whole. */
-  const outcome = async (line: string) => {
-    env.log(line);
-    await env.writeFile(join(f.outcomes, `${String(env.now()).padStart(15, "0")}-${id}-${++seq}.txt`), `${line}\n`);
-  };
   const markFailed = async (label: string) => {
     const had = (await env.readFile(f.failed)) ?? "";
-    if (!failedLabels(had).has(label)) await env.writeFile(f.failed, `${had}${label}\n`);
+    if (failedLabels(had).has(label)) return;
+    if (env.appendFile) await env.appendFile(f.failed, `${label}\n`);
+    else await env.writeFile(f.failed, `${had}${label}\n`);
   };
-  const setProgress = (p: InProgress) => env.writeFile(f.inprogress, `${JSON.stringify(p)}\n`);
   const print = async (target: string) => {
     const r = await env.exec(["launchctl", "print", target]);
     return r.rc === 0 ? parsePrint(r.out) : undefined;
   };
-  /** Whether this pid maps a file of a keg directory that no longer exists (-a: only this pid's maps). */
-  const onDeletedKeg = async (pid: string, keg: string) => {
+  /**
+   * Whether this pid still maps a file of the job's stale keg (which may still be on disk: a
+   * release check keeps the previous keg), of any keg of the same formula but `expect` (when set),
+   * or of any keg directory that no longer exists (-a: only this pid's maps). `strict` (a release check's owner, whose check relies on it): output
+   * without lsof's COMMAND header is a failed scan, never "no keg mapped" (as lsofMaps).
+   */
+  const onDeletedKeg = async (pid: string, keg: string, strict = false, expect?: string) => {
     const r = await env.exec([o.lsof, "-nP", "-w", "-a", "-p", pid, "-d", "txt,mem"]);
     if (r.rc !== 0) return undefined;
+    if (strict && !r.out.split("\n").some((l) => l.startsWith("COMMAND"))) return undefined;
     const cellar = dirname(dirname(keg));
-    for (const h of kegHolders(r.out, cellar)) if (h.pid === pid && !(await env.isDir(h.keg))) return true;
+    const other = (k: string) => expect !== undefined && dirname(k) === dirname(expect) && k !== expect;
+    for (const h of kegHolders(r.out, cellar)) if (h.pid === pid && (h.keg === keg || other(h.keg) || !(await env.isDir(h.keg)))) return true;
     return false;
   };
   /** Idle: the probe exits 0, else no ESTABLISHED TCP on the pid for idleMs straight. False once busy past the bound. */
@@ -305,7 +336,7 @@ async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<nu
     const kick = await env.exec([...sudo, "launchctl", "kickstart", "-k", q.target]);
     return kick.rc !== 0 ? `kickstart rc ${kick.rc}` : undefined;
   };
-  /** Healthy: a new pid running, the health URL 200, no deleted keg mapped. Returns the reason when not. */
+  /** Healthy: a new pid running, the health URL 200, no deleted keg mapped (nor any keg of the formula but q.expect). Returns the reason when not. */
   const health = async (q: QueuedOwner, oldPid: string): Promise<string | undefined> => {
     const start = env.now();
     let why = "no new pid";
@@ -317,15 +348,61 @@ async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<nu
         const url = q.health ? await env.httpStatus(q.health) : 200;
         if (url !== 200) why = `health ${q.health} answered ${url || "nothing"}`;
         else {
-          const stale = await onDeletedKeg(p.pid, q.keg);
+          const stale = await onDeletedKeg(p.pid, q.keg, q.required, q.expect);
           if (stale === false) return undefined;
-          why = stale ? `pid ${p.pid} still maps a deleted keg` : `lsof failed on pid ${p.pid}`;
+          why = stale ? `pid ${p.pid} still maps ${q.expect ? `a keg other than ${q.expect}` : "a deleted keg"}` : `lsof failed on pid ${p.pid}`;
         }
       }
       if (env.now() - start >= (q.healthWithinSec ? q.healthWithinSec * 1000 : healthMs)) return why;
       await env.sleep(pollMs);
     }
   };
+  /**
+   * One job: wait for idle on the pid that will be restarted (read again right before the restart;
+   * a process launchd replaced meanwhile is checked again, as kickstart -k would kill the
+   * replacement), restart, health. A failed job's label is marked failed (a label already marked is
+   * skipped, unless ignoreFailed). `restarting` is called
+   * right before the restart with the plist path launchd named.
+   */
+  const job = async (q: QueuedOwner, hooks: { restarting?: (plist: string | undefined) => Promise<void>; ignoreFailed?: boolean } = {}): Promise<OwnerJobResult> => {
+    // ignoreFailed: a release check restarts its owner even when an earlier restart of it failed.
+    if (!hooks.ignoreFailed && failedLabels(await env.readFile(f.failed)).has(q.label)) return { kind: "skipped" };
+    const first = await print(q.target);
+    if (!first?.pid) return { kind: "not-running", line: `held: ${q.label} not running` };
+    if (!q.required && first.pid !== q.pid && (await onDeletedKeg(first.pid, q.keg)) === false) return { kind: "already", line: `already on the new keg: ${q.label}` };
+    let pid = first.pid;
+    let plist = first.path;
+    for (let tries = 0; ; tries++) {
+      env.log(`${q.label}: waiting for idle (pid ${pid})`);
+      if (!(await waitIdle(q, pid))) return { kind: "busy", line: `held: busy ${q.label} (busy past ${Math.round(bound / 60_000)} min)` };
+      const again = await print(q.target);
+      if (!again?.pid) return { kind: "not-running", line: `held: ${q.label} not running` };
+      plist = again.path ?? plist;
+      if (again.pid === pid) break;
+      if (!q.required && (await onDeletedKeg(again.pid, q.keg)) === false) return { kind: "already", line: `already on the new keg: ${q.label}` };
+      if (tries >= REPLACED_MAX) return { kind: "busy", line: `held: ${q.label} keeps being replaced (pid ${again.pid})` };
+      pid = again.pid;
+    }
+    await hooks.restarting?.(plist);
+    const why = (await restartJob(q)) ?? (await health(q, pid));
+    if (why === undefined) return { kind: "restarted", line: `restarted ${q.label}` };
+    await markFailed(q.label);
+    return { kind: "failed", line: `FAILED: ${q.label} not healthy after restart (${why}) — ${rollback(q, plist)}` };
+  };
+  return { job, markFailed };
+}
+
+async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<number> {
+  const f = ownerFiles(o.dir);
+  const id = o.id ?? process.pid;
+  const ops = ownerOps(env, o);
+  let seq = 0;
+  /** One file per result, never appended to: the report reads and removes each whole. */
+  const outcome = async (line: string) => {
+    env.log(line);
+    await env.writeFile(join(f.outcomes, `${String(env.now()).padStart(15, "0")}-${id}-${++seq}.txt`), `${line}\n`);
+  };
+  const setProgress = (p: InProgress) => env.writeFile(f.inprogress, `${JSON.stringify(p)}\n`);
   const stopQueue = async (after: string) => {
     for (const n of (await env.listDir(f.queue)).filter((x) => x.endsWith(".json"))) {
       const t = await env.readFile(join(f.queue, n));
@@ -354,7 +431,7 @@ async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<nu
     else if (p.phase === "restarting") {
       // The restart may have half happened: never retried, the operator decides. As any failure, it
       // stops the queue for this run; the rest stay queued for a later run.
-      await markFailed(p.item.label);
+      await ops.markFailed(p.item.label);
       await outcome(`FAILED: ${p.item.label} restart interrupted (the waiter stopped mid-restart) — ${rollback(p.item, p.path)}`);
       await env.remove(f.inprogress);
       return 1;
@@ -382,66 +459,14 @@ async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<nu
     // Recorded before the entry goes, so a stop from here on never loses the job.
     await setProgress({ phase: "waiting", item: q });
     await env.remove(file);
-    const done = async (line?: string) => {
-      if (line) await outcome(line);
-      await env.remove(f.inprogress);
-    };
-    if (failedLabels(await env.readFile(f.failed)).has(q.label)) {
-      await done();
-      continue;
-    }
-    const first = await print(q.target);
-    if (!first?.pid) {
-      await done(`held: ${q.label} not running`);
-      continue;
-    }
-    if (first.pid !== q.pid && (await onDeletedKeg(first.pid, q.keg)) === false) {
-      await done(`already on the new keg: ${q.label}`);
-      continue;
-    }
-    // Idle on the pid that will be restarted: read again right before the kickstart, and a process
-    // launchd replaced meanwhile is checked again (kickstart -k would kill the replacement).
-    let pid = first.pid;
-    let plist = first.path;
-    let verdict: "go" | string = "go";
-    for (let tries = 0; ; tries++) {
-      env.log(`${q.label}: waiting for idle (pid ${pid})`);
-      if (!(await waitIdle(q, pid))) {
-        verdict = `held: busy ${q.label} (busy past ${Math.round(bound / 60_000)} min)`;
-        break;
-      }
-      const again = await print(q.target);
-      if (!again?.pid) {
-        verdict = `held: ${q.label} not running`;
-        break;
-      }
-      plist = again.path ?? plist;
-      if (again.pid === pid) break;
-      if ((await onDeletedKeg(again.pid, q.keg)) === false) {
-        verdict = `already on the new keg: ${q.label}`;
-        break;
-      }
-      if (tries >= REPLACED_MAX) {
-        verdict = `held: ${q.label} keeps being replaced (pid ${again.pid})`;
-        break;
-      }
-      pid = again.pid;
-    }
-    if (verdict !== "go") {
-      await done(verdict);
-      continue;
-    }
-    await setProgress({ phase: "restarting", item: q, path: plist });
-    const why = (await restartJob(q)) ?? (await health(q, pid));
-    if (why === undefined) {
-      await done(`restarted ${q.label}`);
-      continue;
-    }
+    const r = await ops.job(q, { restarting: (path) => setProgress({ phase: "restarting", item: q, path }) });
+    if (r.line) await outcome(r.line);
+    await env.remove(f.inprogress);
     // Stop the queue: the failed job is marked, the rest are named and left for a later run.
-    await markFailed(q.label);
-    await done(`FAILED: ${q.label} not healthy after restart (${why}) — ${rollback(q, plist)}`);
-    await stopQueue(q.label);
-    return 1;
+    if (r.kind === "failed") {
+      await stopQueue(q.label);
+      return 1;
+    }
   }
 }
 

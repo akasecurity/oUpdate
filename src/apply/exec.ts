@@ -10,7 +10,8 @@ export interface ExecResult {
   timedOut?: boolean;
 }
 
-export type Exec = (argv: string[], opts?: { env?: Record<string, string>; timeoutMs?: number; cwd?: string; stdin?: string }) => Promise<ExecResult>;
+/** force: starts even while oupdate is stopping (a release check's owed after, run from the stop tasks). */
+export type Exec = (argv: string[], opts?: { env?: Record<string, string>; timeoutMs?: number; cwd?: string; stdin?: string; force?: boolean }) => Promise<ExecResult>;
 
 /** After SIGTERM to a timed-out command's process group, SIGKILL follows this much later. */
 export const KILL_GRACE_MS = 2000;
@@ -39,6 +40,26 @@ export function closeRc(code: number | null, signal: NodeJS.Signals | null): num
 /** Set by killLive: from then on realExec starts nothing (oupdate is being stopped). */
 let stopping = false;
 export const isStopping = () => stopping;
+type StopTask = (log: (line: string) => void) => Promise<void>;
+/** Work a signal must still finish before oupdate exits (after killLive): a release check's owed after. */
+const stopTasks = new Set<StopTask>();
+/** Registers a stop task; returns its removal. */
+export function onStop(f: StopTask): () => void {
+  stopTasks.add(f);
+  return () => void stopTasks.delete(f);
+}
+/** Runs every registered stop task once, in order; one that throws does not stop the rest. */
+export async function runStopTasks(log: (line: string) => void = () => {}): Promise<void> {
+  for (const f of [...stopTasks]) {
+    stopTasks.delete(f);
+    try {
+      await f(log);
+    } catch (e) {
+      log(`  stop task failed (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+}
+
 /** For tests only: a new run in the same process. */
 export const resetStopping = () => {
   stopping = false;
@@ -87,7 +108,7 @@ const text = (chunks: Uint8Array[]) => Buffer.concat(chunks).toString();
  * spawn in a process), so a finished command was waited on to its timeout.
  */
 export const realExec: Exec = async (argv, opts = {}) => {
-  if (stopping) return { rc: 143, out: "", err: "oupdate is stopping: not started" };
+  if (stopping && !opts.force) return { rc: 143, out: "", err: "oupdate is stopping: not started" };
   let p: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     p = Bun.spawn(argv, {

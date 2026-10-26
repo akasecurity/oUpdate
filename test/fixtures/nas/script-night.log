@@ -1,0 +1,35 @@
+=== nas-secure-update box 2026-10-25 04:12 ===
+  jitter: sleeping 12s (skip with SKIP_JITTER=1)
+
+--- plugins ---
+Checking for plugin updates...
+  example.plugin: 2026.09.01 -> 2026.10.01
+  Updating example.plugin...
+  other.plugin: up to date (2026.08.01)
+
+--- containers ---
+
+--- layer diff ---
+  registry.example/team/app:1: running image -> candidate
+    RUN echo v2
+
+--- LLM review (local-model) ---
+
+┌─ LLM (local-model @ https://router.example.invalid) ─────────────────
+│ 1. none
+│ 2. Verdict: APPROVE
+└───────────────────────────────────────────────────
+┌─ LLM second opinion (on-prem https://onprem.example.invalid) ───────
+│ 1. none
+│ 2. Verdict: APPROVE
+└───────────────────────────────────────────────────
+
+--- Unraid OS ---
+Current: 7.1.4
+Latest:  7.1.4
+OS: up to date
+
+=== box summary ===
+  plugins:    updated: example.plugin
+  containers: updated (1 pulled)
+  OS:         up to date
