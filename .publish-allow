@@ -1,0 +1,3 @@
+# scanner test fixtures: made-up fleet values the oss-scan rules must flag
+fleet-host-cmd	test/oss-scan.test.ts
+gitea-host	test/oss-scan.test.ts
