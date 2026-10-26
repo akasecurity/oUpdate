@@ -14,6 +14,7 @@
 
 import { basename } from "node:path";
 import { isStopping, type Exec } from "./exec.ts";
+import { matchOwner, parsePrint, type QueuedOwner, type StaleOwner } from "./owner-waiter.ts";
 
 export interface KegEnv {
   exec: Exec;
@@ -151,6 +152,42 @@ export interface KegOptions {
   trackStuck: (still: string[]) => string[];
   /** The caller's log: lines land there as they are made, so a check stopped part-way keeps them. */
   log?: string[];
+  /** Labels (globs) restarted only at an idle moment by the owner waiter; before labelRestart and staleKegUnlisted. */
+  staleOwners?: StaleOwner[];
+  /** Queues the matched jobs and starts the waiter; returns its note. Not called in a dry run. */
+  queueOwners?: (items: QueuedOwner[]) => Promise<string>;
+  /** Labels whose waiter restart failed: never queued again until the operator clears them. */
+  ownerFailed?: ReadonlySet<string>;
+  /** Labels the last waiter held as busy: queued again, counted as held busy. */
+  ownerBusy?: ReadonlySet<string>;
+}
+
+/**
+ * How a package's stale holders were handled, in the order the STALE KEG note names them. Counted
+ * per launchd target, or per pid for oharness jobs and orphans.
+ */
+const CATEGORIES = ["restarted", "waiting", "busy", "failed", "oharness", "orphans", "left", "reported"] as const;
+type Category = (typeof CATEGORIES)[number];
+
+/** `--job <id>` of an `oharness run` command line ("?" without one), or undefined when it is not one. */
+export function oharnessJob(command: string): string | undefined {
+  if (!/(^|[\s/])oharness(\s|\/)/.test(command) || !/\srun(\s|$)/.test(command)) return undefined;
+  return command.match(/\s--job\s+(\S+)/)?.[1] ?? "?";
+}
+
+/** One category of a package's outcomes, as the STALE KEG note names it. */
+function describeOutcome(c: Category, ids: string[]): string {
+  const n = ids.length;
+  switch (c) {
+    case "restarted": return `restarted ${n}`;
+    case "waiting": return `waiting for idle restart ${n}`;
+    case "busy": return `held busy ${n}`;
+    case "failed": return `FAILED ${n}`;
+    case "oharness": return `oharness jobs on old keg ${n}: ${ids.join(" ")}`;
+    case "orphans": return `orphans ${n}: pid ${ids.join(" ")}`;
+    case "left": return `restart left to its owner${n > 1 ? ` ${n}` : ""}`;
+    case "reported": return `reported only, not on the restart list${n > 1 ? ` ${n}` : ""}`;
+  }
 }
 
 const words = (s: string) => s.split(/\s+/).filter(Boolean);
@@ -193,10 +230,17 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
    * package on the same target, so each of them is accounted for the same way.
    */
   const restarted = new Map<string, Outcome>();
-  /** Packages a "skip" label left to its owner: named so in the STALE KEG note. */
-  const ownerLeft = new Set<string>();
-  /** Packages on a label not in labelRestart under staleKegUnlisted "report": named so in the note. */
-  const reportedOnly = new Set<string>();
+  /** Per package, per category, the targets (or pids) handled that way: every one is named in the note. */
+  const marks = new Map<string, Map<Category, Set<string>>>();
+  const mark = (pkg: string, c: Category, id: string) => {
+    let m = marks.get(pkg);
+    if (!m) marks.set(pkg, (m = new Map()));
+    let ids = m.get(c);
+    if (!ids) m.set(c, (ids = new Set()));
+    ids.add(id);
+  };
+  /** Jobs for the owner waiter, queued once after the walk. */
+  const ownerQueue: QueuedOwner[] = [];
   const add = (list: string[], v: string) => void (list.includes(v) || list.push(v));
   const ps = async (field: string, pid: string) => (await env.exec(["ps", "-o", `${field}=`, "-p", pid])).out.split("\n")[0]?.trim() ?? "";
   /** pid, then its parents up to (not including) launchd; read-only, bounded, stops on a loop. */
@@ -263,7 +307,7 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
     return candidates;
   };
   /** The restart of one label; the restart helper (it takes a package) only for a name-matched label. */
-  const restart = async (pkg: string, label: string, system: boolean, helper: boolean) => {
+  const restart = async (pkg: string, label: string, system: boolean, helper: boolean, pid: string, keg: string) => {
     const target = system ? `system/${label}` : `gui/${env.uid}/${label}`;
     const done = restarted.get(target);
     if (done) {
@@ -271,7 +315,7 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
       done.record(pkg);
       return;
     }
-    const out = await restartOnce(pkg, label, target, system, helper);
+    const out = await restartOnce(pkg, label, target, system, helper, pid, keg);
     restarted.set(target, out);
     out.record(pkg);
   };
@@ -283,16 +327,43 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
     },
   });
   const nothing = (said: string): Outcome => ({ said, record: () => {} });
+  const restartedOutcome = (target: string): Outcome => ({ said: "restarted", record: (p) => mark(p, "restarted", target) });
   /** Makes the restart; returns how a package on this target is accounted for. */
-  const restartOnce = async (pkg: string, label: string, target: string, system: boolean, helper: boolean): Promise<Outcome> => {
+  const restartOnce = async (pkg: string, label: string, target: string, system: boolean, helper: boolean, pid: string, keg: string): Promise<Outcome> => {
+    // An owner restarted at an idle moment: queued for the waiter, before any other policy.
+    const owner = matchOwner(o.staleOwners, label);
+    if (owner) {
+      if (o.ownerFailed?.has(label)) {
+        log.push(`    ${pkg}: ${label} restart FAILED earlier — not retried`);
+        return { said: "failed earlier", record: (p) => mark(p, "failed", target) };
+      }
+      // A label found by the plist name (helper) is not proven to own this pid: queue it only when
+      // launchd shows the label running exactly this pid, else it may be an unrelated service.
+      if (helper) {
+        const shown = await ask(["launchctl", "print", target]);
+        if (shown === undefined || parsePrint(shown).pid !== pid) {
+          log.push(`    ${label} matched by plist name, but launchd does not run pid ${pid} under it — reported as an orphan`);
+          return { said: "reported as an orphan", record: (p) => mark(p, "orphans", pid) };
+        }
+      }
+      if (o.dryRun) {
+        log.push(`    dry-run: would queue ${target} for an idle restart`);
+        return nothing("said it would queue");
+      }
+      ownerQueue.push({ label, target, pid, keg, ...(owner.probe ? { probe: owner.probe } : {}), ...(owner.health ? { health: owner.health } : {}),
+        ...(owner.restart ? { restart: owner.restart } : {}), ...(owner.healthWithinSec ? { healthWithinSec: owner.healthWithinSec } : {}) });
+      log.push(`    ${pkg}: ${label} queued for an idle restart`);
+      const c: Category = o.ownerBusy?.has(label) ? "busy" : "waiting";
+      return { said: "queued for an idle restart", record: (p) => mark(p, c, target) };
+    }
     const policy = Object.hasOwn(o.labelRestart ?? {}, label) ? o.labelRestart![label] : undefined;
     if (policy === "skip") {
       log.push(o.dryRun ? `    dry-run: would leave ${target} to its owner` : `    ${pkg}: ${label} restart left to its owner`);
-      return { said: "left to its owner", record: (p) => void ownerLeft.add(p) };
+      return { said: "left to its owner", record: (p) => mark(p, "left", target) };
     }
     if (policy === undefined && o.staleKegUnlisted === "report") {
       log.push(o.dryRun ? `    dry-run: would report ${target} only (not on the restart list)` : `    ${pkg}: ${label} not on the restart list — reported only`);
-      return { said: "reported only", record: (p) => void reportedOnly.add(p) };
+      return { said: "reported only", record: (p) => mark(p, "reported", target) };
     }
     if (policy !== undefined && policy !== "kickstart") {
       const by = basename(policy[0] ?? "");
@@ -339,7 +410,7 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
           kicked = true;
         }
       }
-      if (kicked) return nothing(o.dryRun ? "said it would kickstart" : "restarted");
+      if (kicked) return o.dryRun ? nothing("said it would kickstart") : restartedOutcome(target);
       log.push(`    cannot restart unattended — run: sudo launchctl kickstart -k ${target}`);
       return { said: "failed to restart", record: (p) => add(unresolved, `${p}(${target})`) };
     }
@@ -349,7 +420,7 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
     }
     if ((await env.exec(["launchctl", "kickstart", "-k", target])).rc === 0) {
       log.push(`    restarted ${target}`);
-      return nothing("restarted");
+      return restartedOutcome(target);
     }
     log.push(`    cannot restart — run: launchctl kickstart -k ${target}`);
     return { said: "failed to restart", record: (p) => add(unresolved, `${p}(gui/${label})`) };
@@ -399,7 +470,16 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
       if (ld) {
         log.push(`    label ${ld.label} (from launchctl, pid ${h.pid})`);
         add(stale, h.pkg);
-        await restart(h.pkg, ld.label, ld.system, false);
+        await restart(h.pkg, ld.label, ld.system, false, h.pid, h.keg);
+        continue;
+      }
+      // No launchd job of its own: an `oharness run --detach` job (live work, it ends on its own)
+      // is named, never restarted, not by a plist name either.
+      const job = oharnessJob(cmd);
+      if (job !== undefined) {
+        log.push(`    oharness job ${job} (pid ${h.pid}) — not restarted, it ends on its own`);
+        add(stale, h.pkg);
+        mark(h.pkg, "oharness", `${job} (pid ${h.pid})`);
         continue;
       }
     }
@@ -444,16 +524,20 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
     }
     const candidates = await byName(h.pkg, comm);
     add(stale, h.pkg);
+    if (candidates.length === 0) {
+      // An orphan: no job, no plist. Named with its pid, never restarted.
+      mark(h.pkg, "orphans", h.pid);
+      if (nameDone.has(h.pkg)) continue;
+      nameDone.add(h.pkg);
+      log.push("    launchd-owned (ppid 1) but no matching plist — label needs a look");
+      add(unresolved, `${h.pkg}(no label found)`);
+      continue;
+    }
     if (nameDone.has(h.pkg)) {
       log.push("    already handled by the plist name this run");
       continue;
     }
     nameDone.add(h.pkg);
-    if (candidates.length === 0) {
-      log.push("    launchd-owned (ppid 1) but no matching plist — label needs a look");
-      add(unresolved, `${h.pkg}(no label found)`);
-      continue;
-    }
     if (candidates.length > 1) {
       log.push(`    ambiguous — ${candidates.map((p) => basename(p)).join(" ")} all match; not guessing`);
       add(unresolved, `${h.pkg}(ambiguous label)`);
@@ -462,7 +546,17 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
     const plist = candidates[0]!;
     const label = basename(plist, ".plist");
     log.push(`    label ${label} (from the plist name)`);
-    await restart(h.pkg, label, plist.startsWith("/Library/LaunchDaemons/"), true);
+    await restart(h.pkg, label, plist.startsWith("/Library/LaunchDaemons/"), true, h.pid, h.keg);
+  }
+
+  if (ownerQueue.length && !o.dryRun) {
+    let n: string;
+    try {
+      n = o.queueOwners ? await o.queueOwners(ownerQueue) : `owner restart waiter FAILED: not wired here, ${ownerQueue.map((q) => q.label).join(" ")} not queued`;
+    } catch (e) {
+      n = `owner restart waiter FAILED (${e instanceof Error ? e.message : String(e)})`;
+    }
+    if (n) addNote(n);
   }
 
   if (!stale.length) return { note: "", log };
@@ -485,12 +579,17 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<{ note:
   // A handed-off package is expected to still be stale (its handoff owns it), so it is not an
   // alarm, unless another process on it was unresolved, left to its owner or reported only. It still
   // counts toward stuck.
-  const unhanded = still.filter((p) => !handed.includes(p) || ownerLeft.has(p) || reportedOnly.has(p) || unresolved.some((u) => u.startsWith(`${p}(`)));
+  const unhanded = still.filter((p) => !handed.includes(p) || marks.has(p) || unresolved.some((u) => u.startsWith(`${p}(`)));
   const resolved = stale.filter((p) => !still.includes(p));
   const stuck = o.trackStuck(still);
   let note = "";
   if (unhanded.length) {
-    const named = unhanded.map((p) => (ownerLeft.has(p) ? `${p}(restart left to its owner)` : reportedOnly.has(p) ? `${p}(reported only, not on the restart list)` : p));
+    // Every outcome of the package, counted: none masks another. No ";" inside, the summary parser splits there.
+    const named = unhanded.map((p) => {
+      const m = marks.get(p);
+      const parts = m ? CATEGORIES.filter((c) => m.has(c)).map((c) => describeOutcome(c, [...m.get(c)!])) : [];
+      return parts.length ? `${p}(${parts.join(", ")})` : p;
+    });
     note = `STALE KEG: ${named.join(" ")} still running from a deleted keg`;
     await send(o, log, `⚠️ <b>${o.host} stale keg</b>\n${unhanded.join(" ")} is serving from a Cellar path brew deleted.\n${unresolved.length ? `Needs an operator: ${unresolved.join(" ")} ` : ""}`);
   }

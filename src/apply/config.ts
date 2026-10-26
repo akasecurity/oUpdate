@@ -7,6 +7,7 @@ import type { Caps } from "./chunked.ts";
 import type { DeferredService } from "./waiter.ts";
 import type { LabelRestart } from "./kegs.ts";
 import type { AppBundle } from "./appbundle.ts";
+import type { StaleOwner } from "./owner-waiter.ts";
 import { validateReviewerSpec, type ReviewerSpec } from "../adapters/reviewer/spec.ts";
 
 export interface RestartHelper {
@@ -65,6 +66,11 @@ export interface ApplyConfig {
   /** A stale-keg label not in labelRestart: "kickstart" (the default) restarts it, "report" only names it. */
   staleKegUnlisted?: "kickstart" | "report";
   /**
+   * Stale-keg launchd jobs restarted only at an idle moment, by a detached waiter, one at a time
+   * (see owner-waiter.ts). `match` is a label glob; it comes before labelRestart and staleKegUnlisted.
+   */
+  staleOwners?: StaleOwner[];
+  /**
    * Apps installed outside brew and published as a signed, notarized disk image on the project's GitHub
    * release (see appbundle.ts). Each one is reviewed and upgraded in place; the old bundle is kept.
    */
@@ -97,7 +103,7 @@ export const DEFAULTS = {
 
 const KEYS = new Set([
   "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "hostPrefixes", "pinRoots",
-  "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "appBundles", "notify", "reviewer", "postUpgradeCheck", "timeoutMs", "npmRegistry", "caps",
+  "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "timeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
 
@@ -169,6 +175,29 @@ function appBundle(v: unknown, i: number): AppBundle {
   return { name, app, repo, asset, ...(restart ? { restart } : {}) };
 }
 
+const OWNER_KEYS = ["match", "probe", "health", "restart", "healthWithinSec"];
+
+function staleOwner(v: unknown, i: number): StaleOwner {
+  const where = `apply.staleOwners[${i}]`;
+  if (!isObj(v)) throw new Error(`${where} must be an object`);
+  for (const k of Object.keys(v)) if (!OWNER_KEYS.includes(k)) throw new Error(`${where}: unknown key ${k}`);
+  const match = str(v, "match", where);
+  if (!match) throw new Error(`${where}.match is required`);
+  const probe = list(v, "probe", where, true);
+  if (probe && !isAbsolute(probe[0]!)) throw new Error(`${where}.probe[0] must be an absolute path`);
+  const health = str(v, "health", where);
+  if (health !== undefined && !/^https?:\/\/\S+$/.test(health)) throw new Error(`${where}.health must be an http(s) URL`);
+  let restart: StaleOwner["restart"];
+  const r = v.restart;
+  if (r === "kickstart") restart = r;
+  else if (isObj(r) && Object.keys(r).length === 1 && typeof r.bootstrap === "string" && isAbsolute(r.bootstrap)) restart = { bootstrap: r.bootstrap };
+  else if (r !== undefined) throw new Error(`${where}.restart must be "kickstart" or {"bootstrap": "<absolute plist path>"}`);
+  const healthWithinSec = posInt(v, "healthWithinSec", where);
+  return {
+    match, ...(probe ? { probe: [...probe] } : {}), ...(health ? { health } : {}), ...(restart ? { restart } : {}), ...(healthWithinSec ? { healthWithinSec } : {}),
+  };
+}
+
 /** Parses the config file's text; `host` is the fallback when the file names none. */
 export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfig {
   let root: unknown;
@@ -226,6 +255,7 @@ export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfi
   if (a.staleKegUnlisted !== undefined && a.staleKegUnlisted !== staleKegUnlisted) throw new Error(`${w}.staleKegUnlisted must be "kickstart" or "report"`);
   if (a.appBundles !== undefined && !Array.isArray(a.appBundles)) throw new Error(`${w}.appBundles must be an array`);
   if (a.deferred !== undefined && !Array.isArray(a.deferred)) throw new Error(`${w}.deferred must be an array`);
+  if (a.staleOwners !== undefined && !Array.isArray(a.staleOwners)) throw new Error(`${w}.staleOwners must be an array`);
   let caps: Caps | undefined;
   if (a.caps !== undefined) {
     if (!isObj(a.caps)) throw new Error(`${w}.caps must be an object`);
@@ -255,6 +285,7 @@ export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfi
     restartHelper,
     labelRestart,
     staleKegUnlisted,
+    ...(a.staleOwners !== undefined ? { staleOwners: (a.staleOwners as unknown[]).map(staleOwner) } : {}),
     appBundles: ((a.appBundles as unknown[] | undefined) ?? []).map(appBundle),
     notify: list(a, "notify", w),
     postUpgradeCheck,

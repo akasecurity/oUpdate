@@ -10,12 +10,14 @@
 // config's labelRestart comes first: "skip" leaves the label to its owner, an owner command is
 // started detached with the label appended, and "kickstart" takes the normal path, as for a label
 // not listed. staleKegUnlisted "report" applies here too: a label with a plist not in labelRestart is reported only.
+// A staleOwners label comes before all of these: it is left to the stale-keg check, which queues it for the idle waiter.
 
 import { isStopping, type Exec } from "./exec.ts";
 import { basename } from "node:path";
 import type { RestartHelper } from "./config.ts";
 import type { LabelRestart } from "./kegs.ts";
 import type { DeferredService } from "./waiter.ts";
+import { matchOwner, type StaleOwner } from "./owner-waiter.ts";
 
 export interface RestartEnv {
   exec: Exec;
@@ -30,6 +32,7 @@ export async function restartUpgraded(
   upgraded: string[],
   o: {
     deferred: DeferredService[]; helper?: RestartHelper; labelRestart?: LabelRestart; staleKegUnlisted?: "kickstart" | "report"; detachedLog: string; into?: string[];
+    staleOwners?: StaleOwner[];
     /** Filled with each label handed to its owner command (label → command name), for the stale-keg check. */
     ownerHanded?: Map<string, string>;
   },
@@ -54,6 +57,11 @@ export async function restartUpgraded(
     // A label whose restart belongs to its owner (config labelRestart): before the helper and kickstart.
     // Only for a label whose plist exists: without one there is no service, as before.
     const hasPlist = (await env.exists(`${daemons}/${label}.plist`)) || (await env.exists(`${agents}/${label}.plist`));
+    // A staleOwners label is restarted only at an idle moment: the stale-keg check queues it for the waiter.
+    if (hasPlist && matchOwner(o.staleOwners, label)) {
+      out.push(`${pkg}(waiting for idle restart)`);
+      continue;
+    }
     const policy = hasPlist && Object.hasOwn(o.labelRestart ?? {}, label) ? o.labelRestart![label] : undefined;
     if (policy === "skip") {
       out.push(`${pkg}(restart left to its owner)`);

@@ -3,6 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { killLive, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
 import { caskRunning, kegHolders, linkageCheck, lsofMaps, relinkUpgraded, staleKegCheck, type KegEnv, type KegOptions } from "../../src/apply/kegs.ts";
+import type { QueuedOwner } from "../../src/apply/owner-waiter.ts";
 
 const CELLAR = "/brew/Cellar";
 // The fleet digest's trouble words: a note that must alarm has to contain one of them.
@@ -494,7 +495,8 @@ describe("staleKegCheck: the label from launchd, by pid", () => {
       plists: { "/Library/LaunchDaemons": ["sh.brew.node.plist"] },
     }));
     const v = await staleKegCheck(env, opts().o);
-    expect(v.note).toBe("STALE KEG: node still running from a deleted keg");
+    // OUP-b10: the kickstart that did nothing is counted, the package still alarms.
+    expect(v.note).toBe("STALE KEG: node(restarted 1) still running from a deleted keg");
   });
   test("a deferred service is handed off before any launchctl query", async () => {
     const { env, calls } = fakeEnv(base({ out: { [GUI]: gui(["20", "org.example.serving-watch"]) } }));
@@ -761,6 +763,135 @@ describe("staleKegCheck: the label from launchd, by pid", () => {
         expect(calls).toContain("sudo -n launchctl kickstart -k system/org.example.agent-daemon");
       }
     });
+  });
+});
+
+// OUP-b10: owners restarted at an idle moment, oharness jobs and orphans named, every outcome counted.
+describe("staleKegCheck: stale owners, oharness jobs and orphans", () => {
+  const GUI = "launchctl print gui/501";
+  const PRINT = "launchctl print system";
+  const rows = (domain: string, ...rs: [string, string][]) => [`${domain} = {`, "\tservices = {", ...rs.map(([pid, label]) => `\t\t${pid.padStart(8)}      - \t${label}`), "\t}", "}"].join("\n") + "\n";
+  const stale = (pid: string) => lsofLine(pid, `${CELLAR}/bun/1.0_old/bin/bun`);
+  const KEG = `${CELLAR}/bun/1.0_old`;
+  const OWNERS = [{ match: "org.example.serv*", probe: ["/opt/svc.test/idle"], health: "http://127.0.0.1:8080/health" }];
+  const ohJob = (id: string) => `/brew/Cellar/bun/1.0_old/bin/bun /home.test/.oharness/deploy/x/packages/oharness/src/cli.ts run --notify --job ${id} --agent fy-x --label w --message done`;
+  const queueOpts = (over: Partial<KegOptions> = {}) => {
+    const queued: QueuedOwner[][] = [];
+    const r = opts({ staleOwners: OWNERS, queueOwners: async (q) => (queued.push(q), "owner restart waiter started (pid 4242) for org.example.serving"), ...over });
+    return { ...r, queued };
+  };
+
+  test("a label matching staleOwners is queued for the waiter, never kickstarted; the note says it waits", async () => {
+    const { env, calls } = fakeEnv({ lsof: [stale("20")], ps: { "20": { comm: "bun", command: "bun serve.ts", ppid: "1" } }, out: { [GUI]: rows("gui/501", ["20", "org.example.serving"]) } });
+    const { o, queued, notices } = queueOpts();
+    const v = await staleKegCheck(env, o);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(queued).toEqual([[{ label: "org.example.serving", target: "gui/501/org.example.serving", pid: "20", keg: KEG, probe: ["/opt/svc.test/idle"], health: "http://127.0.0.1:8080/health" }]]);
+    expect(v.log).toContain("    bun: org.example.serving queued for an idle restart");
+    expect(v.note).toBe("STALE KEG: bun(waiting for idle restart 1) still running from a deleted keg; owner restart waiter started (pid 4242) for org.example.serving");
+    expect(v.note).toMatch(TROUBLE_RE);
+    expect(notices).toHaveLength(1);
+  });
+  test("the queued job carries the owner's restart mode and health window", async () => {
+    const { env } = fakeEnv({ lsof: [stale("20")], ps: { "20": { comm: "bun", ppid: "1" } }, out: { [PRINT]: rows("system", ["20", "org.ofleet.ohost"]) } });
+    const { o, queued } = queueOpts({ staleOwners: [{ match: "org.ofleet.ohost", restart: { bootstrap: "/Library/LaunchDaemons/org.ofleet.ohost.plist" }, healthWithinSec: 120 }] });
+    await staleKegCheck(env, o);
+    expect(queued).toEqual([[{ label: "org.ofleet.ohost", target: "system/org.ofleet.ohost", pid: "20", keg: KEG, restart: { bootstrap: "/Library/LaunchDaemons/org.ofleet.ohost.plist" }, healthWithinSec: 120 }]]);
+  });
+  test("staleOwners comes before labelRestart skip and staleKegUnlisted report", async () => {
+    const { env, calls } = fakeEnv({ lsof: [stale("20")], ps: { "20": { comm: "bun", ppid: "1" } }, out: { [PRINT]: rows("system", ["20", "org.example.serving"]) } });
+    const { o, queued } = queueOpts({ labelRestart: { "org.example.serving": "skip" }, staleKegUnlisted: "report" });
+    const v = await staleKegCheck(env, o);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(queued[0]?.[0]?.target).toBe("system/org.example.serving");
+    expect(v.note).toStartWith("STALE KEG: bun(waiting for idle restart 1) still");
+  });
+  test("a plist-name label matching staleOwners is queued only when launchd shows that label running the stale pid, before the restart helper", async () => {
+    const proven = fakeEnv({
+      lsof: [stale("20")], files: ["/usr/local/sbin/restart-helper"], ps: { "20": { comm: "bun", ppid: "1" } }, plists: { "/Library/LaunchDaemons": ["org.example.serving-bun.plist"] },
+      out: { "launchctl print system/org.example.serving-bun": "system/org.example.serving-bun = {\n\tstate = running\n\tpid = 20\n}\n" },
+    });
+    const a = queueOpts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["bun"] } });
+    await staleKegCheck(proven.env, a.o);
+    expect(proven.calls.some((c) => c.includes("kickstart") || c.includes("restart-helper"))).toBe(false);
+    expect(a.queued[0]?.[0]?.target).toBe("system/org.example.serving-bun");
+  });
+  test("review 5: an orphan pid whose plist-name label launchd runs under another pid is never queued, only reported", async () => {
+    // The plist name matched, but that service is a different process: queuing it would restart an unrelated job.
+    const { env, calls } = fakeEnv({
+      lsof: [stale("20")], ps: { "20": { comm: "bun", ppid: "1" } }, plists: { "/Library/LaunchDaemons": ["org.example.serving-bun.plist"] },
+      out: { "launchctl print system/org.example.serving-bun": "system/org.example.serving-bun = {\n\tstate = running\n\tpid = 31\n}\n" },
+    });
+    const { o, queued } = queueOpts();
+    const v = await staleKegCheck(env, o);
+    expect(queued).toEqual([]);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(v.log).toContain("    org.example.serving-bun matched by plist name, but launchd does not run pid 20 under it — reported as an orphan");
+    expect(v.note).toBe("STALE KEG: bun(orphans 1: pid 20) still running from a deleted keg");
+  });
+  test("dry run: says it would queue, queues nothing", async () => {
+    const { env, calls } = fakeEnv({ lsof: [stale("20")], ps: { "20": { comm: "bun", ppid: "1" } }, out: { [GUI]: rows("gui/501", ["20", "org.example.serving"]) } });
+    const { o, queued } = queueOpts({ dryRun: true });
+    const v = await staleKegCheck(env, o);
+    expect(v.log).toContain("    dry-run: would queue gui/501/org.example.serving for an idle restart");
+    expect(queued).toEqual([]);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+  });
+  test("a label the waiter failed is not queued again (FAILED); one it held busy is queued again (held busy)", async () => {
+    const lsof = [stale("20"), stale("22")].join("\n");
+    const { env } = fakeEnv({ lsof: [lsof], ps: { "20": { comm: "bun", ppid: "1" }, "22": { comm: "bun", ppid: "1" } }, out: { [GUI]: rows("gui/501", ["20", "org.example.serving"], ["22", "org.example.server2"]) } });
+    const { o, queued } = queueOpts({ ownerFailed: new Set(["org.example.serving"]), ownerBusy: new Set(["org.example.server2"]) });
+    const v = await staleKegCheck(env, o);
+    expect(queued.flat().map((q) => q.label)).toEqual(["org.example.server2"]);
+    expect(v.log).toContain("    bun: org.example.serving restart FAILED earlier — not retried");
+    expect(v.note).toStartWith("STALE KEG: bun(held busy 1, FAILED 1) still running from a deleted keg");
+  });
+  test("the queue failing to start is in the note", async () => {
+    const { env } = fakeEnv({ lsof: [stale("20")], ps: { "20": { comm: "bun", ppid: "1" } }, out: { [GUI]: rows("gui/501", ["20", "org.example.serving"]) } });
+    const v = await staleKegCheck(env, queueOpts({ queueOwners: async () => "owner restart waiter FAILED to start (EAGAIN), org.example.serving queued" }).o);
+    expect(v.note).toContain("owner restart waiter FAILED to start (EAGAIN)");
+  });
+
+  test("oharness jobs on the old keg are named with their ids and pids, never restarted, not by a plist name either", async () => {
+    // A ppid-1 bun with no launchd label is an `oharness run --detach` job: restarting it kills live work.
+    const lsof = [stale("20"), stale("22")].join("\n");
+    const { env, calls } = fakeEnv({
+      lsof: [lsof], ps: { "20": { comm: "bun", command: ohJob("fy-a-1"), ppid: "1" }, "22": { comm: "bun", command: ohJob("fy-b-2"), ppid: "1" } },
+      out: { [GUI]: rows("gui/501"), [PRINT]: rows("system") }, plists: { "/Library/LaunchDaemons": ["sh.brew.bun.plist"] },
+    });
+    const { o, notices } = opts();
+    const v = await staleKegCheck(env, o);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(v.log).toContain("    oharness job fy-a-1 (pid 20) — not restarted, it ends on its own");
+    expect(v.note).toBe("STALE KEG: bun(oharness jobs on old keg 2: fy-a-1 (pid 20) fy-b-2 (pid 22)) still running from a deleted keg");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).not.toContain("Needs an operator");
+  });
+  test("a ppid-1 holder with no label and no plist is an orphan: named with its pids, never restarted", async () => {
+    const lsof = [stale("20"), stale("25")].join("\n");
+    const { env, calls } = fakeEnv({ lsof: [lsof], ps: { "20": { comm: "bun", command: "bun x.ts", ppid: "1" }, "25": { comm: "bun", command: "bun y.ts", ppid: "1" } }, out: { [GUI]: rows("gui/501"), [PRINT]: rows("system") } });
+    const { o, notices } = opts();
+    const v = await staleKegCheck(env, o);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(v.note).toBe("STALE KEG: bun(orphans 2: pid 20 25) still running from a deleted keg");
+    expect(notices[0]).toContain("bun(no label found)");
+  });
+  test("line-493 masking gone: one package's every outcome is counted, left-to-owner no longer hides the rest", async () => {
+    // Mutant caught: the first special outcome (left to its owner) named alone, the queued, restarted and job pids dropped.
+    const lsof = [stale("20"), stale("21"), stale("22"), stale("23"), stale("25")].join("\n");
+    const { env } = fakeEnv({
+      lsof: [lsof],
+      ps: {
+        "20": { comm: "bun", ppid: "1" }, "21": { comm: "bun", ppid: "1" }, "22": { comm: "bun", ppid: "1" },
+        "23": { comm: "bun", command: ohJob("fy-c-3"), ppid: "1" }, "25": { comm: "bun", command: "bun z.ts", ppid: "1" },
+      },
+      out: { [GUI]: rows("gui/501", ["20", "org.example.owned"], ["21", "org.example.serving"], ["22", "org.example.plain"]), [PRINT]: rows("system") },
+    });
+    const { o } = queueOpts({ labelRestart: { "org.example.owned": "skip" } });
+    const v = await staleKegCheck(env, o);
+    expect(v.note).toStartWith("STALE KEG: bun(restarted 1, waiting for idle restart 1, oharness jobs on old keg 1: fy-c-3 (pid 23), orphans 1: pid 25, restart left to its owner) still running from a deleted keg");
+    // No ";" inside the package's outcomes: the summary parser splits the brew line there.
+    expect(v.note.split("still running")[0]).not.toContain(";");
   });
 });
 

@@ -4,10 +4,11 @@
 //
 // oupdate host --apply [--dry-run]: the host apply (src/apply/run.ts), from the "apply" object of
 // the config file. --gatekeeper-approve CASK and --gatekeeper-revert CASK are the operator's
-// one-offs for a cask's quarantine: no review, no upgrade.
+// one-offs for a cask's quarantine: no review, no upgrade. --stale-owners-waiter is the detached owner
+// restart waiter the apply run starts (see apply/owner-waiter.ts); not meant to be run by hand.
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir, hostname } from "node:os";
 import type { Item } from "./collect.ts";
 import { hostReport, type HostReport } from "./report.ts";
@@ -18,6 +19,8 @@ import { parseApplyConfig, type ApplyConfig } from "../apply/config.ts";
 import { killLive, type Exec } from "../apply/exec.ts";
 import type { ApplyFs } from "../apply/fs.ts";
 import { applyHost, gatekeeperAction } from "../apply/run.ts";
+import { ownerDir, realHttpStatus, realReleaseLock, realTakeLock, runOwnerWaiter } from "../apply/owner-waiter.ts";
+import { realFs } from "../apply/fs.ts";
 import { parseLaunchdArgs, type LaunchdArgs } from "./launchd.ts";
 
 export interface HostArgs {
@@ -84,6 +87,7 @@ export type HostCommand =
   | { mode: "report"; args: HostArgs }
   | { mode: "apply"; config: string; dryRun: boolean; host?: string }
   | { mode: "gatekeeper"; action: "approve" | "revert"; cask: string; config: string; host?: string }
+  | { mode: "owner-waiter"; config: string; host?: string }
   | { mode: "launchd"; args: LaunchdArgs };
 
 export const defaultConfigPath = () => join(homedir(), ".config", "oupdate", "config.json");
@@ -94,7 +98,7 @@ export const defaultConfigPath = () => join(homedir(), ".config", "oupdate", "co
  */
 export function parseHostCommand(argv: string[]): HostCommand {
   const has = (f: string) => argv.includes(f);
-  const modes = ["--report-only", "--apply", "--gatekeeper-approve", "--gatekeeper-revert", "--launchd-plist"].filter(has);
+  const modes = ["--report-only", "--apply", "--gatekeeper-approve", "--gatekeeper-revert", "--launchd-plist", "--stale-owners-waiter"].filter(has);
   if (modes.length > 1) throw new Error(`host takes one of ${modes.join(", ")}`);
   if (modes[0] === "--launchd-plist") return { mode: "launchd", args: parseLaunchdArgs(argv) };
   if (!modes.length || modes[0] === "--report-only") {
@@ -112,7 +116,7 @@ export function parseHostCommand(argv: string[]): HostCommand {
       if (v === undefined || v.startsWith("--")) throw new Error(`${a} needs a value`);
       return v;
     };
-    if (a === "--apply") continue;
+    if (a === "--apply" || a === "--stale-owners-waiter") continue;
     else if (a === "--dry-run") dryRun = true;
     else if (a === "--config") config = value();
     else if (a === "--host") host = value();
@@ -122,6 +126,7 @@ export function parseHostCommand(argv: string[]): HostCommand {
   config ??= defaultConfigPath();
   if (modes[0] === "--apply") return { mode: "apply", config, dryRun, ...(host ? { host } : {}) };
   if (dryRun) throw new Error("--dry-run goes with --apply");
+  if (modes[0] === "--stale-owners-waiter") return { mode: "owner-waiter", config, ...(host ? { host } : {}) };
   return { mode: "gatekeeper", action: modes[0] === "--gatekeeper-approve" ? "approve" : "revert", cask: cask!, config, ...(host ? { host } : {}) };
 }
 
@@ -134,6 +139,44 @@ function loadConfig(c: { config: string; host?: string }): ApplyConfig {
   }
   const cfg = parseApplyConfig(text, c.host ?? hostname().split(".")[0]!);
   return c.host ? { ...cfg, host: c.host } : cfg;
+}
+
+/**
+ * The command that starts the owner restart waiter: bun by its stable link (a Cellar keg path is
+ * deleted by the next bun upgrade, the very thing the waiter restarts jobs off), this CLI, the config.
+ */
+export function ownerWaiterArgv(config: string, execPath: string = process.execPath, main: string = Bun.main): string[] {
+  const i = execPath.indexOf("/Cellar/");
+  const bun = i < 0 ? execPath : join(execPath.slice(0, i) || "/", "bin", basename(execPath));
+  return [bun, main, "host", "--stale-owners-waiter", "--config", resolve(config)];
+}
+
+/** `host --stale-owners-waiter`: works the owner restart queue of the config's stateDir. Returns the rc. */
+export async function ownerWaiterMain(c: Extract<HostCommand, { mode: "owner-waiter" }>, deps: { exec: Exec; out?: (line: string) => void }): Promise<number> {
+  const cfg = loadConfig(c);
+  const out = deps.out ?? ((l: string) => console.error(l));
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  const stamp = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+  };
+  return runOwnerWaiter(
+    {
+      exec: deps.exec,
+      readFile: realFs.readFile,
+      writeFile: realFs.writeFile,
+      remove: realFs.remove,
+      listDir: realFs.listDir,
+      isDir: realFs.isDir,
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      takeLock: realTakeLock,
+      releaseLock: realReleaseLock,
+      httpStatus: realHttpStatus,
+      log: (l) => out(`${stamp()} owner waiter ${cfg.host}: ${l}`),
+    },
+    { dir: ownerDir(cfg.stateDir), lsof: cfg.lsof },
+  );
 }
 
 /** A log file name may carry {date}: the run's local date as YYYYMMDD (one file per day, as secure-update kept). */
@@ -187,7 +230,7 @@ export function logFileFor(c: Extract<HostCommand, { mode: "apply" | "gatekeeper
  * run or one-off with a "=== STOPPED" line, which no reader counts as an aborted run. Returns the
  * text and the exit code.
  */
-export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatekeeper" }>, deps: ApplyDeps): Promise<{ text: string; rc: number }> {
+export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatekeeper" }>, deps: ApplyDeps & { ownerWaiterArgv?: string[] }): Promise<{ text: string; rc: number }> {
   const now = deps.now ?? new Date();
   const loaded = loadConfig(c);
   const cfg = loaded.logFile ? { ...loaded, logFile: logFileFor(c, logPath(loaded.logFile, now)) } : loaded;
@@ -263,7 +306,7 @@ export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatek
       return { text: lines.join("\n"), rc: await settle(g.rc) };
     }
     if (!c.dryRun) mkdirSync(cfg.stateDir, { recursive: true });
-    const r = await applyHost(cfg, deps.exec, deps.fs, { dryRun: c.dryRun, now, onLine: (l) => emit(l), isStopping: () => stopCode !== undefined });
+    const r = await applyHost(cfg, deps.exec, deps.fs, { dryRun: c.dryRun, now, onLine: (l) => emit(l), isStopping: () => stopCode !== undefined, ownerWaiterArgv: deps.ownerWaiterArgv ?? ownerWaiterArgv(c.config) });
     // The end-of-run notice is logged after the summary block: emitted by applyHost already.
     return { text: lines.join("\n"), rc: await settle(logBroken ? 1 : r.rc) };
   } catch (e) {

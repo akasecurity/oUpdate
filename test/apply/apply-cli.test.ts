@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readdirSync } from "node:fs";
 import { closeRc, isStopping, KILL_GRACE_MS, killLive, liveGroups, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
-import { applyMain, logPath, parseHostCommand } from "../../src/host/cli.ts";
+import { realReleaseLock, realTakeLock } from "../../src/apply/owner-waiter.ts";
+import { applyMain, logPath, ownerWaiterArgv, ownerWaiterMain, parseHostCommand } from "../../src/host/cli.ts";
 import { parseSuSummary } from "../../src/host/su-log.ts";
 import { fakeHost } from "./host-fixture.ts";
 
@@ -35,12 +36,49 @@ describe("parseHostCommand", () => {
     expect(parseHostCommand(["--gatekeeper-approve", "tool", "--config", "/c.json"])).toEqual({ mode: "gatekeeper", action: "approve", cask: "tool", config: "/c.json" });
     expect(parseHostCommand(["--gatekeeper-revert", "tool", "--config", "/c.json"])).toEqual({ mode: "gatekeeper", action: "revert", cask: "tool", config: "/c.json" });
   });
+  test("--stale-owners-waiter runs the owner restart waiter for a config (OUP-b10)", () => {
+    expect(parseHostCommand(["--stale-owners-waiter", "--config", "/c.json"])).toEqual({ mode: "owner-waiter", config: "/c.json" });
+    expect(() => parseHostCommand(["--stale-owners-waiter", "--dry-run"])).toThrow(/--dry-run goes with --apply/);
+    expect(() => parseHostCommand(["--stale-owners-waiter", "--apply"])).toThrow(/one of/);
+  });
+  test("the waiter command: the stable bun link, never a Cellar keg path, and an absolute config", () => {
+    expect(ownerWaiterArgv("/conf/c.json", "/opt/homebrew/Cellar/bun/1.4.4_1/bin/bun", "/app/src/cli.ts")).toEqual(["/opt/homebrew/bin/bun", "/app/src/cli.ts", "host", "--stale-owners-waiter", "--config", "/conf/c.json"]);
+    expect(ownerWaiterArgv("rel/c.json", "/usr/local/bin/bun", "/app/src/cli.ts")).toEqual(["/usr/local/bin/bun", "/app/src/cli.ts", "host", "--stale-owners-waiter", "--config", join(process.cwd(), "rel/c.json")]);
+  });
   test("mistakes are errors", () => {
     expect(() => parseHostCommand(["--apply", "--report-only"])).toThrow(/one of/);
     expect(() => parseHostCommand(["--dry-run", "--report-only", "--state", "s"])).toThrow(/--dry-run goes with --apply/);
     expect(() => parseHostCommand(["--gatekeeper-approve"])).toThrow(/needs a value/);
     expect(() => parseHostCommand(["--gatekeeper-revert", "tool", "--dry-run"])).toThrow(/--dry-run goes with --apply/);
     expect(() => parseHostCommand(["--apply", "--bogus"])).toThrow(/unknown flag --bogus/);
+  });
+});
+
+describe("ownerWaiterMain (OUP-b10)", () => {
+  test("works the config's queue on real files with the given exec, writes the outcome, releases the lock", async () => {
+    const c = config({});
+    const cellar = join(c.dir, "Cellar");
+    mkdirSync(join(cellar, "bun", "1.1"), { recursive: true });
+    const q = join(c.dir, "state", "owner-restarts", "queue");
+    mkdirSync(q, { recursive: true });
+    writeFileSync(join(q, "gui%2F501%2Forg.example.svc.json"), JSON.stringify({ label: "org.example.svc", target: "gui/501/org.example.svc", pid: "20", keg: join(cellar, "bun", "1.0_old") }));
+    const calls: string[] = [];
+    const exec: Exec = async (argv) => {
+      calls.push(argv.join(" "));
+      if (argv[0] === "launchctl") return { rc: 0, out: "gui/501/org.example.svc = {\n\tstate = running\n\tpid = 26\n}\n", err: "" };
+      return { rc: 0, out: `bun 26 u txt REG 1,4 1 2 ${cellar}/bun/1.1/bin/bun\n`, err: "" };
+    };
+    const lines: string[] = [];
+    expect(await ownerWaiterMain({ mode: "owner-waiter", config: c.path }, { exec, out: (l) => lines.push(l) })).toBe(0);
+    const outs = join(c.dir, "state", "owner-restarts", "outcomes");
+    expect(readdirSync(outs).map((n) => readFileSync(join(outs, n), "utf8"))).toEqual(["already on the new keg: org.example.svc\n"]);
+    expect(existsSync(join(c.dir, "state", "owner-restarts", "inprogress.json"))).toBe(false);
+    expect(readdirSync(q)).toEqual([]);
+    // The flock is released on exit; the lock file stays (it is never deleted), free to take again.
+    expect(await realTakeLock(join(c.dir, "state", "owner-restarts", "lock"))).toBe(true);
+    await realReleaseLock(join(c.dir, "state", "owner-restarts", "lock"));
+    expect(calls.some((x) => x.includes("kickstart"))).toBe(false);
+    expect(lines.some((l) => l.includes("already on the new keg: org.example.svc"))).toBe(true);
   });
 });
 

@@ -1,11 +1,12 @@
 // Ported from secure-update's waiter cases (test/port/07): the handoff of a deferred service to its
 // idle waiter, and the waiter report. The waiter is a real script started detached.
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { killLive, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
 import { staleKegCheck, type KegEnv } from "../../src/apply/kegs.ts";
+import { matchOwner, ownerWaiterReport, queueOwners, makeFlockLock, realTakeLock, runOwnerWaiter, type OwnerWaiterEnv, type QueuedOwner } from "../../src/apply/owner-waiter.ts";
 import { handoff, mtimeDayOf, realSpawnDetached, waiterReport, type DeferredService, type WaiterEnv } from "../../src/apply/waiter.ts";
 
 const root = mkdtempSync(join(tmpdir(), "oupdate-waiter-"));
@@ -287,5 +288,413 @@ describe("staleKegCheck with the real handoff", () => {
     expect(v.note).toMatch(/^svc stale — restart handed to waiter \(pid \d+\)$/);
     expect(calls.some((c) => c.startsWith("sudo") || c.includes("launchctl"))).toBe(false);
     expect(notices).toEqual([]);
+  });
+});
+
+// OUP-b10: the stale-owner waiter (owner-waiter.ts). Every launchctl, lsof and probe call is a fake.
+describe("owner waiter", () => {
+  const Q = "/state.test/owner-restarts";
+  const CELLAR = "/brew/Cellar";
+  const KEG = `${CELLAR}/bun/1.0_old`;
+  const maps = (pid: string, keg: string) => `bun ${pid} u txt REG 1,4 1 2 ${keg}/bin/bun\n`;
+  const printOut = (pid: string | undefined, state = "running", path = "/home.test/Library/LaunchAgents/org.example.svc.plist") =>
+    `gui/501/org.example.svc = {\n\tactive count = 1\n\tpath = ${path}\n\tstate = ${state}\n${pid ? `\tpid = ${pid}\n` : ""}\tendpoints = {\n\t\tpid = 1\n\t}\n}\n`;
+  const item = (over: Partial<QueuedOwner> = {}): QueuedOwner => ({ label: "org.example.svc", target: "gui/501/org.example.svc", pid: "20", keg: KEG, ...over });
+
+  interface Script {
+    /** Successive ESTABLISHED answers for the default probe: true = a connection. */
+    busy?: boolean[];
+    /** Per target: pid before and after the kickstart (undefined: not running). */
+    pids?: Record<string, [string | undefined, string | undefined]>;
+    /** pid → the keg dir its maps show (default the new keg). */
+    kegOf?: Record<string, string>;
+    probeRc?: number[];
+    kickRc?: number;
+    http?: number;
+    lockHeld?: boolean;
+    /** Successive takeLock answers (overrides lockHeld). */
+    lockSeq?: boolean[];
+    files?: Record<string, string>;
+    /** Per target: successive pids launchd shows before the kickstart (the last repeats). */
+    printSeq?: Record<string, (string | undefined)[]>;
+    /** Other processes on the host: pid → the keg dir they map. lsof lists them too unless -a ANDs -p in. */
+    others?: Record<string, string>;
+    bootstrapRc?: number;
+    /** The kickstart throws: the waiter dies mid-restart. */
+    kickThrows?: boolean;
+    /** Called the first time the waiter finds the queue empty (an apply run queuing right then). */
+    onEmptyQueue?: () => void;
+  }
+  function owEnv(s: Script = {}) {
+    const calls: string[] = [];
+    const logs: string[] = [];
+    const files = new Map(Object.entries(s.files ?? {}));
+    const busy = [...(s.busy ?? [])];
+    const probe = [...(s.probeRc ?? [])];
+    const locks = [...(s.lockSeq ?? [])];
+    const seq = Object.fromEntries(Object.entries(s.printSeq ?? {}).map(([k, v]) => [k, [...v]]));
+    const kicked = new Set<string>();
+    let emptyHook = s.onEmptyQueue;
+    let t = 0;
+    let released = false;
+    const exec: Exec = async (argv) => {
+      const line = argv.join(" ");
+      calls.push(line);
+      if (argv[0] === "launchctl" && argv[1] === "print") {
+        const target = argv[2]!;
+        const [before, after] = s.pids?.[target] ?? ["20", "30"];
+        let pid = kicked.has(target) ? after : before;
+        const q = seq[target];
+        if (!kicked.has(target) && q?.length) pid = q.length > 1 ? q.shift() : q[0];
+        return { rc: 0, out: printOut(pid, pid ? "running" : "not running"), err: "" };
+      }
+      if (line.includes("launchctl bootout")) {
+        kicked.add(argv.at(-1)!);
+        return { rc: 0, out: "", err: "" };
+      }
+      if (line.includes("launchctl bootstrap")) return { rc: s.bootstrapRc ?? 0, out: "", err: "" };
+      if (line.includes("kickstart -k")) {
+        if (s.kickThrows) throw new Error("waiter killed mid-restart");
+        kicked.add(argv.at(-1)!);
+        return { rc: s.kickRc ?? 0, out: "", err: "" };
+      }
+      if (argv[0] === "/usr/sbin/lsof" && argv.includes("-iTCP")) {
+        const b = busy.length > 1 ? busy.shift()! : (busy[0] ?? false);
+        return b ? { rc: 0, out: "COMMAND PID\nbun 20 u IPv4 TCP 127.0.0.1:8080->127.0.0.1:5000 (ESTABLISHED)\n", err: "" } : { rc: 1, out: "", err: "" };
+      }
+      if (argv[0] === "/usr/sbin/lsof") {
+        // As real lsof: without -a the -p and -d selections are ORed, so every process's maps come back.
+        const pid = argv[argv.indexOf("-p") + 1]!;
+        const mine = maps(pid, s.kegOf?.[pid] ?? `${CELLAR}/bun/1.1`);
+        if (argv.includes("-a")) return { rc: 0, out: mine, err: "" };
+        return { rc: 0, out: mine + Object.entries(s.others ?? {}).map(([p, k]) => maps(p, k)).join(""), err: "" };
+      }
+      if (argv[0] === "/opt/svc.test/idle") return { rc: probe.length > 1 ? probe.shift()! : (probe[0] ?? 0), out: "", err: "" };
+      return { rc: 99, out: "", err: `UNEXPECTED ${line}` };
+    };
+    const env: OwnerWaiterEnv = {
+      exec,
+      readFile: async (p) => files.get(p),
+      writeFile: async (p, text) => void files.set(p, text),
+      remove: async (p) => void files.delete(p),
+      listDir: async (d) => {
+        const names = [...files.keys()].filter((k) => k.startsWith(`${d}/`)).map((k) => k.slice(d.length + 1));
+        if (d === `${Q}/queue` && !names.length && emptyHook) {
+          const h = emptyHook;
+          emptyHook = undefined;
+          h();
+        }
+        return names;
+      },
+      isDir: async (p) => p === `${CELLAR}/bun/1.1`,
+      now: () => t,
+      sleep: async (ms) => void (t += ms),
+      takeLock: async () => (locks.length ? locks.shift()! : !s.lockHeld),
+      releaseLock: async () => void (released = true),
+      httpStatus: async (url) => (calls.push(`GET ${url}`), s.http ?? 200),
+      log: (l) => void logs.push(l),
+    };
+    const queue = (...qs: QueuedOwner[]) => {
+      for (const q of qs) files.set(`${Q}/queue/${encodeURIComponent(q.target)}.json`, JSON.stringify(q));
+    };
+    const outcome = () => [...files.keys()].filter((k) => k.startsWith(`${Q}/outcomes/`)).sort().map((k) => files.get(k)!.trim());
+    return { env, calls, logs, files, queue, outcome, released: () => released, clock: () => t };
+  }
+  /** An outcome file as the waiter writes one. */
+  const outcomeFile = (n: number, text: string): [string, string] => [`${Q}/outcomes/${String(n).padStart(15, "0")}-1-${n}.txt`, `${text}\n`];
+  const opts = { dir: Q, lsof: "/usr/sbin/lsof" };
+  const reportEnv = (files: Map<string, string>) => ({
+    readFile: async (p: string) => files.get(p),
+    remove: async (p: string) => void files.delete(p),
+    listDir: async (d: string) => [...files.keys()].filter((k) => k.startsWith(`${d}/`)).map((k) => k.slice(d.length + 1)),
+  });
+
+  test("matchOwner: a whole-label glob, * and ? only, dots literal", () => {
+    const owners = [{ match: "org.ofleet.*" }, { match: "com.x.svc?" }];
+    expect(matchOwner(owners, "org.ofleet.ohost")).toEqual({ match: "org.ofleet.*" });
+    expect(matchOwner(owners, "com.x.svc2")).toEqual({ match: "com.x.svc?" });
+    expect(matchOwner(owners, "orgXofleet.ohost")).toBeUndefined();
+    expect(matchOwner(owners, "com.x.svc")).toBeUndefined();
+    expect(matchOwner(owners, "a.org.ofleet.x")).toBeUndefined();
+    expect(matchOwner(undefined, "org.ofleet.ohost")).toBeUndefined();
+  });
+
+  test("queueOwners writes one file per job and starts the waiter detached", async () => {
+    const written = new Map<string, string>();
+    const spawned: string[][] = [];
+    const env = { readFile: async (p: string) => written.get(p), writeFile: async (p: string, t: string) => void written.set(p, t), spawnDetached: async (a: string[]) => (spawned.push(a), 4242) };
+    const note = await queueOwners(env, Q, [item(), item({ label: "org.example.b", target: "system/org.example.b", pid: "40" })], ["/brew/bin/bun", "/app/src/cli.ts", "host", "--stale-owners-waiter"], "/state.test/restart.log");
+    expect(note).toBe("owner restart waiter started (pid 4242) for org.example.svc org.example.b");
+    expect([...written.keys()].sort()).toEqual([`${Q}/queue/gui%2F501%2Forg.example.svc.json`, `${Q}/queue/system%2Forg.example.b.json`]);
+    expect(JSON.parse(written.get(`${Q}/queue/system%2Forg.example.b.json`)!)).toEqual(item({ label: "org.example.b", target: "system/org.example.b", pid: "40" }));
+    expect(spawned).toEqual([["/brew/bin/bun", "/app/src/cli.ts", "host", "--stale-owners-waiter"]]);
+  });
+  test("queueOwners with no waiter command, or a spawn that fails, says FAILED", async () => {
+    const env = { readFile: async () => undefined, writeFile: async () => {}, spawnDetached: async (): Promise<number> => Promise.reject(new Error("EAGAIN")) };
+    expect(await queueOwners(env, Q, [item()], undefined, "/l")).toMatch(/^owner restart waiter FAILED: no waiter command here/);
+    expect(await queueOwners(env, Q, [item()], ["/bun"], "/l")).toBe("owner restart waiter FAILED to start (EAGAIN), org.example.svc queued");
+    expect(await queueOwners(env, Q, [], ["/bun"], "/l")).toBe("");
+  });
+
+  test("the report shows and removes the last outcome, reads busy labels, and names failed labels every run", async () => {
+    const files = new Map([
+      outcomeFile(1, "restarted org.example.a"), outcomeFile(2, "held: busy org.example.b (busy past 120 min)"), outcomeFile(3, "FAILED: org.example.c not healthy after restart (x) — rollback: y"),
+      [`${Q}/failed`, "org.example.c\n"],
+    ]);
+    const env = reportEnv(files);
+    const r = await ownerWaiterReport(env, Q, false);
+    expect(r.note).toBe(`owner restart waiter: restarted org.example.a, held: busy org.example.b (busy past 120 min), FAILED: org.example.c not healthy after restart (x) — rollback: y; owner restart FAILED earlier for org.example.c — not retried, retry: rm ${Q}/failed`);
+    // Split as the summary parser (su-log.ts) splits the brew line: no part starts "FAILED:" (it would read as failed packages).
+    expect(r.note.split(";").filter((p) => /^\s*FAILED:/.test(p))).toEqual([]);
+    expect(r.note).not.toMatch(/stale/i);
+    expect([...r.busy]).toEqual(["org.example.b"]);
+    expect([...r.failed]).toEqual(["org.example.c"]);
+    expect([...files.keys()].filter((k) => k.includes("/outcomes/"))).toEqual([]);
+    expect(files.has(`${Q}/failed`)).toBe(true);
+    const again = await ownerWaiterReport(env, Q, false);
+    expect(again.note).toBe(`owner restart FAILED earlier for org.example.c — not retried, retry: rm ${Q}/failed`);
+  });
+  test("a clean outcome carries no trouble word; a dry run leaves the outcome in place", async () => {
+    const files = new Map([outcomeFile(1, "restarted org.example.a")]);
+    const r = await ownerWaiterReport(reportEnv(files), Q, true);
+    expect(r.note).toBe("owner restart waiter: restarted org.example.a");
+    expect(r.note).not.toMatch(TROUBLE_RE);
+    expect(files.size).toBe(1);
+  });
+  test("review 6: an outcome the waiter writes while the report reads is kept for the next report, never lost", async () => {
+    const files = new Map([outcomeFile(1, "restarted org.example.a")]);
+    const env = reportEnv(files);
+    const read = env.readFile;
+    let wrote = false;
+    env.readFile = async (p) => {
+      const t = await read(p);
+      // The waiter finishes its next job between the report's read and its remove.
+      if (p.includes("/outcomes/") && !wrote) {
+        wrote = true;
+        files.set(...outcomeFile(2, "restarted org.example.b"));
+      }
+      return t;
+    };
+    expect((await ownerWaiterReport(env, Q, false)).note).toBe("owner restart waiter: restarted org.example.a");
+    expect((await ownerWaiterReport(env, Q, false)).note).toBe("owner restart waiter: restarted org.example.b");
+  });
+
+  describe("re-review 1: the lock is a kernel flock, never a file to reclaim", () => {
+    let k = 0;
+    const fresh = () => {
+      const d = join(root, `flock-${++k}`);
+      mkdirSync(d, { recursive: true });
+      return { d, lock: join(d, "lock") };
+    };
+    test("taken through the flock seam: LOCK_EX|LOCK_NB on the lock file's fd, the file created and never deleted, pid + start time in the info file", async () => {
+      const { d, lock } = fresh();
+      const seen: { fd: number; op: number }[] = [];
+      const lk = makeFlockLock({ flock: (fd, op) => (seen.push({ fd, op }), 0), pid: 4242, startTime: () => "Mon Oct 26 07:00:00 2026" });
+      expect(await lk.take(lock)).toBe(true);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.op).toBe(2 | 4);
+      expect(readFileSync(`${lock}.info`, "utf8")).toBe("4242 Mon Oct 26 07:00:00 2026\n");
+      await lk.release(lock);
+      expect(existsSync(lock)).toBe(true);
+      expect(readdirSync(d).sort()).toEqual(["lock", "lock.info"]);
+    });
+    test("a flock refused (another holder) is false, its fd closed, the info file untouched", async () => {
+      const { lock } = fresh();
+      writeFileSync(`${lock}.info`, "7 holder\n");
+      const lk = makeFlockLock({ flock: () => -1, pid: 1, startTime: () => "x" });
+      expect(await lk.take(lock)).toBe(false);
+      expect(readFileSync(`${lock}.info`, "utf8")).toBe("7 holder\n");
+    });
+    test.if(process.platform === "darwin")("real flock across processes: refused while the holder lives, free once it exits without unlocking", async () => {
+      const { d, lock } = fresh();
+      const mod = join(import.meta.dir, "../../src/apply/owner-waiter.ts");
+      const child = join(d, "child.ts");
+      // Takes the lock, prints the answer; with "hold" it then waits to be killed, never releasing.
+      writeFileSync(child, `import { realTakeLock } from ${JSON.stringify(mod)};\nconst ok = await realTakeLock(${JSON.stringify(lock)});\nconsole.log(ok ? "took" : "refused");\nif (process.argv[2] === "hold") await new Promise(() => {});\nprocess.exit(0);\n`);
+      const holder = Bun.spawn(["bun", child, "hold"], { stdout: "pipe", stderr: "inherit" });
+      const reader = holder.stdout.getReader();
+      const first = new TextDecoder().decode((await reader.read()).value);
+      expect(first.trim()).toBe("took");
+      const second = Bun.spawnSync(["bun", child]);
+      expect(second.stdout.toString().trim()).toBe("refused");
+      holder.kill("SIGKILL");
+      await holder.exited;
+      const third = Bun.spawnSync(["bun", child]);
+      expect(third.stdout.toString().trim()).toBe("took");
+    }, 30_000); // three bun starts
+  });
+  test("review 1: launchd replaced the process during the idle wait: the new pid is checked again before the kickstart", async () => {
+    const t = "gui/501/org.example.svc";
+    // Still on the deleted keg: idle is waited for again, on the new pid.
+    const a = owEnv({ printSeq: { [t]: ["20", "21"] }, kegOf: { "21": KEG } });
+    a.queue(item());
+    expect(await runOwnerWaiter(a.env, opts)).toBe(0);
+    const kick = a.calls.indexOf(`launchctl kickstart -k ${t}`);
+    const before = a.calls.slice(0, kick);
+    expect(before.filter((c) => c.includes("-p 21 -iTCP")).length).toBeGreaterThan(0);
+    expect(before.lastIndexOf(`launchctl print ${t}`)).toBeGreaterThan(before.findIndex((c) => c.includes("-p 21 -iTCP")));
+    // On the new keg already: dropped, never kickstarted.
+    const b = owEnv({ printSeq: { [t]: ["20", "21"] } });
+    b.queue(item());
+    expect(await runOwnerWaiter(b.env, opts)).toBe(0);
+    expect(b.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(b.outcome()).toEqual(["already on the new keg: org.example.svc"]);
+  });
+  test("review 2: health reads only the restarted pid's maps (lsof -a), never another process's deleted keg", async () => {
+    const w = owEnv({ others: { "40": KEG } });
+    w.queue(item());
+    expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(0);
+    expect(w.outcome()).toEqual(["restarted org.example.svc"]);
+    expect(w.calls).toContain("/usr/sbin/lsof -nP -w -a -p 30 -d txt,mem");
+  });
+  test("review 4: a waiter that dies mid-restart leaves a record; the next waiter marks it FAILED and never restarts it again", async () => {
+    const w = owEnv({ kickThrows: true });
+    w.queue(item());
+    await expect(runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).rejects.toThrow("waiter killed mid-restart");
+    expect(w.files.has(`${Q}/inprogress.json`)).toBe(true);
+    // The next run queues it again (still stale); the next waiter finds the record first.
+    const next = owEnv({ files: Object.fromEntries(w.files) });
+    const other = item({ label: "org.example.z", target: "gui/501/org.example.z" });
+    next.queue(item(), other);
+    // re-review 2: as a failure on the normal path, the interrupted one stops the queue for this run;
+    // the rest stay queued (the next run reports them waiting), nothing else is restarted.
+    expect(await runOwnerWaiter(next.env, { ...opts, idleMs: 0 })).toBe(1);
+    expect(next.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(next.files.has(`${Q}/queue/${encodeURIComponent(other.target)}.json`)).toBe(true);
+    expect(next.outcome()).toEqual(["FAILED: org.example.svc restart interrupted (the waiter stopped mid-restart) — rollback: launchctl bootout gui/501/org.example.svc && launchctl bootstrap gui/501 /home.test/Library/LaunchAgents/org.example.svc.plist"]);
+    expect(next.files.get(`${Q}/failed`)).toBe("org.example.svc\n");
+    expect(next.files.has(`${Q}/inprogress.json`)).toBe(false);
+  });
+  test("review 4: a waiter stopped before the restart (still waiting for idle) puts the job back, it is not a failure", async () => {
+    const w = owEnv({ files: { [`${Q}/inprogress.json`]: JSON.stringify({ phase: "waiting", item: item() }) } });
+    expect(await runOwnerWaiter(w.env, opts)).toBe(0);
+    expect(w.files.has(`${Q}/failed`)).toBe(false);
+    expect(w.outcome()).toEqual(["restarted org.example.svc"]);
+  });
+  test("review 7: work queued while the waiter is finding the queue empty is not stranded", async () => {
+    // The apply run queues a job right as the waiter sees an empty queue; its own waiter exits on the lock.
+    const hooked = owEnv({ lockSeq: [true, true], onEmptyQueue: () => hooked.queue(item()) });
+    expect(await runOwnerWaiter(hooked.env, opts)).toBe(0);
+    expect(hooked.calls).toContain("launchctl kickstart -k gui/501/org.example.svc");
+    expect(hooked.outcome()).toEqual(["restarted org.example.svc"]);
+  });
+  describe("restart mode bootstrap: bootout then bootstrap, never kickstart -k", () => {
+    const T = "system/org.ofleet.ohost";
+    const PLIST = "/Library/LaunchDaemons/org.ofleet.ohost.plist";
+    const ohost = (over: Partial<QueuedOwner> = {}) => item({ label: "org.ofleet.ohost", target: T, restart: { bootstrap: PLIST }, ...over });
+    test("a system job: sudo -n launchctl bootout <target>, then sudo -n launchctl bootstrap system <plist>, then health", async () => {
+      const w = owEnv({ pids: { [T]: ["20", "31"] } });
+      w.queue(ohost());
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(0);
+      expect(w.calls.filter((c) => c.includes("launchctl b") || c.includes("kickstart"))).toEqual([`sudo -n launchctl bootout ${T}`, `sudo -n launchctl bootstrap system ${PLIST}`]);
+      expect(w.outcome()).toEqual(["restarted org.ofleet.ohost"]);
+    });
+    test("a gui job runs without sudo, in its gui domain", async () => {
+      const g = "gui/501/org.example.svc";
+      const w = owEnv();
+      w.queue(item({ restart: { bootstrap: "/home.test/Library/LaunchAgents/org.example.svc.plist" } }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(0);
+      expect(w.calls.filter((c) => c.includes("launchctl b"))).toEqual([`launchctl bootout ${g}`, "launchctl bootstrap gui/501 /home.test/Library/LaunchAgents/org.example.svc.plist"]);
+    });
+    test("a failed bootstrap is FAILED with the bootstrap-again note", async () => {
+      const w = owEnv({ bootstrapRc: 5 });
+      w.queue(ohost());
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(w.outcome()[0]).toBe(`FAILED: org.ofleet.ohost not healthy after restart (bootstrap rc 5) — bootstrap again: sudo launchctl bootstrap system ${PLIST}`);
+      expect(w.files.get(`${Q}/failed`)).toBe("org.ofleet.ohost\n");
+    });
+    test("healthWithinSec bounds the health wait (default 60 s)", async () => {
+      const a = owEnv({ pids: { [T]: ["20", "20"] } });
+      a.queue(ohost({ healthWithinSec: 5 }));
+      expect(await runOwnerWaiter(a.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(a.clock()).toBeGreaterThanOrEqual(5_000);
+      expect(a.clock()).toBeLessThan(10_000);
+      const b = owEnv({ pids: { [T]: ["20", "20"] } });
+      b.queue(ohost());
+      expect(await runOwnerWaiter(b.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(b.clock()).toBeGreaterThanOrEqual(60_000);
+      expect(b.clock()).toBeLessThan(65_000);
+    });
+  });
+  test("another waiter holds the lock: nothing runs, the queue is kept", async () => {
+    const w = owEnv({ lockHeld: true });
+    w.queue(item());
+    expect(await runOwnerWaiter(w.env, opts)).toBe(0);
+    expect(w.calls).toEqual([]);
+    expect(w.files.size).toBe(1);
+  });
+  test("default probe: waits for 60 s with no ESTABLISHED TCP, then kickstarts the gui job and checks it is healthy", async () => {
+    const w = owEnv({ busy: [true, true, false] });
+    w.queue(item());
+    expect(await runOwnerWaiter(w.env, opts)).toBe(0);
+    expect(w.outcome()).toEqual(["restarted org.example.svc"]);
+    const kick = w.calls.indexOf("launchctl kickstart -k gui/501/org.example.svc");
+    expect(kick).toBeGreaterThan(0);
+    // Idle sampled for the full minute before the kickstart.
+    expect(w.calls.slice(0, kick).filter((c) => c.includes("ESTABLISHED")).length).toBeGreaterThanOrEqual(2 + 60_000 / 3_000);
+    expect(w.clock()).toBeGreaterThanOrEqual(60_000);
+    expect(w.calls.slice(kick)).toContain("/usr/sbin/lsof -nP -w -a -p 30 -d txt,mem");
+    expect(w.calls.some((c) => c.startsWith("sudo"))).toBe(false);
+    expect(w.released()).toBe(true);
+    expect([...w.files.keys()].filter((k) => k.includes("/queue/"))).toEqual([]);
+  });
+  test("a probe argv decides idle; a system job is kickstarted through sudo -n; the health URL is checked", async () => {
+    const t = "system/org.example.svc";
+    const w = owEnv({ probeRc: [1, 1, 0], pids: { [t]: ["20", "31"] } });
+    w.queue(item({ target: t, probe: ["/opt/svc.test/idle"], health: "http://127.0.0.1:8080/health" }));
+    expect(await runOwnerWaiter(w.env, opts)).toBe(0);
+    expect(w.calls.filter((c) => c === "/opt/svc.test/idle")).toHaveLength(3);
+    expect(w.calls.some((c) => c.includes("ESTABLISHED"))).toBe(false);
+    expect(w.calls).toContain(`sudo -n launchctl kickstart -k ${t}`);
+    expect(w.calls).toContain("GET http://127.0.0.1:8080/health");
+    expect(w.outcome()).toEqual(["restarted org.example.svc"]);
+  });
+  test("busy past the bound is held, never restarted; the next job still goes", async () => {
+    const w = owEnv({ probeRc: [1] });
+    w.queue(item({ probe: ["/opt/svc.test/idle"] }), item({ label: "org.example.z", target: "gui/501/org.example.z" }));
+    expect(await runOwnerWaiter(w.env, { ...opts, busyBoundMs: 30_000, idleMs: 10_000 })).toBe(0);
+    expect(w.calls).not.toContain("launchctl kickstart -k gui/501/org.example.svc");
+    expect(w.calls).toContain("launchctl kickstart -k gui/501/org.example.z");
+    expect(w.outcome()).toEqual(["held: busy org.example.svc (busy past 1 min)", "restarted org.example.z"]);
+  });
+  test("not healthy after the restart: FAILED with the bootout/bootstrap rollback, the label marked failed, the queue stopped", async () => {
+    // The pid never changes: the restart did not take.
+    const w = owEnv({ pids: { "gui/501/org.example.svc": ["20", "20"] } });
+    w.queue(item(), item({ label: "org.example.z", target: "gui/501/org.example.z" }));
+    expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+    // No ";" in an outcome: the summary's parser splits the brew line there, and a part starting "FAILED:" reads as failed packages.
+    expect(w.outcome()[0]).toBe("FAILED: org.example.svc not healthy after restart (state running, pid 20) — rollback: launchctl bootout gui/501/org.example.svc && launchctl bootstrap gui/501 /home.test/Library/LaunchAgents/org.example.svc.plist");
+    expect(w.outcome()[1]).toBe("not tried: org.example.z (queue stopped after org.example.svc failed)");
+    expect(w.files.get(`${Q}/failed`)).toBe("org.example.svc\n");
+    expect(w.calls).not.toContain("launchctl kickstart -k gui/501/org.example.z");
+    expect([...w.files.keys()].filter((k) => k.includes("/queue/"))).toEqual([]);
+    expect(w.released()).toBe(true);
+  });
+  test("a health URL that does not answer 200, or a new pid still on a deleted keg, is FAILED", async () => {
+    const a = owEnv({ http: 503 });
+    a.queue(item({ health: "http://127.0.0.1:8080/health" }));
+    expect(await runOwnerWaiter(a.env, { ...opts, idleMs: 0 })).toBe(1);
+    expect(a.outcome()[0]).toStartWith("FAILED: org.example.svc not healthy after restart (health http://127.0.0.1:8080/health answered 503)");
+    const b = owEnv({ kegOf: { "30": KEG } });
+    b.queue(item());
+    expect(await runOwnerWaiter(b.env, { ...opts, idleMs: 0 })).toBe(1);
+    expect(b.outcome()[0]).toStartWith("FAILED: org.example.svc not healthy after restart (pid 30 still maps a deleted keg)");
+  });
+  test("a job already on the new keg is not restarted; a failed label is skipped; an unloaded job is held", async () => {
+    const t = "gui/501/org.example.svc";
+    const a = owEnv({ pids: { [t]: ["25", "26"] } });
+    a.queue(item());
+    expect(await runOwnerWaiter(a.env, opts)).toBe(0);
+    expect(a.outcome()).toEqual(["already on the new keg: org.example.svc"]);
+    expect(a.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    const b = owEnv({ files: { [`${Q}/failed`]: "org.example.svc\n" } });
+    b.queue(item());
+    expect(await runOwnerWaiter(b.env, opts)).toBe(0);
+    expect(b.calls).toEqual([]);
+    const c = owEnv({ pids: { [t]: [undefined, undefined] } });
+    c.queue(item());
+    expect(await runOwnerWaiter(c.env, opts)).toBe(0);
+    expect(c.outcome()).toEqual(["held: org.example.svc not running"]);
+    expect(c.calls.some((x) => x.includes("kickstart"))).toBe(false);
   });
 });
