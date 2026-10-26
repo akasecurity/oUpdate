@@ -41,6 +41,21 @@ bun src/cli.ts review npm some-pkg 1.0.0 1.0.1
 
 \`bin\` in \`package.json\` maps \`oupdate\` to \`src/cli.ts\`, so \`bun link\` gives you an \`oupdate\` command.
 
+### Set up with your agent
+
+The easiest way to set it up is to ask your coding agent. Paste this:
+
+\`\`\`
+Set up oupdate (https://github.com/akasecurity/oupdate) on this machine for me. Clone it, read its AGENTS.md and follow it step by step. Ask me before anything that changes my system.
+\`\`\`
+
+[AGENTS.md](AGENTS.md) gives the agent the order to work in:
+- what you want oupdate for;
+- prerequisites, then the install;
+- a local or hosted reviewer model, checked on a known-clean update;
+- a dry run before any live run;
+- scheduling only with your approval.
+
 ## Configuration
 
 Most commands take their settings as flags (\`--reviewer\`, \`--scanner\`, \`--token-file\`). The host commands read a JSON config from \`$HOME/.config/oupdate/config.json\` or the file you pass with \`--config\`; the \`apply\` object is described under [Host apply](#host-apply). \`\${NAME}\` in any config value is read from the environment. \`scripts/sample.config.example.json\` is a minimal config with one local OpenAI-compatible reviewer and placeholders only.
