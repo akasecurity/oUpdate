@@ -1,4 +1,17 @@
-# oupdate
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/cover-dark.svg">
+  <img src="assets/cover-light.svg" alt="oupdate by AKA Security, recurring, gated dependency updates for a fleet of hosts. Illustration: update trucks for npm, pnpm, bun and brew wait in a striped cooldown lot; under an overhead board reading advisories one flagged truck's lane is closed, and a gate releases the rest onto the fleet road." width="100%">
+</picture>
+
+<p align="center">
+  <a href="#install"><b>Install</b></a> &nbsp;·&nbsp;
+  <a href="#configuration"><b>Configuration</b></a> &nbsp;·&nbsp;
+  <a href="#gate-update-prs-on-a-forge"><b>Gate update PRs</b></a> &nbsp;·&nbsp;
+  <a href="#host-apply"><b>Host apply</b></a> &nbsp;·&nbsp;
+  <a href="#license"><b>License</b></a>
+</p>
+
+<h3 align="center">Recurring, gated dependency updates for a fleet of hosts.</h3>
 
 A dependency and advisory sweep: it inventories packages across repos and hosts, matches them against advisory feeds, holds routine updates for a cooldown, reads each update's release-artifact diff with a deterministic pre-pass and a model reviewer, and hands the change to your own gate. Early release: the interfaces may still change.
 
@@ -41,6 +54,9 @@ Heads that already have success or failure are skipped. Gitea and API-compatible
 
 ## GuardDog layer
 
+<details>
+<summary><b>The static rule scanner</b> that runs between the pre-pass and the reviewer</summary>
+
 Between the pre-pass and the reviewer, a static rule scanner can run on both releases: `--scanner JSON` on `review` and `gate`. It sees only the files the new release adds or changes, plus the old copies of the changed files. Only rule + path pairs that are new in the new release count.
 
 Why changed files only: GuardDog 3.2.0 stops each rule after its `max_hits` (1 to 3) matches per package, in sorted walk order. Unchanged code that sorts first can use up a rule's budget and hide a new file: litellm 1.107.0's payload under `litellm-1.107.0.data/purelib/` raised nothing beside the 3,773-file `litellm/` directory. The budget still applies inside the changed set, so a large release can still hide a match behind another changed file. They reach the reviewer as soft signals and mark their files as priority files. With no scanner the layer is skipped; a scanner that fails, times out or reports a rule error holds the update.
@@ -64,7 +80,12 @@ oupdate review npm some-pkg 1.0.0 1.0.1 --scanner '{"type":"guarddog","name":"gu
 
 The local reviewer reads the release diff in parts, at most 12. When the whole diff is over that, it reads the priority files only: files with a pre-pass or scanner signal, new files, manifests and install or startup files. When those are still over it, it reads the signal files only: files with a signal, manifests and install or startup files. A FLAG on the signal files stops the update. An APPROVE there does not land it, because the rest of the diff was not read: the update stays held for a human, and the verdict names how many files were left out.
 
+</details>
+
 ## Client keys
+
+<details>
+<summary><b>Client keys</b>: the settings oupdate checks on each package manager</summary>
 
 `oupdate keys [DIR] [--cooldown-days N] [--json]` checks the install-time hardening the package managers already ship, in a repo's own config. It finds the managers from their lockfiles and only reads; it never edits a file. Exit 1 when a key is missing or too weak.
 
@@ -80,7 +101,12 @@ The local reviewer reads the release diff in parts, at most 12. When the whole d
 
 The build-script allow-lists are listed, not judged: pnpm `allowBuilds` (or the older `onlyBuiltDependencies`) and bun `trustedDependencies` (bun runs no other dependency's lifecycle scripts). Build-script denial stops the install-script attacks; it does not stop a payload that runs at import or at Python start, which is what the review layers are for. None of these keys lifts the cooldown for an advisory fix: `oupdate review --advisory-fix` does that.
 
+</details>
+
 ## Host shadow report
+
+<details>
+<summary><b>The read-only host report</b></summary>
 
 `oupdate host --report-only --state DIR [--host NAME] [--su-log PATH]` reads the installed inventory of this host (Homebrew formulae and casks, global npm packages, Docker images, macOS and its pending updates, agent CLI versions). It runs read-only commands only, with `HOMEBREW_NO_AUTO_UPDATE=1`, and never updates or installs anything. Advisories for the npm globals come from OSV; a failed lookup is a note in the report, never "no advisories".
 
@@ -89,6 +115,8 @@ It compares the run against the last summary block of the previous updater's run
 - what is still outdated, against what secure-update held: flagged (a Type B FLAG in the run body counts too), stuck, failed, skipped by CASK_EXCLUDE, or listed in a repo's `pins.json` (secure-update's `PINNED:` part). A brew-pinned package counts as held. An npm batch secure-update FLAGGED (its summary names no packages) holds every outdated npm global.
 
 It writes `DIR/inventory.json` (the snapshot for the next run) and `DIR/reports/<date>.json`, then prints a summary with the number of weeks in a row in which every report agreed. Run it once secure-update finishes, so a release published later that day doesn't show up as a disagreement.
+
+</details>
 
 ## Host apply
 
@@ -211,6 +239,9 @@ The Gatekeeper one-offs exit 1 when nothing was released or restored. They log t
 
 ## OS targets
 
+<details>
+<summary><b>OS targets</b>: pin-bump, NAS legs, VM OS packages</summary>
+
 `oupdate targets --apply [--dry-run] --config FILE [--target ID]...` runs the targets in a targets file (separate from the host config). A target is an `id`, an `os` (`macos`, `unraid`, `linux`), a `reach` (how oupdate gets at it), its update `legs`, a `schedule` (`nightly` or `weekly:<sun..sat>`) and `summaryTo`, the status tsv it publishes. The tsv has `host`, `date`, `rev` and `summary` rows, the shape the fleet digest reads. The run joins each target's leg results into one summary line. A target or leg that could not be checked says "not checked" with the reason and counts as trouble, so it is never skipped silently, and every trouble line carries a digest trouble word. `--target` runs the named targets whatever their schedule. A dry run publishes nothing and writes `dry-run-targets.log` instead of `targets.log`. The exit code is 1 when any target had trouble. See `scripts/targets.config.example.json`.
 
 Built so far: the reaches `local`, `git`, `broker-script` and `gce-patch`, and the legs `pin-bump`, `docker-compose`, `unraid-plugin`, `unraid-os` (the last three over `broker-script` only) and `os-packages` (over `gce-patch` only). The reaches `vm-agent` and `docker`, and the legs `brew`, `npm`, `claude-code` and `app-bundle`, already parse but report "not checked — … not built yet". `oupdate host --apply` is unchanged.
@@ -256,6 +287,8 @@ For each VM in turn, `os-packages`:
 
 A card denied or expired, or a broker refusal (a card approved while the VM's role is still busy, a VM the broker suspended, or a Lock change just before the send, which voids the intent), is "blocked — nothing ran". A card still pending at the end of the wait, a lost reply or any answer not recognized is FAILED with "outcome unknown"; the leg then reads the run's job status once, for the log (the latest job, an orphan or voided intent, or no job), and the broker's own post-check covers that job. After any trouble on any VM (not checked, a review FLAG, a patch not sent or not clean), no later VM is patched that run, in any `gce-patch` target: the run keeps one latch for all of them, and sends each VM at most one patch request. A VM may be listed in only one `gce-patch` target. Summaries are fixed phrases and counts (`vm-a: patched 2 · held 1`); package names, versions and every broker or decode reason are in the targets log, with the broker's request id for every patch. Factory-base VMs, per-run VMs and model-proxy VMs are rebuilt from their images, so they are never listed here.
 
+</details>
+
 ## Development
 
 ```
@@ -268,6 +301,9 @@ bun run scan
 
 ## Evaluation
 
+<details>
+<summary><b>How the reviewer is evaluated</b></summary>
+
 `acceptance/` holds the attack and control cases. `cases.json` lists 9 attack cases, `controls.json` 8 clean updates that must land. `acceptance/run.ts` runs the cases through the review layers with the reviewers you give it, and it fetches the malicious-package samples from the public DataDog malicious-software-packages dataset on GitHub, and `acceptance/extract.ts` unpacks them. The litellm 1.107.0 case needs a replay script that this repository does not ship, so a run counts it as not run. Results go to `./acceptance-results/`.
 
 `scripts/eval.ts` runs the whole set plus the repo scan. Copy `scripts/eval.config.example.json`, point `sampleConfig` at a copy of `scripts/sample.config.example.json`, then:
@@ -275,6 +311,8 @@ bun run scan
 ```
 OUPDATE_EVAL_BASE_URL=http://127.0.0.1:8080/v1 OUPDATE_EVAL_MODEL=<model> bun scripts/eval.ts --only 6
 ```
+
+</details>
 
 ## License
 
