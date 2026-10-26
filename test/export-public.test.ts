@@ -13,7 +13,7 @@ function git(cwd: string, args: string[], email: string) {
 test("badCommitEmails flags author or committer emails other than the noreply address", () => {
   const dir = mkdtempSync(join(tmpdir(), "oupdate-export-"));
   try {
-    const good = "oupdate@users.noreply.github.com";
+    const good = "222731067+alsoknownaswill@users.noreply.github.com";
     git(dir, ["init", "-q", "-b", "main"], good);
     writeFileSync(join(dir, "a"), "1");
     git(dir, ["add", "-A"], good);
