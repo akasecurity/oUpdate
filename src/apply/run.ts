@@ -39,6 +39,7 @@ import type { ApplyFs } from "./fs.ts";
 import { gkCheck, gkRelease, gkRevert, gkSnapshot, realGates, type GkEnv, type GkOptions, type GkPrior } from "./gatekeeper.ts";
 import { caskRunning, linkageCheck, lsofMaps, relinkUpgraded, staleKegCheck, type KegEnv } from "./kegs.ts";
 import { npmSection, type NpmRun } from "./npm.ts";
+import { ownerDir, ownerWaiterReport, queueOwners, type OwnerReport } from "./owner-waiter.ts";
 import { heldFromPinned, pinFilter } from "./pins.ts";
 import { restartUpgraded } from "./restarts.ts";
 import { pendingFromOutdated, trackStuck } from "./stuck.ts";
@@ -68,6 +69,8 @@ export interface ApplyOptions {
   typeB?: { upgrades: typeof typeBUpgrades; awaiting: typeof awaitingTapApproval };
   /** The app-bundle phase's network and file operations. */
   appNet?: AppNet;
+  /** Starts the owner restart waiter (`oupdate host --stale-owners-waiter`), set by the CLI; absent: staleOwners jobs are queued, not started. */
+  ownerWaiterArgv?: string[];
 }
 
 export interface ApplyResult {
@@ -339,11 +342,17 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   const installEnv = { HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1", ...(quarantined ? { HOMEBREW_NO_INSTALL_CLEANUP: "1" } : {}) };
 
   // ── waiter report: a drain a dead waiter left behind is recovered before any long brew build ──
+  let owners: OwnerReport = { note: "", busy: new Set(), failed: new Set() };
   await step("brew", "waiter report", async () => {
     const notes: string[] = [];
     for (const s of cfg.deferred) {
       const n = await waiterReport(waiterEnv, s, dryRun);
       if (n) notes.push(n);
+    }
+    // The owner restart waiter's last outcome, and the labels it failed (not queued again).
+    if (cfg.staleOwners?.length) {
+      owners = await ownerWaiterReport(fs, ownerDir(cfg.stateDir), dryRun);
+      if (owners.note) notes.push(owners.note);
     }
     b.waiterNote = notes.join("; ");
   });
@@ -364,6 +373,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     b.relinkNote = rl.note;
     await restartUpgraded({ exec: x, exists: fs.exists, spawnDetached: fs.spawnDetached, home: fs.home, uid: fs.uid }, b.upgraded, {
       deferred: cfg.deferred, helper: cfg.restartHelper, labelRestart: cfg.labelRestart, staleKegUnlisted: cfg.staleKegUnlisted, detachedLog: join(cfg.stateDir, "restart.log"), into: b.restarted, ownerHanded,
+      staleOwners: cfg.staleOwners,
     });
     if (b.restarted.length) log.push(`restarted: ${b.restarted.join(" ")}`);
   });
@@ -390,6 +400,10 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       staleKegUnlisted: cfg.staleKegUnlisted,
       ownerHanded,
       detachedLog: join(cfg.stateDir, "restart.log"),
+      staleOwners: cfg.staleOwners,
+      ownerFailed: owners.failed,
+      ownerBusy: owners.busy,
+      queueOwners: (items) => queueOwners(fs, ownerDir(cfg.stateDir), items, opts.ownerWaiterArgv, join(cfg.stateDir, "restart.log")),
       trackStuck: (still) => track("stale-keg", still) ?? [],
       log,
     });

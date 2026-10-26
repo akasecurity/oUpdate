@@ -751,3 +751,57 @@ describe("app bundles", () => {
     expect(r.rc).toBe(1);
   });
 });
+
+describe("stale owners in the run (OUP-b10)", () => {
+  const lsof = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nbun 77 u txt REG 1,4 1 2 /brew/Cellar/bun/1.0_old/bin/bun\n";
+  const gui = "gui/501 = {\n\tservices = {\n\t\t      77      - \torg.example.serving\n\t}\n}\n";
+  const WAITER = ["/brew/bin/bun", "/app.test/src/cli.ts", "host", "--stale-owners-waiter", "--config", "/conf.test/config.json"];
+  const DIR = "/state.test/owner-restarts";
+  const OUT = `${DIR}/outcomes/000000000000001-1-1.txt`;
+  async function ownerRun(files: Record<string, string> = {}, over: { argv?: string[] | null; dryRun?: boolean } = {}) {
+    const h = fakeHost({ dirs: ["/brew/Cellar"], lsof: [lsof], ps: { "77": { comm: "bun", command: "bun serve.ts", ppid: "1" } }, files });
+    // The owner dir lists its files; every other dir lists nothing, as in the fixture.
+    const listDir = h.fs.listDir;
+    h.fs.listDir = async (d) => (d.startsWith(DIR) ? [...h.files.keys()].filter((k) => k.startsWith(`${d}/`)).map((k) => k.slice(d.length + 1)) : listDir(d));
+    const exec: typeof h.exec = async (argv, o) => (argv.join(" ") === "launchctl print gui/501" ? { rc: 0, out: gui, err: "" } : h.exec(argv, o));
+    const res = await applyHost(testConfig({ npm: null, staleOwners: [{ match: "org.example.serv*", probe: ["/opt/svc.test/idle"] }] }), exec, h.fs, {
+      dryRun: over.dryRun ?? false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB, ...(over.argv === null ? {} : { ownerWaiterArgv: over.argv ?? WAITER }),
+    });
+    return { ...h, res, summary: res.summary.join("\n") };
+  }
+
+  test("a stale job matching staleOwners is queued and the waiter started detached; never kickstarted", async () => {
+    const r = await ownerRun();
+    expect(r.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(r.spawned).toEqual([WAITER]);
+    const q = JSON.parse(r.files.get(`${DIR}/queue/gui%2F501%2Forg.example.serving.json`)!);
+    expect(q).toEqual({ label: "org.example.serving", target: "gui/501/org.example.serving", pid: "77", keg: "/brew/Cellar/bun/1.0_old", probe: ["/opt/svc.test/idle"] });
+    expect(r.summary).toContain("STALE KEG: bun(waiting for idle restart 1) still running from a deleted keg");
+    expect(r.summary).toContain("owner restart waiter started (pid 4242) for org.example.serving");
+  });
+  test("no waiter command (not started from the CLI): queued, and the summary says FAILED", async () => {
+    const r = await ownerRun({}, { argv: null });
+    expect(r.spawned).toEqual([]);
+    expect(r.summary).toContain("owner restart waiter FAILED: no waiter command here");
+  });
+  test("the last outcome is reported and removed at the start; a failed label is not queued again", async () => {
+    const r = await ownerRun({ [OUT]: "FAILED: org.example.serving not healthy after restart (no new pid) — rollback: x\n", [`${DIR}/failed`]: "org.example.serving\n" });
+    expect(r.summary).toContain("owner restart waiter: FAILED: org.example.serving not healthy after restart (no new pid) — rollback: x");
+    expect(r.files.has(OUT)).toBe(false);
+    expect(r.spawned).toEqual([]);
+    expect(r.summary).toContain("STALE KEG: bun(FAILED 1) still running from a deleted keg");
+    expect(r.res.rc).toBe(0);
+  });
+  test("a label held busy last time is queued again and counted as held busy", async () => {
+    const r = await ownerRun({ [OUT]: "held: busy org.example.serving (busy past 120 min)\n" });
+    expect(r.spawned).toEqual([WAITER]);
+    expect(r.summary).toContain("STALE KEG: bun(held busy 1) still running from a deleted keg");
+  });
+  test("dry run: nothing queued, started or removed", async () => {
+    const r = await ownerRun({ [OUT]: "restarted org.example.serving\n" }, { dryRun: true });
+    expect(r.spawned).toEqual([]);
+    expect([...r.files.keys()].some((k) => k.includes("/queue/"))).toBe(false);
+    expect(r.files.has(OUT)).toBe(true);
+    expect(r.res.log).toContain("    dry-run: would queue gui/501/org.example.serving for an idle restart");
+  });
+});
