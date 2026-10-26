@@ -1,10 +1,30 @@
-# oupdate
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/cover-dark.svg">
+  <img src="assets/cover-light.svg" alt="oUpdate by AKA Security, an open-source package firewall that reads what each new release changed before it lands. Illustration: update trucks for npm, pnpm, bun and brew wait in a striped cooldown lot; under an overhead board reading review one flagged truck's lane is closed, and a gate releases the rest onto the fleet road." width="100%">
+</picture>
 
-A dependency and advisory sweep: it inventories packages across repos and hosts, matches them against advisory feeds, holds routine updates for a cooldown, reads each update's release-artifact diff with a deterministic pre-pass and a model reviewer, and hands the change to your own gate. Early release: the interfaces may still change.
+<p align="center">
+  <a href="#install"><b>Install</b></a> &nbsp;·&nbsp;
+  <a href="#configuration"><b>Configuration</b></a> &nbsp;·&nbsp;
+  <a href="#gate-update-prs-on-a-forge"><b>Gate update PRs</b></a> &nbsp;·&nbsp;
+  <a href="#host-apply"><b>Host apply</b></a> &nbsp;·&nbsp;
+  <a href="#license"><b>License</b></a>
+</p>
+
+<h3 align="center">An open-source package firewall that reads what each new release changed before it lands.</h3>
+
+oUpdate is an open-source package firewall. Before a new release of a package lands, it reads what the release changed. Deterministic checks look for known attack patterns, such as install scripts, Python startup hooks and encoded payloads. A model you choose, either a local model on your own hardware or a cloud model, reviews the release diff itself. Nothing waits on an advisory or a threat feed, so a release nobody has reported yet still gets read.
+
+In [an evaluation](docs/evaluation-2026-10-26.md) on 9 real supply-chain attacks and 8 clean releases, with no threat feeds or advisories, it stopped all 9 attacks and held none of the 8 clean releases. The attacks include Shai-Hulud in @ctrl/tinycolor 4.1.1, s1ngularity in @nx/devkit 21.5.0, and litellm 1.107.0.
+
+- **On a Mac**, it takes Homebrew and npm updates as soon as they clear their checks, with no waiting period. A model reviews npm global packages and formulae from third-party Homebrew taps. Formulae from Homebrew's own taps get a deterministic version policy. An upgraded cask's files are cleared to run only when they pass Apple's signing and notarization checks.
+- **In your repos**, dependency updates from your update bot get a 7-day cooldown and the same review, then a commit status that your own gate acts on before they land.
+
+Early release, built from tools that run in production; the interfaces may still change. The easiest way to install it is to ask your coding agent to set it up; see [Set up with your agent](#set-up-with-your-agent).
 
 ## Install
 
-oupdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is no build step.
+oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is no build step.
 
 ```
 git clone https://github.com/akasecurity/oupdate.git
@@ -15,13 +35,28 @@ bun src/cli.ts review npm some-pkg 1.0.0 1.0.1
 
 `bin` in `package.json` maps `oupdate` to `src/cli.ts`, so `bun link` gives you an `oupdate` command.
 
+### Set up with your agent
+
+Paste this into your coding agent:
+
+```
+Set up oUpdate (https://github.com/akasecurity/oupdate) on this machine for me. Clone it, read its AGENTS.md and follow it step by step. Ask me before anything that changes my system.
+```
+
+[AGENTS.md](AGENTS.md) gives the agent the order to work in:
+- what you want oUpdate for;
+- prerequisites, then the install;
+- a local or hosted reviewer model, checked on a known-clean update;
+- a dry run before any live run;
+- scheduling only with your approval.
+
 ## Configuration
 
 Most commands take their settings as flags (`--reviewer`, `--scanner`, `--token-file`). The host commands read a JSON config from `$HOME/.config/oupdate/config.json` or the file you pass with `--config`; the `apply` object is described under [Host apply](#host-apply). `${NAME}` in any config value is read from the environment. `scripts/sample.config.example.json` is a minimal config with one local OpenAI-compatible reviewer and placeholders only.
 
 ## Gate update PRs on a forge
 
-Run after your update bot (Renovate, for example): for each open PR on a `renovate/` branch, oupdate diffs `bun.lock` between base and head and reviews every package version the PR brings in. It then posts a commit status `oupdate/review` and one comment carrying the per-layer verdicts.
+Run after your update bot (Renovate, for example): for each open PR on a `renovate/` branch, oUpdate diffs `bun.lock` between base and head and reviews every package version the PR brings in. It then posts a commit status `oupdate/review` and one comment carrying the per-layer verdicts.
 
 ```
 oupdate gate --endpoint https://forge.example/api/v1 --repo owner/name \
@@ -41,11 +76,14 @@ Heads that already have success or failure are skipped. Gitea and API-compatible
 
 ## GuardDog layer
 
+<details>
+<summary><b>The static rule scanner</b> that runs between the pre-pass and the reviewer</summary>
+
 Between the pre-pass and the reviewer, a static rule scanner can run on both releases: `--scanner JSON` on `review` and `gate`. It sees only the files the new release adds or changes, plus the old copies of the changed files. Only rule + path pairs that are new in the new release count.
 
 Why changed files only: GuardDog 3.2.0 stops each rule after its `max_hits` (1 to 3) matches per package, in sorted walk order. Unchanged code that sorts first can use up a rule's budget and hide a new file: litellm 1.107.0's payload under `litellm-1.107.0.data/purelib/` raised nothing beside the 3,773-file `litellm/` directory. The budget still applies inside the changed set, so a large release can still hide a match behind another changed file. They reach the reviewer as soft signals and mark their files as priority files. With no scanner the layer is skipped; a scanner that fails, times out or reports a rule error holds the update.
 
-oupdate writes the files it already unpacked into a fresh directory (dirs 0755, files 0644, every path checked) and passes the directory, not the archive, so GuardDog's own extraction never runs on untrusted input. The command is an argv with `{eco}` and `{dir}` placeholders, run with no shell. Run it in the sandbox image from `sandbox/guarddog/` (hash-locked wheels, non-root user):
+oUpdate writes the files it already unpacked into a fresh directory (dirs 0755, files 0644, every path checked) and passes the directory, not the archive, so GuardDog's own extraction never runs on untrusted input. The command is an argv with `{eco}` and `{dir}` placeholders, run with no shell. Run it in the sandbox image from `sandbox/guarddog/` (hash-locked wheels, non-root user):
 
 ```
 oupdate review npm some-pkg 1.0.0 1.0.1 --scanner '{"type":"guarddog","name":"guarddog",
@@ -64,7 +102,12 @@ oupdate review npm some-pkg 1.0.0 1.0.1 --scanner '{"type":"guarddog","name":"gu
 
 The local reviewer reads the release diff in parts, at most 12. When the whole diff is over that, it reads the priority files only: files with a pre-pass or scanner signal, new files, manifests and install or startup files. When those are still over it, it reads the signal files only: files with a signal, manifests and install or startup files. A FLAG on the signal files stops the update. An APPROVE there does not land it, because the rest of the diff was not read: the update stays held for a human, and the verdict names how many files were left out.
 
+</details>
+
 ## Client keys
+
+<details>
+<summary><b>Client keys</b>: the settings oUpdate checks on each package manager</summary>
 
 `oupdate keys [DIR] [--cooldown-days N] [--json]` checks the install-time hardening the package managers already ship, in a repo's own config. It finds the managers from their lockfiles and only reads; it never edits a file. Exit 1 when a key is missing or too weak.
 
@@ -80,7 +123,12 @@ The local reviewer reads the release diff in parts, at most 12. When the whole d
 
 The build-script allow-lists are listed, not judged: pnpm `allowBuilds` (or the older `onlyBuiltDependencies`) and bun `trustedDependencies` (bun runs no other dependency's lifecycle scripts). Build-script denial stops the install-script attacks; it does not stop a payload that runs at import or at Python start, which is what the review layers are for. None of these keys lifts the cooldown for an advisory fix: `oupdate review --advisory-fix` does that.
 
+</details>
+
 ## Host shadow report
+
+<details>
+<summary><b>The read-only host report</b></summary>
 
 `oupdate host --report-only --state DIR [--host NAME] [--su-log PATH]` reads the installed inventory of this host (Homebrew formulae and casks, global npm packages, Docker images, macOS and its pending updates, agent CLI versions). It runs read-only commands only, with `HOMEBREW_NO_AUTO_UPDATE=1`, and never updates or installs anything. Advisories for the npm globals come from OSV; a failed lookup is a note in the report, never "no advisories".
 
@@ -89,6 +137,8 @@ It compares the run against the last summary block of the previous updater's run
 - what is still outdated, against what secure-update held: flagged (a Type B FLAG in the run body counts too), stuck, failed, skipped by CASK_EXCLUDE, or listed in a repo's `pins.json` (secure-update's `PINNED:` part). A brew-pinned package counts as held. An npm batch secure-update FLAGGED (its summary names no packages) holds every outdated npm global.
 
 It writes `DIR/inventory.json` (the snapshot for the next run) and `DIR/reports/<date>.json`, then prints a summary with the number of weeks in a row in which every report agreed. Run it once secure-update finishes, so a release published later that day doesn't show up as a disagreement.
+
+</details>
 
 ## Host apply
 
@@ -131,7 +181,7 @@ Every line goes to the log file and stdout as it is made. A run stopped by SIGTE
   mas:  not checked — the App Store phase is not in oupdate
 ```
 
-`mas` reads "not checked" on every run by design: the App Store phase is not in oupdate, and the words are not ones the digest counts as trouble. `claude-code` is the version after the update, `FAILED (rc=<rc>, on <version>)` or `FAILED (timeout, on <version>)` when the update failed (`unknown` when `--version` fails too), `not configured` without `claudeCode`, and `dry-run` in a dry run. A `claudeCode` path that is not executable is skipped with no `claude-code` part, as secure-update did.
+`mas` reads "not checked" on every run by design: the App Store phase is not in oUpdate, and the words are not ones the digest counts as trouble. `claude-code` is the version after the update, `FAILED (rc=<rc>, on <version>)` or `FAILED (timeout, on <version>)` when the update failed (`unknown` when `--version` fails too), `not configured` without `claudeCode`, and `dry-run` in a dry run. A `claudeCode` path that is not executable is skipped with no `claude-code` part, as secure-update did.
 
 ### Schedule it
 
@@ -149,7 +199,7 @@ oupdate host --launchd-plist --label org.example.oupdate-apply --user USER --at 
 - `PATH` is bun's directory, then the directories of the config's absolute `brew` and `npm`, then each `--path DIR`, then `/usr/bin:/bin:/usr/sbin:/sbin`. Homebrew's own directory is not on it unless the config puts it there, so give `brew` and `npm` as absolute paths in the config: a bare `brew` (the default) is not found under launchd. npm is a `#!/usr/bin/env node` script, so `node` must be on that PATH: Homebrew's npm and node share a directory, which the config's `npm` adds. Without `--config`, or with a bare `npm` in it, pass `--path` with node's directory.
 - With `--config`, the config is read even when `--stdout` is given, for the brew and npm directories. To skip it, leave out `--config` and give those directories with `--path`; the job then reads the default config.
 - launchd's stdout and stderr go to `--stdout`. It defaults to `launchd-oupdate.log` beside the config's `apply.logFile`. A name that starts with `2` is refused, because the digest reads the newest `2*.log` as the run log.
-- If the host shadow report's trigger (`scripts/host-shadow-trigger.sh`) watches the old job's stdout log (the shadow's `--su-log`), pass that file as `--stdout`, so the trigger still fires. Or retire the shadow on that host: after the switch it compares oupdate with itself.
+- If the host shadow report's trigger (`scripts/host-shadow-trigger.sh`) watches the old job's stdout log (the shadow's `--su-log`), pass that file as `--stdout`, so the trigger still fires. Or retire the shadow on that host: after the switch it compares oUpdate with itself.
 
 Pick the time the old updater ran. launchd does not create the stdout file's directory, so make it first, owned by the job's user. Then, as root, disable the old job and install the new one:
 
@@ -191,10 +241,10 @@ launchctl bootstrap system /Library/LaunchDaemons/org.example.old-updater.plist
      - **Unknown taps**: an advisory review only. One notice asks for the tap's approval; nothing installs.
    - Upgrade what passed, one package at a time. Relink, then restart each upgraded service, except a deferred one: that goes to its idle waiter.
 3. **Deferred casks.** One at a time, with Gatekeeper around each upgrade: snapshot before, then release and check after.
-4. **Stale keg and linkage.** Restart services still running from a deleted keg, and report broken library links. Every stale process is looked at, not one per package. This oupdate run and the processes that started it are never restarted; they move to the new keg with the next run. A process launchd started (parent pid 1) is looked up in launchd by its pid: `launchctl print system` for a daemon (restarted with `sudo -n launchctl kickstart -k system/<label>`), then `launchctl print gui/<uid>` for your own agent (restarted in `gui/<uid>/`). So a job whose label never names the package, such as an agent running a Homebrew `bun`, is still found. Only when launchd has no row for such a pid is the label taken from a plist name containing the package, narrowed by the process name, once per package; the restart helper is used only for such a name-matched label, since it restarts a package's own service. More than one label for a pid, an unmatched label or an ambiguous plist match is named for you, never guessed. A process launchd did not start (a shell's `bun`, say) is never restarted, not by its pid and not by a plist name: if its direct parent is a launchd job's own process (say a plist whose shell does not `exec`), the package is named for an operator as `<pkg>(child of <label>)`, noticed and counted toward stuck, and never restarted through that chain; when that job was already restarted or handed to its owner this run, the child carries that outcome instead. Any other process (an interactive one, or one deeper under a job, such as a shell in a session under a daemon) is left alone and not counted on the re-scan; a job further up its chain is only logged. A label is restarted once per run; every package stale under it is accounted for by that one outcome. `labelRestart` overrides the restart of a label, matched literally, on either path: `"skip"` leaves it to the job's owner (the STALE KEG note says so), `"kickstart"` restarts it as usual, and a command (its first entry an absolute path) is started detached with the label as its last argument and not waited for; the note reads `STALE KEG: <pkg> handed to <command> (<label>)` until a run finds the package gone (a re-scan that already finds it gone says only `restarted onto new keg`). The same `labelRestart` applies when step 2 restarts the service of a package it just upgraded, before the restart helper and kickstart, for a label whose plist exists. An owner command is started at most once per run: a label step 2 handed over is not handed again by this step. Write owner commands to be single-instance anyway (take a lock, exit when another one runs). `staleKegUnlisted` says what this step does with a label not in `labelRestart`: `"kickstart"` (the default) restarts it as above; `"report"` makes `labelRestart` an allow list, so such a label is never restarted (no helper, no kickstart), its packages read `<pkg>(reported only, not on the restart list)` in the STALE KEG note and count toward stuck. List a label as `"kickstart"` to restart it then; a `"kickstart"` label found only by plist name goes through the restart helper by package when the helper lists that package. Report mode does not cover deferred services: they still go to their idle waiter. Step 2 obeys it too: in report mode a label with a plist that is not in `labelRestart` is not restarted there (no helper, no kickstart) and reads `<pkg>(reported only, not on the restart list)` in the restarted list. A failed or timed-out launchctl query (`print gui/<uid>` fails with no GUI session) is logged and falls back to the plist name. The log says which way each label was found. A dry run runs these queries and only says what it would kickstart, hand over, leave or report. A deferred service on a deleted keg is handed to its idle waiter unless its `--holder` probe answers 0, the waiter's sign that one is already running. Any other answer hands off; a timed-out probe is named in the note. Your waiter must take its own exclusive lock and exit when another one is live. During a stop, nothing is handed off.
+4. **Stale keg and linkage.** Restart services still running from a deleted keg, and report broken library links. Every stale process is looked at, not one per package. This oUpdate run and the processes that started it are never restarted; they move to the new keg with the next run. A process launchd started (parent pid 1) is looked up in launchd by its pid: `launchctl print system` for a daemon (restarted with `sudo -n launchctl kickstart -k system/<label>`), then `launchctl print gui/<uid>` for your own agent (restarted in `gui/<uid>/`). So a job whose label never names the package, such as an agent running a Homebrew `bun`, is still found. Only when launchd has no row for such a pid is the label taken from a plist name containing the package, narrowed by the process name, once per package; the restart helper is used only for such a name-matched label, since it restarts a package's own service. More than one label for a pid, an unmatched label or an ambiguous plist match is named for you, never guessed. A process launchd did not start (a shell's `bun`, say) is never restarted, not by its pid and not by a plist name: if its direct parent is a launchd job's own process (say a plist whose shell does not `exec`), the package is named for an operator as `<pkg>(child of <label>)`, noticed and counted toward stuck, and never restarted through that chain; when that job was already restarted or handed to its owner this run, the child carries that outcome instead. Any other process (an interactive one, or one deeper under a job, such as a shell in a session under a daemon) is left alone and not counted on the re-scan; a job further up its chain is only logged. A label is restarted once per run; every package stale under it is accounted for by that one outcome. `labelRestart` overrides the restart of a label, matched literally, on either path: `"skip"` leaves it to the job's owner (the STALE KEG note says so), `"kickstart"` restarts it as usual, and a command (its first entry an absolute path) is started detached with the label as its last argument and not waited for; the note reads `STALE KEG: <pkg> handed to <command> (<label>)` until a run finds the package gone (a re-scan that already finds it gone says only `restarted onto new keg`). The same `labelRestart` applies when step 2 restarts the service of a package it just upgraded, before the restart helper and kickstart, for a label whose plist exists. An owner command is started at most once per run: a label step 2 handed over is not handed again by this step. Write owner commands to be single-instance anyway (take a lock, exit when another one runs). `staleKegUnlisted` says what this step does with a label not in `labelRestart`: `"kickstart"` (the default) restarts it as above; `"report"` makes `labelRestart` an allow list, so such a label is never restarted (no helper, no kickstart), its packages read `<pkg>(reported only, not on the restart list)` in the STALE KEG note and count toward stuck. List a label as `"kickstart"` to restart it then; a `"kickstart"` label found only by plist name goes through the restart helper by package when the helper lists that package. Report mode does not cover deferred services: they still go to their idle waiter. Step 2 obeys it too: in report mode a label with a plist that is not in `labelRestart` is not restarted there (no helper, no kickstart) and reads `<pkg>(reported only, not on the restart list)` in the restarted list. A failed or timed-out launchctl query (`print gui/<uid>` fails with no GUI session) is logged and falls back to the plist name. The log says which way each label was found. A dry run runs these queries and only says what it would kickstart, hand over, leave or report. A deferred service on a deleted keg is handed to its idle waiter unless its `--holder` probe answers 0, the waiter's sign that one is already running. Any other answer hands off; a timed-out probe is named in the note. Your waiter must take its own exclusive lock and exit when another one is live. During a stop, nothing is handed off.
 
    `staleOwners` restarts long-running launchd jobs that are still on a deleted keg, one at a time, when each is idle. Each entry is `{"match": <label glob, * and ?>, "probe"?: argv, "health"?: url, "restart"?: "kickstart" | {"bootstrap": <absolute plist path>}, "healthWithinSec"?: n}` and takes precedence over `labelRestart` and `staleKegUnlisted`. A matched label is queued, never restarted inline: the run starts `oupdate host --stale-owners-waiter --config <file>` detached, and the waiter works the queue under a kernel lock (flock on `<stateDir>/owner-restarts/lock`). For each job it waits until idle (the probe exits 0, or by default the pid holds no established TCP connection for 60 s; still busy after 2 h reads `held: busy`), re-reads the pid just before restarting, restarts it (`launchctl kickstart -k`, or bootout then bootstrap of the plist; `sudo -n` in the system domain), then checks health: a new running pid within `healthWithinSec` (default 60), the health URL answering 200 when set, and no deleted keg mapped by that pid. A failure stops the queue, writes `FAILED: <label> ... rollback: <command>` and marks the label so it is not tried again until you remove it from `<stateDir>/owner-restarts/failed`; a waiter killed mid-restart counts as failed. Results are reported by the next run. A label found only by a plist name is queued only when launchd runs the stale pid under it. Processes from a `run` job of a process supervisor and orphans with no launchd job are reported with their pids, never restarted. The STALE KEG note counts every outcome per package, and anything not cleared keeps it.
-   `releaseChecks` (optional, off by default) gates a formula's release on a quality check run on the host. Each entry is `{"formula": <name, bare or tap-qualified>, "command": argv, "retries"?: n (default 1), "timeoutSec"?: n (default 900), "before"?: argv, "after"?: argv, "runAs"?: <user>}`. For a listed formula the upgrade keeps the previous keg (no install cleanup in a run with release checks; the cleanup step skips the formula until its check decides; a process still on the previous keg counts as stale). `before` runs right before the upgrade. After the upgrade and its owner restart (a `staleOwners` job on the previous keg is restarted inline, the same way the waiter does it, never queued), `command` runs with `GATE_VERSION=<the installed version>`: exit 0 is PASS, exit 1 FAIL (rerun up to `retries` more times), any other exit or a timeout means the check could not run: no verdict, the new version stays and a notice says so. FAIL on every attempt rolls back: `brew uninstall` of the new keg (brew resolves the linked keg) and `brew link` of the one left (`brew link` always links the latest keg, so it cannot pick the older one while both are installed); a formula trusted before is trusted again. Then the owner restarts, the release is held (`<stateDir>/release-checks/holds/<formula>.json`; later runs log `HELD by release check` and skip that version, a newer one is tried) and the check runs again on the restored version. `after` runs when the check passed, could not run, or the restored version passed; after any other confirmed fail (restored version failing, previous keg missing, rollback or owner restart failing) it is not run and a loud notice says so. When the run stops before any verdict (an upgrade or `before` failure, an owner restart that failed, an error), `after` still runs once `before` did. A formula not upgraded this run runs neither. `owners` (optional) names launchd labels, matched literally, whose restart the check always needs, whether or not the stale-keg scan found them (system domain when `/Library/LaunchDaemons/<label>.plist` exists, else the user's LaunchAgents, else system); one not running or not found is a restart failure. `runAs` runs `before`, `command` and `after` as `/usr/bin/sudo -n -u <user> -H --preserve-env=GATE_VERSION -- <argv>`. An upgrade whose check has not decided is recorded in `<stateDir>/release-checks/pending/`, so a run that dies leaves it to the next. A dry run logs what it would run and runs none of it. Versions are read from the opt link (a keg-only formula has no linked keg; its rollback is `brew link --force` then `brew unlink`); a version that cannot be read is a no-verdict end, notified. While a gated formula is outdated (or held), a planned upgrade whose `brew deps` include it waits for a later run, so brew never pulls the gated release in unchecked; unreadable dependencies wait too. A signal after `before` still runs `after` (forced past the stop, before oupdate exits); the pending record is removed only once `after` ran and the check is over. An owner gone before its restart is a restart failure, never a pass. A failed inline owner restart is appended to `<stateDir>/owner-restarts/failed`, as the waiter's are, so neither loses the other's entry. The pending record is a written state machine (upgraded, owner restarted, verdict, rolled back, restored owner restarted, restored verdict, after ran): every step is written before the next starts, and a later run resumes from the last one; while a record is unfinished its formula is not upgraded again. The dependency guard covers every planned upgrade: a gated formula on another outdated gated one, and casks (`brew deps --cask`). A release check's owner is restarted inline even if an earlier restart of it failed, and a formula whose own service label matches `staleOwners` always needs that restart. The inline restarts, check and re-check hold the waiter's lock (waited for up to 10 min, else the check waits for a later run), the label's queued waiter job is removed, and a waiter for other owners queued meanwhile starts after the release checks.
+   `releaseChecks` (optional, off by default) gates a formula's release on a quality check run on the host. Each entry is `{"formula": <name, bare or tap-qualified>, "command": argv, "retries"?: n (default 1), "timeoutSec"?: n (default 900), "before"?: argv, "after"?: argv, "runAs"?: <user>}`. For a listed formula the upgrade keeps the previous keg (no install cleanup in a run with release checks; the cleanup step skips the formula until its check decides; a process still on the previous keg counts as stale). `before` runs right before the upgrade. After the upgrade and its owner restart (a `staleOwners` job on the previous keg is restarted inline, the same way the waiter does it, never queued), `command` runs with `GATE_VERSION=<the installed version>`: exit 0 is PASS, exit 1 FAIL (rerun up to `retries` more times), any other exit or a timeout means the check could not run: no verdict, the new version stays and a notice says so. FAIL on every attempt rolls back: `brew uninstall` of the new keg (brew resolves the linked keg) and `brew link` of the one left (`brew link` always links the latest keg, so it cannot pick the older one while both are installed); a formula trusted before is trusted again. Then the owner restarts, the release is held (`<stateDir>/release-checks/holds/<formula>.json`; later runs log `HELD by release check` and skip that version, a newer one is tried) and the check runs again on the restored version. `after` runs when the check passed, could not run, or the restored version passed; after any other confirmed fail (restored version failing, previous keg missing, rollback or owner restart failing) it is not run and a loud notice says so. When the run stops before any verdict (an upgrade or `before` failure, an owner restart that failed, an error), `after` still runs once `before` did. A formula not upgraded this run runs neither. `owners` (optional) names launchd labels, matched literally, whose restart the check always needs, whether or not the stale-keg scan found them (system domain when `/Library/LaunchDaemons/<label>.plist` exists, else the user's LaunchAgents, else system); one not running or not found is a restart failure. `runAs` runs `before`, `command` and `after` as `/usr/bin/sudo -n -u <user> -H --preserve-env=GATE_VERSION -- <argv>`. An upgrade whose check has not decided is recorded in `<stateDir>/release-checks/pending/`, so a run that dies leaves it to the next. A dry run logs what it would run and runs none of it. Versions are read from the opt link (a keg-only formula has no linked keg; its rollback is `brew link --force` then `brew unlink`); a version that cannot be read is a no-verdict end, notified. While a gated formula is outdated (or held), a planned upgrade whose `brew deps` include it waits for a later run, so brew never pulls the gated release in unchecked; unreadable dependencies wait too. A signal after `before` still runs `after` (forced past the stop, before oUpdate exits); the pending record is removed only once `after` ran and the check is over. An owner gone before its restart is a restart failure, never a pass. A failed inline owner restart is appended to `<stateDir>/owner-restarts/failed`, as the waiter's are, so neither loses the other's entry. The pending record is a written state machine (upgraded, owner restarted, verdict, rolled back, restored owner restarted, restored verdict, after ran): every step is written before the next starts, and a later run resumes from the last one; while a record is unfinished its formula is not upgraded again. The dependency guard covers every planned upgrade: a gated formula on another outdated gated one, and casks (`brew deps --cask`). A release check's owner is restarted inline even if an earlier restart of it failed, and a formula whose own service label matches `staleOwners` always needs that restart. The inline restarts, check and re-check hold the waiter's lock (waited for up to 10 min, else the check waits for a later run), the label's queued waiter job is removed, and a waiter for other owners queued meanwhile starts after the release checks.
 5. **Stuck.** Count what is still pending, run after run. Pinned and excluded packages never count.
 6. **npm globals.** One review of the batch, with literal attack indicators forced to FLAG. Then upgrade each package by name.
 7. **Claude Code (native).** In the npm phase, after npm: `<claudeCode> update` (its output indented in the log), then `<claudeCode> --version` for the version the summary reports. The native build updates itself in place; with its background updater off, this call is the only update path. A dry run logs `DRY RUN - would run: claude update` and runs neither command; during a stop neither starts. A timed-out update is also a `FAILED — timeout:claude-update` entry on the npm line.
@@ -211,7 +261,10 @@ The Gatekeeper one-offs exit 1 when nothing was released or restored. They log t
 
 ## OS targets
 
-`oupdate targets --apply [--dry-run] --config FILE [--target ID]...` runs the targets in a targets file (separate from the host config). A target is an `id`, an `os` (`macos`, `unraid`, `linux`), a `reach` (how oupdate gets at it), its update `legs`, a `schedule` (`nightly` or `weekly:<sun..sat>`) and `summaryTo`, the status tsv it publishes. The tsv has `host`, `date`, `rev` and `summary` rows, the shape the fleet digest reads. The run joins each target's leg results into one summary line. A target or leg that could not be checked says "not checked" with the reason and counts as trouble, so it is never skipped silently, and every trouble line carries a digest trouble word. `--target` runs the named targets whatever their schedule. A dry run publishes nothing and writes `dry-run-targets.log` instead of `targets.log`. The exit code is 1 when any target had trouble. See `scripts/targets.config.example.json`.
+<details>
+<summary><b>OS targets</b>: pin-bump, NAS legs, VM OS packages</summary>
+
+`oupdate targets --apply [--dry-run] --config FILE [--target ID]...` runs the targets in a targets file (separate from the host config). A target is an `id`, an `os` (`macos`, `unraid`, `linux`), a `reach` (how oUpdate gets at it), its update `legs`, a `schedule` (`nightly` or `weekly:<sun..sat>`) and `summaryTo`, the status tsv it publishes. The tsv has `host`, `date`, `rev` and `summary` rows, the shape the fleet digest reads. The run joins each target's leg results into one summary line. A target or leg that could not be checked says "not checked" with the reason and counts as trouble, so it is never skipped silently, and every trouble line carries a digest trouble word. `--target` runs the named targets whatever their schedule. A dry run publishes nothing and writes `dry-run-targets.log` instead of `targets.log`. The exit code is 1 when any target had trouble. See `scripts/targets.config.example.json`.
 
 Built so far: the reaches `local`, `git`, `broker-script` and `gce-patch`, and the legs `pin-bump`, `docker-compose`, `unraid-plugin`, `unraid-os` (the last three over `broker-script` only) and `os-packages` (over `gce-patch` only). The reaches `vm-agent` and `docker`, and the legs `brew`, `npm`, `claude-code` and `app-bundle`, already parse but report "not checked — … not built yet". `oupdate host --apply` is unchanged.
 
@@ -256,6 +309,8 @@ For each VM in turn, `os-packages`:
 
 A card denied or expired, or a broker refusal (a card approved while the VM's role is still busy, a VM the broker suspended, or a Lock change just before the send, which voids the intent), is "blocked — nothing ran". A card still pending at the end of the wait, a lost reply or any answer not recognized is FAILED with "outcome unknown"; the leg then reads the run's job status once, for the log (the latest job, an orphan or voided intent, or no job), and the broker's own post-check covers that job. After any trouble on any VM (not checked, a review FLAG, a patch not sent or not clean), no later VM is patched that run, in any `gce-patch` target: the run keeps one latch for all of them, and sends each VM at most one patch request. A VM may be listed in only one `gce-patch` target. Summaries are fixed phrases and counts (`vm-a: patched 2 · held 1`); package names, versions and every broker or decode reason are in the targets log, with the broker's request id for every patch. Factory-base VMs, per-run VMs and model-proxy VMs are rebuilt from their images, so they are never listed here.
 
+</details>
+
 ## Development
 
 ```
@@ -268,6 +323,9 @@ bun run scan
 
 ## Evaluation
 
+<details>
+<summary><b>How the reviewer is evaluated</b></summary>
+
 `acceptance/` holds the attack and control cases. `cases.json` lists 9 attack cases, `controls.json` 8 clean updates that must land. `acceptance/run.ts` runs the cases through the review layers with the reviewers you give it, and it fetches the malicious-package samples from the public DataDog malicious-software-packages dataset on GitHub, and `acceptance/extract.ts` unpacks them. The litellm 1.107.0 case needs a replay script that this repository does not ship, so a run counts it as not run. Results go to `./acceptance-results/`.
 
 `scripts/eval.ts` runs the whole set plus the repo scan. Copy `scripts/eval.config.example.json`, point `sampleConfig` at a copy of `scripts/sample.config.example.json`, then:
@@ -275,6 +333,8 @@ bun run scan
 ```
 OUPDATE_EVAL_BASE_URL=http://127.0.0.1:8080/v1 OUPDATE_EVAL_MODEL=<model> bun scripts/eval.ts --only 6
 ```
+
+</details>
 
 ## License
 
