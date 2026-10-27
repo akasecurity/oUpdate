@@ -244,9 +244,40 @@ describe("review budget", () => {
     for (const p of ["setup.py", "lib/net.py", "lib/new.py"]) expect(seen).toContain(p);
     expect(seen).not.toContain("lib/m0.py");
     expect(seen).toContain("priority files only");
+    expect(r.layers.find((l) => l.layer === "reviewer")!.detail).toMatch(/10 lower-priority file\(s\) not reviewed/);
+  });
+
+  // an APPROVE on the priority files never lands the update while
+  // files were left unread; it is held for a human, like the signal and ranked tiers.
+  test("an APPROVE on priority files with files left out is held for a human, not landed", async () => {
+    const r = await reviewUpdate(base({ loadArtifacts: async () => wide, chunkChars: 200, maxParts: 3, reviewer: approve }));
     const rev = r.layers.find((l) => l.layer === "reviewer")!;
+    expect(rev.verdict).toBe("stop");
+    expect(rev.detail).toMatch(/^too large for model review: \d+ parts > 3 \(full diff\); fake APPROVE on the priority files/);
+    expect(rev.detail).toMatch(/10 lower-priority file\(s\) not reviewed; needs a human$/);
+    expect(r.decision).toBe("hold");
+    expect(classifyOutcome(r)).toBe("held-human");
+  });
+
+  test("over maxParts with nothing left unread, an APPROVE on the priority files still lands", async () => {
+    const removedOnly = {
+      old: files({ "setup.py": "v = 1\n", "lib/gone.py": "g = 1\n".repeat(400) }),
+      new: files({ "setup.py": "v = 2\n", "lib/new.py": "y = 1\n" }),
+    };
+    const r = await reviewUpdate(base({ loadArtifacts: async () => removedOnly, chunkChars: 200, maxParts: 3, reviewer: approve }));
+    const rev = r.layers.find((l) => l.layer === "reviewer")!;
+    expect(rev.detail).toContain("priority files only, 0 lower-priority file(s) not reviewed");
     expect(rev.verdict).toBe("pass");
-    expect(rev.detail).toMatch(/10 lower-priority file\(s\) not reviewed/);
+  });
+
+  test("over maxParts with no priority files at all, it holds for a human without calling the reviewer", async () => {
+    let calls = 0;
+    const plainOnly = { old: files(plain(10, "1")), new: files(plain(10, "2")) };
+    const r = await reviewUpdate(base({ loadArtifacts: async () => plainOnly, chunkChars: 200, maxParts: 3, reviewer: { name: "fake", review: async () => (calls++, "APPROVE") } }));
+    const rev = r.layers.find((l) => l.layer === "reviewer")!;
+    expect(calls).toBe(0);
+    expect(rev.detail).toMatch(/^too large for model review: \d+ parts > 3 \(full diff\); no priority files to review/);
+    expect(classifyOutcome(r)).toBe("held-human");
   });
 
   test("a FLAG on a priority part still stops", async () => {
