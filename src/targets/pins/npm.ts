@@ -28,17 +28,36 @@ export function sriOf(bytes: Uint8Array): string {
   return `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
 }
 
+/** The SRI algorithms npm writes, with their digest size in bytes. */
+const SRI_BYTES: Record<string, number> = { sha1: 20, sha256: 32, sha384: 48, sha512: 64 };
+
 /**
- * Downloads a tarball and returns its bytes only when their sha512 is `sri` (the integrity the pins or the
- * proposal carry), so the artifact review reads the very bytes the build will fetch. No sri: no check.
+ * The hashes of an SRI field (npm may list several, space-separated), each as its algorithm and its text. Any hash
+ * of another algorithm, or not a base64 digest of the right size, throws: an integrity that cannot be checked is
+ * never read as none.
+ */
+export function sriHashes(field: string): { alg: string; sri: string }[] {
+  const out = field.trim().split(/\s+/).map((sri) => {
+    const m = /^(sha1|sha256|sha384|sha512)-([A-Za-z0-9+/]+={0,2})$/.exec(sri);
+    if (!m || Buffer.from(m[2]!, "base64").length !== SRI_BYTES[m[1]!]) throw new Error(`cannot check integrity ${JSON.stringify(sri.slice(0, 100))}: only sha1, sha256, sha384 and sha512 SRI hashes are`);
+    return { alg: m[1]!, sri };
+  });
+  return out;
+}
+
+/**
+ * Downloads a tarball and returns its bytes only when they match every hash in `sri` (the integrity the pins, the
+ * proposal or the lockfile carry), so the artifact review reads the very bytes the install will fetch. No sri: no
+ * check. A hash it cannot check throws.
  */
 export async function fetchVerified(f: typeof fetch, url: string, sri: string | undefined): Promise<Uint8Array> {
+  const hashes = sri === undefined ? [] : sriHashes(sri);
   const r = await f(url);
   if (!r.ok) throw new Error(`download ${r.status} for ${url}`);
   const bytes = new Uint8Array(await r.arrayBuffer());
-  if (sri !== undefined) {
-    const got = sriOf(bytes);
-    if (got !== sri) throw new Error(`integrity mismatch for ${url}: the bytes are ${got}, the proposal pins ${sri}`);
+  for (const h of hashes) {
+    const got = `${h.alg}-${createHash(h.alg).update(bytes).digest("base64")}`;
+    if (got !== h.sri) throw new Error(`integrity mismatch for ${url}: the bytes are ${got}, the proposal pins ${h.sri}`);
   }
   return bytes;
 }

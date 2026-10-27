@@ -15,6 +15,8 @@ importers:
         specifier: workspace:*
         version: link:packages/b
 
+  packages/b: {}
+
 packages:
 
   '@babel/core@7.24.0':

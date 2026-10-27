@@ -3,7 +3,7 @@ import { lockKind, parseLock, LOCK_NAMES } from "../src/lockfile/index.ts";
 
 describe("parseLock", () => {
   test("picks the parser and ecosystem by base name, in any directory", () => {
-    const text = `{"lockfileVersion":1,"packages":{"yaml":["yaml@2.8.1","",{},"sha512-x"],}}`;
+    const text = `{"lockfileVersion":1,"packages":{"yaml":["yaml@2.8.1","",{},"sha512-${"X".repeat(86)}=="],}}`;
     expect(parseLock("sub/dir/bun.lock", text)).toMatchObject({ eco: "npm", pkgs: [{ name: "yaml", version: "2.8.1" }] });
     expect(LOCK_NAMES).toContain("bun.lock");
   });

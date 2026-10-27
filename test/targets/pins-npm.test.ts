@@ -91,6 +91,24 @@ describe("npm pins", () => {
     await expect(fetchVerified(nf, url, good)).rejects.toThrow(`download 404 for ${url}`);
   });
 
+  // Adversarial read 0.2.3 final (Codex 1): a lockfile's sha1 integrity was dropped, so the review checked nothing.
+  test("fetchVerified checks every hash in an SRI field, sha1 to sha512, and refuses an algorithm it cannot check", async () => {
+    const body = new TextEncoder().encode("tarball bytes");
+    const sri = (alg: string, b = body) => `${alg}-${createHash(alg).update(b).digest("base64")}`;
+    const other = new TextEncoder().encode("other bytes");
+    const f = (async () => new Response(body.slice().buffer as ArrayBuffer)) as unknown as typeof fetch;
+    const url = "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz";
+    for (const alg of ["sha1", "sha256", "sha384", "sha512"]) {
+      expect(new TextDecoder().decode(await fetchVerified(f, url, sri(alg)))).toBe("tarball bytes");
+      await expect(fetchVerified(f, url, sri(alg, other))).rejects.toThrow(`integrity mismatch for ${url}`);
+    }
+    expect(new TextDecoder().decode(await fetchVerified(f, url, `${sri("sha512")} ${sri("sha1")}`))).toBe("tarball bytes");
+    await expect(fetchVerified(f, url, `${sri("sha512")} ${sri("sha1", other)}`)).rejects.toThrow("integrity mismatch");
+    for (const bad of [`md5-${createHash("md5").update(body).digest("base64")}`, "sha512-$(id)", `${sri("sha512")} x`, "sha1-AAAA"]) {
+      await expect(fetchVerified(f, url, bad)).rejects.toThrow(/integrity/);
+    }
+  });
+
   test("npmIntegrity reads dist.integrity of one version, undefined on 404", async () => {
     const urls: string[] = [];
     const f = (async (u: string | URL | Request) => {

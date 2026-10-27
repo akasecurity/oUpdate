@@ -1,7 +1,7 @@
-import { getJson, type Registry, type RegistryDeps } from "./types.ts";
+import { getJson, type ArtifactFile, type Registry, type RegistryDeps } from "./types.ts";
 
 interface Release {
-  urls?: { packagetype?: string; url?: string; upload_time_iso_8601?: string }[];
+  urls?: { packagetype?: string; url?: string; filename?: string; digests?: { sha256?: string }; upload_time_iso_8601?: string }[];
 }
 
 export function pypiRegistry(deps: RegistryDeps = {}): Registry {
@@ -25,6 +25,15 @@ export function pypiRegistry(deps: RegistryDeps = {}): Registry {
         .filter((u) => u.url)
         .sort((a, b) => rank(a.packagetype) - rank(b.packagetype))
         .map((u) => u.url!);
+    },
+    async artifactFiles(name, version) {
+      const out: ArtifactFile[] = [];
+      for (const u of (await release(name, version))?.urls ?? []) {
+        // Eggs and other legacy types are not installed by pip or uv.
+        if (!u.url || (u.packagetype !== "bdist_wheel" && u.packagetype !== "sdist")) continue;
+        out.push({ url: u.url, filename: u.filename ?? u.url.split("/").pop()!, packagetype: u.packagetype, sha256: u.digests?.sha256 });
+      }
+      return out;
     },
   };
 }

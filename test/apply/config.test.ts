@@ -138,4 +138,13 @@ describe("parseApplyConfig", () => {
   ] as const) {
     test(`${label} is an error`, () => expect(() => parseApplyConfig(text, "hosta")).toThrow(err));
   }
+  test("${NAME} in a config value is read from the environment; unset or empty is an error naming it (#9)", () => {
+    const text = cfg({ stateDir: "${OUP_STATE}/s", reviewer: { type: "openai", name: "h", baseUrls: ["${base_url}"], model: "m", headers: { "X-Key": "${OUP_KEY}" } }, notify: ["/bin/echo", "$HOME $1 ${1X} $"] });
+    const c = parseApplyConfig(text, "hosta", { OUP_STATE: "/state.test", base_url: "https://h.test/v1", OUP_KEY: 'k"\\' });
+    expect(c.stateDir).toBe("/state.test/s");
+    expect(c.reviewer).toMatchObject({ baseUrls: ["https://h.test/v1"], headers: { "X-Key": 'k"\\' } });
+    expect(c.notify).toEqual(["/bin/echo", "$HOME $1 ${1X} $"]);
+    expect(() => parseApplyConfig(text, "hosta", { OUP_STATE: "/state.test", base_url: "https://h.test/v1" })).toThrow("OUP_KEY");
+    expect(() => parseApplyConfig(text, "hosta", { OUP_STATE: "/state.test", base_url: "https://h.test/v1", OUP_KEY: "" })).toThrow("OUP_KEY");
+  });
 });
