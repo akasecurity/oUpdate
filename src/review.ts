@@ -8,6 +8,7 @@ import { prepass, type Ecosystem, type FileMap, type PrepassResult } from "./pre
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
 import { newFindings, type Finding } from "./adapters/scanner/types.ts";
+import { renderLineDiff } from "./linediff.ts";
 
 export type LayerName = "cooldown" | "advisory" | "prepass" | "scan" | "reviewer" | "gate";
 export const LAYERS: LayerName[] = ["cooldown", "advisory", "prepass", "scan", "reviewer", "gate"];
@@ -107,12 +108,7 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
     const h = after ? new Bun.CryptoHasher("sha256").update(after).digest("hex") : "-";
     return [`${head}[binary, ${after?.length ?? 0} bytes, sha256 ${h}]\n`];
   }
-  const oldLines = before ? dec.decode(before).split("\n") : [];
-  const newLines = after ? dec.decode(after).split("\n") : [];
-  const oldSet = new Set(oldLines);
-  const newSet = new Set(newLines);
-  const body = [...oldLines.filter((l) => !newSet.has(l)).map((l) => `-${l}\n`), ...newLines.filter((l) => !oldSet.has(l)).map((l) => `+${l}\n`)];
-  return [head, ...body];
+  return [head, renderLineDiff(before && dec.decode(before), after && dec.decode(after))];
 }
 
 // Files that never execute: images, fonts, source maps, type declarations, prose.
@@ -212,7 +208,8 @@ function reviewPrompt(input: ReviewInput, pre: PrepassResult, chunk: string, i: 
   const signals = [...pre.hard.map((s) => `HARD ${s.kind} ${s.path}: ${s.detail}`), ...pre.soft.map((s) => `soft ${s.kind} ${s.path}: ${s.detail}`)];
   return `You are reviewing a dependency update for supply-chain attacks before it is installed.
 Package: ${input.eco} ${input.name} ${input.from} -> ${input.to}
-The diff below is between the two published release artifacts (what installs), part ${i + 1} of ${n}.${SCOPE_NOTE[scope]}
+The diff below is between the two published release artifacts (what installs), part ${i + 1} of ${n}.${SCOPE_NOTE[scope]}${n > 1 ? `\nEach part goes to a separate review call, and a FLAG on any part holds the update. Judge what this part shows: FLAG for a concrete attack indicator in it. Not seeing the other parts, or the contents of a dependency, is not by itself a reason to FLAG.` : ""}
+Diff format: \`@@ -a +b @@\` gives the old and new line numbers of a change; \`-\` lines are removed, \`+\` lines added; a \`~\` line is a changed minified line, shown as its [-removed-] and {+added+} tokens with some unchanged text around them (… marks text left out). Unchanged lines are not shown.
 Look for: code that runs at install or interpreter start, credential or token reads, network calls to new hosts, downloads of further code, obfuscated or encoded payloads, and changes unrelated to the stated purpose of a release.
 Deterministic pre-pass signals (pointers, not conclusions):
 ${signals.length ? signals.join("\n") : "(none)"}

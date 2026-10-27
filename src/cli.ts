@@ -79,7 +79,7 @@ export function parseReviewArgs(argv: string[]): ReviewArgs {
   const [eco, name, from, to] = pos;
   if (eco !== "npm" && eco !== "pypi") throw new Error(`ecosystem must be npm or pypi, got ${eco ?? "nothing"}`);
   if (!name || !from || !to || pos.length !== 4) throw new Error("usage: oupdate gate [--forge gitea|github] [--endpoint URL] --repo owner/name (--token-file F | --token-env NAME) [--reviewer JSON] [--scanner JSON] [--branch-prefix renovate/]... [--lock PATH]... [--cooldown-days N]\n       oupdate review <npm|pypi> <name> <from> <to> [flags]");
-  const out: ReviewArgs = { eco, name, from, to, now: new Date(), cooldownDays: 7, advisoryFix };
+  const out: ReviewArgs = { eco, name, from, to, now: new Date(), cooldownDays: 2, advisoryFix };
   const oldA = flags.get("--old-artifact");
   const newA = flags.get("--new-artifact");
   if (!!oldA !== !!newA) throw new Error("--old-artifact and --new-artifact go together: give both or neither");
@@ -199,7 +199,7 @@ export function parseGateArgs(argv: string[], env: Record<string, string | undef
   }
   const repo = flags.get("--repo")!;
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) throw new Error(`--repo must be owner/name, got ${repo}`);
-  const cooldownDays = Number(flags.get("--cooldown-days") ?? 7);
+  const cooldownDays = Number(flags.get("--cooldown-days") ?? 2);
   if (!Number.isFinite(cooldownDays) || cooldownDays < 0) throw new Error("--cooldown-days must be a number >= 0");
   const endpoint = flags.get("--endpoint") ?? (forge === "github" ? env.GITHUB_API_URL || undefined : undefined);
   const out: GateCliArgs = { forge, endpoint, repo, branchPrefixes: branchPrefixes.length ? branchPrefixes : ["renovate/"], lockPaths, cooldownDays };
@@ -299,7 +299,7 @@ export interface KeysArgs {
 }
 
 export function parseKeysArgs(argv: string[]): KeysArgs {
-  const out: KeysArgs = { dir: ".", cooldownDays: 7, json: false };
+  const out: KeysArgs = { dir: ".", cooldownDays: 2, json: false };
   const pos: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;

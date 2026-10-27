@@ -40,7 +40,7 @@ describe("parseTargetsConfig", () => {
     expect(c.targets[0]!.reach).toEqual({ kind: "git", repo: "/repo", remote: "origin", base: "main" });
     expect(c.targets[0]!.schedule).toEqual({ every: "week", day: 0 });
     expect(c.targets[1]!.schedule).toEqual({ every: "night" });
-    expect(c.targets[0]!.legs[0]).toMatchObject({ kind: "pin-bump", cooldownDays: 7 });
+    expect(c.targets[0]!.legs[0]).toMatchObject({ kind: "pin-bump", cooldownDays: 2 });
     expect(c.targets[1]!.legs).toEqual([{ kind: "docker-compose", apply: false, prune: true }, { kind: "nas-os" }]);
   });
 

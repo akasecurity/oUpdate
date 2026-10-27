@@ -150,7 +150,7 @@ describe("renderKeys and parseKeysArgs", () => {
 
   test("parseKeysArgs takes a dir, a cooldown and --json", async () => {
     const { parseKeysArgs } = await import("../src/cli.ts");
-    expect(parseKeysArgs([])).toEqual({ dir: ".", cooldownDays: 7, json: false });
+    expect(parseKeysArgs([])).toEqual({ dir: ".", cooldownDays: 2, json: false });
     expect(parseKeysArgs(["some/repo", "--cooldown-days", "3", "--json"])).toEqual({ dir: "some/repo", cooldownDays: 3, json: true });
     expect(() => parseKeysArgs(["a", "b"])).toThrow("usage");
     expect(() => parseKeysArgs(["--cooldown-days", "x"])).toThrow(">= 0");
