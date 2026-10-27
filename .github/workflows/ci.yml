@@ -1,0 +1,35 @@
+name: ci
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          # package.json has no packageManager field and no engines field.
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      # ubuntu-latest ships GNU tar. src/artifact.ts and the archive tests invoke bsdtar.
+      # setup-bun installs under the runner home. A plist for another user refuses that
+      # path, so the test step uses a stable link outside the home.
+      - run: |
+          sudo apt-get update && sudo apt-get install -y libarchive-tools
+          sudo ln -sfn "$(command -v bun)" /usr/local/bin/bun
+          echo /usr/local/bin >> "$GITHUB_PATH"
+      - run: bun test
