@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// oupdate CLI. Subcommands: review (one package update), gate (forge PRs), host (report-only shadow of the previous updater, --apply, or --launchd-plist), targets (OS targets: --apply [--dry-run] --config FILE; parity --record … --script-log … --date … --ledger …).
+// oupdate CLI. Subcommands: review (one package update), image (one container image repin), gate (forge PRs), host (report-only shadow of the previous updater, --apply, or --launchd-plist), targets (OS targets: --apply [--dry-run] --config FILE; parity --record … --script-log … --date … --ledger …).
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,7 +14,10 @@ import { osvFeed } from "./adapters/advisory/osv.ts";
 import { parseReviewerSpec, makeReviewer, type ReviewerSpec } from "./adapters/reviewer/spec.ts";
 import { parseScannerSpec, makeScanner, type ScannerSpec } from "./adapters/scanner/spec.ts";
 import { giteaForge } from "./adapters/forge/gitea.ts";
+import { githubForge } from "./adapters/forge/github.ts";
+import type { Forge } from "./adapters/forge/types.ts";
 import { runGate } from "./gate.ts";
+import { lockKind } from "./lockfile/index.ts";
 import { parseHostCommand, hostMain, applyMain, ownerWaiterMain } from "./host/cli.ts";
 import { launchdPlist } from "./host/launchd.ts";
 import { killLive, realExec } from "./apply/exec.ts";
@@ -28,7 +31,8 @@ import { parityMain, parseParityCommand } from "./targets/parity-cli.ts";
 import { fetchVerified, realNpmSource } from "./targets/pins/npm.ts";
 import { realGithubSource } from "./targets/pins/github.ts";
 import { realSnapshotSource } from "./targets/pins/oci.ts";
-import { dockerHubSource } from "./adapters/oci/registry.ts";
+import { dockerHubSource, parseImageRef, registrySource, type ImageRef } from "./adapters/oci/registry.ts";
+import { checkImage, renderImage } from "./image.ts";
 
 export interface ReviewArgs {
   eco: Ecosystem;
@@ -74,7 +78,7 @@ export function parseReviewArgs(argv: string[]): ReviewArgs {
   }
   const [eco, name, from, to] = pos;
   if (eco !== "npm" && eco !== "pypi") throw new Error(`ecosystem must be npm or pypi, got ${eco ?? "nothing"}`);
-  if (!name || !from || !to || pos.length !== 4) throw new Error("usage: oupdate gate --endpoint URL --repo owner/name --token-file F [--reviewer JSON] [--scanner JSON] [--branch-prefix renovate/] [--lock bun.lock] [--cooldown-days N]\n       oupdate review <npm|pypi> <name> <from> <to> [flags]");
+  if (!name || !from || !to || pos.length !== 4) throw new Error("usage: oupdate gate [--forge gitea|github] [--endpoint URL] --repo owner/name (--token-file F | --token-env NAME) [--reviewer JSON] [--scanner JSON] [--branch-prefix renovate/]... [--lock PATH]... [--cooldown-days N]\n       oupdate review <npm|pypi> <name> <from> <to> [flags]");
   const out: ReviewArgs = { eco, name, from, to, now: new Date(), cooldownDays: 7, advisoryFix };
   const oldA = flags.get("--old-artifact");
   const newA = flags.get("--new-artifact");
@@ -150,55 +154,142 @@ export async function runReview(a: ReviewArgs): Promise<ReviewResult> {
   }
 }
 
+export type ForgeKind = "gitea" | "github";
+
 export interface GateCliArgs {
-  endpoint: string;
+  forge: ForgeKind;
+  /** The forge's API base. Required for gitea; for github, unset means api.github.com. */
+  endpoint?: string;
   repo: string;
-  tokenFile: string;
-  branchPrefix: string;
-  lockPath: string;
+  /** Exactly one of these: a file holding the token, or the name of an environment variable holding it. */
+  tokenFile?: string;
+  tokenEnv?: string;
+  /** A PR is gated when its head branch starts with any of these. */
+  branchPrefixes: string[];
+  /** Empty: the gate looks for each known lockfile name at the repo root. */
+  lockPaths: string[];
   cooldownDays: number;
   reviewer?: ReviewerSpec;
   scanner?: ScannerSpec;
 }
 
-const GATE_FLAGS = new Set(["--endpoint", "--repo", "--token-file", "--branch-prefix", "--lock", "--cooldown-days", "--reviewer", "--scanner"]);
+const GATE_FLAGS = new Set(["--forge", "--endpoint", "--repo", "--token-file", "--token-env", "--branch-prefix", "--lock", "--cooldown-days", "--reviewer", "--scanner"]);
 
-export function parseGateArgs(argv: string[]): GateCliArgs {
+/** `env` supplies GITHUB_API_URL, which Actions sets on GitHub Enterprise Server, as the github endpoint when --endpoint is absent. */
+export function parseGateArgs(argv: string[], env: Record<string, string | undefined> = process.env): GateCliArgs {
   const flags = new Map<string, string>();
+  const lockPaths: string[] = [];
+  const branchPrefixes: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (!GATE_FLAGS.has(a)) throw new Error(`unknown flag ${a}`);
     const v = argv[++i];
     if (v === undefined) throw new Error(`${a} needs a value`);
-    flags.set(a, v);
+    if (a === "--lock") {
+      lockKind(v);
+      lockPaths.push(v);
+    } else if (a === "--branch-prefix") branchPrefixes.push(v);
+    else flags.set(a, v);
   }
-  for (const req of ["--endpoint", "--repo", "--token-file"]) if (!flags.has(req)) throw new Error(`gate needs ${req}`);
+  const forge = flags.get("--forge") ?? "gitea";
+  if (forge !== "gitea" && forge !== "github") throw new Error(`--forge must be gitea or github, got ${forge}`);
+  for (const req of forge === "gitea" ? ["--endpoint", "--repo"] : ["--repo"]) if (!flags.has(req)) throw new Error(`gate needs ${req}`);
+  if (flags.has("--token-file") === flags.has("--token-env")) {
+    throw new Error(flags.has("--token-file") ? "gate takes --token-file or --token-env, not both" : "gate needs --token-file or --token-env");
+  }
   const repo = flags.get("--repo")!;
   if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) throw new Error(`--repo must be owner/name, got ${repo}`);
   const cooldownDays = Number(flags.get("--cooldown-days") ?? 7);
   if (!Number.isFinite(cooldownDays) || cooldownDays < 0) throw new Error("--cooldown-days must be a number >= 0");
-  const out: GateCliArgs = { endpoint: flags.get("--endpoint")!, repo, tokenFile: flags.get("--token-file")!, branchPrefix: flags.get("--branch-prefix") ?? "renovate/", lockPath: flags.get("--lock") ?? "bun.lock", cooldownDays };
+  const endpoint = flags.get("--endpoint") ?? (forge === "github" ? env.GITHUB_API_URL || undefined : undefined);
+  const out: GateCliArgs = { forge, endpoint, repo, branchPrefixes: branchPrefixes.length ? branchPrefixes : ["renovate/"], lockPaths, cooldownDays };
+  if (flags.has("--token-file")) out.tokenFile = flags.get("--token-file")!;
+  else out.tokenEnv = flags.get("--token-env")!;
   if (flags.has("--reviewer")) out.reviewer = parseReviewerSpec(flags.get("--reviewer")!);
   if (flags.has("--scanner")) out.scanner = parseScannerSpec(flags.get("--scanner")!);
   return out;
 }
 
+/** The forge token from --token-file or the --token-env variable, trimmed. Errors name the source, never the value. */
+export async function gateToken(g: GateCliArgs, env: Record<string, string | undefined> = process.env): Promise<string> {
+  if (g.tokenEnv !== undefined) {
+    const token = (env[g.tokenEnv] ?? "").trim();
+    if (!token) throw new Error(`environment variable ${g.tokenEnv} is empty or unset`);
+    return token;
+  }
+  const token = (await Bun.file(g.tokenFile!).text()).trim();
+  if (!token) throw new Error(`empty token file ${g.tokenFile}`);
+  return token;
+}
+
+export function gateForge(g: GateCliArgs, token: string, f?: typeof fetch): Forge {
+  return g.forge === "github" ? githubForge({ endpoint: g.endpoint, token, fetch: f }) : giteaForge({ endpoint: g.endpoint!, token, fetch: f });
+}
+
 async function gateMain(argv: string[]): Promise<number> {
   const g = parseGateArgs(argv);
-  const token = (await Bun.file(g.tokenFile).text()).trim();
-  if (!token) throw new Error(`empty token file ${g.tokenFile}`);
+  const token = await gateToken(g);
   const pulls = await runGate({
-    forge: giteaForge({ endpoint: g.endpoint, token }),
+    forge: gateForge(g, token),
     repo: g.repo,
-    branchPrefix: g.branchPrefix,
-    lockPath: g.lockPath,
-    review: (c) => runReview({ eco: "npm", name: c.name, from: c.from ?? "", to: c.to, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner }),
+    branchPrefixes: g.branchPrefixes,
+    lockPaths: g.lockPaths,
+    review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner }),
   });
   for (const p of pulls) {
     console.log(`PR #${p.number}: ${p.state}`);
     for (const r of p.results) console.log(render(r).replace(/^/gm, "  "));
   }
   return pulls.some((p) => p.state === "failure") ? 1 : 0;
+}
+
+export interface ImageArgs {
+  old: ImageRef;
+  new: ImageRef;
+  platform: string;
+  now: Date;
+  reviewer?: ReviewerSpec;
+  secondReviewer?: ReviewerSpec;
+  json?: string;
+}
+
+const IMAGE_USAGE = "usage: oupdate image <old-ref> <new-ref> [--platform linux/amd64] [--reviewer JSON] [--second-reviewer JSON] [--now ISO] [--json FILE]";
+const IMAGE_FLAGS = new Set(["--platform", "--reviewer", "--second-reviewer", "--now", "--json"]);
+
+export function parseImageArgs(argv: string[]): ImageArgs {
+  const pos: string[] = [];
+  const flags = new Map<string, string>();
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (IMAGE_FLAGS.has(a)) {
+      const v = argv[++i];
+      if (v === undefined) throw new Error(`${a} needs a value`);
+      flags.set(a, v);
+    } else if (a.startsWith("--")) throw new Error(`unknown flag ${a}`);
+    else pos.push(a);
+  }
+  if (pos.length !== 2) throw new Error(IMAGE_USAGE);
+  const old = parseImageRef(pos[0]!);
+  const now = parseImageRef(pos[1]!);
+  if (old.registry !== now.registry || old.repository !== now.repository) throw new Error(`the two refs must name the same repository: ${old.registry}/${old.repository} and ${now.registry}/${now.repository}`);
+  const platform = flags.get("--platform") ?? "linux/amd64";
+  if (!/^[a-z0-9]+\/[a-z0-9_]+(\/[a-z0-9]+)?$/.test(platform)) throw new Error(`--platform must be os/arch[/variant], got ${platform}`);
+  const out: ImageArgs = { old, new: now, platform, now: flags.has("--now") ? date("--now", flags.get("--now")!) : new Date() };
+  if (flags.has("--reviewer")) out.reviewer = parseReviewerSpec(flags.get("--reviewer")!);
+  if (flags.has("--second-reviewer")) out.secondReviewer = parseReviewerSpec(flags.get("--second-reviewer")!);
+  if (flags.has("--json")) out.json = flags.get("--json")!;
+  return out;
+}
+
+async function imageMain(argv: string[]): Promise<number> {
+  const a = parseImageArgs(argv);
+  const r = await checkImage(a, {
+    source: registrySource(),
+    reviewers: { primary: a.reviewer ? makeReviewer(a.reviewer) : undefined, secondary: a.secondReviewer ? makeReviewer(a.secondReviewer) : undefined },
+  });
+  if (a.json) writeFileSync(a.json, JSON.stringify(r, null, 2) + "\n");
+  console.log(renderImage(r));
+  return r.decision === "land" ? 0 : 1;
 }
 
 export interface KeysArgs {
@@ -262,6 +353,7 @@ if (import.meta.main) {
   try {
     if (cmd === "gate") process.exit(await gateMain(rest));
     if (cmd === "keys") process.exit(keysMain(rest));
+    if (cmd === "image") process.exit(await imageMain(rest));
     if (cmd === "targets") process.exit(await targetsCli(rest));
     if (cmd === "host") {
       const hc = parseHostCommand(rest);
@@ -278,7 +370,7 @@ if (import.meta.main) {
       console.log(text);
       process.exit(0);
     }
-    if (cmd !== "review") throw new Error("usage: oupdate review <npm|pypi> <name> <from> <to> [--old-artifact F --new-artifact F] [--published ISO] [--now ISO] [--only layers] [--reviewer JSON] [--scanner JSON] [--advisory-fix] [--cooldown-days N] [--json FILE]\n       oupdate targets --apply [--dry-run] --config FILE [--target ID]...\n       oupdate targets parity --record FILE --script-log FILE --date YYYY-MM-DD --ledger FILE [--target ID]");
+    if (cmd !== "review") throw new Error("usage: oupdate review <npm|pypi> <name> <from> <to> [--old-artifact F --new-artifact F] [--published ISO] [--now ISO] [--only layers] [--reviewer JSON] [--scanner JSON] [--advisory-fix] [--cooldown-days N] [--json FILE]\n       oupdate image <old-ref> <new-ref> [--platform linux/amd64] [--reviewer JSON] [--second-reviewer JSON] [--now ISO] [--json FILE]\n       oupdate targets --apply [--dry-run] --config FILE [--target ID]...\n       oupdate targets parity --record FILE --script-log FILE --date YYYY-MM-DD --ledger FILE [--target ID]");
     const args = parseReviewArgs(rest);
     const r = await runReview(args);
     if (args.json) writeFileSync(args.json, JSON.stringify(r, null, 2) + "\n");

@@ -35,7 +35,7 @@ oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is n
 Install a release tag, not the tip of \`main\`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
 
 \`\`\`
-git clone --branch v0.1.1 https://github.com/akasecurity/oupdate.git
+git clone --branch v0.2.0 https://github.com/akasecurity/oupdate.git
 cd oupdate
 git rev-parse HEAD
 bun install
@@ -49,6 +49,7 @@ bun src/cli.ts review npm ms 2.1.2 2.1.3
 oUpdate becomes part of your supply chain, so read it before you trust it:
 - It has no runtime dependencies. \`bun.lock\` holds only the dev tools (TypeScript and Bun's types).
 - \`review\` and \`gate\` download release archives from the registry and read them; they never install a package or run its code (archives are read with \`bsdtar\`; the optional GuardDog layer runs in the container you give it). The network calls go to the package registries, OSV, your reviewer endpoint and, for \`gate\`, your forge.
+- \`image\` reads two images' manifests and config blobs from their container registry; it never pulls a layer or runs the image.
 - Nothing runs as root unless you schedule \`host --apply\` as a LaunchDaemon yourself. Start with \`host --apply --dry-run\`: it runs every check and changes nothing on disk.
 
 ### Set up with your agent
@@ -84,7 +85,7 @@ Most commands take their settings as flags (\`--reviewer\`, \`--scanner\`, \`--t
   ["## Eval check 6\n", "## Evaluation\n"],
   [
     "`scripts/eval.ts` check 6 runs `oss-scan` over the tracked files and checks 1 and 2 on a clean sample config. `scripts/sample.config.example.json` is that config: one local OpenAI-compatible reviewer, placeholders only. `${NAME}` in any config value is read from the environment. Point `sampleConfig` in your eval config (see `scripts/eval.config.example.json`) at a copy, then:",
-    "`acceptance/` holds the attack and control cases. `cases.json` lists 9 attack cases, `controls.json` 8 clean updates that must land. `acceptance/run.ts` runs the cases through the review layers with the reviewers you give it, and it fetches the malicious-package samples from the public DataDog malicious-software-packages dataset on GitHub, and `acceptance/extract.ts` unpacks them. The litellm 1.107.0 case needs a replay script that this repository does not ship, so a run counts it as not run. Results go to `./acceptance-results/`.\n\n`scripts/eval.ts` runs the whole set plus the repo scan. Copy `scripts/eval.config.example.json`, point `sampleConfig` at a copy of `scripts/sample.config.example.json`, then:",
+    "`acceptance/` holds the attack and control cases. `cases.json` lists 9 attack cases from real releases and 4 synthetic evasion cases, which `acceptance/synthetic/generate.ts` builds in memory with payload URLs on `.invalid` hosts only; `controls.json` lists 8 clean updates that must land. That is the core set, the one the published bar is scored on. Both files also hold an extended set, marked `\"set\": \"extended\"`: 17 more compromised releases and a clean control for each. `acceptance/run.ts --set extended` (or `--set all`) runs it and scores it against its own counts, with no published bar. `acceptance/run.ts` runs the cases through the review layers with the reviewers you give it, and it fetches the malicious-package samples from the public DataDog malicious-software-packages dataset on GitHub, and `acceptance/extract.ts` unpacks them. The litellm 1.107.0 case needs a replay script that this repository does not ship, so a run counts it as not run. Results go to `./acceptance-results/`.\n\n`scripts/eval.ts` runs the whole set plus the repo scan. Copy `scripts/eval.config.example.json`, point `sampleConfig` at a copy of `scripts/sample.config.example.json`, then:",
   ],
   [/## Publish checklist[\s\S]*$/.source, "## License\n\nMIT. See [LICENSE](LICENSE).\n"],
 ];

@@ -52,6 +52,8 @@ export function giteaForge(deps: GiteaDeps): Forge {
       await json("POST", `/repos/${enc(repo)}/statuses/${encodeURIComponent(sha)}`, status);
     },
     async upsertComment(repo, pr, marker, body) {
+      // This endpoint takes no page or limit and returns every comment on the issue (Gitea and Forgejo), so one
+      // call sees the marker comment however long the thread is.
       const comments = await json<{ id: number; body: string }[]>("GET", `/repos/${enc(repo)}/issues/${pr}/comments`);
       const mine = comments.find((c) => c.body.startsWith(marker));
       if (mine) await json("PATCH", `/repos/${enc(repo)}/issues/comments/${mine.id}`, { body });

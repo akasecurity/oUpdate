@@ -120,9 +120,10 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
 const INERT = /(\.(png|jpe?g|gif|webp|ico|svg|bmp|woff2?|ttf|otf|eot|map|d\.ts|d\.mts|d\.cts|md|markdown|rst)$|(^|\/)(LICEN[CS]E|COPYING|NOTICE|AUTHORS|CHANGELOG|HISTORY)(\.[a-z]+)?$)/i;
 
 // Splits the diff into prompt-sized chunks on line boundaries. Only inert files
-// (INERT) are left out; long lines are sliced, not dropped.
-export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, only?: Set<string>): string[] {
-  const paths = [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter((p) => !only || only.has(p)).sort();
+// (INERT) are left out; long lines are sliced, not dropped. `only` as a set keeps those
+// paths in sorted order; as an array it keeps them in the array's order (a ranking).
+export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, only?: Set<string> | string[]): string[] {
+  const paths = Array.isArray(only) ? only : [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter((p) => !only || only.has(p)).sort();
   const chunks: string[] = [];
   let cur = "";
   const push = (piece: string) => {
@@ -149,6 +150,7 @@ export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, onl
 
 // Manifests and the files an install or interpreter start runs.
 const PRIORITY_NAME = /(^|\/)(package\.json|setup\.py|setup\.cfg|pyproject\.toml|MANIFEST\.in|sitecustomize\.py|usercustomize\.py|[^/]+\.pth)$/;
+const INSTALL_NAME = /(^|\/)(setup\.py|sitecustomize\.py|usercustomize\.py|[^/]+\.pth)$/;
 
 // The files an attack needs, for a diff over budget: any pre-pass signal, new files, manifests and
 // install or startup files. What is left is changed files with no signal.
@@ -183,12 +185,27 @@ export function priorityPaths(pre: PrepassResult): Set<string> {
   return out;
 }
 
-type Scope = "all" | "priority" | "signal";
+/**
+ * The priority files (signal files plus new files) in review order, for a diff whose signal files alone are over
+ * budget: hard pre-pass signals, scanner hits, install or startup files, manifests, new files, then changed files
+ * with a soft signal. Ties go to the file with more signals, then by path.
+ */
+export function rankPriorityPaths(pre: PrepassResult, scanHits: Set<string> = new Set()): string[] {
+  const hard = new Set(pre.hard.map((s) => s.path));
+  const added = new Set(pre.added);
+  const count = new Map<string, number>();
+  for (const s of [...pre.hard, ...pre.soft]) count.set(s.path, (count.get(s.path) ?? 0) + 1);
+  const tier = (p: string) => (hard.has(p) ? 0 : scanHits.has(p) ? 1 : INSTALL_NAME.test(p) ? 2 : PRIORITY_NAME.test(p) ? 3 : added.has(p) ? 4 : 5);
+  return [...priorityPaths(pre)].sort((a, b) => tier(a) - tier(b) || (count.get(b) ?? 0) - (count.get(a) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+type Scope = "all" | "priority" | "signal" | "ranked";
 
 const SCOPE_NOTE: Record<Scope, string> = {
   all: "",
   priority: "\nThe full diff is over budget, so these parts hold priority files only: files with a pre-pass signal, new files, manifests and install or startup files. Changed files with no signal are left out.",
   signal: "\nThe full diff is over budget even as priority files, so these parts hold signal files only: files with a pre-pass or scanner signal, manifests and install or startup files. Everything else is left out.",
+  ranked: "\nThe full diff is over budget even as signal files, so these parts hold the top-ranked priority files only: hard pre-pass signals first, then scanner hits, install or startup files, manifests, new files and changed files with a soft signal. Everything else is left out.",
 };
 
 function reviewPrompt(input: ReviewInput, pre: PrepassResult, chunk: string, i: number, n: number, scope: Scope): string {
@@ -249,6 +266,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
 
   let artifacts: { old: FileMap; new: FileMap } | undefined;
   let pre: PrepassResult | undefined;
+  const scanHits = new Set<string>();
   const needArtifacts = on("prepass") || on("reviewer") || (on("scan") && !!input.scanner);
   let artifactError: string | undefined;
   if (needArtifacts) {
@@ -280,7 +298,10 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         if (ch.new.size === 0) layers.push({ layer: "scan", verdict: "pass", detail: `${input.scanner.name}: no changed files` });
         else {
           const found = newFindings(ch.old.size ? await input.scanner.scan(input.eco, ch.old) : [], await input.scanner.scan(input.eco, ch.new));
-          for (const f of found) pre.soft.push({ kind: `${input.scanner.name}:${f.rule}`, path: f.path, detail: f.detail });
+          for (const f of found) {
+            pre.soft.push({ kind: `${input.scanner.name}:${f.rule}`, path: f.path, detail: f.detail });
+            scanHits.add(f.path);
+          }
           layers.push({ layer: "scan", verdict: "pass", detail: `${input.scanner.name}: ${ch.new.size} changed file(s) scanned, ${found.length} new finding(s)${found.length ? ": " + found.map((f) => `${f.rule} ${f.path}`).join("; ") : ""}` });
         }
       } catch (e) {
@@ -311,17 +332,31 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           chunks = sig.size ? chunkDiff(artifacts.old, artifacts.new, cap, sig) : [];
           scope = "signal";
           note = `${leftOut(sig)} file(s) not reviewed`;
+          if (chunks.length > maxParts) {
+            // Still over: review the top-ranked parts. The rest is never read, so this tier can stop, never land.
+            const ranked = chunkDiff(artifacts.old, artifacts.new, cap, rankPriorityPaths(pre, scanHits));
+            chunks = ranked.slice(0, maxParts);
+            const read = new Set([...chunks.join("").matchAll(/^=== (.+) \((?:added|removed|changed)\) ===$/gm)].map((m) => m[1]!));
+            scope = "ranked";
+            overPriority = `too large for model review: ${ranked.length} parts > ${maxParts} (signal files alone)`;
+            note = `${ranked.length - maxParts} parts not reviewed, ${leftOut(read)} file(s) not reviewed`;
+          }
         }
       }
       if (scope === "signal" && !chunks.length) layers.push({ layer: "reviewer", verdict: "stop", detail: `${overPriority}; needs a human` });
-      else if (chunks.length > maxParts) layers.push({ layer: "reviewer", verdict: "stop", detail: `too large for model review: ${chunks.length} parts > ${maxParts}${scope === "signal" ? " (signal files alone)" : ""}; needs a human` });
       else try {
         const texts: string[] = [];
         for (let i = 0; i < chunks.length; i++) texts.push(await input.reviewer.review(reviewPrompt(input, pre, chunks[i]!, i, chunks.length, scope)));
         result.reviewerText = texts;
         const flagged = texts.map((t, i) => [parseVerdict(t), i] as const).filter(([v]) => v === "FLAG");
         const parts = flagged.map(([, i]) => i + 1).join(",");
-        if (scope === "signal")
+        if (scope === "ranked")
+          layers.push(
+            flagged.length
+              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on ranked part(s) ${parts} of ${chunks.length} reviewed; ${note}` }
+              : { layer: "reviewer", verdict: "stop", detail: `${overPriority}; ${input.reviewer.name} APPROVE on the top ${chunks.length} ranked part(s); ${note}; needs a human` },
+          );
+        else if (scope === "signal")
           // A narrowed review never lands an update: an APPROVE leaves the unread files for a human.
           layers.push(
             flagged.length

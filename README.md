@@ -25,11 +25,12 @@ In [an evaluation](docs/evaluation-2026-10-26.md) on 9 real supply-chain attacks
 | Where | What oUpdate reviews | Command |
 |---|---|---|
 | One release, on demand | an npm or PyPI package update | `oupdate review` |
-| Update PRs in your repos | npm packages in `bun.lock`, on Gitea and API-compatible forges | `oupdate gate` |
+| One container image, before you repin it | the old and new image's Entrypoint, Cmd and build history, from any registry that allows anonymous pulls | `oupdate image`, see [Check one image](#check-one-image) |
+| Update PRs in your repos | npm packages in `bun.lock`, `package-lock.json`, `npm-shrinkwrap.json` and `pnpm-lock.yaml`; PyPI packages in `uv.lock`, `poetry.lock` and pinned requirements files; on GitHub, Gitea and API-compatible forges | `oupdate gate` |
 | A Mac | Homebrew formulae and casks, global npm packages | `oupdate host --apply` |
 | Images, a NAS, VMs | Docker Compose images, NAS plugins and OS, OS packages on Google Cloud VMs, only through a credential broker | `oupdate targets`, see [OS targets](#os-targets) |
 
-Not covered yet: `package-lock.json`, `pnpm-lock.yaml` and Python lockfiles in the gate; GitHub as the gate's forge; a standalone check of a container image before you repin it; apt or other OS packages on a host you reach directly; the Mac App Store. oUpdate is not a hook on your package manager: an install that someone runs by hand, or that an agent runs, never reaches it.
+Not covered yet: `yarn.lock` in the gate; apt or other OS packages on a host you reach directly; the Mac App Store. oUpdate is not a hook on your package manager: an install that someone runs by hand, or that an agent runs, never reaches it.
 
 **Reading a verdict.** Treat a FLAG or a hold as a stop until a person has looked. Treat an APPROVE as one piece of evidence, not clearance: the model reads the release diff and can be wrong, and a release too large for the review budget is held for a person rather than judged.
 
@@ -42,7 +43,7 @@ oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is n
 Install a release tag, not the tip of `main`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
 
 ```
-git clone --branch v0.1.1 https://github.com/akasecurity/oupdate.git
+git clone --branch v0.2.0 https://github.com/akasecurity/oupdate.git
 cd oupdate
 git rev-parse HEAD
 bun install
@@ -56,6 +57,7 @@ bun src/cli.ts review npm ms 2.1.2 2.1.3
 oUpdate becomes part of your supply chain, so read it before you trust it:
 - It has no runtime dependencies. `bun.lock` holds only the dev tools (TypeScript and Bun's types).
 - `review` and `gate` download release archives from the registry and read them; they never install a package or run its code (archives are read with `bsdtar`; the optional GuardDog layer runs in the container you give it). The network calls go to the package registries, OSV, your reviewer endpoint and, for `gate`, your forge.
+- `image` reads two images' manifests and config blobs from their container registry; it never pulls a layer or runs the image.
 - Nothing runs as root unless you schedule `host --apply` as a LaunchDaemon yourself. Start with `host --apply --dry-run`: it runs every check and changes nothing on disk.
 
 ### Set up with your agent
@@ -79,7 +81,17 @@ Most commands take their settings as flags (`--reviewer`, `--scanner`, `--token-
 
 ## Gate update PRs on a forge
 
-Run after your update bot (Renovate, for example): for each open PR on a `renovate/` branch, oUpdate diffs `bun.lock` between base and head and reviews every package version the PR brings in. It then posts a commit status `oupdate/review` and one comment carrying the per-layer verdicts.
+Run after your update bot (Renovate or Dependabot): for each open PR on a `renovate/` branch, oUpdate diffs the lockfiles between base and head and reviews every package version the PR brings in. It then posts a commit status `oupdate/review` and one comment carrying the per-layer verdicts.
+
+- **Branches:** `--branch-prefix` (repeatable) replaces the `renovate/` default, for example `--branch-prefix dependabot/ --branch-prefix renovate/`.
+- **Forge:** `--forge gitea` (the default) needs `--endpoint`. `--forge github` talks to `https://api.github.com`, or to `$GITHUB_API_URL` or `--endpoint` on GitHub Enterprise Server; see [On GitHub](#on-github).
+- **Token:** `--token-file FILE`, or `--token-env NAME` to read it from an environment variable.
+- **Lockfiles:** for npm, `bun.lock`, `package-lock.json` and `npm-shrinkwrap.json` (lockfileVersion 2 and 3), and `pnpm-lock.yaml` (v5, v6 and v9); for PyPI, `uv.lock` and `poetry.lock`. Without `--lock`, the gate reads each of these names that the PR's head has at the repo root. `--lock PATH` (repeatable) names them instead, for a lockfile in a subdirectory, say. All lockfiles go into one status; a version bumped in two of them is reviewed once.
+- **Requirements files:** a pinned `requirements*.txt` or `*.lock.txt` (pip-compile output, for example) is read only when `--lock` names it, since the name alone does not say a file is pinned. Only exact `name==version` lines count; ranges, `-r` includes, editables and `name @ url` lines are skipped. Python package names are compared in their PEP 503 form, so `Typing_Extensions` and `typing-extensions` are one package.
+- **Skipped entries:** workspace packages, links, editable and path installs, and git, file and url dependencies have no registry version to review.
+- **Integrity:** when the lockfile records a sha512 integrity, the download is checked against it, so the review reads the exact bytes the install fetches. A mismatch holds the package. Python lockfiles record sha256 hashes, which are not checked yet: a PyPI download is reviewed without that check.
+- **Private registry:** a version from a registry other than the public npm registry, or an index other than PyPI (a uv `registry` source, a poetry `legacy` source, or a requirements file's `--index-url`), is listed in the comment as "not reviewed (private registry)" and does not change the status.
+- **A lockfile that cannot be read** (an npm 6 `package-lock.json`, lockfileVersion 1, or a file that does not parse) holds the PR at pending with the reason, never success.
 
 ```
 oupdate gate --endpoint https://forge.example/api/v1 --repo owner/name \
@@ -95,7 +107,63 @@ The advisory layer splits OSV entries in two:
 - **Malicious** (an OpenSSF `MAL-` id or alias) always stops the update. The comment opens with a MALICIOUS line, because the useful next step is checking where that version is already installed.
 - **Vulnerabilities** stop only the ones this update introduces. If the old version already had one, keeping the old version would not help, so it is listed as "already in" and does not stop the update. Vulnerabilities the update removes are listed as "fixes".
 
-Heads that already have success or failure are skipped. Gitea and API-compatible forges are supported.
+Heads that already have success or failure are skipped. GitHub, Gitea and API-compatible forges (Forgejo) are supported.
+
+### On GitHub
+
+The gate reports with a commit status, not a check run, so it works with the Actions `GITHUB_TOKEN` and with a personal access token alike, and branch protection can require `oupdate/review` like any other check. Lockfiles are read raw, so a `package-lock.json` over 1 MB is read in full.
+
+Run it on a schedule from the repo it gates, with `.github/workflows/oupdate-gate.yml`:
+
+```yaml
+name: oupdate gate
+on:
+  schedule: [{ cron: "17 * * * *" }]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: oven-sh/setup-bun@<commit-sha>    # pin actions to a full commit sha
+      - uses: actions/checkout@<commit-sha>
+        with: { repository: akasecurity/oupdate, ref: v0.2.0, path: .oupdate }
+      - run: >
+          bun .oupdate/src/cli.ts gate --forge github --repo "$GITHUB_REPOSITORY"
+          --token-env GITHUB_TOKEN --branch-prefix dependabot/ --branch-prefix renovate/
+          --reviewer "$OUPDATE_REVIEWER"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUPDATE_REVIEWER: ${{ vars.OUPDATE_REVIEWER }}
+          REVIEWER_API_KEY: ${{ secrets.REVIEWER_API_KEY }}
+```
+
+`OUPDATE_REVIEWER` is a repository variable holding the reviewer spec, for example `{"type":"openai","name":"cloud","baseUrls":["https://api.example/v1"],"model":"your-model","apiKeyEnv":"REVIEWER_API_KEY"}`; `apiKeyEnv` names the secret the step passes in. A hosted runner cannot reach a model on your own machine; for a local model, use a self-hosted runner.
+
+Why a schedule and not `pull_request`:
+- A run that a Dependabot PR triggers gets a read-only token and no secrets, so it could not post the status or call the reviewer.
+- The gate never checks out the PR's code; it reads the lockfiles through the API. A scheduled run on the default branch is safe.
+- Cooldown holds need runs after the PR opened anyway: a pending PR is reviewed again on each run.
+
+## Check one image
+
+Before you repin a container image, compare the new image with the one you run now:
+
+```
+oupdate image registry.example/team/app-a:5.14.0 registry.example/team/app-a@sha256:<64 hex> \
+  --reviewer '{"type":"openai","name":"local","baseUrls":["http://127.0.0.1:8080/v1"],"model":"your-model"}'
+```
+
+Both refs must name the same repository; each is a tag or a `@sha256:` digest, and a bare name means Docker Hub. oUpdate reads both images from the registry for one platform (`--platform`, default `linux/amd64`) without pulling them, and checks every manifest and config against its digest. The evidence is the same as for Docker Compose images on a NAS: the Entrypoint and Cmd, and the build history lines the new image adds. It reads no layer contents and no advisories. A pre-gate holds an Entrypoint or Cmd change, a fetch piped to a shell, SSH keys and similar lines whatever the model says; then the reviewer reads the diff. With `--second-reviewer`, both must approve.
+
+- **Exit 0 (LAND):** the two refs are the same image, or the pre-gate is clean and the reviewers approve.
+- **Exit 1 (HOLD):** a pre-gate hit, a FLAG, no reviewer, a reviewer that failed, or an image that could not be read (BASELINE MISSING).
+- **Exit 2:** a usage error.
+
+`--json FILE` writes the result, including the platform manifest digests. Private registries are not supported yet: the registry must allow anonymous pulls.
 
 ## GuardDog layer
 
@@ -123,7 +191,7 @@ oupdate review npm some-pkg 1.0.0 1.0.1 --scanner '{"type":"guarddog","name":"gu
 
 ### Review budget
 
-The local reviewer reads the release diff in parts, at most 12. When the whole diff is over that, it reads the priority files only: files with a pre-pass or scanner signal, new files, manifests and install or startup files. When those are still over it, it reads the signal files only: files with a signal, manifests and install or startup files. A FLAG on the signal files stops the update. An APPROVE there does not land it, because the rest of the diff was not read: the update stays held for a human, and the verdict names how many files were left out.
+The local reviewer reads the release diff in parts, at most 12. When the whole diff is over that, it reads the priority files only: files with a pre-pass or scanner signal, new files, manifests and install or startup files. When those are still over it, it reads the signal files only: files with a signal, manifests and install or startup files. When even the signal files are over 12 parts, it ranks the priority files and reads the top 12 parts: files with a hard pre-pass signal first, then scanner hits, install or startup files, manifests, new files, and changed files with a soft signal. A FLAG on the signal files stops the update. An APPROVE there does not land it, because the rest of the diff was not read: the update stays held for a human, and the verdict names how many parts and files were left out.
 
 </details>
 
@@ -349,7 +417,7 @@ bun run scan
 <details>
 <summary><b>How the reviewer is evaluated</b></summary>
 
-`acceptance/` holds the attack and control cases. `cases.json` lists 9 attack cases, `controls.json` 8 clean updates that must land. `acceptance/run.ts` runs the cases through the review layers with the reviewers you give it, and it fetches the malicious-package samples from the public DataDog malicious-software-packages dataset on GitHub, and `acceptance/extract.ts` unpacks them. The litellm 1.107.0 case needs a replay script that this repository does not ship, so a run counts it as not run. Results go to `./acceptance-results/`.
+`acceptance/` holds the attack and control cases. `cases.json` lists 9 attack cases from real releases and 4 synthetic evasion cases, which `acceptance/synthetic/generate.ts` builds in memory with payload URLs on `.invalid` hosts only; `controls.json` lists 8 clean updates that must land. That is the core set, the one the published bar is scored on. Both files also hold an extended set, marked `"set": "extended"`: 17 more compromised releases and a clean control for each. `acceptance/run.ts --set extended` (or `--set all`) runs it and scores it against its own counts, with no published bar. `acceptance/run.ts` runs the cases through the review layers with the reviewers you give it, and it fetches the malicious-package samples from the public DataDog malicious-software-packages dataset on GitHub, and `acceptance/extract.ts` unpacks them. The litellm 1.107.0 case needs a replay script that this repository does not ship, so a run counts it as not run. Results go to `./acceptance-results/`.
 
 `scripts/eval.ts` runs the whole set plus the repo scan. Copy `scripts/eval.config.example.json`, point `sampleConfig` at a copy of `scripts/sample.config.example.json`, then:
 
@@ -358,6 +426,19 @@ OUPDATE_EVAL_BASE_URL=http://127.0.0.1:8080/v1 OUPDATE_EVAL_MODEL=<model> bun sc
 ```
 
 </details>
+
+### Score your own model
+
+`acceptance/run.ts` runs the attack and clean-release cases through any reviewer you give it. `acceptance-results/summary.txt` ends with a scorecard per reviewer: attacks stopped, attacks stopped by the model reviewer alone, model FLAGs on attacks, controls landed, and the cases the model did not judge. Each line sits beside the bar (9 of 9 attacks stopped, 8 of 8 controls landed) and the [26 Oct result](docs/evaluation-2026-10-26.md) (9 of 9 stopped, 8 of 8 landed, model FLAG on 7 of 9). `run.ts` runs the 8 dataset attacks; litellm 1.107.0 is a separate replay, so a run scores attacks out of 8. The run also builds 4 synthetic evasion cases in memory (`acceptance/synthetic/generate.ts`: a comment telling the reviewer to approve, a loader hidden among 300 changed files, a loader inside a minified bundle, a refactor that posts the environment to a URL). They are inert, with payload URLs on `.invalid` hosts only, and the scorecard counts them on their own line, outside the published set.
+
+`--set` picks the cases. `core`, the default, is the published set above, scored against the bar. `extended` is 17 more compromised releases from the same dataset (npm: axios, @solana/web3.js, xrpl, @rspack/core, node-ipc, cline, posthog-node, @tanstack/react-router, is; PyPI: telnyx, lightning, elementary-data, xinference, num2words, guardrails-ai, mistralai, durabletask), each with a control: the clean release before it. `all` runs both. The extended set has no bar or published result: its scorecard is labeled with the set and scores against that set's counts in `cases.json` and `controls.json`. An entry marked `"set": "extended"` belongs to it; an entry without `set` is core. `scripts/eval.ts` scores checks 1 and 2 on core only; `"extended": true` in its config adds the extended set as one line that is not a check.
+
+```
+bun acceptance/run.ts --reviewers reviewers.json --layers prepass,scan,reviewer
+bun acceptance/run.ts --reviewers reviewers.json --layers prepass,scan,reviewer --set extended
+```
+
+`reviewers.json` is a JSON array of reviewer specs, one per model to score, for example `[{"type":"openai","name":"local","baseUrls":["http://127.0.0.1:8080/v1"],"model":"your-model"}]`. `--work <dir>` keeps the downloaded artifacts; add `--offline` to score against what is already in `<dir>` with no downloads, so a second machine can score its model on the same bytes.
 
 ## License
 

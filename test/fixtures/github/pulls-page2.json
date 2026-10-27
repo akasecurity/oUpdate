@@ -1,0 +1,22 @@
+[
+  {
+    "url": "https://api.github.com/repos/octo-org/app/pulls/42",
+    "id": 2001,
+    "number": 42,
+    "state": "open",
+    "title": "Bump yaml from 2.8.1 to 2.8.3",
+    "user": { "login": "dependabot[bot]", "type": "Bot" },
+    "head": {
+      "label": "octo-org:dependabot/npm_and_yarn/yaml-2.8.3",
+      "ref": "dependabot/npm_and_yarn/yaml-2.8.3",
+      "sha": "4b1e5c0a3f2d9e8b7c6a5f4e3d2c1b0a9f8e7d6c",
+      "repo": { "full_name": "octo-org/app" }
+    },
+    "base": {
+      "label": "octo-org:main",
+      "ref": "main",
+      "sha": "0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e",
+      "repo": { "full_name": "octo-org/app" }
+    }
+  }
+]
