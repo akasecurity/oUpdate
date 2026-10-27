@@ -18,7 +18,7 @@ oUpdate is an open-source package firewall. Before a new release of a package la
 In [an evaluation](docs/evaluation-2026-10-26.md) on 9 real supply-chain attacks and 8 clean releases, with no threat feeds or advisories, it stopped all 9 attacks and held none of the 8 clean releases. The attacks include Shai-Hulud in @ctrl/tinycolor 4.1.1, s1ngularity in @nx/devkit 21.5.0, and litellm 1.107.0.
 
 - **On a Mac**, it takes Homebrew and npm updates as soon as they clear their checks, with no waiting period. A model reviews npm global packages and formulae from third-party Homebrew taps. Formulae from Homebrew's own taps get a deterministic version policy. An upgraded cask's files are cleared to run only when they pass Apple's signing and notarization checks.
-- **In your repos**, dependency updates from your update bot get a 7-day cooldown and the same review, then a commit status that your own gate acts on before they land.
+- **In your repos**, dependency updates from your update bot get a 2-day cooldown and the same review, then a commit status that your own gate acts on before they land.
 
 ## What it covers
 
@@ -43,7 +43,7 @@ oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is n
 Install a release tag, not the tip of `main`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
 
 ```
-git clone --branch v0.2.0 https://github.com/akasecurity/oupdate.git
+git clone --branch v0.2.1 https://github.com/akasecurity/oupdate.git
 cd oupdate
 git rev-parse HEAD
 bun install
@@ -130,7 +130,7 @@ jobs:
     steps:
       - uses: oven-sh/setup-bun@<commit-sha>    # pin actions to a full commit sha
       - uses: actions/checkout@<commit-sha>
-        with: { repository: akasecurity/oupdate, ref: v0.2.0, path: .oupdate }
+        with: { repository: akasecurity/oupdate, ref: v0.2.1, path: .oupdate }
       - run: >
           bun .oupdate/src/cli.ts gate --forge github --repo "$GITHUB_REPOSITORY"
           --token-env GITHUB_TOKEN --branch-prefix dependabot/ --branch-prefix renovate/
@@ -210,7 +210,7 @@ The local reviewer reads the release diff in parts, at most 12. When the whole d
 | pnpm | `pnpm-workspace.yaml` (or `.npmrc` kebab-case) | `strictDepBuilds` | `true` |
 | pnpm | same | `minimumReleaseAge` | at least the cooldown, in minutes |
 | bun | `bunfig.toml` `[install]` | `minimumReleaseAge` | at least the cooldown, in seconds |
-| uv | `uv.toml` or `pyproject.toml` `[tool.uv]` | `exclude-newer` | a rolling duration (`"7 days"`, `P7D`); a fixed date is weak |
+| uv | `uv.toml` or `pyproject.toml` `[tool.uv]` | `exclude-newer` | a rolling duration (`"2 days"`, `P2D`); a fixed date is weak |
 
 The build-script allow-lists are listed, not judged: pnpm `allowBuilds` (or the older `onlyBuiltDependencies`) and bun `trustedDependencies` (bun runs no other dependency's lifecycle scripts). Build-script denial stops the install-script attacks; it does not stop a payload that runs at import or at Python start, which is what the review layers are for. None of these keys lifts the cooldown for an advisory fix: `oupdate review --advisory-fix` does that.
 
@@ -368,7 +368,7 @@ The pin-bump leg proposes a bump of an image's pins file and never applies it. I
   - `npm`: dist-tags.latest and each tarball's sha512 integrity.
   - `github-release`: the newest stable tag fitting `tag`, and each asset's published sha256 digest, which must be on the project's own release path.
   - `oci-index`: the Docker Hub index digest under the pinned tag, with every manifest and config checked against its digest. An optional apt snapshot id is taken as the first midnight UTC after the newest image build, and only once that snapshot is published.
-- It holds each newer value for `cooldownDays`.
+- It holds each newer value for `cooldownDays` (default 2).
 - npm bumps also go through the release artifact review (advisory, pre-pass and reviewer). Then the pins diff and its evidence go to the configured reviewer.
 - On APPROVE it writes the branch `<branchPrefix>pins-<hash>` with git plumbing, without touching the checkout, and writes a train ask text file to `trainAskDir`. With `push: true` it pushes that branch, never the base.
 - The same bump on a later run is "already proposed", with no review again. A missing train ask, or (with `push: true`) a branch that fails to push again, stays trouble.

@@ -150,7 +150,7 @@ export function parsePinBumpLeg(v: unknown, where: string): PinBumpLeg {
     branchPrefix,
     trainAskDir: absPath(o, "trainAskDir", where),
     push: optBool(o, "push", where) ?? false,
-    cooldownDays: optCount(o, "cooldownDays", where) ?? 7,
+    cooldownDays: optCount(o, "cooldownDays", where) ?? 2,
     author,
     groups,
     fixed,

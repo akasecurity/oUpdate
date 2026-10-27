@@ -4,7 +4,7 @@ import { parseReviewArgs, parseGateArgs, parseImageArgs, gateToken, gateForge } 
 describe("parseReviewArgs", () => {
   test("positional eco name from to, with defaults", () => {
     const a = parseReviewArgs(["pypi", "litellm", "1.106.2", "1.107.0"]);
-    expect(a).toMatchObject({ eco: "pypi", name: "litellm", from: "1.106.2", to: "1.107.0", cooldownDays: 7 });
+    expect(a).toMatchObject({ eco: "pypi", name: "litellm", from: "1.106.2", to: "1.107.0", cooldownDays: 2 });
     expect(a.only).toBeUndefined();
   });
 
@@ -47,7 +47,7 @@ describe("parseReviewArgs", () => {
 describe("parseGateArgs", () => {
   test("needs endpoint, repo and token file; defaults the rest", () => {
     const a = parseGateArgs(["--endpoint", "https://forge.test/api/v1", "--repo", "o/r", "--token-file", "tok"]);
-    expect(a).toMatchObject({ forge: "gitea", endpoint: "https://forge.test/api/v1", repo: "o/r", tokenFile: "tok", branchPrefixes: ["renovate/"], lockPaths: [], cooldownDays: 7 });
+    expect(a).toMatchObject({ forge: "gitea", endpoint: "https://forge.test/api/v1", repo: "o/r", tokenFile: "tok", branchPrefixes: ["renovate/"], lockPaths: [], cooldownDays: 2 });
     expect(a.reviewer).toBeUndefined();
   });
 

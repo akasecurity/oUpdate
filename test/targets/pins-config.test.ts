@@ -22,7 +22,7 @@ describe("parsePinBumpLeg", () => {
   test("parses a full leg with defaults", () => {
     const l: PinBumpLeg = P();
     expect(l.push).toBe(false);
-    expect(l.cooldownDays).toBe(7);
+    expect(l.cooldownDays).toBe(2);
     expect(l.author).toEqual({ name: "oupdate", email: "oupdate@invalid" });
     expect(l.groups[0]).toMatchObject({ source: "npm", propose: true });
     expect(l.groups[1]).toMatchObject({ source: "github-release", propose: false, note: "coupled" });
