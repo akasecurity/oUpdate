@@ -20,11 +20,22 @@ interface Fake {
   out?: Record<string, string>;
   timeout?: readonly string[]; // command lines that time out
   selfPid?: number;
+  /** The pid `launchctl print <domain>/<label>` shows for every plist in plists (default "20"); null: none. */
+  plistPid?: string | null;
 }
 
 function fakeEnv(f: Fake) {
   const calls: string[] = [];
   const lsof = [...(f.lsof ?? [])];
+  // A plist's job runs the stale pid unless told otherwise: the name path confirms it before a restart.
+  const runs = new Map<string, string>();
+  const pid = f.plistPid === undefined ? "20" : f.plistPid;
+  for (const [dir, names] of Object.entries(f.plists ?? {})) {
+    for (const n of names) {
+      const target = `${dir === "/Library/LaunchDaemons" ? "system" : "gui/501"}/${n.replace(/\.plist$/, "")}`;
+      if (pid !== null) runs.set(`launchctl print ${target}`, `${target} = {\n\tstate = running\n\tpid = ${pid}\n}\n`);
+    }
+  }
   const exec: Exec = async (argv) => {
     const line = argv.join(" ");
     calls.push(line);
@@ -41,7 +52,7 @@ function fakeEnv(f: Fake) {
     if (line === "brew --cellar") return { rc: 0, out: `${CELLAR}\n`, err: "" };
     if (line === "brew --prefix") return { rc: 0, out: "/brew\n", err: "" };
     if (f.timeout?.includes(line)) return { rc: 124, out: "", err: "", timedOut: true };
-    return { rc: f.rc?.[line] ?? 0, out: f.out?.[line] ?? "", err: "" };
+    return { rc: f.rc?.[line] ?? 0, out: f.out?.[line] ?? runs.get(line) ?? "", err: "" };
   };
   const dirs = new Set([CELLAR, ...(f.dirs ?? [])]);
   const files = new Set(f.files ?? []);
@@ -158,12 +169,41 @@ describe("staleKegCheck: restart", () => {
     expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.tailscale");
     expect(v.note).toBe("restarted onto new keg: tailscale");
   });
-  test("a label is matched on the name before .plist, as the shell glob", async () => {
-    const f = base("list", { "/Library/LaunchDaemons": ["com.x.other.plist", "com.x.list-server.plist"] });
+  test("a label is the package as its whole last dotted part, never a name that contains it", async () => {
+    const f = base("list", { "/Library/LaunchDaemons": ["com.x.other.plist", "com.x.list-server.plist", "com.x.playlist.plist", "com.x.list.plist"] });
     f.ps = { "20": { comm: "", command: "list", ppid: "1" } };
     const { env, calls } = fakeEnv(f);
     await staleKegCheck(env, opts().o);
-    expect(calls).toContain("sudo -n launchctl kickstart -k system/com.x.list-server");
+    expect(calls.filter((c) => c.includes("kickstart"))).toEqual(["sudo -n launchctl kickstart -k system/com.x.list"]);
+  });
+  // Audit 0.2.2: a plist name that only contains the package, a label launchd does not run this pid
+  // under, or a pid whose executable is outside the keg is reported, never restarted.
+  const shown = (target: string, pid = "20") => ({ [`launchctl print ${target}`]: `${target} = {\n\tstate = running\n\tpid = ${pid}\n}\n` });
+  test("a plist that only contains the package name is not its label: reported, not restarted", async () => {
+    const f = base("go", { "/Library/LaunchDaemons": ["com.example.gofer.plist"] }, { lsof: [stale("go")], out: shown("system/com.example.gofer") });
+    const { env, calls } = fakeEnv(f);
+    const { o, notices } = opts();
+    const v = await staleKegCheck(env, o);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(notices[0]).toContain("go(no label found)");
+    expect(v.note).toMatch(TROUBLE_RE);
+  });
+  test("an exact label that launchd does not run this pid under is reported, not restarted", async () => {
+    const f = base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }, { lsof: [stale("tailscale")], out: shown("system/sh.brew.tailscale", "77") });
+    const { env, calls } = fakeEnv(f);
+    const v = await staleKegCheck(env, opts().o);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(v.log).toContain("    sh.brew.tailscale matched by plist name, but launchd does not run pid 20 under it — reported as an orphan");
+    expect(v.note).toMatch(TROUBLE_RE);
+  });
+  test("an exact label running this pid, but the pid's executable is outside the keg: reported, not restarted", async () => {
+    // pid 20 runs another program and only maps a library from the deleted tailscale keg.
+    const lsof = [lsofLine("20", "/opt/other/bin/daemon"), lsofLine("20", `${CELLAR}/tailscale/1.0_old/lib/libx.dylib`)].join("\n");
+    const f = base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }, { lsof: [lsof], out: shown("system/sh.brew.tailscale") });
+    const { env, calls } = fakeEnv(f);
+    const v = await staleKegCheck(env, opts().o);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(v.log).toContain("    sh.brew.tailscale matched by plist name, but pid 20 runs /opt/other/bin/daemon, not a file of 1.0_old — reported as an orphan");
   });
   test("a kickstart that fails leaves an operator one-liner, an alarm and a notice", async () => {
     const { env } = fakeEnv({ ...base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }), lsof: [stale("tailscale")], rc: { "sudo -n launchctl kickstart -k system/sh.brew.tailscale": 1 } });
@@ -187,15 +227,15 @@ describe("staleKegCheck: restart", () => {
     expect(calls).toContain("sudo -n launchctl kickstart -k system/com.x.svc-server");
     expect(calls).not.toContain("sudo -n launchctl kickstart -k system/com.x.svc-scheduler");
   });
-  test("still ambiguous after narrowing → named, never guessed", async () => {
-    const f = base("svc", { "/Library/LaunchDaemons": ["com.x.svc-a.plist", "com.x.svc-b.plist"] });
+  test("a label for the package and another for the process name → ambiguous, named, never guessed", async () => {
+    const f = base("svc", { "/Library/LaunchDaemons": ["com.x.svc.plist", "com.x.other.plist"] });
     f.ps = { "20": { comm: "other", command: "other", ppid: "1" } };
     f.lsof = [stale("svc")];
     const { env, calls } = fakeEnv(f);
     const { o, notices } = opts();
     const v = await staleKegCheck(env, o);
     expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
-    expect(v.log).toContain("    ambiguous — com.x.svc-a.plist com.x.svc-b.plist all match; not guessing");
+    expect(v.log).toContain("    ambiguous — com.x.svc.plist com.x.other.plist all match; not guessing");
     expect(notices[0]).toContain("svc(ambiguous label)");
   });
   test("launchd-owned with no matching label → named for the operator", async () => {
@@ -308,20 +348,21 @@ describe("staleKegCheck: the label from launchd, by pid", () => {
   ] as const) {
     test(`a launchctl query that ${how} is a log note, then the plist name match`, async () => {
       // Mutant caught: a failed query read as "no row" silently, or as the end of the check.
-      const { env, calls } = fakeEnv(base({ ...extra, plists: { "/home.test/Library/LaunchAgents": ["org.example.bun-watch.plist"] } }));
+      const { env, calls } = fakeEnv(base({ ...extra, plists: { "/home.test/Library/LaunchAgents": ["org.example.bun.plist"] } }));
       const v = await staleKegCheck(env, opts().o);
       for (const l of said) expect(v.log).toContain(l);
-      expect(calls).toContain("launchctl kickstart -k gui/501/org.example.bun-watch");
+      expect(calls).toContain("launchctl kickstart -k gui/501/org.example.bun");
       expect(v.note).toBe("restarted onto new keg: bun");
     });
   }
-  test("a launchctl query that throws is a note too, never a crash", async () => {
-    const f = fakeEnv(base({ plists: { "/home.test/Library/LaunchAgents": ["org.example.bun-watch.plist"] } }));
+  test("a launchctl query that throws is a note too, never a crash; the plist-name label then cannot be confirmed", async () => {
+    const f = fakeEnv(base({ plists: { "/home.test/Library/LaunchAgents": ["org.example.bun.plist"] } }));
     const exec = f.env.exec;
     f.env.exec = async (argv, o) => (argv[0] === "launchctl" && argv[1] === "print" ? Promise.reject(new Error("spawn failed")) : exec(argv, o));
     const v = await staleKegCheck(f.env, opts().o);
     expect(v.log).toContain("    launchctl print gui/501 failed (spawn failed) — falling back to the plist name");
-    expect(f.calls).toContain("launchctl kickstart -k gui/501/org.example.bun-watch");
+    expect(v.log).toContain("    org.example.bun matched by plist name, but launchd does not run pid 20 under it — reported as an orphan");
+    expect(f.calls.some((c) => c.includes("kickstart"))).toBe(false);
   });
   test("the queries go through env.query when given, not env.exec", async () => {
     // Mutant caught: the queries on the step's exec, whose timeout stops the whole step in the run.
@@ -808,25 +849,25 @@ describe("staleKegCheck: stale owners, oharness jobs and orphans", () => {
   });
   test("a plist-name label matching staleOwners is queued only when launchd shows that label running the stale pid, before the restart helper", async () => {
     const proven = fakeEnv({
-      lsof: [stale("20")], files: ["/usr/local/sbin/restart-helper"], ps: { "20": { comm: "bun", ppid: "1" } }, plists: { "/Library/LaunchDaemons": ["org.example.serving-bun.plist"] },
-      out: { "launchctl print system/org.example.serving-bun": "system/org.example.serving-bun = {\n\tstate = running\n\tpid = 20\n}\n" },
+      lsof: [stale("20")], files: ["/usr/local/sbin/restart-helper"], ps: { "20": { comm: "bun", ppid: "1" } }, plists: { "/Library/LaunchDaemons": ["org.example.serving.bun.plist"] },
+      out: { "launchctl print system/org.example.serving.bun": "system/org.example.serving.bun = {\n\tstate = running\n\tpid = 20\n}\n" },
     });
     const a = queueOpts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["bun"] } });
     await staleKegCheck(proven.env, a.o);
     expect(proven.calls.some((c) => c.includes("kickstart") || c.includes("restart-helper"))).toBe(false);
-    expect(a.queued[0]?.[0]?.target).toBe("system/org.example.serving-bun");
+    expect(a.queued[0]?.[0]?.target).toBe("system/org.example.serving.bun");
   });
   test("review 5: an orphan pid whose plist-name label launchd runs under another pid is never queued, only reported", async () => {
     // The plist name matched, but that service is a different process: queuing it would restart an unrelated job.
     const { env, calls } = fakeEnv({
-      lsof: [stale("20")], ps: { "20": { comm: "bun", ppid: "1" } }, plists: { "/Library/LaunchDaemons": ["org.example.serving-bun.plist"] },
-      out: { "launchctl print system/org.example.serving-bun": "system/org.example.serving-bun = {\n\tstate = running\n\tpid = 31\n}\n" },
+      lsof: [stale("20")], ps: { "20": { comm: "bun", ppid: "1" } }, plists: { "/Library/LaunchDaemons": ["org.example.serving.bun.plist"] },
+      out: { "launchctl print system/org.example.serving.bun": "system/org.example.serving.bun = {\n\tstate = running\n\tpid = 31\n}\n" },
     });
     const { o, queued } = queueOpts();
     const v = await staleKegCheck(env, o);
     expect(queued).toEqual([]);
     expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
-    expect(v.log).toContain("    org.example.serving-bun matched by plist name, but launchd does not run pid 20 under it — reported as an orphan");
+    expect(v.log).toContain("    org.example.serving.bun matched by plist name, but launchd does not run pid 20 under it — reported as an orphan");
     expect(v.note).toBe("STALE KEG: bun(orphans 1: pid 20) still running from a deleted keg");
   });
   test("dry run: says it would queue, queues nothing", async () => {
@@ -927,7 +968,7 @@ describe("staleKegCheck: deferred and unresolved", () => {
     const { env } = fakeEnv({
       lsof: [lsof],
       ps: { "30": { comm: "model-svc-server", ppid: "1" }, "31": { comm: "other", ppid: "1" } },
-      plists: { "/Library/LaunchDaemons": ["com.x.libpy-a.plist", "com.x.libpy-b.plist"] },
+      plists: { "/Library/LaunchDaemons": ["com.x.libpy.plist", "sh.brew.libpy.plist"] },
     });
     const { o, notices } = opts();
     const v = await staleKegCheck(env, o);

@@ -4,8 +4,6 @@
 #
 #    pip-compile --generate-hashes requirements.in
 #
--r base.txt
--c constraints.txt
 --trusted-host mirror.example
 certifi==2024.8.30 \
     --hash=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
@@ -21,9 +19,3 @@ typing-extensions==4.12.2 --hash=sha256:cccccccccccccccccccccccccccccccccccccccc
 --editable git+https://git.example/acme/editable.git#egg=editable
 gitdep @ git+https://git.example/acme/gitdep.git@main
 wheelfile @ file:///srv/wheels/wheelfile-1.0.0-py3-none-any.whl
-flask>=3.0
-django~=5.1
-numpy==2.1.*
-exact===1.0-weird
-pinned-range==1.0,>=0.5
-unpinned

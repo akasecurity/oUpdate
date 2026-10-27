@@ -1,6 +1,8 @@
 // The npm globals phase, ported minimally from secure-update's npm_section: list the outdated
-// globals, read each new version's scripts and tarball, force a FLAG on literal attack
-// indicators (a model is not trusted with what a pattern does reliably), ask the reviewer about
+// globals, read each new version's scripts and tarball and the installed version's scripts, force a
+// FLAG on literal attack indicators, on a new or changed install hook and on any hook npm runs on
+// install even when unchanged (a model is not trusted with what a pattern does reliably, and this lane
+// never sees the file a hook runs, which can change under the same hook string), ask the reviewer about
 // the batch, then upgrade each package by name. A FLAG or an unavailable reviewer holds the whole
 // batch. Differences from the bash, all fail-closed: a failed or unreadable outdated query is an
 // ERROR, not "nothing to update"; the tarball must come from the registry's own origin, not merely
@@ -65,11 +67,39 @@ export function npmHardHit(details: string): string {
   return "";
 }
 
+const INSTALL_HOOKS = ["preinstall", "install", "postinstall", "prepare"];
+/** The hooks npm runs on a registry install (prepare runs only for git/directory sources). */
+const RUN_HOOKS = ["preinstall", "install", "postinstall"];
+
+/** `npm view … scripts --json` as name → body; "" is no scripts; undefined when it is not that shape. */
+function parseScripts(text: string): Record<string, string> | undefined {
+  try {
+    const j: unknown = JSON.parse(text.trim() || "{}");
+    if (!j || typeof j !== "object" || Array.isArray(j)) return undefined;
+    return Object.fromEntries(Object.entries(j as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+  } catch {
+    return undefined;
+  }
+}
+
 function fromRegistry(tarball: string, registry: string): boolean {
   try {
     return new URL(tarball).origin === new URL(registry).origin;
   } catch {
     return false;
+  }
+}
+
+/** The installed global version of a package from `npm ls -g --json`, or undefined when it cannot be read. */
+export async function npmInstalled(exec: Exec, npm: string, pkg: string): Promise<string | undefined> {
+  const r = await exec([npm, "ls", "-g", "--depth=0", "--json", pkg]);
+  // npm ls exits 1 on an unrelated problem in the tree: the answer decides, as for outdated.
+  if (r.rc !== 0 && r.rc !== 1) return undefined;
+  try {
+    const v = (JSON.parse(r.out) as { dependencies?: Record<string, { version?: unknown }> }).dependencies?.[pkg]?.version;
+    return typeof v === "string" && v ? v : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -105,12 +135,25 @@ export async function npmSection(exec: Exec, r: Reviewer, o: NpmOptions): Promis
   run.pending.push(...names);
   let details = "";
   const unread: string[] = [];
+  const hooks: string[] = [];
+  const runs: string[] = [];
   for (const [pkg, v] of outdated) {
     // A failed view is not "no scripts": what could not be read cannot be reviewed.
-    const sv = await exec([o.npm, "view", `${pkg}@${v.next}`, "scripts"]);
+    const sv = await exec([o.npm, "view", `${pkg}@${v.next}`, "scripts", "--json"]);
+    const ov = await exec([o.npm, "view", `${pkg}@${v.current}`, "scripts", "--json"]);
     const tv = await exec([o.npm, "view", `${pkg}@${v.next}`, "dist.tarball"]);
     if (sv.rc !== 0) unread.push(`${pkg}@${v.next} scripts (npm view rc ${sv.rc})`);
+    if (ov.rc !== 0) unread.push(`${pkg}@${v.current} scripts (npm view rc ${ov.rc})`);
     if (tv.rc !== 0) unread.push(`${pkg}@${v.next} tarball (npm view rc ${tv.rc})`);
+    const after = sv.rc === 0 ? parseScripts(sv.out) : {};
+    const before = ov.rc === 0 ? parseScripts(ov.out) : {};
+    if (!after) unread.push(`${pkg}@${v.next} scripts (unparseable)`);
+    if (!before) unread.push(`${pkg}@${v.current} scripts (unparseable)`);
+    // A new or changed install hook runs code this lane never sees (the file it calls), so it is a person's call.
+    for (const k of INSTALL_HOOKS) if (after?.[k] !== undefined && after[k] !== before?.[k]) hooks.push(`${pkg}@${v.next} ${k}: ${after[k]!.slice(0, 200)}`);
+    // An unchanged hook string can run a changed file (audit 0.2.3: same "node setup.js", new setup.js), and this
+    // lane never reads the tarball, so any hook npm runs on install holds too.
+    for (const k of RUN_HOOKS) if (after?.[k] !== undefined && after[k] === before?.[k]) runs.push(`${pkg}@${v.next} ${k}: ${after[k]!.slice(0, 200)}`);
     const scripts = sv.out.trim() || "(no scripts)";
     const tarball = tv.out.trim().split("\n")[0] || "unknown";
     const ok = fromRegistry(tarball, o.registry) ? "yes" : `NO — unexpected: ${tarball}`;
@@ -129,13 +172,13 @@ Only these lifecycle scripts run automatically on \`npm install\` / \`npm update
   - prepare (only when installing from a git/directory source — NOT for registry tarballs, which is what we use here)
 IGNORE all other scripts (build, test, lint, release, version, prepack, prepublish, prepublishOnly, dev, start, etc.) — they only run when a developer explicitly invokes them. They are NOT an install-time attack surface.
 
-A script body that just calls a local file (e.g. "node scripts/postinstall.js", "node ./bin/setup.js") is a normal package convention. Do NOT flag it just because the referenced file's contents aren't visible. Only flag if the inline script body itself shows direct attack patterns: curl|sh, wget|sh, base64 -d | sh, eval of network input, writes to ~/.ssh or /etc, encoded payloads, exfiltration to non-package domains.
+An install-time script that calls a local file (e.g. "node bundle.js") runs code that is not shown here; the Shai-Hulud worm ran exactly that way. Treat it as a risk signal, never as a convention that makes it safe. Any preinstall/install/postinstall script, and a new or changed prepare, holds the update for a person whatever you answer. FLAG any install-time script whose body shows a direct attack pattern: curl|sh, wget|sh, base64 -d | sh, eval of network input, writes to ~/.ssh or /etc, encoded payloads, exfiltration to non-package domains.
 
 Review and decide APPROVE or FLAG:
 1. Install-time script (preinstall/install/postinstall/prepare) with an explicit attack indicator? — FLAG and quote the offending line.
 2. Tarball not from ${o.registry}? — FLAG it.
 3. Unknown package name that isn't a recognized public npm package? — FLAG it.
-4. Otherwise (including packages with build/test scripts, or local-file references in install hooks) — APPROVE.
+4. Otherwise (including packages with only build/test scripts) — APPROVE.
 
 ${VERDICT_CONTRACT}
 One-line reason if FLAG. 6 lines max.`;
@@ -146,7 +189,8 @@ One-line reason if FLAG. 6 lines max.`;
     await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${reason}\nPackages: ${names.join(" ")}\nLog: ${o.logFile ?? "-"}`);
     return { status: `FLAGGED — ${reason}`, log };
   }
-  const hard = npmHardHit(details);
+  const hookHit = [hooks.length ? `new or changed install script: ${hooks.join(", ")}` : "", runs.length ? `install script runs unreviewed package files: ${runs.join(", ")}` : ""].filter(Boolean).join("; ");
+  const hard = npmHardHit(details) || hookHit;
   const v = await reviewChunk(r, prompt, { ground: () => "GROUNDED", box: "review npm" });
   log.push(...v.log);
   let reason = "";
@@ -166,15 +210,27 @@ One-line reason if FLAG. 6 lines max.`;
   }
 
   let status = "";
-  for (const pkg of names) {
-    log.push(`  upgrading ${pkg}...`);
-    const u = await exec([o.npm, "update", "-g", pkg]);
+  const off: string[] = [];
+  for (const [pkg, v] of outdated) {
+    // Exactly the reviewed version: `npm update` would take whatever is newest by now.
+    log.push(`  upgrading ${pkg} to ${v.next}...`);
+    const u = await exec([o.npm, "install", "-g", `${pkg}@${v.next}`]);
     if (u.rc !== 0) {
       status = `FAILED — ${pkg}`;
       log.push(`npm: upgrade failed for ${pkg} — continuing`);
       await send(`⚠️ <b>${o.host} npm FAILED — ${pkg}</b>\nLog: ${o.logFile ?? "-"}`);
+      continue;
+    }
+    // Verified, not assumed: a version that cannot be read is no match.
+    const got = await npmInstalled(exec, o.npm, pkg);
+    if (got !== v.next) {
+      const what = `${pkg} installed ${got ?? "unknown"}, reviewed ${v.next}`;
+      off.push(what);
+      log.push(`npm: ${what} — FLAGGED`);
+      await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${what}\nLog: ${o.logFile ?? "-"}`);
     } else run.upgraded.push(pkg);
   }
+  if (off.length) status = [status, `FLAGGED — ${off.join(", ")}`].filter(Boolean).join("; ");
   if (!status) status = `upgraded: ${names.join(" ")}`;
 
   // What is still outdated: re-queried, not inferred.

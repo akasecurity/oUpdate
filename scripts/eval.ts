@@ -26,8 +26,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { validateReviewerSpec } from "../src/adapters/reviewer/spec.ts";
+import { expandEnv } from "../src/env.ts";
 import type { HostReport } from "../src/host/report.ts";
 import { scanTracked } from "./oss-scan.ts";
+
+export { expandEnv };
 import { loadSets, setCounts } from "../acceptance/sets.ts";
 
 export type Status = "pass" | "fail" | "not run";
@@ -234,15 +237,6 @@ export function checkOpenSource(sample: CheckResult[] | undefined, denyFile = pr
 }
 
 // ---- main -----------------------------------------------------------------
-
-/** Replaces ${NAME} in every string with the environment value; an unset name is an error. */
-export function expandEnv(text: string, env: Record<string, string | undefined> = process.env): string {
-  return text.replace(/\$\{([A-Z0-9_]+)\}/g, (_, n: string) => {
-    const v = env[n];
-    if (v === undefined || v === "") throw new Error(`env ${n} is not set`);
-    return JSON.stringify(v).slice(1, -1);
-  });
-}
 
 export function loadConfig(path: string): EvalConfig {
   return JSON.parse(expandEnv(readFileSync(path, "utf8"))) as EvalConfig;

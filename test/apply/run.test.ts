@@ -124,7 +124,7 @@ describe("tap approval in the brew phase (port 03)", () => {
     expect(r.text).not.toContain("[notify]");
     expect(r.calls.some((c) => c.startsWith("notify-cmd"))).toBe(false);
     // Nothing that changes the host: no tap sync, HEAD fetch, upgrade, cleanup, restart or write.
-    expect(r.calls.filter((c) => /^brew (update|upgrade|cleanup|link|unlink)\b|--fetch-HEAD|launchctl|^sudo|^npm update|^spawn/.test(c))).toEqual([]);
+    expect(r.calls.filter((c) => /^brew (update|upgrade|cleanup|link|unlink)\b|--fetch-HEAD|launchctl|^sudo|^npm (update|install)|^spawn/.test(c))).toEqual([]);
     expect(r.writes).toEqual([]);
     expect(r.log).toContain("dry-run: would upgrade Type A formulas=[good-a] casks=[]");
     expect(r.brew).toMatch(/^ {2}brew: FLAGGED — awaiting tap approval: example\/tf/);
@@ -361,7 +361,7 @@ describe("the run: failures, timeouts and the summary", () => {
     const h = fakeHost({ npmOutdated: JSON.stringify({ tool: { current: "1.0.0", wanted: "1.1.0", latest: "1.1.0" } }) });
     const res = await applyHost(testConfig(), h.exec, h.fs, { dryRun: false });
     expect(npmLine(res.summary)).toMatch(/^ {2}npm: {2}FLAGGED — /);
-    expect(h.calls).not.toContain("npm update -g tool");
+    expect(h.calls.some((c) => /^npm (install|update) -g tool/.test(c))).toBe(false);
   });
 
   test("the summary is read back by the host shadow parser unchanged", async () => {
@@ -490,7 +490,7 @@ describe("slice 7 review", () => {
 describe("slice 7 re-review", () => {
   test("2: an npm timeout after an earlier package was updated keeps it, the pending list and the review in the log", async () => {
     // Mutant caught: npmSection's own log and status, returned only at the end (pkg1 and the review vanished).
-    const r = await run({ npmOutdated: JSON.stringify({ one: { current: "1.0.0", latest: "1.1.0" }, two: { current: "1.0.0", latest: "1.1.0" } }), timeout: ["npm update -g two"] });
+    const r = await run({ npmOutdated: JSON.stringify({ one: { current: "1.0.0", latest: "1.1.0" }, two: { current: "1.0.0", latest: "1.1.0" } }), timeout: ["npm install -g two@"] });
     // Mutant caught (re-review 2): NpmRun.pending never read.
     expect(r.npm).toMatch(/^ {2}npm: {2}FAILED — two; upgraded: one; not completed — still pending: two; /);
     expect(r.log).toContain("Pending npm upgrades:");
@@ -530,7 +530,10 @@ describe("slice 7 re-review", () => {
     const lsof = ["COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME", "bun 77 u txt REG 1,4 1 2 /brew/Cellar/bun/1.0_old/bin/bun", "bun 78 u txt REG 1,4 1 2 /brew/Cellar/bun/1.1/bin/bun"].join("\n");
     const h = fakeHost({ dirs: ["/brew/Cellar", "/brew/Cellar/bun/1.1"], lsof: [lsof, lsof.split("\n").filter((l) => !l.includes(" 77 ")).join("\n")], ps: { "77": { comm: "bun", ppid: "1" } }, timeout: ["launchctl print system", "launchctl print gui/501"] });
     const fs = { ...h.fs, listDir: async (p: string) => (p === "/Library/LaunchDaemons" ? ["sh.brew.bun.plist"] : []) };
-    const res = await applyHost(testConfig({ npm: null }), h.exec, fs, { dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB });
+    // The plist-name label is confirmed before its restart: launchd runs pid 77 under it.
+    const shown = "system/sh.brew.bun = {\n\tstate = running\n\tpid = 77\n}\n";
+    const exec: typeof h.exec = async (argv, o) => (argv.join(" ") === "launchctl print system/sh.brew.bun" ? (h.calls.push(argv.join(" ")), { rc: 0, out: shown, err: "" }) : h.exec(argv, o));
+    const res = await applyHost(testConfig({ npm: null }), exec, fs, { dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB });
     expect(res.log).toContain("    launchctl print gui/501 timed out — falling back to the plist name");
     expect(h.calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.bun");
     expect(brewLine(res.summary)).not.toContain("FAILED");
@@ -563,6 +566,8 @@ describe("slice 7 re-review", () => {
     expect(timeoutToken(["sudo", "-n", "launchctl", "kickstart", "-k", "system/x"])).toBe("timeout:launchctl-kickstart");
     expect(timeoutToken(["sudo", "-n", "/usr/local/sbin/helper.test", "svc"])).toBe("timeout:helper.test");
     expect(timeoutToken(["npm", "update", "-g", "@scope/b"])).toBe("@scope/b");
+    expect(timeoutToken(["npm", "install", "-g", "@scope/b@3.0.0"])).toBe("@scope/b");
+    expect(timeoutToken(["npm", "install", "-g", "tool@1.1.0"])).toBe("tool");
     expect(timeoutToken(["brew", "upgrade", "--cask", "--greedy", "app"])).toBe("app");
     expect(timeoutToken(["brew", "upgrade", "example/svc/svc"])).toBe("svc");
     expect(timeoutToken(["/usr/sbin/lsof", "-nP", "-w", "-d", "txt,mem"])).toBe("timeout:lsof");

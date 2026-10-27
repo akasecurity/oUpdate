@@ -266,3 +266,40 @@ describe.if(mac)("spctl by absolute path", () => {
     expect(`${r.out}${r.err}`).toMatch(/assessments (enabled|disabled)/);
   });
 });
+
+describe("realGates: tool output parsed by line, never fooled by the file name (audit 0.2.2)", () => {
+  const TEAM = "ABCDE12345";
+  const ok = `source=Notarized Developer ID\norigin=Developer ID Application: Example Inc (${TEAM})\n`;
+  const fake = (r: { rc: number; out?: string; err?: string }) => realGates(async () => ({ rc: r.rc, out: r.out ?? "", err: r.err ?? "" }));
+  test("a genuine accept passes", async () => {
+    const f = "/c/app/1.2/bin/tool";
+    expect(await fake({ rc: 0, err: `${f}: accepted\n${ok}` }).notarized(f, TEAM)).toBe(true);
+  });
+  test("a rejected file whose name carries the accept markers is held", async () => {
+    // Mutant caught: substring checks over the whole output; spctl echoes the file name.
+    const f = `/c/app/1.2/bin/x: accepted source=Notarized Developer ID (${TEAM})`;
+    expect(await fake({ rc: 3, err: `${f}: rejected\nsource=no usable signature\n` }).notarized(f, TEAM)).toBe(false);
+    expect(await fake({ rc: 0, err: `${f}: rejected\nsource=Unnotarized Developer ID\norigin=Developer ID Application: Other (${TEAM})\n` }).notarized(f, TEAM)).toBe(false);
+  });
+  test("a name with a newline that forges whole lines is held", async () => {
+    const f = `/c/app/1.2/bin/x: accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: E (${TEAM})\n/c/app/1.2/bin/x`;
+    expect(await fake({ rc: 0, err: `${f}: rejected\nsource=no usable signature\n` }).notarized(f, TEAM)).toBe(false);
+  });
+  test("a non-zero exit is held whatever the text says", async () => {
+    const f = "/c/app/1.2/bin/tool";
+    expect(await fake({ rc: 3, err: `${f}: accepted\n${ok}` }).notarized(f, TEAM)).toBe(false);
+  });
+  test("an accept for another team, or a doubled source line, is held", async () => {
+    const f = "/c/app/1.2/bin/tool";
+    expect(await fake({ rc: 0, err: `${f}: accepted\n${ok}` }).notarized(f, "ZZZZZ99999")).toBe(false);
+    expect(await fake({ rc: 0, err: `${f}: accepted\nsource=Notarized Developer ID\nsource=Unnotarized Developer ID\norigin=Developer ID Application: E (${TEAM})\n` }).notarized(f, TEAM)).toBe(false);
+  });
+  test("codesign: a name that forges a TeamIdentifier line gets no team", async () => {
+    // Mutant caught: the first ^TeamIdentifier= line taken, which a newline in the Executable= path can supply.
+    const f = `/c/app/1.2/bin/x\nTeamIdentifier=${TEAM}`;
+    expect(await fake({ rc: 0, err: `Executable=${f}\nIdentifier=x\nTeamIdentifier=OTHER12345\n` }).team(f)).toBe("");
+    expect(await fake({ rc: 1, err: `Executable=/c/x\nTeamIdentifier=${TEAM}\n` }).team("/c/x")).toBe("");
+    expect(await fake({ rc: 0, err: `Executable=/c/x\nIdentifier=x\nTeamIdentifier=${TEAM}\n` }).team("/c/x")).toBe(TEAM);
+    expect(await fake({ rc: 0, err: "Executable=/c/x\nIdentifier=x\nTeamIdentifier=not set\n" }).team("/c/x")).toBe("not set");
+  });
+});

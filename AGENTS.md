@@ -28,7 +28,7 @@ Clone to a stable path the user will keep, such as `~/.oupdate/app`. A scheduled
 Install the latest release tag, not the tip of `main`. Show the user the commit `git rev-parse HEAD` prints next to the one on https://github.com/akasecurity/oupdate/releases, and stop if they differ.
 
 ```bash
-git clone --branch v0.2.2 https://github.com/akasecurity/oupdate.git ~/.oupdate/app
+git clone --branch v0.2.3 https://github.com/akasecurity/oupdate.git ~/.oupdate/app
 cd ~/.oupdate/app
 git rev-parse HEAD
 bun install
@@ -39,7 +39,7 @@ bun install
 The reviewer is any OpenAI-compatible chat endpoint. Ask the user which one to use:
 
 - **A local model.** Use the server's base URL, for example Ollama `http://127.0.0.1:11434/v1`, LM Studio `http://127.0.0.1:1234/v1` or a llama.cpp server `http://127.0.0.1:8080/v1`, plus a model it serves. List the served models with `curl -s <base>/models` (for a base given without `/v1`, use `<base>/v1/models`). `baseUrls` takes a base with or without `/v1`.
-- **A hosted model.** Use the provider's OpenAI-compatible base URL. Set `"apiKeyEnv"` to the name of the environment variable that holds the key. Never write a key into the config, this repository or the chat.
+- **A hosted model.** Use the provider's OpenAI-compatible base URL. Set `"apiKeyEnv"` to the name of the environment variable that holds the key. Never write a key into the config, this repository or the chat. oUpdate sends the key only over https or to a loopback host (127.0.0.1, ::1, localhost); with a key set, a plain http base URL on any other host is skipped. A redirect is an error for that base URL and is never followed, with or without a key, so neither the key nor any configured header goes anywhere else.
 
 The reviewer spec is one JSON object:
 
@@ -74,7 +74,7 @@ If the reviewer line says `error` or the call times out, fix the endpoint before
 ### Rules
 
 - Dry run first, then the live run only with the user's yes.
-- Never store secrets in a file you create. Point to them through environment variables (`apiKeyEnv`, `${NAME}` in config values) or a token file the user makes.
+- Never store secrets in a file you create. Point to them through environment variables (`apiKeyEnv`, or `${NAME}` in a value of the host config, a targets file or the eval config; an unset or empty variable stops the run with its name) or a token file the user makes.
 - Don't edit oUpdate's source, or switch off a layer, to make a run pass. A hold is the tool working. Show it to the user.
 
 ## Working on this repository

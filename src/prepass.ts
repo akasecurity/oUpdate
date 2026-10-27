@@ -5,6 +5,44 @@
 export type FileMap = Map<string, Uint8Array>;
 export type Ecosystem = "npm" | "pypi";
 
+// Symlink entries from readArtifact. Their bytes are the link target (what pip writes for a wheel's
+// symlink entry), and the mark is kept on the bytes so it survives path renames and copies.
+const LINKS = new WeakSet<Uint8Array>();
+
+export function markLink(bytes: Uint8Array): Uint8Array {
+  LINKS.add(bytes);
+  return bytes;
+}
+
+export function isLink(bytes: Uint8Array): boolean {
+  return LINKS.has(bytes);
+}
+
+// Paths mergeArtifactPair placed, per merged map: the path inside the artifact (a `label/` prefix stripped), which
+// is what a symlink target is relative to, and the paths that artifact holds, so a link resolves only inside it.
+const LABELED = new WeakMap<FileMap, Map<string, { inner: string; members?: ReadonlySet<string> }>>();
+
+export function markLabeled(files: FileMap, key: string, inner: string, members?: ReadonlySet<string>): void {
+  let m = LABELED.get(files);
+  if (!m) LABELED.set(files, (m = new Map()));
+  m.set(key, { inner, members });
+}
+
+export function artifactPath(files: FileMap, key: string): string {
+  return LABELED.get(files)?.get(key)?.inner ?? key;
+}
+
+/** The key a merge placed `inner` of the same artifact (same member set) under, if it placed it at all. */
+export function artifactKey(files: FileMap, members: ReadonlySet<string>, inner: string): string | undefined {
+  for (const [k, v] of LABELED.get(files) ?? []) if (v.members === members && v.inner === inner) return k;
+  return undefined;
+}
+
+/** The paths of the artifact a merged key came from, or undefined for a map no merge built. */
+export function artifactMembers(files: FileMap, key: string): ReadonlySet<string> | undefined {
+  return LABELED.get(files)?.get(key)?.members;
+}
+
 export interface Signal {
   kind: string;
   path: string;
@@ -41,6 +79,19 @@ function basename(p: string): string {
 function isPythonStartupHook(path: string): boolean {
   const b = basename(path);
   return b.endsWith(".pth") || b === "sitecustomize.py" || b === "usercustomize.py";
+}
+
+// True when a symlink at `path` with this target resolves above the package root (or is absolute).
+function linkEscapes(path: string, target: string): boolean {
+  if (target.startsWith("/") || /^[A-Za-z]:/.test(target)) return true;
+  const stack = path.split("/").slice(0, -1);
+  for (const seg of target.split("/")) {
+    if (seg === "..") {
+      if (!stack.length) return true;
+      stack.pop();
+    } else if (seg && seg !== ".") stack.push(seg);
+  }
+  return false;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -80,6 +131,15 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
     const prev = oldFiles.get(p);
     if (!prev) added.push(p);
     else if (!bytesEqual(prev, bytes)) changed.push(p);
+  }
+
+  // A link named as a startup hook, or pointing outside the package, is hard whether or not it changed.
+  for (const [p, bytes] of newFiles) {
+    if (!isLink(bytes)) continue;
+    const target = dec.decode(bytes);
+    if (isPythonStartupHook(p)) hard.push({ kind: "link-startup-hook", path: p, detail: `symlink with a startup hook name; pip installs its target as the file: ${target.slice(0, 200)}` });
+    else if (linkEscapes(artifactPath(newFiles, p), target)) hard.push({ kind: "link-outside", path: p, detail: `symlink outside the package: ${target.slice(0, 200)}` });
+    else if (!oldFiles.has(p) || !bytesEqual(oldFiles.get(p)!, bytes)) soft.push({ kind: "symlink", path: p, detail: `symlink to ${target.slice(0, 160)}` });
   }
 
   if (eco === "pypi") {

@@ -5,7 +5,7 @@ import { join } from "node:path";
 /** Hand-written API responses, trimmed to the fields that matter plus a few around them. */
 const fixture = (f: string) => Bun.file(join(import.meta.dir, "fixtures/github", f)).json();
 const pullsPage2 = await fixture("pulls-page2.json");
-const combined = (await fixture("combined-status.json")) as { sha: string };
+const statuses = await fixture("statuses.json");
 const commentsPage2 = await fixture("comments-page2.json");
 
 interface Call { method: string; url: string; headers: Headers; body?: string }
@@ -20,7 +20,7 @@ function fakeFetch(routes: Record<string, () => Response>, calls: Call[], base =
   }) as typeof fetch;
 }
 
-const pull = (n: number) => ({ number: n, head: { ref: `renovate/p${n}`, sha: `h${n}` }, base: { ref: "main", sha: "b" } });
+const pull = (n: number) => ({ number: n, user: { login: "renovate[bot]" }, head: { ref: `renovate/p${n}`, sha: `h${n}`, repo: { full_name: "octo-org/app" } }, base: { ref: "main", sha: "b", repo: { full_name: "octo-org/app" } } });
 
 describe("githubForge", () => {
   test("sends a bearer token with the GitHub JSON media type and API version, to api.github.com by default", async () => {
@@ -53,8 +53,8 @@ describe("githubForge", () => {
     });
     const out = await f.openPulls("octo-org/app");
     expect(out).toHaveLength(101);
-    expect(out[0]).toEqual({ number: 1, headRef: "renovate/p1", headSha: "h1", baseSha: "b" });
-    expect(out[100]).toEqual({ number: 42, headRef: "dependabot/npm_and_yarn/yaml-2.8.3", headSha: "4b1e5c0a3f2d9e8b7c6a5f4e3d2c1b0a9f8e7d6c", baseSha: "0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e" });
+    expect(out[0]).toEqual({ number: 1, headRef: "renovate/p1", headSha: "h1", baseSha: "b", author: "renovate[bot]", headRepo: "octo-org/app", baseRepo: "octo-org/app" });
+    expect(out[100]).toEqual({ number: 42, headRef: "dependabot/npm_and_yarn/yaml-2.8.3", headSha: "4b1e5c0a3f2d9e8b7c6a5f4e3d2c1b0a9f8e7d6c", baseSha: "0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e", author: "dependabot[bot]", headRepo: "octo-org/app", baseRepo: "octo-org/app" });
     expect(calls).toHaveLength(2);
   });
 
@@ -82,27 +82,55 @@ describe("githubForge", () => {
     await expect(f.readFile("o/r", "h1", "bun.lock")).rejects.toThrow(/403/);
   });
 
-  test("statusOf reads our context from the combined status, which holds the latest state per context", async () => {
-    const calls: Call[] = [];
-    const sha = combined.sha;
-    const f = githubForge({ token: "t", fetch: fakeFetch({ [`GET /repos/octo-org/app/commits/${sha}/status?per_page=100&page=1`]: () => Response.json(combined) }, calls) });
-    expect(await f.statusOf("octo-org/app", sha, "oupdate/review")).toBe("pending");
-    expect(await f.statusOf("octo-org/app", sha, "ci/build")).toBe("success");
-    expect(await f.statusOf("octo-org/app", sha, "other")).toBeUndefined();
-  });
-
-  test("statusOf pages through a combined status with more than 100 contexts", async () => {
-    const calls: Call[] = [];
-    const many = Array.from({ length: 100 }, (_, i) => ({ id: i, state: "success", context: `ci/${i}` }));
+  test("changedFiles pages through the PR's files, a rename's old path too; a list at GitHub's 3000 cap throws", async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ filename: `src/f${i}.ts` }));
     const f = githubForge({
       token: "t",
       fetch: fakeFetch({
-        "GET /repos/o/r/commits/h1/status?per_page=100&page=1": () => Response.json({ state: "failure", sha: "h1", total_count: 101, statuses: many }),
-        "GET /repos/o/r/commits/h1/status?per_page=100&page=2": () => Response.json({ state: "failure", sha: "h1", total_count: 101, statuses: [{ id: 200, state: "failure", context: "oupdate/review" }] }),
+        "GET /repos/o/r/pulls/7/files?per_page=100&page=1": () => Response.json(page1),
+        "GET /repos/o/r/pulls/7/files?per_page=100&page=2": () => Response.json([{ filename: "web/bun.lock", previous_filename: "bun.lock" }]),
+      }, []),
+    });
+    const out = await f.changedFiles("o/r", 7);
+    expect(out).toHaveLength(102);
+    expect(out.slice(-2)).toEqual(["web/bun.lock", "bun.lock"]);
+    const full = Array.from({ length: 100 }, (_, i) => ({ filename: `f${i}` }));
+    const routes: Record<string, () => Response> = {};
+    for (let p = 1; p <= 31; p++) routes[`GET /repos/o/r/pulls/8/files?per_page=100&page=${p}`] = () => Response.json(p <= 30 ? full : []);
+    await expect(githubForge({ token: "t", fetch: fakeFetch(routes, []) }).changedFiles("o/r", 8)).rejects.toThrow(/3000/);
+  });
+
+  test("statusOf reads the newest status of our context from the statuses list, with who posted it", async () => {
+    const calls: Call[] = [];
+    const f = githubForge({ token: "t", fetch: fakeFetch({ "GET /repos/octo-org/app/commits/s1/statuses?per_page=100&page=1": () => Response.json(statuses) }, calls) });
+    expect(await f.statusOf("octo-org/app", "s1", "oupdate/review")).toEqual({ state: "success", creator: "mallory" });
+    expect(await f.statusOf("octo-org/app", "s1", "ci/build")).toEqual({ state: "success", creator: "ci-bot" });
+    expect(await f.statusOf("octo-org/app", "s1", "other")).toBeUndefined();
+  });
+
+  test("statusOf pages through more than 100 statuses", async () => {
+    const calls: Call[] = [];
+    const many = Array.from({ length: 100 }, (_, i) => ({ id: i, state: "success", context: `ci/${i}`, creator: { login: "ci" } }));
+    const f = githubForge({
+      token: "t",
+      fetch: fakeFetch({
+        "GET /repos/o/r/commits/h1/statuses?per_page=100&page=1": () => Response.json(many),
+        "GET /repos/o/r/commits/h1/statuses?per_page=100&page=2": () => Response.json([{ id: 200, state: "failure", context: "oupdate/review", creator: { login: "gate" } }]),
       }, calls),
     });
-    expect(await f.statusOf("o/r", "h1", "oupdate/review")).toBe("failure");
+    expect(await f.statusOf("o/r", "h1", "oupdate/review")).toEqual({ state: "failure", creator: "gate" });
     expect(calls).toHaveLength(2);
+  });
+
+  test("self reads the token's login from /user once, or takes it as given; a GITHUB_TOKEN refusal names --gate-login", async () => {
+    const calls: Call[] = [];
+    const f = githubForge({ token: "t", fetch: fakeFetch({ "GET /user": () => Response.json({ login: "octo-gate" }) }, calls) });
+    expect(await f.self()).toBe("octo-gate");
+    expect(await f.self()).toBe("octo-gate");
+    expect(calls).toHaveLength(1);
+    expect(await githubForge({ token: "t", login: "github-actions[bot]", fetch: fakeFetch({}, []) }).self()).toBe("github-actions[bot]");
+    const refused = githubForge({ token: "t", fetch: (async () => Response.json({ message: "Resource not accessible by integration" }, { status: 403 })) as unknown as typeof fetch });
+    await expect(refused.self()).rejects.toThrow(/403.*--gate-login github-actions\[bot\]/);
   });
 
   test("setStatus posts state, context and description, cut to GitHub's 140 characters", async () => {
@@ -117,11 +145,12 @@ describe("githubForge", () => {
     expect(sent.endsWith("…")).toBe(true);
   });
 
-  test("upsertComment finds the marker comment on a later page and edits it", async () => {
+  test("upsertComment finds the gate's own marker comment on a later page and edits it", async () => {
     const calls: Call[] = [];
-    const page1 = Array.from({ length: 100 }, (_, i) => ({ id: 9000 + i, body: `comment ${i}` }));
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ id: 9000 + i, body: `comment ${i}`, user: { login: "octocat" } }));
     const f = githubForge({
       token: "t",
+      login: "github-actions[bot]",
       fetch: fakeFetch({
         "GET /repos/octo-org/app/issues/42/comments?per_page=100&page=1": () => Response.json(page1),
         "GET /repos/octo-org/app/issues/42/comments?per_page=100&page=2": () => Response.json(commentsPage2),
@@ -137,12 +166,38 @@ describe("githubForge", () => {
     expect(JSON.parse(calls[2]!.body!)).toEqual({ body: "<!-- oupdate-gate -->\nnew" });
   });
 
+  test("ownComment returns only the token's own marker comment, never another user's", async () => {
+    const mk = (login: string) => githubForge({
+      token: "t",
+      login,
+      fetch: fakeFetch({ "GET /repos/octo-org/app/issues/42/comments?per_page=100&page=1": () => Response.json(commentsPage2) }, []),
+    });
+    expect(await mk("oupdate-gate").ownComment("octo-org/app", 42, "<!-- oupdate-gate -->")).toBeUndefined();
+    const mine = (commentsPage2 as { user: { login: string }; body: string }[]).find((c) => c.user.login === "github-actions[bot]" && c.body.startsWith("<!-- oupdate-gate -->"))!;
+    expect(await mk("github-actions[bot]").ownComment("octo-org/app", 42, "<!-- oupdate-gate -->")).toBe(mine.body);
+  });
+
+  test("upsertComment never edits another user's comment carrying the marker", async () => {
+    const calls: Call[] = [];
+    const f = githubForge({
+      token: "t",
+      login: "oupdate-gate",
+      fetch: fakeFetch({
+        "GET /repos/octo-org/app/issues/42/comments?per_page=100&page=1": () => Response.json(commentsPage2),
+        "POST /repos/octo-org/app/issues/42/comments": () => Response.json({}, { status: 201 }),
+      }, calls),
+    });
+    await f.upsertComment("octo-org/app", 42, "<!-- oupdate-gate -->", "<!-- oupdate-gate -->\nnew");
+    expect(calls.map((c) => c.method)).toEqual(["GET", "POST"]);
+  });
+
   test("upsertComment creates the comment when no page carries the marker", async () => {
     const calls: Call[] = [];
     const f = githubForge({
       token: "t",
+      login: "me",
       fetch: fakeFetch({
-        "GET /repos/o/r/issues/8/comments?per_page=100&page=1": () => Response.json([{ id: 1, body: "hi" }]),
+        "GET /repos/o/r/issues/8/comments?per_page=100&page=1": () => Response.json([{ id: 1, body: "hi", user: { login: "me" } }]),
         "POST /repos/o/r/issues/8/comments": () => Response.json({}, { status: 201 }),
       }, calls),
     });

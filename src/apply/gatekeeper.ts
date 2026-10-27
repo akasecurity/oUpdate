@@ -34,17 +34,31 @@ export interface GkOptions {
 
 const Q = "com.apple.quarantine";
 
+// Both tools print the file name, so their output is read by whole lines only, and a name with a
+// line break (it could forge a line) is never assessed. Anything unexpected holds the file.
+const lines = (r: { out: string; err: string }) => `${r.out}${r.err}`.split("\n").map((l) => l.replace(/\r$/, ""));
+const oneLine = (file: string) => !/[\n\r]/.test(file);
+
 /** The real Team ID and notarization gates. spctl is called by absolute path: /usr/sbin is not on a LaunchDaemon's PATH. */
 export function realGates(exec: Exec, spctl = "/usr/sbin/spctl") {
   return {
     team: async (file: string) => {
+      if (!oneLine(file)) return "";
       const r = await exec(["codesign", "-dv", file]);
-      return `${r.out}${r.err}`.match(/^TeamIdentifier=(.*)$/m)?.[1]?.trim() ?? "";
+      if (r.rc !== 0) return "";
+      const ids = lines(r).filter((l) => l.startsWith("TeamIdentifier="));
+      const t = ids.length === 1 ? ids[0]!.slice("TeamIdentifier=".length) : "";
+      return /^[A-Z0-9]{10}$/.test(t) || t === "not set" ? t : "";
     },
     notarized: async (file: string, team: string) => {
+      if (!oneLine(file) || !/^[A-Z0-9]{10}$/.test(team)) return false;
       const r = await exec([spctl, "-a", "-vv", "-t", "open", "--context", "context:primary-signature", file]);
-      const a = `${r.out}${r.err}`;
-      return a.includes(": accepted") && a.includes("source=Notarized Developer ID") && a.includes(`(${team})`);
+      if (r.rc !== 0) return false;
+      const ls = lines(r).filter(Boolean);
+      const sources = ls.filter((l) => l.startsWith("source="));
+      const origins = ls.filter((l) => l.startsWith("origin="));
+      return ls[0] === `${file}: accepted` && sources.length === 1 && sources[0] === "source=Notarized Developer ID" &&
+        origins.length === 1 && origins[0]!.endsWith(` (${team})`);
     },
   };
 }
