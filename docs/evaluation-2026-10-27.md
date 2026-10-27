@@ -1,5 +1,7 @@
 # Attack and clean-release evaluation, 27 Oct 2026
 
+The limits this page names are tracked and re-scored each release in [limits.md](limits.md).
+
 This page follows the [26 Oct evaluation](evaluation-2026-10-26.md). It adds three things: five repeat runs of the local model on the same cases, the same cases reviewed by two cloud models, and a larger set of 25 real attacks and 25 clean releases. On the core set, the local model stopped all 9 attacks and let all 8 clean releases through in each of the five runs. On the larger set, every reviewer stopped 23 of the 25 attacks, the same two got through all three, and between 9 and 14 of the 25 clean releases were held. Those false holds are the main result of this round.
 
 For the effect of the 0.2.1 and 0.2.2 releases on these cases, see [Update: 0.2.1 and 0.2.2](#update-021-and-022) below.
