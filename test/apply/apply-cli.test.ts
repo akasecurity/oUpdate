@@ -1,10 +1,9 @@
 // `oupdate host --apply | --dry-run | --gatekeeper-approve | --gatekeeper-revert` (slice 7), and the
 // Exec timeout the run relies on.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readdirSync } from "node:fs";
 import { closeRc, isStopping, KILL_GRACE_MS, killLive, liveGroups, onStop, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
 import { realReleaseLock, realTakeLock } from "../../src/apply/owner-waiter.ts";
 import { applyMain, logPath, ownerWaiterArgv, ownerWaiterMain, parseHostCommand } from "../../src/host/cli.ts";
@@ -454,7 +453,14 @@ describe("realExec: process groups (slice 7 re-review)", () => {
 
   test("a timed-out call closes its pipe ends even while a grandchild still holds the other ends", async () => {
     // Mutant caught: stdout/stderr destroy() deleted (our ends stayed open until the grandchild died).
-    const fds = () => readdirSync("/dev/fd").length;
+    // Linux keeps a pidfd open for the child until it exits. That is not a pipe end.
+    const fds = () => readdirSync("/dev/fd").filter((fd) => {
+      try {
+        return readlinkSync(join("/dev/fd", fd)) !== "anon_inode:[pidfd]";
+      } catch {
+        return true;
+      }
+    }).length;
     const before = fds();
     const r = await realExec(["/bin/sh", "-c", 'trap "" TERM; sleep 30 & wait'], { timeoutMs: 300 });
     expect(r.timedOut).toBe(true);

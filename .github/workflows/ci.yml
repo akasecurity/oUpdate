@@ -26,5 +26,10 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       # ubuntu-latest ships GNU tar. src/artifact.ts and the archive tests invoke bsdtar.
-      - run: sudo apt-get update && sudo apt-get install -y libarchive-tools
+      # setup-bun installs under the runner home. A plist for another user refuses that
+      # path, so the test step uses a stable link outside the home.
+      - run: |
+          sudo apt-get update && sudo apt-get install -y libarchive-tools
+          sudo ln -sfn "$(command -v bun)" /usr/local/bin/bun
+          echo /usr/local/bin >> "$GITHUB_PATH"
       - run: bun test
