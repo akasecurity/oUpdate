@@ -73,8 +73,8 @@ function rig(state: string, w: World = {}) {
   const calls: string[][] = [];
   const spawned: string[][] = [];
   const removed: string[] = [];
-  const inst = w.installed ?? { ver: "0.7.0", id: "app.example", team: "TEAM1" };
-  const stg = { ver: "0.7.1", id: "app.example", team: "TEAM1", codesign: 0, notarized: true, ...w.staged };
+  const inst = w.installed ?? { ver: "0.7.0", id: "app.example", team: "TEAMAAAAA1" };
+  const stg = { ver: "0.7.1", id: "app.example", team: "TEAMAAAAA1", codesign: 0, notarized: true, ...w.staged };
   const exec: Exec = async (argv) => {
     calls.push(argv);
     const [cmd, ...a] = argv;
@@ -159,7 +159,7 @@ describe("appBundleUpgrade", () => {
   });
   test("nothing to do when the installed bundle is current", async () => {
     const { state } = project();
-    const t = rig(state, { installed: { ver: "0.7.1", id: "app.example", team: "TEAM1" } });
+    const t = rig(state, { installed: { ver: "0.7.1", id: "app.example", team: "TEAMAAAAA1" } });
     const res = await t.run();
     expect(res.status).toBe("current");
     expect(t.calls.some((c) => c[0] === "/bin/mv")).toBe(false);
@@ -220,7 +220,7 @@ describe("appBundleUpgrade", () => {
   });
   test("a missing tag holds", async () => {
     const { state } = project();
-    const res = await rig(state, { installed: { ver: "0.6.0", id: "app.example", team: "TEAM1" } }).run();
+    const res = await rig(state, { installed: { ver: "0.6.0", id: "app.example", team: "TEAMAAAAA1" } }).run();
     expect(res.status).toBe("held");
     expect(res.note).toContain("v0.6.0");
   });

@@ -46,6 +46,8 @@ test("landing and score", () => {
 test("expandEnv fills ${NAME} and rejects an unset name", () => {
   expect(expandEnv('{"u":"${A_B}/v1"}', { A_B: "http://h:1" })).toBe('{"u":"http://h:1/v1"}');
   expect(() => expandEnv("${NOPE}", {})).toThrow("NOPE");
+  expect(() => expandEnv("${E}", { E: "" })).toThrow("E");
+  expect(expandEnv("${lower_1} $A ${1A} ${A-B} $", { lower_1: "x" })).toBe("x $A ${1A} ${A-B} $");
 });
 
 test("checks 1 and 2 count the core set from the JSON and ignore extended results", () => {

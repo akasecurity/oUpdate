@@ -46,6 +46,7 @@ const ok = (out = ""): ExecResult => ({ rc: 0, out, err: "" });
 export function fakeHost(s: HostScript = {}) {
   const calls: string[] = [];
   const upgraded = new Set<string>();
+  const npmInstalled = new Map<string, string>();
   const lsof = [...(s.lsof ?? [])];
   const exec: Exec = async (argv) => {
     const line = argv.join(" ");
@@ -107,6 +108,13 @@ export function fakeHost(s: HostScript = {}) {
     if (cmd === "npm") {
       if (rest === "outdated -g --json") return { rc: s.npmOutdated && s.npmOutdated !== "{}" ? 1 : 0, out: s.npmOutdated ?? "{}", err: "" };
       if (a[0] === "view" && a[2] === "dist.tarball") return ok(`https://registry.npmjs.org/${a[1]!.replace(/@[^@/]*$/, "")}/-/x.tgz\n`);
+      // install -g <name>@<version> records it; ls -g reads it back.
+      const pin = a[0] === "install" ? a.at(-1)!.match(/^(.+)@([^@/]+)$/) : null;
+      if (pin) npmInstalled.set(pin[1]!, pin[2]!);
+      if (a[0] === "ls") {
+        const v = npmInstalled.get(a.at(-1)!);
+        return ok(JSON.stringify({ dependencies: v ? { [a.at(-1)!]: { version: v } } : {} }));
+      }
       return ok();
     }
     return ok();

@@ -9,12 +9,26 @@ export interface GithubDeps {
   /** API base, e.g. https://ghe.example/api/v3. Default https://api.github.com. */
   endpoint?: string;
   token: string;
+  /**
+   * The login the token acts as; unset, it is read from GET /user. The Actions GITHUB_TOKEN cannot read /user:
+   * pass "github-actions[bot]" for it.
+   */
+  login?: string;
   fetch?: typeof fetch;
+}
+
+interface ApiPull {
+  number: number;
+  user?: { login?: string } | null;
+  head: { ref: string; sha: string; repo?: { full_name?: string } | null };
+  base: { sha: string; repo?: { full_name?: string } | null };
 }
 
 const PAGE = 100;
 /** GitHub refuses a status description longer than this. */
 const DESCRIPTION_MAX = 140;
+/** GitHub's cap on the files listed for one PR. */
+const FILES_MAX = 3000;
 
 export function githubForge(deps: GithubDeps): Forge {
   const f = deps.fetch ?? fetch;
@@ -48,12 +62,36 @@ export function githubForge(deps: GithubDeps): Forge {
 
   const enc = (repo: string) => repo.split("/").map(encodeURIComponent).join("/");
   const list = <T>(p: unknown) => p as T[];
+  let me: Promise<string> | undefined;
+  /** The login the token acts as, asked of the forge once. */
+  function self(): Promise<string> {
+    me ??= deps.login
+      ? Promise.resolve(deps.login)
+      : call("GET", "/user").then(async (r) => {
+          if (!r.ok) throw new Error(`forge GET /user: ${r.status}; the Actions GITHUB_TOKEN cannot read it, pass --gate-login github-actions[bot]`);
+          const u = (await r.json()) as { login?: string };
+          if (!u.login) throw new Error("forge GET /user: no login");
+          return u.login;
+        });
+    return me;
+  }
+
+  type Comment = { id: number; body: string; user?: { login?: string } | null };
+  /** The token's own comment that starts with `marker`, if any. */
+  async function own(repo: string, pr: number, marker: string): Promise<Comment | undefined> {
+    const me = (await self()).toLowerCase();
+    for await (const c of pages(`/repos/${enc(repo)}/issues/${pr}/comments`, list<Comment>)) {
+      if (c.body?.startsWith(marker) && c.user?.login?.toLowerCase() === me) return c;
+    }
+    return undefined;
+  }
 
   return {
+    self,
     async openPulls(repo) {
       const out: Pull[] = [];
-      for await (const p of pages(`/repos/${enc(repo)}/pulls?state=open`, list<{ number: number; head: { ref: string; sha: string }; base: { sha: string } }>)) {
-        out.push({ number: p.number, headRef: p.head.ref, headSha: p.head.sha, baseSha: p.base.sha });
+      for await (const p of pages(`/repos/${enc(repo)}/pulls?state=open`, list<ApiPull>)) {
+        out.push({ number: p.number, headRef: p.head.ref, headSha: p.head.sha, baseSha: p.base.sha, author: p.user?.login ?? "", headRepo: p.head.repo?.full_name ?? "", baseRepo: p.base.repo?.full_name ?? "" });
       }
       return out;
     },
@@ -65,10 +103,20 @@ export function githubForge(deps: GithubDeps): Forge {
       if (!r.ok) throw new Error(`forge GET contents ${path}: ${r.status}`);
       return r.text();
     },
+    async changedFiles(repo, pr) {
+      const out: string[] = [];
+      for await (const f of pages(`/repos/${enc(repo)}/pulls/${pr}/files`, list<{ filename: string; previous_filename?: string }>)) {
+        out.push(f.filename);
+        if (f.previous_filename) out.push(f.previous_filename);
+      }
+      // GitHub lists at most 3000 files of a PR; past that the list is cut short, so the rest cannot be seen.
+      if (out.length >= FILES_MAX) throw new Error(`PR #${pr} changes ${FILES_MAX} or more files, more than GitHub lists`);
+      return out;
+    },
     async statusOf(repo, sha, context) {
-      // The combined status holds the latest status per context.
-      for await (const s of pages(`/repos/${enc(repo)}/commits/${encodeURIComponent(sha)}/status`, (p) => (p as { statuses: { context: string; state: StatusState }[] }).statuses)) {
-        if (s.context === context) return s.state;
+      // The statuses list runs newest first and names who posted each (the combined status does not).
+      for await (const s of pages(`/repos/${enc(repo)}/commits/${encodeURIComponent(sha)}/statuses`, list<{ context: string; state: StatusState; creator?: { login?: string } | null }>)) {
+        if (s.context === context) return { state: s.state, creator: s.creator?.login ?? "" };
       }
       return undefined;
     },
@@ -77,14 +125,13 @@ export function githubForge(deps: GithubDeps): Forge {
       const description = chars.length > DESCRIPTION_MAX ? chars.slice(0, DESCRIPTION_MAX - 1).join("") + "…" : status.description;
       await json("POST", `/repos/${enc(repo)}/statuses/${encodeURIComponent(sha)}`, { ...status, description });
     },
+    async ownComment(repo, pr, marker) {
+      return (await own(repo, pr, marker))?.body;
+    },
     async upsertComment(repo, pr, marker, body) {
-      for await (const c of pages(`/repos/${enc(repo)}/issues/${pr}/comments`, list<{ id: number; body: string }>)) {
-        if (c.body?.startsWith(marker)) {
-          await json("PATCH", `/repos/${enc(repo)}/issues/comments/${c.id}`, { body });
-          return;
-        }
-      }
-      await json("POST", `/repos/${enc(repo)}/issues/${pr}/comments`, { body });
+      const mine = await own(repo, pr, marker);
+      if (mine) await json("PATCH", `/repos/${enc(repo)}/issues/comments/${mine.id}`, { body });
+      else await json("POST", `/repos/${enc(repo)}/issues/${pr}/comments`, { body });
     },
   };
 }

@@ -96,26 +96,26 @@ function tokenDiff(oldLine: string, newLine: string): string | undefined {
 
 // Renders the change between two file texts for the reviewer: hunks in file order with
 // `@@ -oldLine +newLine @@` positions, `-`/`+` lines, and `~` lines for changed minified
-// lines ([-removed-]{+added+} with context). CRLF and trailing whitespace are ignored.
+// lines ([-removed-]{+added+} with context). Lines are compared exactly: a whitespace change can be code (a shell
+// heredoc delimiter "EOF " vs "EOF"), so it is shown, and a hunk with a CR or trailing whitespace in any of its
+// lines shows every line as a JSON string so the change is visible. Only a whole-file CRLF<->LF conversion is named instead of listed.
+const QUOTE_NOTE = " [lines below are exact text as JSON strings, to show a CR or trailing whitespace]";
+const needsQuote = (l: string) => l.includes("\r") || /[ \t]$/.test(l);
+
 export function renderLineDiff(before: string | undefined, after: string | undefined): string {
-  const split = (s: string | undefined) => (s === undefined ? [] : s.replace(/\r\n/g, "\n").split("\n"));
+  if (before !== undefined && after !== undefined && before !== after && (after === before.replaceAll("\n", "\r\n") || before === after.replaceAll("\n", "\r\n"))) {
+    return "[line endings only: every line converted between CRLF and LF]\n";
+  }
+  const split = (s: string | undefined) => (s === undefined ? [] : s.split("\n"));
   const oldLines = split(before);
   const newLines = split(after);
-  const key = (l: string) => l.trimEnd();
-  const oldKeys = oldLines.map(key);
-  const newKeys = newLines.map(key);
-  if (before !== undefined && after !== undefined && oldKeys.length === newKeys.length && oldKeys.every((l, i) => l === newKeys[i])) {
-    return "[line endings or whitespace only]\n";
-  }
-  const ops = diffSeq(oldKeys, newKeys);
+  const ops = diffSeq(oldLines, newLines);
   if (!ops) {
-    // Too many edits to order: list each line found in only one version, which still
-    // shows every line of text that is new to this version.
-    const oldSet = new Set(oldKeys);
-    const newSet = new Set(newKeys);
-    const gone = oldLines.filter((_, i) => !newSet.has(oldKeys[i]!)).map((l) => `-${l}\n`);
-    const added = newLines.filter((_, i) => !oldSet.has(newKeys[i]!)).map((l) => `+${l}\n`);
-    return ["[too many changes to show in order: lines found in only one version, unordered]\n", ...gone, ...added].join("");
+    // Too many edits to order: show the whole new version. Dropping lines both versions hold would hide a
+    // reorder (an activation line moved above its payload); the review's size holds bound the length.
+    const q = newLines.some(needsQuote);
+    const show = (l: string) => (q ? JSON.stringify(l) : l);
+    return [`[too many changes to show in order: the whole new version follows]${q ? QUOTE_NOTE : ""}\n`, ...newLines.map((l) => `+${show(l)}\n`)].join("");
   }
 
   let out = "";
@@ -132,14 +132,16 @@ export function renderLineDiff(before: string | undefined, after: string | undef
       else add.push(newLines[ni++]!);
       i++;
     }
-    out += `@@ -${o0 + 1} +${n0 + 1} @@\n`;
+    const q = [...del, ...add].some(needsQuote);
+    const show = (l: string) => (q ? JSON.stringify(l) : l);
+    out += `@@ -${o0 + 1} +${n0 + 1} @@${q ? QUOTE_NOTE : ""}\n`;
     if (del.length === add.length && del.every((l, j) => l.length > LONG && add[j]!.length > LONG)) {
       for (let j = 0; j < del.length; j++) {
         const t = tokenDiff(del[j]!, add[j]!);
-        out += t === undefined ? `-${del[j]}\n+${add[j]}\n` : `~${t}\n`;
+        out += t === undefined ? `-${show(del[j]!)}\n+${show(add[j]!)}\n` : `~${t}\n`;
       }
     } else {
-      out += del.map((l) => `-${l}\n`).join("") + add.map((l) => `+${l}\n`).join("");
+      out += del.map((l) => `-${show(l)}\n`).join("") + add.map((l) => `+${show(l)}\n`).join("");
     }
   }
   return out;

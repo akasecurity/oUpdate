@@ -121,6 +121,8 @@ export function timeoutToken(argv: string[]): string {
   if (prog === "git" && rest[0] === "-C") rest = rest.slice(2);
   if (prog === "brew" && rest[0] === "upgrade") return last(rest.at(-1) ?? "?");
   if (prog === "npm" && rest[0] === "update") return rest.at(-1) ?? "?";
+  // install -g <name>@<version>: the name without its version (a scope's leading @ kept).
+  if (prog === "npm" && rest[0] === "install") return (rest.at(-1) ?? "?").replace(/(?<=.)@[^@/]*$/, "");
   const sub = ["brew", "git", "npm", "launchctl", "claude"].includes(prog) ? rest.find((x) => !x.startsWith("-")) : undefined;
   return `timeout:${prog}${sub ? `-${sub}` : ""}`;
 }

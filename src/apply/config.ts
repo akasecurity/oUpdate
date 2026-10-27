@@ -3,6 +3,7 @@
 // type is an error, so a typo never silently turns a guard off.
 
 import { isAbsolute } from "node:path";
+import { expandEnv } from "../env.ts";
 import type { Caps } from "./chunked.ts";
 import type { DeferredService } from "./waiter.ts";
 import type { LabelRestart } from "./kegs.ts";
@@ -251,11 +252,12 @@ function releaseCheck(v: unknown, i: number, seen: Set<string>): ReleaseCheck {
   return { formula, command: [...command], retries, timeoutSec, ...(before ? { before: [...before] } : {}), ...(after ? { after: [...after] } : {}), ...(runAs ? { runAs } : {}), ...(owners ? { owners: [...owners] } : {}) };
 }
 
-/** Parses the config file's text; `host` is the fallback when the file names none. */
-export function parseApplyConfig(text: string, fallbackHost: string): ApplyConfig {
+/** Parses the config file's text, ${NAME} read from env; `host` is the fallback when the file names none. */
+export function parseApplyConfig(text: string, fallbackHost: string, env: Record<string, string | undefined> = process.env): ApplyConfig {
+  const expanded = expandEnv(text, env);
   let root: unknown;
   try {
-    root = JSON.parse(text);
+    root = JSON.parse(expanded);
   } catch {
     throw new Error("config is not valid JSON");
   }

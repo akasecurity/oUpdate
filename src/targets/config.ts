@@ -5,6 +5,7 @@
 
 import { resolve } from "node:path";
 import { validateReviewerSpec, type ReviewerSpec } from "../adapters/reviewer/spec.ts";
+import { expandEnv } from "../env.ts";
 import { NAS_LEGS, UNBUILT_LEGS, type Leg, type Reach, type Schedule, type Target, type TargetOs, type UnbuiltLegKind } from "./model.ts";
 import { parsePinBumpLeg } from "./pins/config.ts";
 import { absPath, isObj, obj, optBool, optCount, optStr, reqStr, strList } from "./strict.ts";
@@ -139,10 +140,12 @@ function target(v: unknown, where: string): Target {
   return { id, os: os as TargetOs, reach: r, legs, schedule: schedule(reqStr(o, "schedule", where), where), summaryTo, ...(parityTo ? { parityTo } : {}) };
 }
 
-export function parseTargetsConfig(text: string): TargetsConfig {
+/** Parses the targets file's text, ${NAME} read from env. */
+export function parseTargetsConfig(text: string, env: Record<string, string | undefined> = process.env): TargetsConfig {
+  const expanded = expandEnv(text, env);
   let root: unknown;
   try {
-    root = JSON.parse(text);
+    root = JSON.parse(expanded);
   } catch {
     throw new Error("targets config is not valid JSON");
   }

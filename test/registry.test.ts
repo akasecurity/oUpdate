@@ -71,6 +71,24 @@ describe("pypiRegistry", () => {
     ]);
   });
 
+  test("artifact files are every wheel and sdist with PyPI's sha256; eggs are left out", async () => {
+    const reg2 = pypiRegistry({
+      fetch: fakeFetch({
+        "https://pypi.org/pypi/demo/1.0/json": {
+          urls: [
+            { packagetype: "bdist_wheel", filename: "demo-1.0-py3-none-any.whl", url: "https://files.example/a.whl", digests: { sha256: "a".repeat(64) } },
+            { packagetype: "bdist_egg", filename: "demo-1.0.egg", url: "https://files.example/b.egg", digests: { sha256: "b".repeat(64) } },
+            { packagetype: "sdist", filename: "demo-1.0.tar.gz", url: "https://files.example/c.tar.gz" },
+          ],
+        },
+      }),
+    });
+    expect(await reg2.artifactFiles!("demo", "1.0")).toEqual([
+      { url: "https://files.example/a.whl", filename: "demo-1.0-py3-none-any.whl", packagetype: "bdist_wheel", sha256: "a".repeat(64) },
+      { url: "https://files.example/c.tar.gz", filename: "demo-1.0.tar.gz", packagetype: "sdist", sha256: undefined },
+    ]);
+  });
+
   test("a quarantined or missing version gives no artifacts and no time", async () => {
     expect(await reg.artifactUrls("litellm", "1.107.0")).toEqual([]);
     expect(await reg.publishedAt("litellm", "1.107.0")).toBeUndefined();

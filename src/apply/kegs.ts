@@ -7,8 +7,9 @@
 // to its handoff. This oupdate run and its ancestors are never restarted. Every other stale pid
 // that launchd started (ppid 1) is looked up in launchd itself (`launchctl print system`, then
 // `launchctl print gui/<uid>`) and restarted by that label. Only when launchd has no row for it is
-// the label found by the package name in the plist names, narrowed by the process name, once per
-// package. An unmatched or ambiguous label is never guessed at. With staleKegUnlisted "report" only
+// the label found by a plist name that is exactly the package or process name (or ends in "." and
+// it), once per package, and restarted only when launchd runs that pid under it and the pid's
+// executable is in the keg. An unmatched, unconfirmed or ambiguous label is never guessed at. With staleKegUnlisted "report" only
 // a label in labelRestart is restarted; any other is named in the note. A re-scan then reports what
 // is still stale. lsof failing is a reported failure, never "nothing stale".
 
@@ -103,6 +104,15 @@ export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict =
   else if (!r.out.trim()) log.push(`  stale-keg: ${bin} returned nothing`);
   else if (strict && !r.out.split("\n").some((l) => l.startsWith("COMMAND"))) log.push(`  stale-keg: ${bin} printed no COMMAND header`);
   else return r.out;
+  return undefined;
+}
+
+/** The pid's executable: its first txt map in lsof output (lsof lists it first), or undefined. */
+export function exePath(lsofOut: string, pid: string): string | undefined {
+  for (const line of lsofOut.split("\n")) {
+    const f = line.trim().split(/\s+/);
+    if (f[1] === pid && f[3] === "txt") return f.at(-1);
+  }
   return undefined;
 }
 
@@ -338,20 +348,32 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
     }
     return false;
   };
-  /** The plist-name candidates of a package, narrowed by the process name. */
+  /**
+   * The plist-name candidates of a package: a label that is the package or process name, or ends in
+   * "." and it (sh.brew.<pkg>, homebrew.mxcl.<pkg>). Never a name that merely contains it: that
+   * could be an unrelated service.
+   */
   const byName = async (pkg: string, comm: string) => {
-    // Every label names its package somewhere, so a glob on the name finds the candidates; the
-    // process name then narrows them, so a sibling service is not bounced.
-    let candidates: string[] = [];
+    const names = [pkg, comm].filter(Boolean);
+    const candidates: string[] = [];
     for (const dir of ["/Library/LaunchDaemons", `${env.home}/Library/LaunchAgents`]) {
-      // As the shell glob *<pkg>*.plist: the name must appear before the .plist suffix.
-      for (const f of await env.listDir(dir)) if (f.endsWith(".plist") && basename(f, ".plist").includes(pkg)) candidates.push(`${dir}/${f}`);
-    }
-    if (comm) {
-      const narrowed = candidates.filter((p) => basename(p, ".plist").includes(comm));
-      if (narrowed.length) candidates = narrowed;
+      for (const f of await env.listDir(dir)) {
+        const label = basename(f, ".plist");
+        if (f.endsWith(".plist") && names.some((n) => label === n || label.endsWith(`.${n}`))) candidates.push(`${dir}/${f}`);
+      }
     }
     return candidates;
+  };
+  /**
+   * Why a label found by its plist name is not proven to own this pid ("" when it is): launchd must
+   * run exactly this pid under it, and the pid's executable (its first txt map) must be a file of the keg.
+   */
+  const unproven = async (label: string, target: string, pid: string, keg: string) => {
+    const shown = await ask(["launchctl", "print", target]);
+    if (shown === undefined || parsePrint(shown).pid !== pid) return `launchd does not run pid ${pid} under it`;
+    const exe = exePath(maps, pid);
+    if (!exe?.startsWith(`${keg}/`)) return `pid ${pid} runs ${exe ?? "an unknown executable"}, not a file of ${basename(keg)}`;
+    return "";
   };
   /** The restart of one label; the restart helper (it takes a package) only for a name-matched label. */
   const restart = async (pkg: string, label: string, system: boolean, helper: boolean, pid: string, keg: string) => {
@@ -640,8 +662,15 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
     }
     const plist = candidates[0]!;
     const label = basename(plist, ".plist");
+    const system = plist.startsWith("/Library/LaunchDaemons/");
+    const why = await unproven(label, system ? `system/${label}` : `gui/${env.uid}/${label}`, h.pid, h.keg);
+    if (why) {
+      log.push(`    ${label} matched by plist name, but ${why} — reported as an orphan`);
+      mark(h.pkg, "orphans", h.pid);
+      return;
+    }
     log.push(`    label ${label} (from the plist name)`);
-    await restart(h.pkg, label, plist.startsWith("/Library/LaunchDaemons/"), true, h.pid, h.keg);
+    await restart(h.pkg, label, system, true, h.pid, h.keg);
   };
   for (const h of held) {
     const before = misses;

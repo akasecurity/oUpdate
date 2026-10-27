@@ -161,4 +161,10 @@ describe("parseTargetsConfig", () => {
     expect(() => parse(withTarget(1, { parityTo: "/srv/oupdate/parity/box.tsv" }))).toThrow("targets[1].parityTo must end in .jsonl");
     expect(() => parse(withTarget(1, { parityTo: "parity.jsonl" }))).toThrow("targets[1].parityTo must be an absolute path");
   });
+  test("${NAME} in a config value is read from the environment; unset or empty is an error naming it (#9)", () => {
+    const text = JSON.stringify({ ...ROOT(), logDir: "${OUP_LOG}/log" });
+    expect(parseTargetsConfig(text, { OUP_LOG: "/srv/oupdate" }).logDir).toBe("/srv/oupdate/log");
+    expect(() => parseTargetsConfig(text, {})).toThrow("OUP_LOG");
+    expect(() => parseTargetsConfig(text, { OUP_LOG: "" })).toThrow("OUP_LOG");
+  });
 });

@@ -4,10 +4,10 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readArtifact, normalizePaths } from "./artifact.ts";
-import { reviewUpdate, LAYERS, type LayerName, type ReviewResult } from "./review.ts";
-import type { Ecosystem } from "./prepass.ts";
-import type { Registry } from "./adapters/ecosystem/types.ts";
+import { readArtifact, normalizePaths, mergeArtifactPair } from "./artifact.ts";
+import { reviewUpdate, LAYERS, type LayerName, type LayerVerdict, type ReviewResult } from "./review.ts";
+import type { Ecosystem, FileMap } from "./prepass.ts";
+import type { ArtifactFile, Registry } from "./adapters/ecosystem/types.ts";
 import { npmRegistry } from "./adapters/ecosystem/npm.ts";
 import { pypiRegistry } from "./adapters/ecosystem/pypi.ts";
 import { osvFeed } from "./adapters/advisory/osv.ts";
@@ -16,8 +16,9 @@ import { parseScannerSpec, makeScanner, type ScannerSpec } from "./adapters/scan
 import { giteaForge } from "./adapters/forge/gitea.ts";
 import { githubForge } from "./adapters/forge/github.ts";
 import type { Forge } from "./adapters/forge/types.ts";
-import { runGate } from "./gate.ts";
+import { BOT_LOGINS, PRIVATE_REGISTRY_DEFAULT, PRIVATE_REGISTRY_POLICIES, runGate, type PrivateRegistryPolicy } from "./gate.ts";
 import { lockKind } from "./lockfile/index.ts";
+import type { LockedFile } from "./lockfile/types.ts";
 import { parseHostCommand, hostMain, applyMain, ownerWaiterMain } from "./host/cli.ts";
 import { launchdPlist } from "./host/launchd.ts";
 import { killLive, realExec } from "./apply/exec.ts";
@@ -41,9 +42,11 @@ export interface ReviewArgs {
   to: string;
   oldArtifact?: string;
   newArtifact?: string;
-  /** sha512 SRI the downloaded old / new tarball must match before it is reviewed (the pins and the proposal). */
+  /** SRI the downloaded old / new tarball must match, every hash in it, before it is reviewed (the pins, the proposal, the lockfile). */
   oldIntegrity?: string;
   newIntegrity?: string;
+  /** The files the lockfile pins for the new version (uv.lock): each must be one the registry lists for it (PyPI). */
+  lockedFiles?: LockedFile[];
   published?: Date;
   now: Date;
   only?: LayerName[];
@@ -78,7 +81,7 @@ export function parseReviewArgs(argv: string[]): ReviewArgs {
   }
   const [eco, name, from, to] = pos;
   if (eco !== "npm" && eco !== "pypi") throw new Error(`ecosystem must be npm or pypi, got ${eco ?? "nothing"}`);
-  if (!name || !from || !to || pos.length !== 4) throw new Error("usage: oupdate gate [--forge gitea|github] [--endpoint URL] --repo owner/name (--token-file F | --token-env NAME) [--reviewer JSON] [--scanner JSON] [--branch-prefix renovate/]... [--lock PATH]... [--cooldown-days N]\n       oupdate review <npm|pypi> <name> <from> <to> [flags]");
+  if (!name || !from || !to || pos.length !== 4) throw new Error("usage: oupdate gate [--forge gitea|github] [--endpoint URL] --repo owner/name (--token-file F | --token-env NAME) [--reviewer JSON] [--scanner JSON] [--branch-prefix renovate/]... [--bot-login LOGIN]... [--gate-login LOGIN] [--lock PATH]... [--cooldown-days N] [--private-registry hold|list|review]\n       oupdate review <npm|pypi> <name> <from> <to> [flags]");
   const out: ReviewArgs = { eco, name, from, to, now: new Date(), cooldownDays: 2, advisoryFix };
   const oldA = flags.get("--old-artifact");
   const newA = flags.get("--new-artifact");
@@ -105,9 +108,11 @@ export function parseReviewArgs(argv: string[]): ReviewArgs {
   return out;
 }
 
-async function download(url: string, dir: string, sri?: string): Promise<string> {
-  const bytes = await fetchVerified(fetch, url, sri);
-  const file = join(dir, decodeURIComponent(new URL(url).pathname.split("/").pop() || "artifact"));
+async function download(url: string, dir: string, sri?: string, f: typeof fetch = fetch): Promise<string> {
+  const bytes = await fetchVerified(f, url, sri);
+  // The decoded name can carry %2F or %5C: flatten separators so the file stays in dir.
+  const name = decodeURIComponent(new URL(url).pathname.split("/").pop() || "").replace(/[/\\]/g, "_");
+  const file = join(dir, /^\.*$/.test(name) ? "artifact" : name);
   writeFileSync(file, bytes);
   return file;
 }
@@ -119,9 +124,97 @@ function render(r: ReviewResult): string {
   return lines.join("\n");
 }
 
+/** The old and new release files a review reads: the given artifacts, or the registry's, downloaded into `work`. */
+export async function loadArtifacts(a: ReviewArgs, registry: Registry, work: string, f: typeof fetch = fetch): Promise<{ old: FileMap; new: FileMap }> {
+  if (a.oldArtifact && a.newArtifact) return { old: normalizePaths(await readArtifact(a.oldArtifact)), new: normalizePaths(await readArtifact(a.newArtifact)) };
+  if (a.eco === "pypi") return loadPypiRelease(a, registry, work, f);
+  // An empty from is a package the old lockfile did not have: diff against nothing.
+  const [oldUrl] = a.from ? await registry.artifactUrls(a.name, a.from) : [undefined];
+  const [newUrl] = await registry.artifactUrls(a.name, a.to);
+  if ((a.from && !oldUrl) || !newUrl) throw new Error(`no published artifact for ${!newUrl ? a.to : a.from}`);
+  return {
+    old: oldUrl ? normalizePaths(await readArtifact(await download(oldUrl, work, a.oldIntegrity, f))) : new Map(),
+    new: normalizePaths(await readArtifact(await download(newUrl, work, a.newIntegrity, f))),
+  };
+}
+
+const MAX_RELEASE_BYTES = 1_000_000_000;
+
+// Pairs a file with its counterpart in the other release: a wheel by its tags, the sdist by type.
+function pairLabel(x: ArtifactFile): string {
+  return x.packagetype === "sdist" ? "sdist" : `${x.filename.replace(/\.whl$/, "").split("-").slice(2).join("-")}.whl`;
+}
+
+/**
+ * Every wheel and the sdist of both releases, each checked against PyPI's sha256, merged into one old/new pair:
+ * an installer picks the file for its platform, so no file goes unread. Anything unlisted, unfetched or
+ * unverified throws, which holds the update.
+ */
+async function loadPypiRelease(a: ReviewArgs, registry: Registry, work: string, f: typeof fetch): Promise<{ old: FileMap; new: FileMap }> {
+  if (!registry.artifactFiles) throw new Error("registry cannot list a release's files");
+  const now = await registry.artifactFiles(a.name, a.to);
+  const before = a.from ? await registry.artifactFiles(a.name, a.from) : [];
+  if (!now.length || (a.from && !before.length)) throw new Error(`no published artifact for ${!now.length ? a.to : a.from}`);
+  const read = async (x: ArtifactFile): Promise<FileMap> => {
+    if (!x.sha256 || !/^[0-9a-f]{64}$/i.test(x.sha256)) throw new Error(`PyPI lists no sha256 for ${x.filename}`);
+    const bytes = await fetchVerified(f, x.url, undefined);
+    const got = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    if (got !== x.sha256.toLowerCase()) throw new Error(`sha256 mismatch for ${x.url}: the bytes are ${got}, PyPI lists ${x.sha256}`);
+    const file = join(work, got);
+    writeFileSync(file, bytes);
+    return normalizePaths(await readArtifact(file));
+  };
+  const oldBy = new Map(before.map((x) => [pairLabel(x), x]));
+  // Paired files first; a file in an unpaired one is read again unless the same bytes were already shown whole.
+  const ordered = [...now.filter((x) => oldBy.has(pairLabel(x))), ...now.filter((x) => !oldBy.has(pairLabel(x)))];
+  const merged = { old: new Map() as FileMap, new: new Map() as FileMap };
+  const seen = new Set<string>();
+  for (const x of ordered) {
+    if (x.sha256 && seen.has(x.sha256.toLowerCase())) continue;
+    const label = pairLabel(x);
+    const o = oldBy.get(label);
+    mergeArtifactPair(merged, label, o ? await read(o) : new Map(), await read(x));
+    seen.add(x.sha256!.toLowerCase());
+    let total = 0;
+    for (const m of [merged.old, merged.new]) for (const b of m.values()) total += b.length;
+    if (total > MAX_RELEASE_BYTES) throw new Error(`release files over ${MAX_RELEASE_BYTES} bytes: ${a.name} ${a.to}`);
+  }
+  return merged;
+}
+
+/**
+ * Whether every file a lockfile pins for name@version is one PyPI lists for that version, by sha256: undefined when
+ * each is, a stop when one is not (the install would fetch bytes the review never reads), an error when one cannot
+ * be checked (no URL, no sha256, no listing), which holds.
+ */
+export async function lockedFilesCheck(registry: Registry, name: string, version: string, locked: LockedFile[]): Promise<LayerVerdict | undefined> {
+  try {
+    if (!registry.artifactFiles) throw new Error("registry cannot list a release's files");
+    const files = await registry.artifactFiles(name, version);
+    if (!files.length) throw new Error(`no published files for ${name} ${version}`);
+    const listed = new Set(files.map((x) => x.sha256?.toLowerCase()).filter(Boolean));
+    for (const f of locked) {
+      const m = /^sha256:([0-9a-f]{64})$/i.exec(f.hash ?? "");
+      if (!f.url || !m) throw new Error(`the lockfile's file ${f.url ?? "(no url)"} has no url or sha256 to check (${f.hash ?? "no hash"})`);
+      if (!listed.has(m[1]!.toLowerCase())) return { layer: "gate", verdict: "stop", detail: `the lockfile's file ${f.url} (${f.hash}) is not one PyPI lists for ${name} ${version}; a person checks it` };
+    }
+  } catch (e) {
+    return { layer: "gate", verdict: "error", detail: `cannot check the lockfile's files against PyPI: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  return undefined;
+}
+
 export async function runReview(a: ReviewArgs): Promise<ReviewResult> {
   const base: Registry = a.eco === "npm" ? npmRegistry() : pypiRegistry();
-  const registry: Registry = a.published ? { ...base, publishedAt: async () => a.published } : base;
+  const registry: Registry = a.published ? { ...base, publishedAt: async () => a.published } : { ...base };
+  if (a.lockedFiles?.length) {
+    // The review reads PyPI's file list for the new version too: fetch it once.
+    const list = base.artifactFiles?.bind(base);
+    const memo = new Map<string, Promise<ArtifactFile[]>>();
+    if (list) registry.artifactFiles = (n, v) => memo.get(`${n}@${v}`) ?? (memo.set(`${n}@${v}`, list(n, v)), memo.get(`${n}@${v}`)!);
+    const bad = await lockedFilesCheck(registry, a.name, a.to, a.lockedFiles);
+    if (bad) return { eco: a.eco, name: a.name, from: a.from, to: a.to, decision: "hold", layers: [bad] };
+  }
   const work = mkdtempSync(join(tmpdir(), "oupdate-dl-"));
   try {
     return await reviewUpdate({
@@ -137,17 +230,7 @@ export async function runReview(a: ReviewArgs): Promise<ReviewResult> {
       now: a.now,
       advisoryFix: a.advisoryFix,
       only: a.only,
-      loadArtifacts: async () => {
-        if (a.oldArtifact && a.newArtifact) return { old: normalizePaths(await readArtifact(a.oldArtifact)), new: normalizePaths(await readArtifact(a.newArtifact)) };
-        // An empty from is a package the old lockfile did not have: diff against nothing.
-        const [oldUrl] = a.from ? await registry.artifactUrls(a.name, a.from) : [undefined];
-        const [newUrl] = await registry.artifactUrls(a.name, a.to);
-        if ((a.from && !oldUrl) || !newUrl) throw new Error(`no published artifact for ${!newUrl ? a.to : a.from}`);
-        return {
-          old: oldUrl ? normalizePaths(await readArtifact(await download(oldUrl, work, a.oldIntegrity))) : new Map(),
-          new: normalizePaths(await readArtifact(await download(newUrl, work, a.newIntegrity))),
-        };
-      },
+      loadArtifacts: () => loadArtifacts(a, registry, work),
     });
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -166,20 +249,27 @@ export interface GateCliArgs {
   tokenEnv?: string;
   /** A PR is gated when its head branch starts with any of these. */
   branchPrefixes: string[];
+  /** ...and one of these logins opened it from a branch of the repo. */
+  botLogins: string[];
+  /** The login the token acts as; unset, the forge is asked (GET /user). */
+  gateLogin?: string;
   /** Empty: the gate looks for each known lockfile name at the repo root. */
   lockPaths: string[];
   cooldownDays: number;
+  /** What a private-registry version gets: hold (default) fails the PR; list accepts it unreviewed. */
+  privateRegistry: PrivateRegistryPolicy;
   reviewer?: ReviewerSpec;
   scanner?: ScannerSpec;
 }
 
-const GATE_FLAGS = new Set(["--forge", "--endpoint", "--repo", "--token-file", "--token-env", "--branch-prefix", "--lock", "--cooldown-days", "--reviewer", "--scanner"]);
+const GATE_FLAGS = new Set(["--forge", "--endpoint", "--repo", "--token-file", "--token-env", "--branch-prefix", "--bot-login", "--gate-login", "--lock", "--cooldown-days", "--private-registry", "--reviewer", "--scanner"]);
 
 /** `env` supplies GITHUB_API_URL, which Actions sets on GitHub Enterprise Server, as the github endpoint when --endpoint is absent. */
 export function parseGateArgs(argv: string[], env: Record<string, string | undefined> = process.env): GateCliArgs {
   const flags = new Map<string, string>();
   const lockPaths: string[] = [];
   const branchPrefixes: string[] = [];
+  const botLogins: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (!GATE_FLAGS.has(a)) throw new Error(`unknown flag ${a}`);
@@ -189,6 +279,7 @@ export function parseGateArgs(argv: string[], env: Record<string, string | undef
       lockKind(v);
       lockPaths.push(v);
     } else if (a === "--branch-prefix") branchPrefixes.push(v);
+    else if (a === "--bot-login") botLogins.push(v);
     else flags.set(a, v);
   }
   const forge = flags.get("--forge") ?? "gitea";
@@ -202,7 +293,10 @@ export function parseGateArgs(argv: string[], env: Record<string, string | undef
   const cooldownDays = Number(flags.get("--cooldown-days") ?? 2);
   if (!Number.isFinite(cooldownDays) || cooldownDays < 0) throw new Error("--cooldown-days must be a number >= 0");
   const endpoint = flags.get("--endpoint") ?? (forge === "github" ? env.GITHUB_API_URL || undefined : undefined);
-  const out: GateCliArgs = { forge, endpoint, repo, branchPrefixes: branchPrefixes.length ? branchPrefixes : ["renovate/"], lockPaths, cooldownDays };
+  const privateRegistry = (flags.get("--private-registry") ?? PRIVATE_REGISTRY_DEFAULT) as PrivateRegistryPolicy;
+  if (!PRIVATE_REGISTRY_POLICIES.includes(privateRegistry)) throw new Error(`--private-registry must be hold, list or review, got ${privateRegistry}`);
+  const out: GateCliArgs = { forge, endpoint, repo, branchPrefixes: branchPrefixes.length ? branchPrefixes : ["renovate/"], botLogins: botLogins.length ? botLogins : BOT_LOGINS, lockPaths, cooldownDays, privateRegistry };
+  if (flags.has("--gate-login")) out.gateLogin = flags.get("--gate-login")!;
   if (flags.has("--token-file")) out.tokenFile = flags.get("--token-file")!;
   else out.tokenEnv = flags.get("--token-env")!;
   if (flags.has("--reviewer")) out.reviewer = parseReviewerSpec(flags.get("--reviewer")!);
@@ -223,7 +317,7 @@ export async function gateToken(g: GateCliArgs, env: Record<string, string | und
 }
 
 export function gateForge(g: GateCliArgs, token: string, f?: typeof fetch): Forge {
-  return g.forge === "github" ? githubForge({ endpoint: g.endpoint, token, fetch: f }) : giteaForge({ endpoint: g.endpoint!, token, fetch: f });
+  return g.forge === "github" ? githubForge({ endpoint: g.endpoint, token, login: g.gateLogin, fetch: f }) : giteaForge({ endpoint: g.endpoint!, token, login: g.gateLogin, fetch: f });
 }
 
 async function gateMain(argv: string[]): Promise<number> {
@@ -233,8 +327,11 @@ async function gateMain(argv: string[]): Promise<number> {
     forge: gateForge(g, token),
     repo: g.repo,
     branchPrefixes: g.branchPrefixes,
+    botLogins: g.botLogins,
     lockPaths: g.lockPaths,
-    review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner }),
+    privateRegistry: g.privateRegistry,
+    log: (line) => console.log(line),
+    review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, lockedFiles: c.toArtifacts, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner }),
   });
   for (const p of pulls) {
     console.log(`PR #${p.number}: ${p.state}`);
