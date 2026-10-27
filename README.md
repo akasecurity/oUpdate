@@ -15,7 +15,7 @@
 
 oUpdate is an open-source package firewall. Before a new release of a package lands, it reads what the release changed. Deterministic checks look for known attack patterns, such as install scripts, Python startup hooks and encoded payloads. A model you choose, either a local model on your own hardware or a cloud model, reviews the release diff itself. Nothing waits on an advisory or a threat feed, so a release nobody has reported yet still gets read.
 
-In [an evaluation](docs/evaluation-2026-10-26.md) on 9 real supply-chain attacks and 8 clean releases, with no threat feeds or advisories, it stopped all 9 attacks and held none of the 8 clean releases. The attacks include Shai-Hulud in @ctrl/tinycolor 4.1.1, s1ngularity in @nx/devkit 21.5.0, and litellm 1.107.0.
+We tested it on 26 real supply-chain attacks, among them Shai-Hulud in @ctrl/tinycolor 4.1.1, s1ngularity in @nx/devkit 21.5.0 and the litellm 1.107.0 release from October. With no threat feeds or advisories, the latest oUpdate with a local model on our own hardware stops all 26. [The evaluation](docs/evaluation-2026-10-27.md) has the method, the clean releases it held, and its limits.
 
 - **On a Mac**, it takes Homebrew and npm updates as soon as they clear their checks, with no waiting period. A model reviews npm global packages and formulae from third-party Homebrew taps. Formulae from Homebrew's own taps get a deterministic version policy. An upgraded cask's files are cleared to run only when they pass Apple's signing and notarization checks.
 - **In your repos**, dependency updates from your update bot get a 2-day cooldown and the same review, then a commit status that your own gate acts on before they land.
