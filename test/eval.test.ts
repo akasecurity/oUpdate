@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkCutover, expandEnv, checkLanding, checkSwitched, parseOutcomes, parseReplay, render, type HostCfg } from "../scripts/eval.ts";
+import { checkCutover, expandEnv, checkLanding, checkSwitched, parseOutcomes, parseReplay, render, scoreAcceptance, type HostCfg } from "../scripts/eval.ts";
+import { loadSets, setCounts } from "../acceptance/sets.ts";
 
 const host = (root: string): HostCfg => ({ name: "h", root, oupdatePlist: "on.plist", secureUpdatePlist: "su.plist", stateDir: "state" });
 
@@ -45,4 +46,29 @@ test("landing and score", () => {
 test("expandEnv fills ${NAME} and rejects an unset name", () => {
   expect(expandEnv('{"u":"${A_B}/v1"}', { A_B: "http://h:1" })).toBe('{"u":"http://h:1/v1"}');
   expect(() => expandEnv("${NOPE}", {})).toThrow("NOPE");
+});
+
+test("checks 1 and 2 count the core set from the JSON and ignore extended results", () => {
+  const core = setCounts(loadSets(), "core");
+  const ext = setCounts(loadSets(), "extended");
+  const mal = new Map([...core.attackIds].filter((id) => id !== "litellm-1.107.0").map((id) => [id, "STOPPED"]));
+  const ctrl = new Map([...core.controlIds].map((id) => [id, "PASSED"]));
+  for (const id of ext.attackIds) mal.set(id, "PASSED");
+  for (const id of ext.controlIds) ctrl.set(id, "STOPPED");
+  const replay = new Map([["wheel-local", "STOPPED"]]);
+  const r = scoreAcceptance({ mal, ctrl }, replay, "0/0");
+  expect(r.c1).toMatchObject({ status: "pass", detail: "9 of 9 stopped" });
+  expect(r.c2).toMatchObject({ status: "pass", detail: "8 of 8 passed" });
+  expect(r.extended).toBe(`extended set (informational, not scored): 0 of ${ext.attacks} attacks stopped, 0 of ${ext.controls} controls passed`);
+  expect(scoreAcceptance({ mal: new Map(), ctrl: new Map() }, new Map(), "1/1").extended).toBeUndefined();
+});
+
+test("extended line counts missing results; render prints info lines without scoring them", () => {
+  const ext = setCounts(loadSets(), "extended");
+  const id = [...ext.attackIds][0]!;
+  const r = scoreAcceptance({ mal: new Map([[id, "STOPPED"]]), ctrl: new Map() }, new Map(), "0/0");
+  expect(r.extended).toBe(`extended set (informational, not scored): 1 of ${ext.attacks} attacks stopped, 0 of ${ext.controls} controls passed; ${ext.attacks - 1 + ext.controls} gave no result`);
+  const out = render([{ n: 1, name: "a", status: "pass", detail: "" }], ["info line"]);
+  expect(out.text).toBe("PASS 1 a: \ninfo line\nscore: 1/6");
+  expect(out.score).toBe(1);
 });

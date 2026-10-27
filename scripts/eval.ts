@@ -5,6 +5,9 @@
 //   1 attacks   all 9 attacks stopped: the 8 dataset cases (acceptance/run.ts) and the litellm
 //               replay (every pair), local reviewer only, advisory and cooldown layers off
 //   2 controls  all 8 controls pass (acceptance/run.ts, same run), 0 false alarms
+//               Checks 1 and 2 score the core set; their counts come from acceptance/cases.json and
+//               controls.json (acceptance/sets.ts). With `extended: true` in the config the run also
+//               covers the extended set, printed as one informational line that is not a check.
 //   3 switched  every host runs oupdate and has secure-update disabled
 //   4 cutover   per host, one dry-run shadow report shows oupdate holds what secure-update holds
 //   5 landing   the yaml advisory update landed through the train, oupdate/review=success,
@@ -25,6 +28,7 @@ import { join, resolve } from "node:path";
 import { validateReviewerSpec } from "../src/adapters/reviewer/spec.ts";
 import type { HostReport } from "../src/host/report.ts";
 import { scanTracked } from "./oss-scan.ts";
+import { loadSets, setCounts } from "../acceptance/sets.ts";
 
 export type Status = "pass" | "fail" | "not run";
 export interface CheckResult {
@@ -58,6 +62,8 @@ export interface EvalConfig {
   landing?: string;
   /** A second, placeholder-only config for the clean-sample run of checks 1 and 2. */
   sampleConfig?: string;
+  /** Also run the extended set (acceptance/run.ts --set all); reported on its own line, not scored. */
+  extended?: boolean;
 }
 
 const repo = resolve(import.meta.dir, "..");
@@ -84,8 +90,42 @@ export function parseReplay(out: string): Map<string, string> {
   return r;
 }
 
-const ATTACKS = 9;
-const CONTROLS = 8;
+// The core set as the JSON defines it: today 9 attacks (8 dataset cases plus the replay) and 8 controls.
+const SETS = loadSets();
+const CORE = setCounts(SETS, "core");
+const EXTENDED = setCounts(SETS, "extended");
+const ATTACKS = CORE.attacks;
+const CONTROLS = CORE.controls;
+
+const pick = (m: Map<string, string>, ids: Set<string>) => new Map([...m].filter(([k]) => ids.has(k)));
+
+/**
+ * Pure: checks 1 and 2 from parsed run.ts and replay outcomes, core ids only; plus the extended
+ * set's informational line when the run produced any extended result. rc is "<run>/<replay>".
+ */
+export function scoreAcceptance(out: { mal: Map<string, string>; ctrl: Map<string, string> }, replay: Map<string, string>, rc: string): { c1: CheckResult; c2: CheckResult; extended?: string } {
+  const mal = pick(out.mal, CORE.attackIds);
+  const ctrl = pick(out.ctrl, CORE.controlIds);
+  const stoppedMal = [...mal].filter(([, o]) => o === "STOPPED").length;
+  const replayOk = replay.size > 0 && [...replay.values()].every((o) => o === "STOPPED");
+  const attacks = stoppedMal + (replayOk ? 1 : 0);
+  const attackSeen = mal.size + (replay.size ? 1 : 0);
+  const c1: CheckResult =
+    attackSeen < ATTACKS
+      ? { n: 1, name: "attacks", status: "not run", detail: `only ${attackSeen} of ${ATTACKS} attacks produced a result (${mal.size} dataset, ${replay.size} replay pairs); rc=${rc}` }
+      : { n: 1, name: "attacks", status: attacks === ATTACKS ? "pass" : "fail", detail: `${attacks} of ${ATTACKS} stopped${attacks < ATTACKS ? `; missed: ${[...mal].filter(([, o]) => o !== "STOPPED").map(([k, o]) => `${k}=${o}`).concat(replayOk ? [] : ["litellm-replay"]).join(", ")}` : ""}` };
+  const passed = [...ctrl].filter(([, o]) => o === "PASSED").length;
+  const c2: CheckResult =
+    ctrl.size < CONTROLS
+      ? { n: 2, name: "controls", status: "not run", detail: `only ${ctrl.size} of ${CONTROLS} controls produced a result; rc=${rc.split("/")[0]}` }
+      : { n: 2, name: "controls", status: passed === CONTROLS ? "pass" : "fail", detail: `${passed} of ${CONTROLS} passed${passed < CONTROLS ? `; not passed: ${[...ctrl].filter(([, o]) => o !== "PASSED").map(([k, o]) => `${k}=${o}`).join(", ")}` : ""}` };
+  const xm = pick(out.mal, EXTENDED.attackIds);
+  const xc = pick(out.ctrl, EXTENDED.controlIds);
+  if (!xm.size && !xc.size) return { c1, c2 };
+  const missing = EXTENDED.attacks - xm.size + EXTENDED.controls - xc.size;
+  const extended = `extended set (informational, not scored): ${[...xm.values()].filter((o) => o === "STOPPED").length} of ${EXTENDED.attacks} attacks stopped, ${[...xc.values()].filter((o) => o === "PASSED").length} of ${EXTENDED.controls} controls passed${missing ? `; ${missing} gave no result` : ""}`;
+  return { c1, c2, extended };
+}
 
 function runBun(args: string[], cwd: string): { rc: number; out: string } {
   const p = Bun.spawnSync([process.execPath, ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -93,7 +133,7 @@ function runBun(args: string[], cwd: string): { rc: number; out: string } {
 }
 
 /** One acceptance run plus the replay, in a scratch dir so the repo's results stay untouched. */
-export function runAcceptance(cfg: EvalConfig): { c1: CheckResult; c2: CheckResult } {
+export function runAcceptance(cfg: EvalConfig): { c1: CheckResult; c2: CheckResult; extended?: string } {
   const nr = (detail: string) => ({ c1: { n: 1, name: "attacks", status: "not run" as const, detail }, c2: { n: 2, name: "controls", status: "not run" as const, detail } });
   if (!cfg.reviewers?.length) return nr("config has no reviewers");
   try {
@@ -109,24 +149,10 @@ export function runAcceptance(cfg: EvalConfig): { c1: CheckResult; c2: CheckResu
     const work = resolve(cfg.workDir ?? join(repo, "acceptance-work"));
     mkdirSync(work, { recursive: true });
     const scanner = cfg.scanner ? ["--scanner", JSON.stringify(cfg.scanner)] : [];
-    const acc = runBun([join(repo, "acceptance/run.ts"), "--reviewers", rfile, "--layers", layers, "--work", work, ...scanner], scratch);
-    const { mal, ctrl } = parseOutcomes(acc.out);
+    const set = cfg.extended ? ["--set", "all"] : [];
+    const acc = runBun([join(repo, "acceptance/run.ts"), "--reviewers", rfile, "--layers", layers, "--work", work, ...scanner, ...set], scratch);
     const rep = runBun([join(repo, "replay/litellm-2026-10-21/run.ts"), rfile, cfg.scanner ? JSON.stringify(cfg.scanner) : "", layers], scratch);
-    const replay = parseReplay(rep.out);
-    const stoppedMal = [...mal].filter(([, o]) => o === "STOPPED").length;
-    const replayOk = replay.size > 0 && [...replay.values()].every((o) => o === "STOPPED");
-    const attacks = stoppedMal + (replayOk ? 1 : 0);
-    const attackSeen = mal.size + (replay.size ? 1 : 0);
-    const c1: CheckResult =
-      attackSeen < ATTACKS
-        ? { n: 1, name: "attacks", status: "not run", detail: `only ${attackSeen} of ${ATTACKS} attacks produced a result (${mal.size} dataset, ${replay.size} replay pairs); rc=${acc.rc}/${rep.rc}` }
-        : { n: 1, name: "attacks", status: attacks === ATTACKS ? "pass" : "fail", detail: `${attacks} of ${ATTACKS} stopped${attacks < ATTACKS ? `; missed: ${[...mal].filter(([, o]) => o !== "STOPPED").map(([k, o]) => `${k}=${o}`).concat(replayOk ? [] : ["litellm-replay"]).join(", ")}` : ""}` };
-    const passed = [...ctrl].filter(([, o]) => o === "PASSED").length;
-    const c2: CheckResult =
-      ctrl.size < CONTROLS
-        ? { n: 2, name: "controls", status: "not run", detail: `only ${ctrl.size} of ${CONTROLS} controls produced a result; rc=${acc.rc}` }
-        : { n: 2, name: "controls", status: passed === CONTROLS ? "pass" : "fail", detail: `${passed} of ${CONTROLS} passed${passed < CONTROLS ? `; not passed: ${[...ctrl].filter(([, o]) => o !== "PASSED").map(([k, o]) => `${k}=${o}`).join(", ")}` : ""}` };
-    return { c1, c2 };
+    return scoreAcceptance(parseOutcomes(acc.out), parseReplay(rep.out), `${acc.rc}/${rep.rc}`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -222,10 +248,11 @@ export function loadConfig(path: string): EvalConfig {
   return JSON.parse(expandEnv(readFileSync(path, "utf8"))) as EvalConfig;
 }
 
-export function render(results: CheckResult[]): { text: string; score: number } {
+/** info: lines printed after the checks (the extended set), never counted in the score. */
+export function render(results: CheckResult[], info: string[] = []): { text: string; score: number } {
   const score = results.filter((r) => r.status === "pass").length;
   const lines = results.map((r) => `${r.status === "pass" ? "PASS" : r.status === "fail" ? "FAIL" : "FAIL (not run)"} ${r.n} ${r.name}: ${r.detail}`);
-  return { text: [...lines, `score: ${score}/6`].join("\n"), score };
+  return { text: [...lines, ...info, `score: ${score}/6`].join("\n"), score };
 }
 
 if (import.meta.main) {
@@ -254,7 +281,7 @@ if (import.meta.main) {
     const sample = cfg?.sampleConfig && existsSync(cfg.sampleConfig) ? runAcceptance(loadConfig(cfg.sampleConfig)) : undefined;
     results.push(checkOpenSource(sample ? [sample.c1, sample.c2] : undefined));
   }
-  const { text, score } = render(results);
+  const { text, score } = render(results, ab?.extended ? [ab.extended] : []);
   console.log(text);
   process.exit(score === 6 && results.length === 6 ? 0 : 1);
 }

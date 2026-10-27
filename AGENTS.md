@@ -8,11 +8,12 @@ Work through these steps in order. Show the user what you found at each step, an
 
 ### 1. Ask what they want
 
-oUpdate does four separate jobs. Ask which ones the user wants, and don't set up the others.
+oUpdate does five separate jobs. Ask which ones the user wants, and don't set up the others.
 
 - **Nightly updates on a Mac (`oupdate host --apply`).** Applies Homebrew formula, cask and npm global updates after review. This is the usual choice for a Mac user.
 - **One-off review (`oupdate review`).** Reviews a single npm or PyPI update before you take it.
-- **Renovate PR gate (`oupdate gate`).** Reviews each Renovate PR and posts a commit status. It needs a Gitea or Forgejo forge; GitHub PRs aren't supported yet.
+- **Container image check (`oupdate image`).** Compares an image you run with the tag or digest you want to repin to, before you change the pin. It only reads.
+- **Update PR gate (`oupdate gate`).** Reviews each Renovate or Dependabot PR and posts a commit status. It reads `bun.lock`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `uv.lock` and `poetry.lock`, plus a pinned `requirements*.txt` named with `--lock`. It works on GitHub (`--forge github`, usually from a scheduled Actions workflow; the README section has the file) and on Gitea or Forgejo.
 - **Repo hardening check (`oupdate keys`).** Checks a repo's package-manager config for release-age and build-script settings. It only reads.
 
 ### 2. Check the prerequisites
@@ -27,7 +28,7 @@ Clone to a stable path the user will keep, such as `~/.oupdate/app`. A scheduled
 Install the latest release tag, not the tip of `main`. Show the user the commit `git rev-parse HEAD` prints next to the one on https://github.com/akasecurity/oupdate/releases, and stop if they differ.
 
 ```bash
-git clone --branch v0.1.1 https://github.com/akasecurity/oupdate.git ~/.oupdate/app
+git clone --branch v0.2.0 https://github.com/akasecurity/oupdate.git ~/.oupdate/app
 cd ~/.oupdate/app
 git rev-parse HEAD
 bun install

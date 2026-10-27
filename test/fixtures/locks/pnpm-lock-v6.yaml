@@ -1,0 +1,20 @@
+lockfileVersion: '6.0'
+
+dependencies:
+  yaml:
+    specifier: ^2.8.0
+    version: 2.8.1
+
+packages:
+
+  /@babel/core@7.24.0(supports-color@8.0.0):
+    resolution: {integrity: sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==}
+    dev: false
+
+  /yaml@2.8.1:
+    resolution: {integrity: sha512-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==}
+    dev: false
+
+  /@vue/runtime@3.4.0(vue@3.4.0)(typescript@5.4.0):
+    resolution: {integrity: sha512-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC==}
+    dev: true

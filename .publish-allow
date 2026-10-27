@@ -1,3 +1,8 @@
 # scanner test fixtures: made-up fleet values the oss-scan rules must flag
 fleet-host-cmd	test/oss-scan.test.ts
 gitea-host	test/oss-scan.test.ts
+# lockfile fixtures and acceptance data: the npm "dev" key, ssh git deps, scoped dataset paths, a made-up private index URL
+email	acceptance/cases.json
+email	test/fixtures/locks/package-lock-v3.json
+fleet-host-quoted	test/fixtures/locks/package-lock-v3.json
+email	test/requirements.test.ts

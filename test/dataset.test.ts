@@ -32,7 +32,7 @@ describe("readSample", () => {
     });
     const z = join(root, "npm.zip");
     zip(z, d, "infected");
-    const m = await readSample(z, "infected");
+    const m = await readSample(z, "infected", "npm");
     expect([...m.keys()].sort()).toEqual(["package/dist/index.js", "package/package.json"]);
   });
 
@@ -44,7 +44,7 @@ describe("readSample", () => {
     Bun.spawnSync(["cp", innerZip, join(outerDir, "2026-01-01-pkg-v1.0.zip")]);
     const z = join(root, "outer.zip");
     zip(z, outerDir, "infected");
-    const m = await readSample(z, "infected");
+    const m = await readSample(z, "infected", "pypi");
     expect([...m.keys()].sort()).toEqual(["evil.pth", "pkg/__init__.py"]);
   });
 
@@ -56,7 +56,7 @@ describe("readSample", () => {
     });
     const z = join(root, "sdist.zip");
     zip(z, d, "infected");
-    const m = await readSample(z, "infected");
+    const m = await readSample(z, "infected", "pypi");
     expect([...m.keys()].sort()).toEqual(["PKG-INFO", "enterprise/dist/x.whl", "pkg/__init__.py"]);
   });
 
@@ -69,14 +69,48 @@ describe("readSample", () => {
     });
     const z = join(root, "wheeltree.zip");
     zip(z, d, "infected");
-    const m = await readSample(z, "infected");
+    const m = await readSample(z, "infected", "pypi");
     expect([...m.keys()].sort()).toEqual(["pkg-1.0.dist-info/METADATA", "pkg/__init__.py"]);
+  });
+
+  test("a plain unpacked wheel tree: the dir holding *.dist-info/METADATA; the sources/ checkout and metadata json are left out", async () => {
+    const d = tree("plainwheel", {
+      "tmp/tmpq/pkg/pkg/__init__.py": "",
+      "tmp/tmpq/pkg/pkg/_client.py": "x",
+      "tmp/tmpq/pkg/pkg-1.0.dist-info/METADATA": "Name: pkg",
+      "tmp/tmpq/pkg/pkg-1.0.dist-info/RECORD": "",
+      "tmp/tmpq/pkg/package_info-pkg-1.0.json": "{}",
+      "tmp/tmpq/sources/pkg/pyproject.toml": "src",
+      "tmp/tmpq/sources/pkg/.git/HEAD": "ref",
+    });
+    const z = join(root, "plainwheel.zip");
+    zip(z, d, "infected");
+    const m = await readSample(z, "infected", "pypi");
+    expect([...m.keys()].sort()).toEqual(["pkg-1.0.dist-info/METADATA", "pkg-1.0.dist-info/RECORD", "pkg/__init__.py", "pkg/_client.py"]);
+  });
+
+  test("a PyPI sample with npm fixtures inside (xinference): the npm package/ rule does not apply", async () => {
+    const d = tree("xinf", {
+      "var/folders/T/tmpz/xinf/xinf/__init__.py": "",
+      "var/folders/T/tmpz/xinf/xinf/ui/node_modules/resolve/test/symlinked/package/package.json": "{}",
+      "var/folders/T/tmpz/xinf/xinf/ui/node_modules/resolve/test/symlinked/package/bar.js": "",
+      "var/folders/T/tmpz/xinf/xinf-2.6.0.dist-info/METADATA": "Name: xinf",
+    });
+    const z = join(root, "xinf.zip");
+    zip(z, d, "infected");
+    const m = await readSample(z, "infected", "pypi");
+    expect([...m.keys()].sort()).toEqual([
+      "xinf-2.6.0.dist-info/METADATA",
+      "xinf/__init__.py",
+      "xinf/ui/node_modules/resolve/test/symlinked/package/bar.js",
+      "xinf/ui/node_modules/resolve/test/symlinked/package/package.json",
+    ]);
   });
 
   test("a wrong passphrase fails loudly", async () => {
     const d = tree("npm2", { "package/package.json": "{}" });
     const z = join(root, "npm2.zip");
     zip(z, d, "infected");
-    await expect(readSample(z, "wrong")).rejects.toThrow();
+    await expect(readSample(z, "wrong", "npm")).rejects.toThrow();
   });
 });

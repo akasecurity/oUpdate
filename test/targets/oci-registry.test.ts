@@ -1,7 +1,7 @@
 // The Docker Hub index read: index digest from the bytes, linux/amd64 and linux/arm64 only, every
 // manifest and config checked against its digest, newest build time.
 import { describe, expect, test } from "bun:test";
-import { dockerHubSource, sha256Digest } from "../../src/adapters/oci/registry.ts";
+import { dockerHubSource, parseImageRef, registrySource, sha256Digest } from "../../src/adapters/oci/registry.ts";
 
 const MAN = "application/vnd.oci.image.manifest.v1+json";
 const IDX = "application/vnd.oci.image.index.v1+json";
@@ -83,5 +83,162 @@ describe("dockerHubSource", () => {
   test("a bad tag or a token failure is an error", async () => {
     await expect(hub().src.index("library/sample", "1.0;x")).rejects.toThrow("not an image tag: 1.0;x");
     await expect(hub({ tokenStatus: 503 }).src.index("library/sample", "1.0")).rejects.toThrow("registry token HTTP 503");
+  });
+});
+
+// The standalone image check's read (OUP-b14): any registry, anonymous bearer auth from the 401 challenge, one
+// platform's manifest and config, mapped to the same ImageEvidence the NAS sends.
+const IMG_CONFIG = "application/vnd.oci.image.config.v1+json";
+const HIST = [
+  { created_by: "/bin/sh -c #(nop) ADD file:abc in / " },
+  { empty_layer: true },
+  { created_by: "RUN /bin/sh -c apk add --no-cache curl # buildkit" },
+];
+
+interface RegFx {
+  challenge?: "bearer" | "bare" | "none";
+  single?: { os: string; architecture: string };
+  tamper?: "manifest" | "blob";
+  badEntry?: boolean;
+  entrypoint?: unknown;
+  cmd?: unknown;
+  /** Also serve the index under this digest: a registry answering a digest ref with other bytes. */
+  serveAs?: string;
+}
+
+function registry(fx: RegFx = {}) {
+  const served = new Map<string, { bytes: Uint8Array; type: string }>();
+  const plat: Record<string, { os: string; architecture: string; variant?: string }> = {
+    amd64: { os: "linux", architecture: "amd64" },
+    arm64: { os: "linux", architecture: "arm64", variant: "v8" },
+  };
+  const entries: unknown[] = [];
+  const digests: Record<string, string> = {};
+  for (const [arch, p] of Object.entries(fx.single ? { one: fx.single } : plat)) {
+    const cfg = enc({
+      architecture: p.architecture,
+      os: p.os,
+      config: { Entrypoint: "entrypoint" in fx ? fx.entrypoint : ["/init"], ...("cmd" in fx ? { Cmd: fx.cmd } : {}) },
+      history: [...HIST, { created_by: `LABEL arch=${arch}` }],
+    });
+    const cd = sha256Digest(cfg);
+    served.set(`blobs/${cd}`, { bytes: fx.tamper === "blob" ? enc({ swapped: true }) : cfg, type: IMG_CONFIG });
+    const man = enc({ schemaVersion: 2, mediaType: MAN, config: { mediaType: IMG_CONFIG, digest: cd }, layers: [] });
+    const md = sha256Digest(man);
+    digests[arch] = md;
+    digests[`${arch}-config`] = cd;
+    if (fx.single) served.set("manifests/1.0", { bytes: man, type: MAN });
+    served.set(`manifests/${md}`, { bytes: fx.tamper === "manifest" ? enc({ swapped: true }) : man, type: MAN });
+    entries.push({ mediaType: MAN, digest: fx.badEntry ? "sha256:../../x" : md, platform: p });
+  }
+  if (!fx.single) {
+    const idx = enc({ schemaVersion: 2, mediaType: IDX, manifests: entries });
+    digests.index = sha256Digest(idx);
+    served.set("manifests/1.0", { bytes: idx, type: IDX });
+    served.set(`manifests/${digests.index}`, { bytes: idx, type: IDX });
+    if (fx.serveAs) served.set(`manifests/${fx.serveAs}`, { bytes: idx, type: IDX });
+  }
+  const calls: { url: string; auth: string }[] = [];
+  const challenge = fx.challenge ?? "bearer";
+  const f = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const auth = new Headers(init?.headers).get("authorization") ?? "";
+    calls.push({ url, auth });
+    if (url.startsWith("https://auth.example/token?")) return Response.json({ token: "anon" });
+    const path = url.replace("https://lscr.example/v2/linuxserver/radarr/", "");
+    if (challenge !== "none" && auth !== "Bearer anon") {
+      const headers: Record<string, string> = challenge === "bearer" ? { "www-authenticate": 'Bearer realm="https://auth.example/token",service="lscr.example",scope="repository:linuxserver/radarr:pull"' } : {};
+      return new Response("unauthorized", { status: 401, headers });
+    }
+    const s = served.get(path);
+    if (!s) return new Response("no", { status: 404 });
+    return new Response(new Uint8Array(s.bytes), { headers: { "content-type": s.type } });
+  }) as unknown as typeof fetch;
+  return { src: registrySource({ fetch: f }), calls, digests };
+}
+
+const RADARR = (reference: string) => parseImageRef(`lscr.example/linuxserver/radarr${reference}`);
+
+describe("parseImageRef", () => {
+  test("docker.io and library/ are the defaults, latest the default tag", () => {
+    expect(parseImageRef("alpine")).toMatchObject({ registry: "docker.io", repository: "library/alpine", reference: "latest" });
+    expect(parseImageRef("grafana/grafana:11.2.0")).toMatchObject({ registry: "docker.io", repository: "grafana/grafana", reference: "11.2.0" });
+    expect(parseImageRef("lscr.io/linuxserver/radarr:5.14.0")).toMatchObject({ registry: "lscr.io", repository: "linuxserver/radarr", reference: "5.14.0", text: "lscr.io/linuxserver/radarr:5.14.0" });
+    expect(parseImageRef("localhost:5000/app:1")).toMatchObject({ registry: "localhost:5000", repository: "app", reference: "1" });
+  });
+
+  test("a digest ref, with or without a tag, uses the digest", () => {
+    const d = `sha256:${"a".repeat(64)}`;
+    expect(parseImageRef(`ghcr.io/o/app@${d}`)).toMatchObject({ registry: "ghcr.io", repository: "o/app", reference: d });
+    expect(parseImageRef(`ghcr.io/o/app:1.0@${d}`)).toMatchObject({ reference: d, text: `ghcr.io/o/app:1.0@${d}` });
+  });
+
+  test("a bad tag, digest or name is an error", () => {
+    expect(() => parseImageRef("alpine:1.0;x")).toThrow("not an image tag");
+    expect(() => parseImageRef("alpine@sha256:abc")).toThrow("not a sha256 digest");
+    expect(() => parseImageRef("Alpine/UPPER:1")).toThrow("not an image name");
+    expect(() => parseImageRef("")).toThrow("not an image name");
+  });
+});
+
+describe("registrySource", () => {
+  test("follows the 401 bearer challenge anonymously and reads one platform's evidence", async () => {
+    const r = registry();
+    const e = await r.src.imageEvidence(RADARR(":1.0"), "linux/amd64");
+    expect(e.digest).toBe(r.digests.amd64);
+    expect(e.config).toBe(r.digests["amd64-config"]);
+    expect(e.entrypoint).toBe('["/init"]');
+    expect(e.cmd).toBe("null");
+    // Newest first, as docker history prints it; an entry with no created_by is an empty line.
+    expect(e.history).toEqual(["LABEL arch=amd64", "RUN /bin/sh -c apk add --no-cache curl # buildkit", "", "/bin/sh -c #(nop) ADD file:abc in / "]);
+    const tok = r.calls.find((c) => c.url.startsWith("https://auth.example/token?"))!;
+    expect(new URL(tok.url).searchParams.get("service")).toBe("lscr.example");
+    expect(new URL(tok.url).searchParams.get("scope")).toBe("repository:linuxserver/radarr:pull");
+    expect(tok.auth).toBe("");
+    // One token, then every later request carries it.
+    expect(r.calls.filter((c) => c.url.startsWith("https://auth.example/")).length).toBe(1);
+    expect(r.calls.at(-1)!.auth).toBe("Bearer anon");
+  });
+
+  test("an arm64 platform picks the arm64 entry, with or without the variant", async () => {
+    const r = registry();
+    expect((await r.src.imageEvidence(RADARR(":1.0"), "linux/arm64")).digest).toBe(r.digests.arm64);
+    expect((await r.src.imageEvidence(RADARR(":1.0"), "linux/arm64/v8")).digest).toBe(r.digests.arm64);
+    await expect(r.src.imageEvidence(RADARR(":1.0"), "linux/s390x")).rejects.toThrow("has 0 linux/s390x images");
+  });
+
+  test("a registry that needs no auth is read directly; a 401 with no challenge is an error", async () => {
+    const open = registry({ challenge: "none" });
+    expect((await open.src.imageEvidence(RADARR(":1.0"), "linux/amd64")).digest).toBe(open.digests.amd64);
+    expect(open.calls.every((c) => c.auth === "")).toBe(true);
+    await expect(registry({ challenge: "bare" }).src.imageEvidence(RADARR(":1.0"), "linux/amd64")).rejects.toThrow("registry HTTP 401");
+  });
+
+  test("Entrypoint and Cmd are canonical JSON as the NAS decodes them", async () => {
+    const e = await registry({ entrypoint: null, cmd: ["sh", "-c", "run"] }).src.imageEvidence(RADARR(":1.0"), "linux/amd64");
+    expect(e.entrypoint).toBe("null");
+    expect(e.cmd).toBe('["sh","-c","run"]');
+    await expect(registry({ entrypoint: "a string" }).src.imageEvidence(RADARR(":1.0"), "linux/amd64")).rejects.toThrow("Entrypoint is not null or a string array");
+  });
+
+  test("a single-platform image is accepted only for its own platform", async () => {
+    const r = registry({ single: { os: "linux", architecture: "amd64" } });
+    expect((await r.src.imageEvidence(RADARR(":1.0"), "linux/amd64")).history[0]).toBe("LABEL arch=one");
+    await expect(r.src.imageEvidence(RADARR(":1.0"), "linux/arm64")).rejects.toThrow("is linux/amd64, not linux/arm64");
+  });
+
+  test("a digest ref must hash to itself", async () => {
+    const r = registry();
+    expect((await r.src.imageEvidence(RADARR(`@${r.digests.index}`), "linux/amd64")).digest).toBe(r.digests.amd64);
+    const other = `sha256:${"0".repeat(64)}`;
+    await expect(registry({ serveAs: other }).src.imageEvidence(RADARR(`@${other}`), "linux/amd64")).rejects.toThrow(`does not hash to ${other}`);
+  });
+
+  test("a swapped manifest or config blob, or a malformed entry digest, is refused", async () => {
+    await expect(registry({ tamper: "manifest" }).src.imageEvidence(RADARR(":1.0"), "linux/amd64")).rejects.toThrow("linux/amd64 manifest does not hash to sha256:");
+    await expect(registry({ tamper: "blob" }).src.imageEvidence(RADARR(":1.0"), "linux/amd64")).rejects.toThrow("linux/amd64 config does not hash to sha256:");
+    const bad = registry({ badEntry: true });
+    await expect(bad.src.imageEvidence(RADARR(":1.0"), "linux/amd64")).rejects.toThrow("linux/amd64 entry is not a sha256 digest");
+    expect(bad.calls.some((c) => c.url.includes(".."))).toBe(false);
   });
 });

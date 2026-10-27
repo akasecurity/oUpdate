@@ -46,13 +46,28 @@ export function ossScanText(file: string, text: string, deny: string[] = []): Fi
   return out.filter((f) => !seen.has(`${f.line}:${f.rule}`) && seen.add(`${f.line}:${f.rule}`));
 }
 
+// .publish-allow: "<rule><TAB><path>" lines, the same file prepublish-check reads. A finding
+// whose rule (or "*") and exact path match is dropped: fixtures and dataset paths that look
+// like fleet values or emails.
+export function parseAllow(text: string): { rule: string; path: string }[] {
+  return text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map((l) => {
+    const [rule, path] = l.split("\t");
+    return { rule: (rule ?? "").trim(), path: (path ?? "").trim() };
+  }).filter((a) => a.rule && a.path);
+}
+
+export function dropAllowed(findings: Finding[], allow: { rule: string; path: string }[]): Finding[] {
+  return findings.filter((f) => !allow.some((a) => (a.rule === f.rule || a.rule === "*") && a.path === f.file));
+}
+
 export function scanTracked(deny: string[] = []): { files: number; findings: Finding[] } {
   const files = new TextDecoder().decode(Bun.spawnSync(["git", "ls-files", "-z"]).stdout).split("\0").filter(Boolean);
   const findings = files.filter((f) => f !== "bun.lock" && !SELF.has(f) && existsSync(f)).flatMap((f) => {
     const buf = readFileSync(f);
     return buf.includes(0) ? [] : ossScanText(f, buf.toString("utf8"), deny);
   });
-  return { files: files.length, findings };
+  const allow = existsSync(".publish-allow") ? parseAllow(readFileSync(".publish-allow", "utf8")) : [];
+  return { files: files.length, findings: dropAllowed(findings, allow) };
 }
 
 if (import.meta.main) {

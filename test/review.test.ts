@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { reviewUpdate, parseVerdict, chunkDiff, classifyOutcome, type LayerName } from "../src/review.ts";
+import { reviewUpdate, parseVerdict, chunkDiff, classifyOutcome, rankPriorityPaths, type LayerName } from "../src/review.ts";
 import type { Registry } from "../src/adapters/ecosystem/types.ts";
 import type { AdvisoryFeed, Advisory } from "../src/adapters/advisory/osv.ts";
 import type { FileMap } from "../src/prepass.ts";
@@ -281,12 +281,55 @@ describe("review budget", () => {
     expect(classifyOutcome(r)).toBe("stopped");
   });
 
-  test("signal files alone over maxParts: a stop for a human, the reviewer is not called", async () => {
+  // Ranked tier: when even the signal files are over budget, rank the priority files (hard pre-pass signals,
+  // scanner hits, install or startup files, manifests, new files, the rest) and review the top maxParts. A FLAG
+  // stops; an APPROVE stays held for a human and names the parts left out.
+  const spawn = "import subprocess; subprocess.run(['git', 'status'])\n";
+  const loud = {
+    old: files({ ...Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`lib/cmd${i}.py`, "x = 1\n"])), "zz/scan.py": "a = 1\n", "setup.py": "v = 1\n", "pyproject.toml": "v = 1\n", "lib/old.py": "o = 1\n" }),
+    new: files({
+      ...Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`lib/cmd${i}.py`, spawn.repeat(4)])),
+      "zz/scan.py": "a = 2\n",
+      "setup.py": "v = 2\n",
+      "pyproject.toml": "v = 2\n",
+      "lib/old.py": "o = 1\n",
+      "lib/zadded.py": spawn.repeat(4),
+      "zz/hook.pth": "import os\n",
+      "lib/plain_new.py": "y = 1\n",
+    }),
+  };
+  const gd = { name: "gd", scan: async (_e: string, f: FileMap) => (f.has("zz/scan.py") && new TextDecoder().decode(f.get("zz/scan.py")!).includes("2") ? [{ rule: "shady", path: "zz/scan.py", detail: "" }] : []) };
+
+  test("rankPriorityPaths: hard signals, scanner hits, install or startup files, manifests, new files, then changed files with a soft signal", async () => {
+    const r = await reviewUpdate(base({ loadArtifacts: async () => loud, scanner: gd, only: ["prepass", "scan"] }));
+    const ranked = rankPriorityPaths(r.prepass!, new Set(["zz/scan.py"]));
+    expect(ranked).toEqual(["zz/hook.pth", "zz/scan.py", "setup.py", "pyproject.toml", "lib/zadded.py", "lib/plain_new.py", ...Array.from({ length: 6 }, (_, i) => `lib/cmd${i}.py`)]);
+  });
+
+  test("signal files alone over maxParts: the reviewer reads the top-ranked parts in rank order; APPROVE is held for a human", async () => {
+    const prompts: string[] = [];
+    const r = await reviewUpdate(base({ loadArtifacts: async () => loud, scanner: gd, only: ["scan", "reviewer"], chunkChars: 200, maxParts: 3, reviewer: { name: "fake", review: async (p) => (prompts.push(p), "APPROVE\nno attack indicators found") } }));
+    expect(prompts.length).toBe(3);
+    const first = prompts.map((p) => p.slice(p.indexOf("--- diff part")));
+    expect(first[0]).toContain("zz/hook.pth");
+    expect(first.join("")).toContain("zz/scan.py");
+    expect(first.join("")).not.toContain("lib/cmd5.py");
+    expect(prompts[0]).toContain("top-ranked priority files");
+    const rev = r.layers.find((l) => l.layer === "reviewer")!;
+    expect(rev.verdict).toBe("stop");
+    expect(rev.detail).toMatch(/^too large for model review: (\d+) parts > 3 \(signal files alone\); fake APPROVE on the top 3 ranked part\(s\); \d+ parts not reviewed, \d+ file\(s\) not reviewed; needs a human$/);
+    const [, total] = /: (\d+) parts > 3/.exec(rev.detail)!;
+    expect(rev.detail).toContain(`; ${Number(total) - 3} parts not reviewed`);
+    expect(classifyOutcome(r)).toBe("held-human");
+  });
+
+  test("signal files alone over maxParts: a FLAG on a ranked part stops as a model detection", async () => {
     let calls = 0;
-    const loud = { old: bigNew.old, new: new Map([...bigNew.new, ["lib/net.py", enc("import subprocess; subprocess.run(['sh'])\n".repeat(60))]]) };
-    const r = await reviewUpdate(base({ loadArtifacts: async () => loud, chunkChars: 200, maxParts: 3, reviewer: { name: "fake", review: async () => (calls++, "APPROVE") } }));
-    expect(calls).toBe(0);
-    expect(r.layers.find((l) => l.layer === "reviewer")!.detail).toMatch(/too large for model review: \d+ parts > 3 \(signal files alone\); needs a human/);
+    const r = await reviewUpdate(base({ loadArtifacts: async () => loud, scanner: gd, only: ["scan", "reviewer"], chunkChars: 200, maxParts: 3, reviewer: { name: "fake", review: async () => (calls++ === 1 ? "FLAG\nfetch and run" : "APPROVE\nno attack indicators found") } }));
+    const rev = r.layers.find((l) => l.layer === "reviewer")!;
+    expect(rev.verdict).toBe("stop");
+    expect(rev.detail).toMatch(/^fake FLAG on ranked part\(s\) 2 of 3 reviewed; \d+ parts not reviewed, \d+ file\(s\) not reviewed$/);
+    expect(classifyOutcome(r)).toBe("stopped");
   });
 
   test("a diff within maxParts is reviewed whole, with no left-out note", async () => {

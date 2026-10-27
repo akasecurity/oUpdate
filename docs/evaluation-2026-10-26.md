@@ -1,5 +1,7 @@
 # Attack and clean-release evaluation, 26 Oct 2026
 
+Superseded by the [27 Oct evaluation](evaluation-2026-10-27.md), which repeats these cases, adds two cloud reviewers and a larger set.
+
 oUpdate reviewed 9 real supply-chain attacks and 8 clean releases with the advisory checks off, so no known-malicious list could help. It stopped all 9 attacks and let all 8 clean releases through. This page gives the sample, the method, which check stopped each attack, and what the result does not show.
 
 ## Sample
@@ -7,7 +9,7 @@ oUpdate reviewed 9 real supply-chain attacks and 8 clean releases with the advis
 - **One run**, 26 Oct 2026, 12:58 to 13:09 PDT, oUpdate commit `5ca5e43`. An earlier run on 24 Oct, on the same cases with the same model, scored the same totals. It did not keep its per-case output, so this page reports the 26 Oct run.
 - **9 attacks.** All are real malicious releases. Eight come from DataDog's public [malicious-software-packages dataset](https://github.com/DataDog/malicious-software-packages-dataset) (`compromised_lib`). The ninth is the litellm 1.107.0 release of 21 Oct 2026, which was live on PyPI for about 1h40m.
 - **8 clean releases.** For seven of the attacked packages, the real registry release just before the attack, plus yaml 2.8.3.
-- **Model:** a local open-weights model served on our own hardware through an OpenAI-compatible endpoint. No cloud model was used.
+- **Model:** a local open-weights mixture-of-experts model, 35 billion parameters with about 3 billion active per token, quantized to 6 bits, served on our own hardware through an OpenAI-compatible endpoint. No cloud model was used.
 
 ## Layers
 

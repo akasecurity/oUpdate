@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ossScanText } from "../scripts/oss-scan.ts";
+import { dropAllowed, ossScanText, parseAllow } from "../scripts/oss-scan.ts";
 
 const rules = (t: string) => ossScanText("f", t).map((f) => f.rule);
 
@@ -18,4 +18,11 @@ test("leaves ordinary words, placeholders and reserved emails alone", () => {
   expect(rules('x ?? "nothing"')).toEqual([]);
   expect(rules('apiKey = "your-key-goes-here-1234"')).toEqual([]);
   expect(rules("me@example.com")).toEqual([]);
+});
+
+test(".publish-allow drops only a matching rule and exact path", () => {
+  const allow = parseAllow("# fixtures\nemail\ttest/a.json\n*\tdata/b.txt\n");
+  const f = (file: string, rule: string) => ({ file, line: 1, rule });
+  const kept = dropAllowed([f("test/a.json", "email"), f("test/a.json", "github-token"), f("data/b.txt", "fleet-host-quoted"), f("test/c.json", "email")], allow);
+  expect(kept.map((k) => `${k.file} ${k.rule}`)).toEqual(["test/a.json github-token", "test/c.json email"]);
 });

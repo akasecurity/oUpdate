@@ -60,7 +60,7 @@ function jsonString(f: string | undefined): string | undefined {
 }
 
 /** A docker `{{json .Config.Entrypoint}}` or `.Cmd`: null or an array of strings, re-encoded in one canonical JSON form. */
-function jsonArgv(f: string | undefined): string | undefined {
+export function jsonArgv(f: string | undefined): string | undefined {
   try {
     const v: unknown = JSON.parse(f ?? "");
     return v === null || (Array.isArray(v) && v.every((x) => typeof x === "string")) ? JSON.stringify(v) : undefined;

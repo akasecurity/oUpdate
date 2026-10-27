@@ -1,0 +1,54 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      yaml:
+        specifier: ^2.8.0
+        version: 2.8.1
+      '@x/b':
+        specifier: workspace:*
+        version: link:packages/b
+
+packages:
+
+  '@babel/core@7.24.0':
+    resolution: {integrity: sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==}
+    engines: {node: '>=6.9.0'}
+
+  yaml@2.8.1:
+    resolution: {integrity: sha512-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==}
+    engines: {node: '>= 14'}
+
+  yaml@1.10.2:
+    resolution: {integrity: sha512-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC==}
+
+  old-dep@0.4.0:
+    resolution: {integrity: sha1-qUPrMeIDqWcUgN6EdBPTCCs/AYs=}
+
+  gitdep@https://codeload.github.com/o/gitdep/tar.gz/0123456789abcdef0123456789abcdef01234567:
+    resolution: {tarball: https://codeload.github.com/o/gitdep/tar.gz/0123456789abcdef0123456789abcdef01234567}
+    version: 1.0.0
+
+  repodep@git+https://github.com/o/repodep.git#0123456789abcdef0123456789abcdef01234567:
+    resolution: {commit: 0123456789abcdef0123456789abcdef01234567, repo: https://github.com/o/repodep.git, type: git}
+    version: 1.0.0
+
+  localdir@file:vendor/localdir:
+    resolution: {directory: vendor/localdir, type: directory}
+
+  '@corp/ui@3.1.0':
+    resolution: {integrity: sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==, tarball: https://npm.corp.example/@corp/ui/-/ui-3.1.0.tgz}
+
+snapshots:
+
+  '@babel/core@7.24.0(supports-color@8.0.0)':
+    dependencies:
+      yaml: 2.8.1
+
+  yaml@2.8.1: {}

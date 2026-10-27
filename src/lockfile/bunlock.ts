@@ -2,10 +2,7 @@
 // Workspace, git, file and link entries are skipped: they have no registry
 // version to check.
 
-export interface LockedPackage {
-  name: string;
-  version: string;
-}
+import { npmPrivateRegistry, sha512Sri, type LockedPackage } from "./types.ts";
 
 function stripTrailingCommas(text: string): string {
   // Commas before a closing bracket, outside strings.
@@ -49,7 +46,13 @@ export function parseBunLock(text: string): LockedPackage[] {
     const key = `${name}@${version}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ name, version });
+    // A registry entry is [spec, registry, info, integrity].
+    const p: LockedPackage = { name, version };
+    const integrity = sha512Sri(entry[3]);
+    if (integrity) p.integrity = integrity;
+    const registry = npmPrivateRegistry(entry[1]);
+    if (registry) p.registry = registry;
+    out.push(p);
   }
   return out;
 }

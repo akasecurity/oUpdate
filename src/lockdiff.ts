@@ -2,12 +2,17 @@
 // new version pairs with the old version it most likely replaced: one the
 // change removed if there is one, else the highest old version of that name.
 
-import type { LockedPackage } from "./adapters/ecosystem/bunlock.ts";
+import type { LockedPackage } from "./lockfile/types.ts";
 
 export interface LockChange {
   name: string;
   from: string | null; // null: a package the old lockfile did not have
   to: string;
+  /** sha512 SRI of the old / new tarball, from the lockfiles, when they record one. */
+  fromIntegrity?: string;
+  toIntegrity?: string;
+  /** Host of the non-default registry the new version comes from, if it does. */
+  registry?: string;
 }
 
 function cmp(a: string, b: string): number {
@@ -34,7 +39,13 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
     const olds = oldPkgs.filter((o) => o.name === p.name).map((o) => o.version);
     const removed = olds.filter((v) => !newKeys.has(`${p.name}@${v}`));
     const pool = (removed.length ? removed : olds).sort(cmp);
-    out.push({ name: p.name, from: pool.at(-1) ?? null, to: p.version });
+    const from = pool.at(-1) ?? null;
+    const c: LockChange = { name: p.name, from, to: p.version };
+    const fromIntegrity = from === null ? undefined : oldPkgs.find((o) => o.name === p.name && o.version === from)?.integrity;
+    if (fromIntegrity) c.fromIntegrity = fromIntegrity;
+    if (p.integrity) c.toIntegrity = p.integrity;
+    if (p.registry) c.registry = p.registry;
+    out.push(c);
   }
   return out;
 }

@@ -1,0 +1,78 @@
+version = 1
+revision = 2
+requires-python = ">=3.11"
+resolution-markers = [
+    "python_full_version >= '3.12'",
+    "python_full_version < '3.12'",
+]
+
+[[package]]
+name = "demo-app"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "charset-normalizer" },
+    { name = "numpy" },
+]
+
+[[package]]
+name = "demo-tools"
+version = "0.2.0"
+source = { virtual = "tools" }
+
+[[package]]
+name = "Charset_Normalizer"
+version = "3.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f2/4f/charset_normalizer-3.4.0.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size = 106620 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/8b/charset_normalizer-3.4.0-py3-none-any.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size = 49446 },
+]
+
+[[package]]
+name = "numpy"
+version = "1.26.4"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = ["python_full_version < '3.12'"]
+sdist = { url = "https://files.pythonhosted.org/packages/65/6e/numpy-1.26.4.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size = 15786129 }
+
+[[package]]
+name = "numpy"
+version = "2.1.3"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = ["python_full_version >= '3.12'"]
+sdist = { url = "https://files.pythonhosted.org/packages/25/ca/numpy-2.1.3.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size = 20166090 }
+
+[[package]]
+name = "torch"
+version = "2.5.1+cpu"
+source = { registry = "https://download.pytorch.org/whl/cpu" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cpu/torch-2.5.1%2Bcpu-cp312-cp312-linux_x86_64.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+]
+
+[[package]]
+name = "corp-auth"
+version = "4.2.0"
+source = { registry = "https://pypi.corp.example/simple" }
+sdist = { url = "https://pypi.corp.example/packages/corp_auth-4.2.0.tar.gz", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", size = 1000 }
+
+[[package]]
+name = "gitdep"
+version = "0.3.0"
+source = { git = "https://git.example/acme/gitdep?rev=main#0123456789abcdef0123456789abcdef01234567" }
+
+[[package]]
+name = "localpkg"
+version = "1.0.0"
+source = { directory = "../localpkg" }
+
+[[package]]
+name = "wheelfile"
+version = "1.0.0"
+source = { path = "vendor/wheelfile-1.0.0-py3-none-any.whl" }
+
+[[package]]
+name = "urldep"
+version = "2.0.0"
+source = { url = "https://downloads.example/urldep-2.0.0.tar.gz" }
