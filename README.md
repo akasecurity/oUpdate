@@ -20,20 +20,43 @@ In [an evaluation](docs/evaluation-2026-10-26.md) on 9 real supply-chain attacks
 - **On a Mac**, it takes Homebrew and npm updates as soon as they clear their checks, with no waiting period. A model reviews npm global packages and formulae from third-party Homebrew taps. Formulae from Homebrew's own taps get a deterministic version policy. An upgraded cask's files are cleared to run only when they pass Apple's signing and notarization checks.
 - **In your repos**, dependency updates from your update bot get a 7-day cooldown and the same review, then a commit status that your own gate acts on before they land.
 
+## What it covers
+
+| Where | What oUpdate reviews | Command |
+|---|---|---|
+| One release, on demand | an npm or PyPI package update | `oupdate review` |
+| Update PRs in your repos | npm packages in `bun.lock`, on Gitea and API-compatible forges | `oupdate gate` |
+| A Mac | Homebrew formulae and casks, global npm packages | `oupdate host --apply` |
+| Images, a NAS, VMs | Docker Compose images, NAS plugins and OS, OS packages on Google Cloud VMs, only through a credential broker | `oupdate targets`, see [OS targets](#os-targets) |
+
+Not covered yet: `package-lock.json`, `pnpm-lock.yaml` and Python lockfiles in the gate; GitHub as the gate's forge; a standalone check of a container image before you repin it; apt or other OS packages on a host you reach directly; the Mac App Store. oUpdate is not a hook on your package manager: an install that someone runs by hand, or that an agent runs, never reaches it.
+
+**Reading a verdict.** Treat a FLAG or a hold as a stop until a person has looked. Treat an APPROVE as one piece of evidence, not clearance: the model reads the release diff and can be wrong, and a release too large for the review budget is held for a person rather than judged.
+
 Early release, built from tools that run in production; the interfaces may still change. The easiest way to install it is to ask your coding agent to set it up; see [Set up with your agent](#set-up-with-your-agent).
 
 ## Install
 
 oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is no build step.
 
+Install a release tag, not the tip of `main`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
+
 ```
-git clone https://github.com/akasecurity/oupdate.git
+git clone --branch v0.1.1 https://github.com/akasecurity/oupdate.git
 cd oupdate
+git rev-parse HEAD
 bun install
-bun src/cli.ts review npm some-pkg 1.0.0 1.0.1
+bun src/cli.ts review npm ms 2.1.2 2.1.3
 ```
 
 `bin` in `package.json` maps `oupdate` to `src/cli.ts`, so `bun link` gives you an `oupdate` command.
+
+### Before you run it
+
+oUpdate becomes part of your supply chain, so read it before you trust it:
+- It has no runtime dependencies. `bun.lock` holds only the dev tools (TypeScript and Bun's types).
+- `review` and `gate` download release archives from the registry and read them; they never install a package or run its code (archives are read with `bsdtar`; the optional GuardDog layer runs in the container you give it). The network calls go to the package registries, OSV, your reviewer endpoint and, for `gate`, your forge.
+- Nothing runs as root unless you schedule `host --apply` as a LaunchDaemon yourself. Start with `host --apply --dry-run`: it runs every check and changes nothing on disk.
 
 ### Set up with your agent
 

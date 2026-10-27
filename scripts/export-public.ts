@@ -32,14 +32,24 @@ const README_EDITS: [string, string][] = [
 
 oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is no build step.
 
+Install a release tag, not the tip of \`main\`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
+
 \`\`\`
-git clone https://github.com/akasecurity/oupdate.git
+git clone --branch v0.1.1 https://github.com/akasecurity/oupdate.git
 cd oupdate
+git rev-parse HEAD
 bun install
-bun src/cli.ts review npm some-pkg 1.0.0 1.0.1
+bun src/cli.ts review npm ms 2.1.2 2.1.3
 \`\`\`
 
 \`bin\` in \`package.json\` maps \`oupdate\` to \`src/cli.ts\`, so \`bun link\` gives you an \`oupdate\` command.
+
+### Before you run it
+
+oUpdate becomes part of your supply chain, so read it before you trust it:
+- It has no runtime dependencies. \`bun.lock\` holds only the dev tools (TypeScript and Bun's types).
+- \`review\` and \`gate\` download release archives from the registry and read them; they never install a package or run its code (archives are read with \`bsdtar\`; the optional GuardDog layer runs in the container you give it). The network calls go to the package registries, OSV, your reviewer endpoint and, for \`gate\`, your forge.
+- Nothing runs as root unless you schedule \`host --apply\` as a LaunchDaemon yourself. Start with \`host --apply --dry-run\`: it runs every check and changes nothing on disk.
 
 ### Set up with your agent
 

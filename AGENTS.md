@@ -24,9 +24,12 @@ oUpdate does four separate jobs. Ask which ones the user wants, and don't set up
 
 Clone to a stable path the user will keep, such as `~/.oupdate/app`. A scheduled job runs from this path, so it must not be under a temporary directory.
 
+Install the latest release tag, not the tip of `main`. Show the user the commit `git rev-parse HEAD` prints next to the one on https://github.com/akasecurity/oupdate/releases, and stop if they differ.
+
 ```bash
-git clone https://github.com/akasecurity/oupdate.git ~/.oupdate/app
+git clone --branch v0.1.1 https://github.com/akasecurity/oupdate.git ~/.oupdate/app
 cd ~/.oupdate/app
+git rev-parse HEAD
 bun install
 ```
 
