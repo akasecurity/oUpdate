@@ -318,8 +318,10 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       let chunks = chunkDiff(artifacts.old, artifacts.new, cap);
       let note = "";
       let overPriority = "";
+      let overFull = "";
       if (chunks.length > maxParts) {
         const keep = priorityPaths(pre);
+        if (leftOut(keep)) overFull = `too large for model review: ${chunks.length} parts > ${maxParts} (full diff)`;
         chunks = chunkDiff(artifacts.old, artifacts.new, cap, keep);
         scope = "priority";
         note = `; priority files only, ${leftOut(keep)} lower-priority file(s) not reviewed`;
@@ -341,6 +343,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         }
       }
       if (scope === "signal" && !chunks.length) layers.push({ layer: "reviewer", verdict: "stop", detail: `${overPriority}; needs a human` });
+      else if (scope === "priority" && !chunks.length) layers.push({ layer: "reviewer", verdict: "stop", detail: `${overFull}; no priority files to review${note}; needs a human` });
       else try {
         const texts: string[] = [];
         for (let i = 0; i < chunks.length; i++) texts.push(await input.reviewer.review(reviewPrompt(input, pre, chunks[i]!, i, chunks.length, scope)));
@@ -360,6 +363,9 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
               ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on signal part(s) ${parts} of ${chunks.length}; ${note}` }
               : { layer: "reviewer", verdict: "stop", detail: `${overPriority}; ${input.reviewer.name} APPROVE on the signal files (${chunks.length} part(s)), ${note}; needs a human` },
           );
+        else if (scope === "priority" && overFull && !flagged.length)
+          // OUP-19: an unread file can carry the attack (xrpl 4.2.1 landed this way), so this APPROVE holds for a human.
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `${overFull}; ${input.reviewer.name} APPROVE on the priority files (${chunks.length} part(s))${note}; needs a human` });
         else
           layers.push(
             flagged.length

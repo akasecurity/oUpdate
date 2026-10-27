@@ -43,7 +43,7 @@ oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is n
 Install a release tag, not the tip of `main`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
 
 ```
-git clone --branch v0.2.1 https://github.com/akasecurity/oupdate.git
+git clone --branch v0.2.2 https://github.com/akasecurity/oupdate.git
 cd oupdate
 git rev-parse HEAD
 bun install
@@ -130,7 +130,7 @@ jobs:
     steps:
       - uses: oven-sh/setup-bun@<commit-sha>    # pin actions to a full commit sha
       - uses: actions/checkout@<commit-sha>
-        with: { repository: akasecurity/oupdate, ref: v0.2.1, path: .oupdate }
+        with: { repository: akasecurity/oupdate, ref: v0.2.2, path: .oupdate }
       - run: >
           bun .oupdate/src/cli.ts gate --forge github --repo "$GITHUB_REPOSITORY"
           --token-env GITHUB_TOKEN --branch-prefix dependabot/ --branch-prefix renovate/
