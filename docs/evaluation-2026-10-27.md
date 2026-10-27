@@ -2,6 +2,8 @@
 
 This page follows the [26 Oct evaluation](evaluation-2026-10-26.md). It adds three things: five repeat runs of the local model on the same cases, the same cases reviewed by two cloud models, and a larger set of 25 real attacks and 25 clean releases. On the core set, the local model stopped all 9 attacks and let all 8 clean releases through in each of the five runs. On the larger set, every reviewer stopped 23 of the 25 attacks, the same two got through all three, and between 9 and 14 of the 25 clean releases were held. Those false holds are the main result of this round.
 
+For the effect of the 0.2.1 and 0.2.2 releases on these cases, see [Update: 0.2.1 and 0.2.2](#update-021-and-022) below.
+
 ## What changed since 26 Oct
 
 - **Ranked parts for large releases.** On 26 Oct, a release whose diff stayed over the model's budget (12 parts) even after narrowing to its signal files was not judged and was held for a human. Now the reviewer reads the top 12 parts in ranked order: files with a hard pre-pass signal first, then scanner hits, install or startup files, manifests, new files, and changed files with a soft signal. The verdict line says how much was left out, for example "52 parts not reviewed, 0 file(s) not reviewed". This tier can only stop a release: a FLAG holds it, and an APPROVE also holds it for a human, because the rest was never read.
@@ -137,6 +139,86 @@ Clean releases held by at least one reviewer. "Partial" means the reviewer did n
 - **False holds are high on the extended set.** See the table above. Of the holds, 4 of 9 (local model), 5 of 14 (Haiku) and 5 of 10 (Codex) came after a partial review.
 - **Partial review on large releases.** Many attacks were flagged after the reviewer read only part of the diff, for example 12 of 192 parts of lightning 2.6.2. A FLAG on part of a release stops it, but this test can't tell whether the model would have found the payload in the parts it didn't read.
 - **The caveats of 26 Oct still apply.** These are known, published attacks, which may be in the models' training data. litellm 1.107.0 is a reconstruction. The advisory, cooldown, scanner and gate layers were off. The evasion cases are four hand-built examples, not a survey of evasion techniques.
+
+## Update: 0.2.1 and 0.2.2
+
+Two releases followed this evaluation. The numbers above are from 0.2.0 code and stay as they are. This section adds what changed and what the extended set showed after.
+
+### What changed
+
+- **0.2.1: an ordered diff for the reviewer.** The old diff compared files as sets of lines, so a line found anywhere in both versions was dropped. That made some changed files look cut off to the model, such as node-ipc 12.0.0. The reviewer now gets ordered hunks with line numbers, and a changed minified line is shown as its removed and added tokens. Files that changed only in line endings or whitespace are named as such.
+- **0.2.1: each part is judged on its own.** When a diff is split into parts, the prompt now says each part goes to a separate call and that not seeing the other parts is not by itself a reason to FLAG.
+- **0.2.1: a 2-day cooldown by default** for dependency updates in your repos and for pin bumps, down from 7. The cooldown layer was off in these runs, so this change was not measured.
+- **0.2.2: an APPROVE at the priority tier holds for a human** when files were left unread. A FLAG still stops the release. If the priority tier has no files to review at all, the release is held for a human without calling the reviewer.
+
+### 0.2.1 on the extended set
+
+The local model and Claude Haiku (small tier) ran the extended set again at 0.2.1, with the same cases, layers and sample cache as above. OpenAI Codex (fast tier) was not run again, so its numbers are still the 0.2.0 ones above.
+
+| Run | Reviewer | Set | Time (PDT) | oUpdate commit |
+| --- | --- | --- | --- | --- |
+| extended | local model | all | 26 Oct 23:46 to 27 Oct 02:54 | `3d64634` |
+| extended | Claude Haiku (small tier) | all | 27 Oct 02:54 to 03:27 | `3d64634` |
+
+The review and pre-pass code at `3d64634` is the same as in the 0.2.1 release. No case was left unjudged for a fetch or model error.
+
+| | Local model, 0.2.0 | Local model, 0.2.1 | Claude Haiku, 0.2.0 | Claude Haiku, 0.2.1 |
+| --- | --- | --- | --- | --- |
+| Attacks stopped | 23/25 | 24/25 | 23/25 | 24/25 |
+| Model FLAG on attacks | 23/25 | 24/25 | 23/25 | 24/25 |
+| Stopped by the model alone | 13/25 | 14/25 | 13/25 | 14/25 |
+| Clean releases landed | 16/25 | 18/25 | 11/25 | 20/25 |
+| Clean releases held (false holds) | 9/25 (36%) | 7/25 (28%) | 14/25 (56%) | 5/25 (20%) |
+| Evasion cases stopped (model FLAG) | 4/4 | 4/4 | 4/4 | 4/4 |
+
+Both reviewers also flagged the litellm 1.107.0 replay, sdist and wheel, at 0.2.1.
+
+**Attacks.** @solana/web3.js 1.95.7 is now stopped by both reviewers. Its diff now fits the review budget in 2 parts, so the reviewer read the whole release, built bundles included, and flagged both parts. xrpl 4.2.1 still landed with both. The reviewer again read only `package.json`: "priority files only, 2 lower-priority file(s) not reviewed".
+
+**Clean releases that changed:**
+
+| Clean release | Local model | Claude Haiku (small tier) |
+| --- | --- | --- |
+| litellm 1.106.2 | landed, no change | held, now landed |
+| @bitwarden/cli 2026.3.0 | landed, now held | held, now landed |
+| @solana/web3.js 1.95.5 | held, now landed | held, now landed |
+| node-ipc 12.0.0 | held, no change | held, now landed |
+| posthog-node 5.13.2 | landed, no change | held, now landed |
+| telnyx 4.87.0 | landed, no change | held, now landed |
+| num2words 0.5.14 | landed, no change | held, now landed |
+| guardrails-ai 0.10.0 | held, now landed | held, now landed |
+| durabletask 1.4.0 | held, now landed | held, now landed |
+
+The local model newly held @bitwarden/cli 2026.3.0. It read all 5 parts and flagged parts 2 and 4.
+
+**Clean releases still held at 0.2.1:**
+
+| Clean release | Local model | Claude Haiku (small tier) | Review |
+| --- | --- | --- | --- |
+| @bitwarden/cli 2026.3.0 | held | landed | complete, 5 parts |
+| axios 1.14.0 | held | held | complete, 6 parts; the pre-pass holds its changed `prepare` script |
+| node-ipc 12.0.0 | held | landed | complete, 1 part |
+| xrpl 4.2.0 | held | held | partial, ranked: 9 parts and 69 files not reviewed |
+| cline 2.2.3 | held | held | partial, ranked: 192 parts not reviewed |
+| elementary-data 0.23.2 | held | held | partial, ranked: 113 parts and 8 files not reviewed |
+| xinference 2.5.0 | held | held | partial, ranked: 15 parts and 42 files not reviewed |
+| **Held** | **7** | **5** | |
+
+- Haiku flagged none of the 25 clean releases at 0.2.1. It approved axios 1.14.0, which the pre-pass held on its own. It approved the top 12 parts of the four ranked-tier releases, and that tier holds for a human whatever the model answers.
+- The local model flagged all 7 of the clean releases it held. 4 of them were partial reviews (ranked tier) and 3 were complete.
+
+### 0.2.2: a replay of the 0.2.1 verdicts
+
+The 0.2.2 rule changes only what happens after the model answers. So it was checked by passing the recorded 0.2.1 verdicts of both reviewers through it, not by running the models again.
+
+In both 0.2.1 runs, xrpl 4.2.1 was the only case whose review covered priority files only. Under 0.2.2, its APPROVE holds it for a human. So with 0.2.2 rules, both reviewers would stop 25 of 25 attacks, and no extra clean releases are held: 18/25 landed for the local model and 20/25 for Haiku, as at 0.2.1. No case in either run had a priority tier with no files to review. Model FLAG on attacks stays 24/25: xrpl 4.2.1 is held because files went unread, not because the model found the payload.
+
+### Limits of this update
+
+- **Single runs.** Each 0.2.1 number is one run per reviewer. The run-to-run spread on the extended set is unknown, so some changes in the tables may be noise.
+- **The 0.2.2 numbers are a replay of recorded verdicts, not a fresh run.** They apply the new rule to the 0.2.1 answers.
+- **Codex was not run at 0.2.1 or 0.2.2.** Its numbers on this page are still from 0.2.0.
+- **The caveats above still apply.** These are known, published attacks, the advisory, cooldown, scanner and gate layers were off, and the cooldown change was not measured.
 
 ## Earlier runs
 
