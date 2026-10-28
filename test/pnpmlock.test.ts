@@ -33,11 +33,11 @@ describe("parsePnpmLock v9", () => {
 
   // Adversarial read 0.2.3 r7 (Opus): a registry entry with neither a tarball nor an integrity was skipped, so a bump
   // written that way reached no review.
-  test("a registry entry with neither a tarball nor an integrity throws, so the PR holds", () => {
+  test("a registry entry with neither a tarball nor an integrity is read, marked unhashed, and never throws", () => {
     for (const res of ["{}", "{engines: {node: '>=6'}}"]) {
-      expect(() => parsePnpmLock(`lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages:\n  ms@2.1.3:\n    resolution: ${res}\n`)).toThrow(/ms@2.1.3/);
+      expect(parsePnpmLock(`lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages:\n  ms@2.1.3:\n    resolution: ${res}\n`)).toEqual([{ name: "ms", version: "2.1.3", unhashed: true }]);
     }
-    expect(() => parsePnpmLock(`lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages:\n  ms@2.1.3: {}\n`)).toThrow(/ms@2.1.3/);
+    expect(parsePnpmLock(`lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages:\n  ms@2.1.3: {}\n`)).toEqual([{ name: "ms", version: "2.1.3", unhashed: true }]);
   });
 
   test("an integrity the download cannot check throws, so the PR holds", () => {
