@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Public export: builds the open-source tree from this repo's HEAD as one fresh commit.
-// Scope: every tracked file except replay/ (deployment replays), plus LICENSE (MIT), the
+// Scope: every tracked file except replay/ (deployment replays) and PRIVATE_FILES (the release script), plus LICENSE (MIT), the
 // public README sections and the package.json / tsconfig.json edits below. It runs
 // scripts/oss-scan.ts over the result before committing and fails on any finding.
 // Commit dates come from the source HEAD, so the same source gives the same export commit.
@@ -12,10 +12,11 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-const AUTHOR = { name: "Will Lin", email: "222731067+alsoknownaswill@users.noreply.github.com" };
+export const AUTHOR = { name: "Will Lin", email: "222731067+alsoknownaswill@users.noreply.github.com" };
 const SRC = resolve(dirname(import.meta.path), "..");
+const PRIVATE_FILES = ["scripts/release.ts", "test/release.test.ts"];
 
-function run(cwd: string, argv: string[], env: Record<string, string> = {}): string {
+export function run(cwd: string, argv: string[], env: Record<string, string> = {}): string {
   const p = Bun.spawnSync(argv, { cwd, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
   if (p.exitCode !== 0) throw new Error(`${argv.join(" ")} failed (${p.exitCode}): ${p.stderr.toString().trim()}`);
   return p.stdout.toString();
@@ -150,6 +151,38 @@ export function badCommitEmails(repo: string, range: string): string[] {
   return rows.filter((r) => r.split(" ").slice(1).some((e) => e !== AUTHOR.email));
 }
 
+// Commit identity and dates for an export commit: the noreply author, dated at the source HEAD,
+// so the same source gives the same export commit.
+export function exportCommitEnv(): Record<string, string> {
+  const date = run(SRC, ["git", "log", "-1", "--format=%cI", "HEAD"]).trim();
+  return { GIT_AUTHOR_NAME: AUTHOR.name, GIT_AUTHOR_EMAIL: AUTHOR.email, GIT_COMMITTER_NAME: AUTHOR.name, GIT_COMMITTER_EMAIL: AUTHOR.email, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date };
+}
+
+// Writes the public tree of the source HEAD into `target` (which must be empty). No git state.
+export function writeExportTree(target: string): void {
+  const tar = join(target, ".export.tar");
+  run(SRC, ["git", "archive", "--format=tar", "-o", tar, "HEAD"]);
+  run(target, ["tar", "-xf", tar]);
+  rmSync(tar);
+  rmSync(join(target, "replay"), { recursive: true, force: true });
+  // The release script drives our own publish flow (local paths, our forge layout): private, like replay/.
+  for (const f of PRIVATE_FILES) rmSync(join(target, f), { force: true });
+
+  const pj = join(target, "package.json");
+  writeFileSync(pj, replaceOnce(readFileSync(pj, "utf8"), '  "private": true,\n', '  "private": true,\n  "license": "MIT",\n', "package.json"));
+  const ts = join(target, "tsconfig.json");
+  writeFileSync(ts, replaceOnce(readFileSync(ts, "utf8"), '"scripts", "replay", "acceptance"', '"scripts", "acceptance"', "tsconfig.json"));
+  const rd = join(target, "README.md");
+  writeFileSync(rd, publicReadme(readFileSync(rd, "utf8")));
+  writeFileSync(join(target, "LICENSE"), LICENSE);
+}
+
+// Runs scripts/oss-scan.ts over the tracked files (git index) of `dir`; throws on any finding.
+export function ossScan(dir: string): void {
+  const scan = Bun.spawnSync(["bun", "scripts/oss-scan.ts"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  if (scan.exitCode !== 0) throw new Error(`oss-scan found problems in the export:\n${scan.stdout.toString()}${scan.stderr.toString()}`);
+}
+
 if (import.meta.main && process.argv[2] === "--check-push") {
   const [repo, range] = [process.argv[3], process.argv[4]];
   if (!repo || !range) throw new Error("usage: bun scripts/export-public.ts --check-push <repo> <range>");
@@ -164,26 +197,11 @@ if (import.meta.main && process.argv[2] === "--check-push") {
   checkTarget(target);
   for (const e of readdirSync(target)) rmSync(join(target, e), { recursive: true, force: true });
 
-  const date = run(SRC, ["git", "log", "-1", "--format=%cI", "HEAD"]).trim();
-  const tar = join(target, ".export.tar");
-  run(SRC, ["git", "archive", "--format=tar", "-o", tar, "HEAD"]);
-  run(target, ["tar", "-xf", tar]);
-  rmSync(tar);
-  rmSync(join(target, "replay"), { recursive: true, force: true });
-
-  const pj = join(target, "package.json");
-  writeFileSync(pj, replaceOnce(readFileSync(pj, "utf8"), '  "private": true,\n', '  "private": true,\n  "license": "MIT",\n', "package.json"));
-  const ts = join(target, "tsconfig.json");
-  writeFileSync(ts, replaceOnce(readFileSync(ts, "utf8"), '"scripts", "replay", "acceptance"', '"scripts", "acceptance"', "tsconfig.json"));
-  const rd = join(target, "README.md");
-  writeFileSync(rd, publicReadme(readFileSync(rd, "utf8")));
-  writeFileSync(join(target, "LICENSE"), LICENSE);
-
-  const env = { GIT_AUTHOR_NAME: AUTHOR.name, GIT_AUTHOR_EMAIL: AUTHOR.email, GIT_COMMITTER_NAME: AUTHOR.name, GIT_COMMITTER_EMAIL: AUTHOR.email, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date };
+  writeExportTree(target);
+  const env = exportCommitEnv();
   run(target, ["git", "init", "-q", "-b", "main"]);
   run(target, ["git", "add", "-A"]);
-  const scan = Bun.spawnSync(["bun", "scripts/oss-scan.ts"], { cwd: target, stdout: "pipe", stderr: "pipe" });
-  if (scan.exitCode !== 0) throw new Error(`oss-scan found problems in the export:\n${scan.stdout.toString()}${scan.stderr.toString()}`);
+  ossScan(target);
   run(target, ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "chore: initial public release"], env);
   console.log(`exported ${run(SRC, ["git", "rev-parse", "--short", "HEAD"]).trim()} -> ${target} @ ${run(target, ["git", "rev-parse", "--short", "HEAD"]).trim()}`);
 }
