@@ -10,7 +10,8 @@ import { directKind, npmCanonicalTarball, npmPrivateRegistry, type LockedPackage
 
 /**
  * Whether a bun.lock registry field is a registry the review reads name@version from: the registry's own tarball of
- * it, a private registry's base, or the public registry's root. A tarball or any other path is not.
+ * it, a private registry's base (a directory URL), or the public registry's root. A tarball, including one whose
+ * path does not end in `.tgz`, or any other path is a url dependency.
  */
 function registryField(url: string, name: string, version: string): boolean {
   if (npmCanonicalTarball(url, name, version)) return true;
@@ -20,8 +21,13 @@ function registryField(url: string, name: string, version: string): boolean {
   } catch {
     return false;
   }
-  if (!/^https?:$/.test(u.protocol) || u.search || u.hash || u.username || u.password || /\.(tgz|tar|tar\.gz)$/i.test(u.pathname)) return false;
-  return npmPrivateRegistry(url) !== undefined || u.pathname === "/";
+  if (!/^https?:$/.test(u.protocol) || u.search || u.hash || u.username || u.password) return false;
+  // A base ends with `/`. A file URL (a .tar.bz2, a codeload `/tar.gz/<rev>`, anything else) does not.
+  const path = u.pathname;
+  if (path !== "/" && !path.endsWith("/")) return false;
+  const last = path.slice(0, -1).split("/").pop() ?? "";
+  if (/\.(?:tgz|tar(?:\.(?:gz|bz2|xz|zst))?|tbz2?|txz|taz|zip)$/i.test(last)) return false;
+  return npmPrivateRegistry(url) !== undefined || path === "/";
 }
 
 export function stripTrailingCommas(text: string): string {

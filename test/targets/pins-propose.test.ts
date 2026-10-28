@@ -37,10 +37,10 @@ const input = (exec: ProposeInput["exec"], over: Partial<ProposeInput> = {}): Pr
 });
 
 describe("proposal branch", () => {
-  test("branchName is the prefix plus a hash of the new file", () => {
-    expect(branchName("oupdate/", "A=2\n")).toMatch(/^oupdate\/pins-[0-9a-f]{12}$/);
-    expect(branchName("oupdate/", "A=2\n")).toBe(branchName("oupdate/", "A=2\n"));
-    expect(branchName("oupdate/", "A=3\n")).not.toBe(branchName("oupdate/", "A=2\n"));
+  test("branchName is the prefix plus a hash of the pins path and the new file", () => {
+    expect(branchName("oupdate/", "img/pins.env", "A=2\n")).toMatch(/^oupdate\/pins-[0-9a-f]{12}$/);
+    expect(branchName("oupdate/", "img/pins.env", "A=2\n")).toBe(branchName("oupdate/", "img/pins.env", "A=2\n"));
+    expect(branchName("oupdate/", "img/pins.env", "A=3\n")).not.toBe(branchName("oupdate/", "img/pins.env", "A=2\n"));
   });
 
   test("branchExists asks show-ref for the local branch", async () => {

@@ -93,12 +93,16 @@ describe("upstream formulaReview", () => {
     expect(v).toMatchObject({ rc: 1, calls: 0 });
     expect(v.reason).toContain("requirements.txt");
   });
-  test("a new binary outside images is FLAGged; an image is not", async () => {
+  test("a new binary outside images is FLAGged; a real PNG is not; a .png that is not a PNG is FLAGged", async () => {
     const bin = await review({ after: release((t) => writeFileSync(join(t, "helper"), Buffer.from([0, 1, 2, 0, 255, 0, 7]))) });
     expect(bin).toMatchObject({ rc: 1, calls: 0 });
     expect(bin.reason).toContain("helper");
-    const img = await review({ after: release((t) => writeFileSync(join(t, "logo.png"), Buffer.from([0, 1, 2, 0, 255]))) });
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const img = await review({ after: release((t) => writeFileSync(join(t, "logo.png"), png)) });
     expect(img.rc).toBe(0);
+    const fake = await review({ after: release((t) => writeFileSync(join(t, "logo.png"), Buffer.from([0, 1, 2, 0, 255]))) });
+    expect(fake).toMatchObject({ rc: 1, calls: 0 });
+    expect(fake.reason).toContain("logo.png: binary file added or changed");
   });
   test("a new executable script is read as surface wherever it is", async () => {
     const v = await review({ after: release((t) => { put(t, "tools/run", "#!/bin/sh\necho hi\n"); chmodSync(join(t, "tools/run"), 0o755); }) });

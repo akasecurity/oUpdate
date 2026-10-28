@@ -2,6 +2,8 @@
 // newer value, and where a proposal goes. Every key in the pins file must be named exactly once:
 // in a group, in `fixed` (a policy value, not an update) or in `notChecked` (with the reason, which
 // the leg logs each run). A key named nowhere is reported as an unknown pin, with trouble.
+// A github-release group may also name `assetKeys`: pin keys rewritten to the asset's file name at
+// the new version. Those keys count as mapped, the same as the hash keys in `assets`.
 
 import { absPath, isObj, obj, optBool, optCount, optStr, reqStr, strList, strMap, type Obj } from "../strict.ts";
 
@@ -23,9 +25,11 @@ const AUTHOR_NAME = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/;
 const EMAIL = /^[^\s@<>]+@[^\s@<>]+$/;
 
 export interface NpmGroup { source: "npm"; name: string; package: string; versionKey: string; integrity: Record<string, string>; propose: boolean; note?: string }
-export interface GithubGroup { source: "github-release"; name: string; repo: string; tag: string; versionKey: string; assets: Record<string, string>; propose: boolean; note?: string }
+export interface GithubGroup { source: "github-release"; name: string; repo: string; tag: string; versionKey: string; assets: Record<string, string>; assetKeys?: Record<string, string>; propose: boolean; note?: string }
+/** Docker's static macOS CLI tarball. No upstream checksums, so a newer version is reported and never proposed. */
+export interface DockerStaticGroup { source: "docker-static"; name: string; versionKey: string; assetKey: string; shaKey: string; propose: false; note?: string }
 export interface OciGroup { source: "oci-index"; name: string; registry: "docker-hub"; repository: string; tagKey: string; digestKey: string; snapshot?: { key: string; base: string; suite: string }; propose: boolean; note?: string }
-export type PinGroup = NpmGroup | GithubGroup | OciGroup;
+export type PinGroup = NpmGroup | GithubGroup | OciGroup | DockerStaticGroup;
 
 export interface PinBumpLeg {
   kind: "pin-bump";
@@ -51,7 +55,8 @@ const LEG_KEYS = ["kind", "pinsPath", "branchPrefix", "proposalDir", "push", "co
 /** The keys a group reads or writes. */
 export function groupKeys(g: PinGroup): string[] {
   if (g.source === "npm") return [g.versionKey, ...Object.keys(g.integrity)];
-  if (g.source === "github-release") return [g.versionKey, ...Object.keys(g.assets)];
+  if (g.source === "github-release") return [g.versionKey, ...Object.keys(g.assets), ...Object.keys(g.assetKeys ?? {})];
+  if (g.source === "docker-static") return [g.versionKey, g.assetKey, g.shaKey];
   return [g.tagKey, g.digestKey, ...(g.snapshot ? [g.snapshot.key] : [])];
 }
 
@@ -75,9 +80,17 @@ function group(v: unknown, where: string): PinGroup {
     };
   }
   if (source === "github-release") {
-    const o = obj(v, where, ["source", "name", "repo", "tag", "versionKey", "assets", "propose", "note"]);
+    const o = obj(v, where, ["source", "name", "repo", "tag", "versionKey", "assets", "assetKeys", "propose", "note"]);
     const assets = strMap(o, "assets", where, PIN_KEY, ASSET);
     if (!assets || !Object.keys(assets).length) throw new Error(`${where}.assets must name at least one pinned asset hash`);
+    const assetKeys = strMap(o, "assetKeys", where, PIN_KEY, ASSET);
+    // A name pin must be the same template as a hash pin. Otherwise a bump can write an arm64 file name while the only hash is of the x86_64 asset.
+    if (assetKeys) {
+      const hashed = new Set(Object.values(assets));
+      for (const [key, template] of Object.entries(assetKeys)) {
+        if (!hashed.has(template)) throw new Error(`${where}.assetKeys[${JSON.stringify(key)}] must name an asset hashed in assets`);
+      }
+    }
     return {
       source: "github-release",
       name: reqStr(o, "name", where, GROUP_NAME),
@@ -85,7 +98,21 @@ function group(v: unknown, where: string): PinGroup {
       tag: reqStr(o, "tag", where, TAG),
       versionKey: reqStr(o, "versionKey", where, PIN_KEY),
       assets,
+      ...(assetKeys && Object.keys(assetKeys).length ? { assetKeys } : {}),
       propose: optBool(o, "propose", where) ?? true,
+      ...note(o, where),
+    };
+  }
+  if (source === "docker-static") {
+    const o = obj(v, where, ["source", "name", "versionKey", "assetKey", "shaKey", "propose", "note"]);
+    if (optBool(o, "propose", where) === true) throw new Error(`${where}: docker-static never proposes (no upstream sums)`);
+    return {
+      source: "docker-static",
+      name: reqStr(o, "name", where, GROUP_NAME),
+      versionKey: reqStr(o, "versionKey", where, PIN_KEY),
+      assetKey: reqStr(o, "assetKey", where, PIN_KEY),
+      shaKey: reqStr(o, "shaKey", where, PIN_KEY),
+      propose: false,
       ...note(o, where),
     };
   }
@@ -110,7 +137,7 @@ function group(v: unknown, where: string): PinGroup {
       ...note(o, where),
     };
   }
-  throw new Error(`${where}.source must be npm, github-release or oci-index`);
+  throw new Error(`${where}.source must be npm, github-release, oci-index or docker-static`);
 }
 
 export function parsePinBumpLeg(v: unknown, where: string): PinBumpLeg {

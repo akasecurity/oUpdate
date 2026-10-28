@@ -36,7 +36,7 @@ oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is n
 Install a release tag, not the tip of \`main\`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
 
 \`\`\`
-git clone --branch v0.2.4 https://github.com/akasecurity/oupdate.git
+git clone --branch v0.2.5 https://github.com/akasecurity/oupdate.git
 cd oupdate
 git rev-parse HEAD
 bun install

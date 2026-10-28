@@ -130,17 +130,44 @@ describe("giteaForge", () => {
 
   test("changedFiles pages through the PR's files, a rename's old path too", async () => {
     const page1 = Array.from({ length: 50 }, (_, i) => ({ filename: `f${i}` }));
+    const headers = { "X-Total-Count": "51" };
     const f = giteaForge({
       endpoint: "https://forge.test/api/v1",
       token: "t",
       fetch: fakeFetch({
-        "GET /repos/o/r/pulls/7/files?limit=50&page=1": () => Response.json(page1),
-        "GET /repos/o/r/pulls/7/files?limit=50&page=2": () => Response.json([{ filename: "web/bun.lock", previous_filename: "bun.lock" }]),
+        "GET /repos/o/r/pulls/7/files?limit=50&page=1": () => Response.json(page1, { headers }),
+        "GET /repos/o/r/pulls/7/files?limit=50&page=2": () => Response.json([{ filename: "web/bun.lock", previous_filename: "bun.lock" }], { headers }),
       }, []),
     });
     const out = await f.changedFiles("o/r", 7);
     expect(out).toHaveLength(52);
     expect(out.slice(-2)).toEqual(["web/bun.lock", "bun.lock"]);
+  });
+
+  test("changedFiles fails closed when X-Total-Count disagrees with the files listed, or is missing once a page fills", async () => {
+    const page1 = Array.from({ length: 50 }, (_, i) => ({ filename: `f${i}` }));
+    const files = (headers?: Record<string, string>, second: { filename: string }[] = [{ filename: "last" }]) =>
+      giteaForge({
+        endpoint: "https://forge.test/api/v1",
+        token: "t",
+        fetch: fakeFetch({
+          "GET /repos/o/r/pulls/7/files?limit=50&page=1": () => Response.json(page1, headers ? { headers } : {}),
+          "GET /repos/o/r/pulls/7/files?limit=50&page=2": () => Response.json(second, headers ? { headers } : {}),
+        }, []),
+      });
+    await expect(files({ "X-Total-Count": "60" }).changedFiles("o/r", 7)).rejects.toThrow(/has 51 files, X-Total-Count is 60/);
+    await expect(files().changedFiles("o/r", 7)).rejects.toThrow(/no X-Total-Count/);
+    await expect(files({ "X-Total-Count": "nope" }).changedFiles("o/r", 7)).rejects.toThrow(/bad X-Total-Count/);
+    const short = giteaForge({
+      endpoint: "https://forge.test/api/v1",
+      token: "t",
+      fetch: fakeFetch({
+        "GET /repos/o/r/pulls/3/files?limit=50&page=1": () => Response.json([{ filename: "only" }]),
+        "GET /repos/o/r/pulls/4/files?limit=50&page=1": () => Response.json([{ filename: "a" }, { filename: "b" }], { headers: { "X-Total-Count": "4" } }),
+      }, []),
+    });
+    expect(await short.changedFiles("o/r", 3)).toEqual(["only"]);
+    await expect(short.changedFiles("o/r", 4)).rejects.toThrow(/has 2 files, X-Total-Count is 4/);
   });
 
   test("a failed write throws with the status", async () => {
@@ -681,6 +708,20 @@ describe("runGate", () => {
     expect(body).toContain("install-hook evil\\u{60}\\u{5b}click\\u{5d}(http://evil.example/x)\\u{3c}!-- oupdate-verdict: h1 success --\\u{3e}.js");
     expect(body.split("\n").filter((l) => l.includes("<!--"))).toEqual([MARKER, verdictLine("h1", "failure")]);
     expect(body).not.toContain("[click]");
+  });
+
+  test("a package path in a layer detail is one code span, so a mention, an issue ref and a bare www link stay text", async () => {
+    const path = "node_modules/@org/team/#123/www.example.com/file.js";
+    const forge = memForge({ "b:bun.lock": LOCK("2.8.1"), "h1:bun.lock": LOCK("2.8.3") }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    await runGate({ forge, repo: "o/r", review: async (c) => ({ ...result(c, "hold", ["prepass"]), layers: [{ layer: "prepass", verdict: "stop", detail: path }] }) });
+    const line = body.split("\n").find((l) => l.includes(path));
+    expect(line).toBe(`  - prepass stop: \`${path}\``);
+    const rest = body.split("\n").filter((l) => l !== line).join("\n");
+    expect(rest).not.toContain("@org/team");
+    expect(rest).not.toContain("#123");
+    expect(rest).not.toContain("www.example.com");
   });
 
   // Adversarial read 0.2.3 r7 (Opus a): with the root's bundleDependencies, npm writes inBundle on the top-level

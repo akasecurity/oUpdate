@@ -3,6 +3,7 @@
 // the update. Later layers still run after an earlier stop, so a replay shows
 // what each layer would have done on its own.
 
+import { benignBinary } from "./benign-binary.ts";
 import { cooldownVerdict } from "./cooldown.ts";
 import { shown } from "./ident.ts";
 import { prepass, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
@@ -111,44 +112,20 @@ function isBinary(b: Uint8Array): boolean {
 // Text an interpreter or an install reads (a manifest, an install or startup file, a code or script extension, a #!
 // line): a NUL in it, say inside a comment, never reduces it to a hash; it is shown with the NUL escaped.
 const CODE_EXT = /\.(js|mjs|cjs|jsx|ts|mts|cts|tsx|py|pyw|pyi|pth|sh|bash|zsh|ps1|bat|cmd|rb|pl|php|json|toml|cfg|ini|ya?ml)$/i;
-// Binaries a model may see as a hash and still land, as in the tap surface scan (apply/surface.ts), but only when
-// the bytes start as that format: a name is no proof (require("./asset.png") runs a NUL-bearing script). Any other
-// added or changed binary holds the update for a human.
-const bytesAre = (b: Uint8Array, at: number, sig: (number | string)[]) => {
-  const want = sig.flatMap((x) => (typeof x === "string" ? [...x].map((c) => c.charCodeAt(0)) : [x]));
-  return b.length >= at + want.length && want.every((v, i) => b[at + i] === v);
-};
-const BENIGN_BINARY: [RegExp, (b: Uint8Array) => boolean][] = [
-  [/\.png$/i, (b) => bytesAre(b, 0, [0x89, "PNG\r\n", 0x1a, "\n"])],
-  [/\.jpe?g$/i, (b) => bytesAre(b, 0, [0xff, 0xd8, 0xff])],
-  [/\.gif$/i, (b) => bytesAre(b, 0, ["GIF87a"]) || bytesAre(b, 0, ["GIF89a"])],
-  [/\.ico$/i, (b) => bytesAre(b, 0, [0, 0, 1, 0])],
-  [/\.icns$/i, (b) => bytesAre(b, 0, ["icns"])],
-  [/\.webp$/i, (b) => bytesAre(b, 0, ["RIFF"]) && bytesAre(b, 8, ["WEBP"])],
-  [/\.bmp$/i, (b) => bytesAre(b, 0, ["BM"])],
-  [/\.pdf$/i, (b) => bytesAre(b, 0, ["%PDF-"])],
-  [/\.(ttf|otf)$/i, (b) => bytesAre(b, 0, [0, 1, 0, 0]) || bytesAre(b, 0, ["OTTO"]) || bytesAre(b, 0, ["true"])],
-  [/\.eot$/i, (b) => bytesAre(b, 34, ["LP"])],
-  [/\.woff$/i, (b) => bytesAre(b, 0, ["wOFF"])],
-  [/\.woff2$/i, (b) => bytesAre(b, 0, ["wOF2"])],
-];
-
-function benignBinary(path: string, bytes: Uint8Array | undefined): boolean {
-  const kind = BENIGN_BINARY.find(([re]) => re.test(path));
-  return !!kind && !!bytes && kind[1](bytes);
-}
 
 function shownAsText(path: string, bytes: Uint8Array | undefined): boolean {
   return CODE_EXT.test(path) || PRIORITY_NAME.test(path) || (!!bytes && bytes[0] === 0x23 && bytes[1] === 0x21);
 }
 
-function hashedBinary(path: string, before: Uint8Array | undefined, after: Uint8Array | undefined): boolean {
+/** A file the reviewer sees only as a hash: binary bytes (a NUL in the first 8000 bytes, before or after) and not shown as text. */
+export function hashedBinary(path: string, before: Uint8Array | undefined, after: Uint8Array | undefined): boolean {
   return !shownAsText(path, after) && ((!!after && isBinary(after)) || (!!before && isBinary(before)));
 }
 
 function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Array | undefined, state = !before ? "added" : !after ? "removed" : "changed"): string[] {
   const head = `=== ${path} (${state}) ===\n`;
-  if (hashedBinary(path, before, after)) {
+  // A text-signature file that code loads is code: show it, with a NUL escaped, instead of a benign hash.
+  if (state !== "loaded by code" && hashedBinary(path, before, after)) {
     const h = after ? new Bun.CryptoHasher("sha256").update(after).digest("hex") : "-";
     return [`${head}[binary, ${after?.length ?? 0} bytes, sha256 ${h}]\n`];
   }
@@ -416,12 +393,64 @@ function hashedMaps(oldFiles: FileMap, newFiles: FileMap, paths: string[], entri
   return out;
 }
 
+// GIF, BMP, WebP, WOFF, OTF, TTF, EOT and ICNS signatures are ASCII that can parse as JavaScript.
+// A .ttf may start with "true" or "OTTO"; "true" plus numTables 0x2F2F is the line comment "true//".
+// A changed or added file of those types that JS or TS loads is not a benign binary.
+const TEXT_SIG = /\.(gif|bmp|webp|woff2?|ttf|otf|eot|icns)$/i;
+const JS_TS = /\.(js|mjs|cjs|jsx|ts|mts|cts|tsx)$/i;
+
+function codeRefs(src: string): string[] {
+  const out: string[] = [];
+  const takeCall = (re: RegExp) => {
+    for (const m of src.matchAll(re)) {
+      const rest = src.slice((m.index ?? 0) + m[0].length);
+      const end = rest.indexOf(")");
+      if (end < 0) continue;
+      for (const s of rest.slice(0, end).matchAll(/['"]([^'"]+)['"]/g)) out.push(s[1]!);
+    }
+  };
+  takeCall(/\brequire\s*\(/g);
+  takeCall(/\bimport\s*\(/g);
+  takeCall(/\bnew\s+Worker\s*\(/g);
+  takeCall(/\bimportScripts\s*\(/g);
+  for (const m of src.matchAll(/\bimport\s*(?:[^'";]*?\bfrom\s+)?['"]([^'"]+)['"]/g)) out.push(m[1]!);
+  for (const m of src.matchAll(/<script\b[^>]*?\bsrc\s*=\s*['"]([^'"]+)['"]/gi)) out.push(m[1]!);
+  return out;
+}
+
+function resolveSpec(from: string, spec: string): string | undefined {
+  const clean = spec.replace(/[?#].*$/, "").trim();
+  if (!clean || clean.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(clean)) return undefined;
+  const rel = clean.startsWith("/") ? clean.slice(1) : clean;
+  if (!(rel.startsWith("./") || rel.startsWith("../") || clean.startsWith("/") || TEXT_SIG.test(rel))) return undefined;
+  return resolveIn(from.split("/").slice(0, -1).join("/"), rel);
+}
+
+/** Added or changed text-signature files named from JS or TS by require, import, Worker, importScripts or script src. */
+function loadedByCode(oldFiles: FileMap, newFiles: FileMap): Set<string> {
+  const out = new Set<string>();
+  for (const [p, b] of newFiles) {
+    if (!JS_TS.test(p) || isLink(b)) continue;
+    for (const spec of codeRefs(dec.decode(b))) {
+      const r = resolveSpec(p, spec);
+      if (r === undefined || !TEXT_SIG.test(r)) continue;
+      const now = newFiles.get(r);
+      if (!now || isLink(now)) continue;
+      const prev = oldFiles.get(r);
+      if (prev && sameFile(prev, now)) continue;
+      out.add(r);
+    }
+  }
+  return out;
+}
+
 // Splits the diff into prompt-sized chunks on line boundaries. Inert files (isInert) that are not entries are
-// left out only with `dropInert`; long lines are sliced, not dropped. `only` as a set keeps those
-// paths in sorted order; as an array it keeps them in the array's order (a ranking).
+// left out only with `dropInert`; a text-signature file that code loads is shown anyway. Long lines are sliced,
+// not dropped. `only` as a set keeps those paths in sorted order; as an array it keeps them in the array's order (a ranking).
 export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, only?: Set<string> | string[], dropInert = false, signals: Set<string> = new Set()): string[] {
   const paths = Array.isArray(only) ? only : [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter((p) => !only || only.has(p)).sort();
   const { entries, fresh } = entryView(oldFiles, newFiles);
+  const loaded = loadedByCode(oldFiles, newFiles);
   const generated = hashedMaps(oldFiles, newFiles, paths, entries, signals);
   const chunks: string[] = [];
   let cur = "";
@@ -439,9 +468,13 @@ export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, onl
   for (const p of paths) {
     const a = oldFiles.get(p);
     const b = newFiles.get(p);
-    if (dropInert && !entries.has(p) && isInert(p, b)) continue;
+    if (dropInert && !entries.has(p) && !loaded.has(p) && isInert(p, b)) continue;
     if (a && b && sameFile(a, b)) {
       if (fresh.has(p)) for (const piece of fileDiff(p, undefined, b, "now loaded by package.json, unchanged")) push(piece);
+      continue;
+    }
+    if (loaded.has(p)) {
+      for (const piece of fileDiff(p, a, b, "loaded by code")) push(piece);
       continue;
     }
     if (generated.has(p)) {
@@ -509,9 +542,9 @@ export function rankPriorityPaths(pre: PrepassResult, scanHits: Set<string> = ne
   return [...priorityPaths(pre)].sort((a, b) => tier(a) - tier(b) || (count.get(b) ?? 0) - (count.get(a) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
 }
 
-type Scope = "all" | "priority" | "signal" | "ranked";
+export type Scope = "all" | "priority" | "signal" | "ranked";
 
-const SCOPE_NOTE: Record<Scope, string> = {
+export const SCOPE_NOTE: Record<Scope, string> = {
   all: "",
   priority: "\nThe full diff is over budget, so these parts hold priority files only: files with a pre-pass signal, new files, manifests and install or startup files. Changed files with no signal are left out.",
   signal: "\nThe full diff is over budget even as priority files, so these parts hold signal files only: files with a pre-pass or scanner signal, manifests and install or startup files. Everything else is left out.",
@@ -628,7 +661,9 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       const maxParts = input.maxParts ?? 12;
       const { entries, fresh } = entryView(artifacts.old, artifacts.new);
       const reviewable = [...new Set([...pre.added, ...pre.changed, ...fresh])];
-      const binaries = reviewable.filter((p) => (entries.has(p) || !benignBinary(p, artifacts!.new.get(p))) && hashedBinary(p, fresh.has(p) ? undefined : artifacts!.old.get(p), artifacts!.new.get(p)));
+      // Shown in the diff as code, so an APPROVE covers them. A hash-only benign pass does not.
+      const loaded = loadedByCode(artifacts.old, artifacts.new);
+      const binaries = reviewable.filter((p) => !loaded.has(p) && (entries.has(p) || !benignBinary(p, artifacts!.new.get(p))) && hashedBinary(p, fresh.has(p) ? undefined : artifacts!.old.get(p), artifacts!.new.get(p)));
       // A link that runs as code and was added or changed, whose target cannot be shown as text.
       const badLinks = reviewable.filter((p) => {
         if (!isLink(artifacts!.new.get(p)!)) return false;
@@ -659,7 +694,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
             // Still over: review the top-ranked parts. The rest is never read, so this tier can stop, never land.
             const ranked = chunkDiff(artifacts.old, artifacts.new, cap, rankPriorityPaths(pre, scanHits), true, signalled);
             chunks = ranked.slice(0, maxParts);
-            const read = new Set([...chunks.join("").matchAll(/^=== (.+) \((?:added|removed|changed|now loaded by package.json, unchanged|target of link .+)\) ===$/gm)].map((m) => m[1]!));
+            const read = new Set([...chunks.join("").matchAll(/^=== (.+) \((?:added|removed|changed|loaded by code|now loaded by package.json, unchanged|target of link .+)\) ===$/gm)].map((m) => m[1]!));
             scope = "ranked";
             overPriority = `too large for model review: ${ranked.length} parts > ${maxParts} (signal files alone)`;
             note = `${ranked.length - maxParts} parts not reviewed, ${leftOut(read)} file(s) not reviewed`;

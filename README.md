@@ -43,7 +43,7 @@ oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is n
 Install a release tag, not the tip of `main`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
 
 ```
-git clone --branch v0.2.4 https://github.com/akasecurity/oupdate.git
+git clone --branch v0.2.5 https://github.com/akasecurity/oupdate.git
 cd oupdate
 git rev-parse HEAD
 bun install
@@ -134,7 +134,7 @@ jobs:
     steps:
       - uses: oven-sh/setup-bun@<commit-sha>    # pin actions to a full commit sha
       - uses: actions/checkout@<commit-sha>
-        with: { repository: akasecurity/oupdate, ref: v0.2.4, path: .oupdate }
+        with: { repository: akasecurity/oupdate, ref: v0.2.5, path: .oupdate }
       - run: >
           bun .oupdate/src/cli.ts gate --forge github --repo "$GITHUB_REPOSITORY"
           --token-env GITHUB_TOKEN --gate-login "github-actions[bot]"
@@ -162,10 +162,10 @@ oupdate image registry.example/team/app-a:5.14.0 registry.example/team/app-a@sha
   --reviewer '{"type":"openai","name":"local","baseUrls":["http://127.0.0.1:8080/v1"],"model":"your-model"}'
 ```
 
-Both refs must name the same repository; each is a tag or a `@sha256:` digest, and a bare name means Docker Hub. oUpdate reads both images from the registry for one platform (`--platform`, default `linux/amd64`) without pulling them, and checks every manifest and config against its digest. The evidence is the same as for Docker Compose images on a NAS: the Entrypoint and Cmd, and the build history lines the new image adds. It reads no layer contents and no advisories. A pre-gate holds an Entrypoint or Cmd change, a fetch piped to a shell, SSH keys and similar lines whatever the model says; then the reviewer reads the diff. With `--second-reviewer`, both must approve.
+Both refs must name the same repository; each is a tag or a `@sha256:` digest, and a bare name means Docker Hub. oUpdate reads both images from the registry for one platform (`--platform`, default `linux/amd64`) without pulling them, and checks every manifest and config against its digest. The evidence is the same as for Docker Compose images on a NAS: the Entrypoint and Cmd, and the build history lines the new image adds. It also reads the layer contents of both images, only the layers they do not share and only with `bsdtar`, never unpacking a tree: the ENV, USER, VOLUME, HEALTHCHECK and ONBUILD changes, the package database changes (apk, dpkg), and the files that changed, ranked so the file the image starts, startup and persistence paths, setuid files, executables no package owns and new CA certificates come first. Text files a package upgrade replaced are counted, not shown. Any added or changed binary file holds, packaged or not, because the reviewers see it only as a hash; only an image or font whose bytes match its name is exempt. Every layer blob is checked against its digest, and a layer that cannot be read is a `LAYERS UNREADABLE` hold whatever the reviewers say. The output says how many layers were read. `--no-layers` skips the layer contents and says so. A pre-gate holds an Entrypoint or Cmd change, a fetch piped to a shell, SSH keys, a write to a startup path such as `/etc/ld.so.preload`, an unpackaged binary and similar findings whatever the model says; then the reviewer reads each part of the diff. With `--second-reviewer`, both must approve.
 
 - **Exit 0 (LAND):** the two refs are the same image, or the pre-gate is clean and the reviewers approve.
-- **Exit 1 (HOLD):** a pre-gate hit, a FLAG, no reviewer, a reviewer that failed, or an image that could not be read (BASELINE MISSING).
+- **Exit 1 (HOLD):** a pre-gate hit, a FLAG, no reviewer, a reviewer that failed, an image that could not be read (BASELINE MISSING), or a layer that could not be read (LAYERS UNREADABLE).
 - **Exit 2:** a usage error.
 
 `--json FILE` writes the result, including the platform manifest digests. Private registries are not supported yet: the registry must allow anonymous pulls.

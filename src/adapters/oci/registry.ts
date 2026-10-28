@@ -33,6 +33,7 @@ export const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const TAG = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 const ARCHES = ["amd64", "arm64"];
 const TIMEOUT_MS = 60_000;
+const MAX_REDIRECTS = 5;
 const dec = new TextDecoder();
 
 export const sha256Digest = (b: Uint8Array) => `sha256:${new Bun.CryptoHasher("sha256").update(b).digest("hex")}`;
@@ -142,17 +143,82 @@ export function parseImageRef(s: string): ImageRef {
   return { registry, repository: parts.join("/"), reference: digest ?? tag ?? "latest", text: s };
 }
 
+export interface LayerInfo {
+  digest: string;
+  mediaType: string;
+  size: number;
+}
+
+/** The image config fields a layer review shows beside the layers; each is empty when the image sets nothing. */
+export interface ImageDetail {
+  env: string[];
+  user: string;
+  workdir: string;
+  ports: string[];
+  volumes: string[];
+  labels: string[];
+  /** The Healthcheck object as JSON, or "". */
+  healthcheck: string;
+  onbuild: string[];
+  shell: string[];
+}
+
+export interface ImageLayers {
+  detail: ImageDetail;
+  /** Oldest first, as the manifest lists them. */
+  layers: LayerInfo[];
+  /** Streams the layer blob to `dest` and checks its size and sha256; throws on an HTTP error or a mismatch. */
+  fetchLayer(layer: LayerInfo, dest: string): Promise<void>;
+}
+
 export interface OciImageSource {
   /** One platform's evidence; `platform` is `os/arch[/variant]`. Throws when anything cannot be read or verified. */
   imageEvidence(ref: ImageRef, platform: string): Promise<ImageEvidence>;
+  /** The same image's layer list, config detail and a verified blob fetch; absent on a source that cannot read layers. */
+  imageLayers?(ref: ImageRef, platform: string, expectDigest?: string): Promise<ImageLayers>;
 }
 
 interface ImageConfig {
   os?: string;
   architecture?: string;
   variant?: string;
-  config?: { Entrypoint?: unknown; Cmd?: unknown };
+  config?: {
+    Entrypoint?: unknown;
+    Cmd?: unknown;
+    Env?: unknown;
+    User?: unknown;
+    WorkingDir?: unknown;
+    ExposedPorts?: unknown;
+    Volumes?: unknown;
+    Labels?: unknown;
+    Healthcheck?: unknown;
+    OnBuild?: unknown;
+    Shell?: unknown;
+  };
   history?: { created_by?: unknown }[];
+}
+
+const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+const keys = (v: unknown): string[] => (v && typeof v === "object" && !Array.isArray(v) ? Object.keys(v).sort() : []);
+
+function imageDetail(c: ImageConfig["config"]): ImageDetail {
+  const labels = c?.Labels && typeof c.Labels === "object" && !Array.isArray(c.Labels) ? Object.entries(c.Labels as Record<string, unknown>).map(([k, v]) => `${k}=${String(v)}`).sort() : [];
+  return {
+    env: strings(c?.Env),
+    user: typeof c?.User === "string" ? c.User : "",
+    workdir: typeof c?.WorkingDir === "string" ? c.WorkingDir : "",
+    ports: keys(c?.ExposedPorts),
+    volumes: keys(c?.Volumes),
+    labels,
+    healthcheck: c?.Healthcheck && typeof c.Healthcheck === "object" ? JSON.stringify(c.Healthcheck) : "",
+    onbuild: strings(c?.OnBuild),
+    shell: strings(c?.Shell),
+  };
+}
+
+interface ManifestDoc {
+  config?: { digest?: string };
+  layers?: { digest?: string; mediaType?: string; size?: number; urls?: unknown }[];
 }
 
 /** The `Bearer realm=…,service=…,scope=…` challenge's parameters; undefined for any other challenge. */
@@ -166,73 +232,126 @@ function bearerChallenge(h: string | null): Record<string, string> | undefined {
 
 export function registrySource(deps: { fetch?: typeof fetch } = {}): OciImageSource {
   const f = deps.fetch ?? fetch;
+  const open = async (ref: ImageRef, platform: string) => {
+    const [os, arch, variant] = platform.split("/");
+    const base = `https://${ref.registry === "docker.io" ? "registry-1.docker.io" : ref.registry}/v2/${ref.repository}/`;
+    const label = `${ref.repository}${DIGEST.test(ref.reference) ? "@" : ":"}${ref.reference}`;
+    let token: string | undefined;
+    // Redirects are followed by hand (a blob usually moves to a CDN): https only, a few hops, and the token goes only to
+    // the registry's own origin, never to the host a redirect names.
+    const origin = new URL(base).origin;
+    const send = async (path: string, accept: string[]): Promise<Response> => {
+      let url = new URL(base + path);
+      for (let hop = 0; ; hop++) {
+        const auth: Record<string, string> = token && url.origin === origin ? { authorization: `Bearer ${token}` } : {};
+        const r = await f(url, { headers: { ...auth, accept: accept.join(", "), "user-agent": "oupdate" }, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) });
+        const to = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
+        if (!to) return r;
+        if (hop >= MAX_REDIRECTS) throw new Error(`registry: over ${MAX_REDIRECTS} redirects for ${path}`);
+        url = new URL(to, url);
+        if (url.protocol !== "https:") throw new Error(`registry redirect to a non-https URL for ${path}`);
+      }
+    };
+    const get = async (path: string, accept: string[]) => {
+      let r = await send(path, accept);
+      const challenge = r.status === 401 && !token ? bearerChallenge(r.headers.get("www-authenticate")) : undefined;
+      if (challenge) {
+        const u = new URL(challenge.realm!);
+        if (u.protocol !== "https:") throw new Error(`registry token realm is not https: ${u.origin}`);
+        if (challenge.service) u.searchParams.set("service", challenge.service);
+        if (challenge.scope) u.searchParams.set("scope", challenge.scope);
+        const tr = await f(u, { headers: { "user-agent": "oupdate" }, signal: AbortSignal.timeout(TIMEOUT_MS) });
+        if (!tr.ok) throw new Error(`registry token HTTP ${tr.status}`);
+        const t = (await tr.json()) as { token?: unknown; access_token?: unknown };
+        const got = typeof t.token === "string" && t.token ? t.token : t.access_token;
+        if (typeof got !== "string" || !got) throw new Error("registry token missing");
+        token = got;
+        r = await send(path, accept);
+      }
+      if (!r.ok) throw new Error(`registry HTTP ${r.status} for ${path}`);
+      return { bytes: new Uint8Array(await r.arrayBuffer()), type: (r.headers.get("content-type") ?? "").split(";")[0]!.trim(), said: r.headers.get("docker-content-digest") ?? undefined };
+    };
+
+    const top = await get(`manifests/${ref.reference}`, [...INDEX_TYPES, ...MANIFEST_TYPES]);
+    const topDigest = sha256Digest(top.bytes);
+    if (DIGEST.test(ref.reference) && topDigest !== ref.reference) throw new Error(`${label}: the bytes served hash to ${topDigest}, which does not hash to ${ref.reference}`);
+    if (top.said !== undefined && top.said !== topDigest) throw new Error(`${label} bytes hash to ${topDigest}, the registry says ${top.said}`);
+    const doc = parseJson<IndexDoc & { manifests?: { platform?: { variant?: string } }[] }>(top.bytes, "manifest");
+    const type = doc.mediaType ?? top.type;
+    let man = top;
+    let single = true;
+    if (INDEX_TYPES.includes(type)) {
+      single = false;
+      const hits = (doc.manifests ?? []).filter((m) => m.platform?.os === os && m.platform?.architecture === arch && (!variant || m.platform?.variant === variant));
+      if (hits.length !== 1) throw new Error(`${label} has ${hits.length} ${platform} images`);
+      const md = hits[0]!.digest ?? "";
+      if (!DIGEST.test(md)) throw new Error(`${platform} entry is not a sha256 digest`);
+      man = await get(`manifests/${md}`, MANIFEST_TYPES);
+      if (sha256Digest(man.bytes) !== md) throw new Error(`${platform} manifest does not hash to ${md}`);
+    } else if (!MANIFEST_TYPES.includes(type)) throw new Error(`${label} is not an image manifest or index (${type || "no media type"})`);
+    const digest = sha256Digest(man.bytes);
+    const manifest = parseJson<ManifestDoc>(man.bytes, `${platform} manifest`);
+    const cd = manifest.config?.digest ?? "";
+    if (!DIGEST.test(cd)) throw new Error(`${platform} config is not a sha256 digest`);
+    const blob = await get(`blobs/${cd}`, CONFIG_TYPES);
+    if (sha256Digest(blob.bytes) !== cd) throw new Error(`${platform} config does not hash to ${cd}`);
+    const cfg = parseJson<ImageConfig>(blob.bytes, `${platform} config`);
+    if (single && (cfg.os !== os || cfg.architecture !== arch || (variant && cfg.variant !== variant)))
+      throw new Error(`${label} is ${[cfg.os, cfg.architecture, cfg.variant].filter(Boolean).join("/")}, not ${platform}`);
+    const argv = (field: "Entrypoint" | "Cmd") => {
+      const v = jsonArgv(JSON.stringify(cfg.config?.[field] ?? null));
+      if (v === undefined) throw new Error(`${label}: ${field} is not null or a string array`);
+      return v;
+    };
+    const evidence: ImageEvidence = {
+      digest,
+      config: cd,
+      entrypoint: argv("Entrypoint"),
+      cmd: argv("Cmd"),
+      // docker history order: newest first; an entry with no created_by prints as an empty line.
+      history: (cfg.history ?? []).map((h) => (typeof h.created_by === "string" ? h.created_by : "")).reverse(),
+    };
+    return { evidence, manifest, cfg, label, send };
+  };
   return {
     async imageEvidence(ref, platform) {
-      const [os, arch, variant] = platform.split("/");
-      const base = `https://${ref.registry === "docker.io" ? "registry-1.docker.io" : ref.registry}/v2/${ref.repository}/`;
-      const label = `${ref.repository}${DIGEST.test(ref.reference) ? "@" : ":"}${ref.reference}`;
-      let token: string | undefined;
-      const send = (path: string, accept: string[]) =>
-        f(base + path, {
-          headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), accept: accept.join(", "), "user-agent": "oupdate" },
-          signal: AbortSignal.timeout(TIMEOUT_MS),
-        });
-      const get = async (path: string, accept: string[]) => {
-        let r = await send(path, accept);
-        const challenge = r.status === 401 && !token ? bearerChallenge(r.headers.get("www-authenticate")) : undefined;
-        if (challenge) {
-          const u = new URL(challenge.realm!);
-          if (challenge.service) u.searchParams.set("service", challenge.service);
-          if (challenge.scope) u.searchParams.set("scope", challenge.scope);
-          const tr = await f(u, { headers: { "user-agent": "oupdate" }, signal: AbortSignal.timeout(TIMEOUT_MS) });
-          if (!tr.ok) throw new Error(`registry token HTTP ${tr.status}`);
-          const t = (await tr.json()) as { token?: unknown; access_token?: unknown };
-          const got = typeof t.token === "string" && t.token ? t.token : t.access_token;
-          if (typeof got !== "string" || !got) throw new Error("registry token missing");
-          token = got;
-          r = await send(path, accept);
-        }
-        if (!r.ok) throw new Error(`registry HTTP ${r.status} for ${path}`);
-        return { bytes: new Uint8Array(await r.arrayBuffer()), type: (r.headers.get("content-type") ?? "").split(";")[0]!.trim(), said: r.headers.get("docker-content-digest") ?? undefined };
-      };
-
-      const top = await get(`manifests/${ref.reference}`, [...INDEX_TYPES, ...MANIFEST_TYPES]);
-      const topDigest = sha256Digest(top.bytes);
-      if (DIGEST.test(ref.reference) && topDigest !== ref.reference) throw new Error(`${label}: the bytes served hash to ${topDigest}, which does not hash to ${ref.reference}`);
-      if (top.said !== undefined && top.said !== topDigest) throw new Error(`${label} bytes hash to ${topDigest}, the registry says ${top.said}`);
-      const doc = parseJson<IndexDoc & { manifests?: { platform?: { variant?: string } }[] }>(top.bytes, "manifest");
-      const type = doc.mediaType ?? top.type;
-      let man = top;
-      let single = true;
-      if (INDEX_TYPES.includes(type)) {
-        single = false;
-        const hits = (doc.manifests ?? []).filter((m) => m.platform?.os === os && m.platform?.architecture === arch && (!variant || m.platform?.variant === variant));
-        if (hits.length !== 1) throw new Error(`${label} has ${hits.length} ${platform} images`);
-        const md = hits[0]!.digest ?? "";
-        if (!DIGEST.test(md)) throw new Error(`${platform} entry is not a sha256 digest`);
-        man = await get(`manifests/${md}`, MANIFEST_TYPES);
-        if (sha256Digest(man.bytes) !== md) throw new Error(`${platform} manifest does not hash to ${md}`);
-      } else if (!MANIFEST_TYPES.includes(type)) throw new Error(`${label} is not an image manifest or index (${type || "no media type"})`);
-      const digest = sha256Digest(man.bytes);
-      const cd = parseJson<{ config?: { digest?: string } }>(man.bytes, `${platform} manifest`).config?.digest ?? "";
-      if (!DIGEST.test(cd)) throw new Error(`${platform} config is not a sha256 digest`);
-      const blob = await get(`blobs/${cd}`, CONFIG_TYPES);
-      if (sha256Digest(blob.bytes) !== cd) throw new Error(`${platform} config does not hash to ${cd}`);
-      const cfg = parseJson<ImageConfig>(blob.bytes, `${platform} config`);
-      if (single && (cfg.os !== os || cfg.architecture !== arch || (variant && cfg.variant !== variant)))
-        throw new Error(`${label} is ${[cfg.os, cfg.architecture, cfg.variant].filter(Boolean).join("/")}, not ${platform}`);
-      const argv = (field: "Entrypoint" | "Cmd") => {
-        const v = jsonArgv(JSON.stringify(cfg.config?.[field] ?? null));
-        if (v === undefined) throw new Error(`${label}: ${field} is not null or a string array`);
-        return v;
-      };
+      return (await open(ref, platform)).evidence;
+    },
+    async imageLayers(ref, platform, expectDigest) {
+      const { evidence, manifest, cfg, label, send } = await open(ref, platform);
+      // A tag can move between the evidence read and this one; the layers must be the manifest that was reviewed.
+      if (expectDigest !== undefined && evidence.digest !== expectDigest) throw new Error(`${label} now resolves to ${evidence.digest}, not the ${expectDigest} that was read first`);
+      const layers = (manifest.layers ?? []).map((l, i): LayerInfo => {
+        if (!DIGEST.test(l.digest ?? "")) throw new Error(`${label}: layer ${i + 1} is not a sha256 digest`);
+        if (typeof l.size !== "number" || !Number.isSafeInteger(l.size) || l.size < 0) throw new Error(`${label}: layer ${l.digest} has no size`);
+        // A layer fetched from other URLs (foreign, non-distributable) is not read from this registry.
+        return { digest: l.digest!, mediaType: Array.isArray(l.urls) && l.urls.length ? `${l.mediaType ?? ""} (foreign)` : (l.mediaType ?? ""), size: l.size };
+      });
       return {
-        digest,
-        config: cd,
-        entrypoint: argv("Entrypoint"),
-        cmd: argv("Cmd"),
-        // docker history order: newest first; an entry with no created_by prints as an empty line.
-        history: (cfg.history ?? []).map((h) => (typeof h.created_by === "string" ? h.created_by : "")).reverse(),
+        detail: imageDetail(cfg.config),
+        layers,
+        async fetchLayer(layer, dest) {
+          if (!DIGEST.test(layer.digest)) throw new Error(`not a sha256 digest: ${layer.digest}`);
+          const r = await send(`blobs/${layer.digest}`, ["application/octet-stream", "*/*"]);
+          if (!r.ok) throw new Error(`registry HTTP ${r.status} for blobs/${layer.digest}`);
+          if (!r.body) throw new Error(`registry sent no body for blobs/${layer.digest}`);
+          const hasher = new Bun.CryptoHasher("sha256");
+          const out = Bun.file(dest).writer();
+          let total = 0;
+          try {
+            for await (const chunk of r.body as unknown as AsyncIterable<Uint8Array>) {
+              total += chunk.length;
+              if (total > layer.size) throw new Error(`blob is larger than the ${layer.size} bytes its manifest declares`);
+              hasher.update(chunk);
+              out.write(chunk);
+            }
+          } finally {
+            await out.end();
+          }
+          if (total !== layer.size) throw new Error(`blob is ${total} bytes, its manifest declares ${layer.size}`);
+          const got = `sha256:${hasher.digest("hex")}`;
+          if (got !== layer.digest) throw new Error(`blob hashes to ${got}, not ${layer.digest}`);
+        },
       };
     },
   };

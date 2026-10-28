@@ -100,12 +100,17 @@ function errored(c: Change, e: unknown): ReviewResult {
   return { eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, decision: "hold", layers: [{ layer: "reviewer", verdict: "error", detail: `review failed: ${e instanceof Error ? e.message : String(e)}` }] };
 }
 
+/** Package-controlled text as one code span. Backticks are escaped first, so the span stays closed and nothing inside it autolinks, mentions or references. */
+function codeDetail(text: string): string {
+  return `\`${inert(text)}\``;
+}
+
 function comment(sha: string, locks: string, state: StatusState, results: ReviewResult[], unreviewed: Change[]): string {
   const lines = [MARKER, verdictLine(sha, state), `**oupdate: ${state}** (${locks})`, ""];
   for (const r of results) if (r.malicious?.length) lines.push(`**MALICIOUS: ${shown(r.name)} ${shown(r.to)} (${r.malicious.join(", ")}).** Do not merge, and check where this version is already installed.`, "");
   for (const r of results) {
     lines.push(`- \`${shown(r.name)} ${r.from ? shown(r.from) : "(new)"} -> ${shown(r.to)}\`: **${r.decision}**`);
-    for (const l of r.layers) lines.push(`  - ${l.layer} ${l.verdict}: ${inert(l.detail.replace(/\s+/g, " ").slice(0, 300))}`);
+    for (const l of r.layers) lines.push(`  - ${l.layer} ${l.verdict}: ${codeDetail(l.detail.replace(/\s+/g, " ").slice(0, 300))}`);
   }
   for (const c of unreviewed) lines.push(`- \`${shown(c.name)} ${c.from ? shown(c.from) : "(new)"} -> ${shown(c.to)}\`: ${privateNote(c)}`);
   return lines.join("\n");
@@ -611,7 +616,7 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
     // A lockfile that does not parse is never read as "no changes": hold the PR and say why.
     const why = e instanceof Error ? e.message : String(e);
     await a.forge.setStatus(a.repo, pr.headSha, { state: "pending", context, description: why.slice(0, 200) });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, `**oupdate: pending** (${paths.join(", ")})`, "", inert(why.replace(/\s+/g, " "))].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, `**oupdate: pending** (${paths.join(", ")})`, "", codeDetail(why.replace(/\s+/g, " "))].join("\n"));
     return { number: pr.number, state: "pending", results: [] };
   }
   const locks = found.join(", ");

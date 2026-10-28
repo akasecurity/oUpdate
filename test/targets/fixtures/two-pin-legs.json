@@ -1,0 +1,62 @@
+{
+  "logDir": "/srv/oupdate/log",
+  "targets": [
+    {
+      "id": "sandbox-pins",
+      "os": "linux",
+      "reach": { "kind": "git", "repo": "/repo/example", "remote": "origin", "base": "main" },
+      "schedule": "weekly:sun",
+      "summaryTo": "/srv/oupdate/status/sandbox-pins.tsv",
+      "legs": [
+        {
+          "kind": "pin-bump",
+          "pinsPath": "sandbox/base/pins.env",
+          "branchPrefix": "oupdate/",
+          "proposalDir": "/srv/oupdate/train-asks",
+          "push": false,
+          "cooldownDays": 2,
+          "groups": [
+            { "source": "npm", "name": "cli", "package": "@scope/cli", "versionKey": "CLI_VERSION", "integrity": {} }
+          ]
+        },
+        {
+          "kind": "pin-bump",
+          "pinsPath": "sandbox/base/host-pins.env",
+          "branchPrefix": "oupdate/",
+          "proposalDir": "/srv/oupdate/train-asks",
+          "push": false,
+          "cooldownDays": 2,
+          "groups": [
+            {
+              "source": "github-release",
+              "name": "lima",
+              "repo": "lima-vm/lima",
+              "tag": "v{v}",
+              "versionKey": "LIMA_VERSION",
+              "assets": { "LIMA_SHA256": "lima-{v}-Darwin-arm64.tar.gz" },
+              "assetKeys": { "LIMA_ASSET": "lima-{v}-Darwin-arm64.tar.gz" }
+            },
+            {
+              "source": "github-release",
+              "name": "colima",
+              "repo": "abiosoft/colima",
+              "tag": "v{v}",
+              "versionKey": "COLIMA_VERSION",
+              "assets": { "COLIMA_SHA256": "colima-Darwin-arm64" },
+              "assetKeys": { "COLIMA_ASSET": "colima-Darwin-arm64" }
+            },
+            {
+              "source": "docker-static",
+              "name": "docker-cli",
+              "versionKey": "DOCKER_CLI_VERSION",
+              "assetKey": "DOCKER_CLI_ASSET",
+              "shaKey": "DOCKER_CLI_SHA256",
+              "propose": false,
+              "note": "no upstream sums; first-fetch pin, refresh the sha and the asset name by hand"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -317,6 +317,75 @@ describe("binary files", () => {
     expect(r.decision).toBe("land");
   });
 
+  test("a GIF89a polyglot required from index.js is not benign; the same GIF not referenced stays benign", async () => {
+    const gif = new Uint8Array([...enc("GIF89a/*"), 0, ...enc("*/\nsteal_gif()\n")]);
+    const prompts: string[] = [];
+    const reviewer = { name: "fake", review: async (p: string) => (prompts.push(p), "APPROVE\nno attack indicators found") };
+    const loaders = [
+      'require("./logo.gif")\n',
+      'import "./logo.gif"\n',
+      'import x from "./logo.gif"\n',
+      'new Worker("./logo.gif")\n',
+      'importScripts("./logo.gif")\n',
+      "const html = '<script src=\"./logo.gif\"></script>'\n",
+    ];
+    for (const src of loaders) {
+      prompts.length = 0;
+      const r = await reviewUpdate(base({
+        reviewer,
+        loadArtifacts: art(
+          [["index.js", enc(src)], ["a.py", enc("x = 1\n")]],
+          [["index.js", enc(src)], ["a.py", enc("x = 2\n")], ["logo.gif", gif]],
+        ),
+      }));
+      const shown = prompts.join("");
+      expect(shown).toContain("=== logo.gif (loaded by code) ===");
+      expect(shown).toContain("steal_gif()");
+      expect(shown).not.toContain("sha256");
+      expect(r.layers.find((l) => l.layer === "reviewer")).toMatchObject({ verdict: "pass" });
+      expect(r.decision).toBe("land");
+    }
+    prompts.length = 0;
+    const quiet = await reviewUpdate(base({
+      reviewer,
+      loadArtifacts: art([["a.py", enc("x = 1\n")]], [["a.py", enc("x = 2\n")], ["logo.gif", gif]]),
+    }));
+    const hidden = prompts.join("");
+    expect(hidden).not.toContain("steal_gif()");
+    expect(hidden).toContain("[binary");
+    expect(quiet.layers.find((l) => l.layer === "reviewer")).toMatchObject({ verdict: "pass" });
+    expect(quiet.decision).toBe("land");
+  });
+
+  test("a true// ttf required from index.js is shown as loaded by code; the same file with no reference stays a benign hash", async () => {
+    const ttf = new Uint8Array([...enc("true//"), 0, ...enc("\nsteal_ttf()\n")]);
+    const prompts: string[] = [];
+    const reviewer = { name: "fake", review: async (p: string) => (prompts.push(p), "APPROVE\nno attack indicators found") };
+    const referenced = await reviewUpdate(base({
+      reviewer,
+      loadArtifacts: art(
+        [["index.js", enc('require("./logo.ttf")\n')], ["a.py", enc("x = 1\n")]],
+        [["index.js", enc('require("./logo.ttf")\n')], ["a.py", enc("x = 2\n")], ["logo.ttf", ttf]],
+      ),
+    }));
+    const shown = prompts.join("");
+    expect(shown).toContain("=== logo.ttf (loaded by code) ===");
+    expect(shown).toContain("steal_ttf()");
+    expect(shown).not.toContain("sha256");
+    expect(referenced.layers.find((l) => l.layer === "reviewer")).toMatchObject({ verdict: "pass" });
+    expect(referenced.decision).toBe("land");
+    prompts.length = 0;
+    const quiet = await reviewUpdate(base({
+      reviewer,
+      loadArtifacts: art([["a.py", enc("x = 1\n")]], [["a.py", enc("x = 2\n")], ["logo.ttf", ttf]]),
+    }));
+    const hidden = prompts.join("");
+    expect(hidden).not.toContain("steal_ttf()");
+    expect(hidden).toContain("[binary");
+    expect(quiet.layers.find((l) => l.layer === "reviewer")).toMatchObject({ verdict: "pass" });
+    expect(quiet.decision).toBe("land");
+  });
+
   test("a FLAG next to a binary stays a model detection", async () => {
     const r = await reviewUpdate(base({ reviewer: flag, loadArtifacts: art([], [["pkg/_ext.so", bin(0, 2)]]) }));
     expect(classifyOutcome(r)).toBe("stopped");

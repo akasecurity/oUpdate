@@ -150,6 +150,7 @@ describe("parseImageArgs", () => {
     expect(a.old).toMatchObject({ registry: "docker.io", repository: "library/alpine", reference: "3.20" });
     expect(a.new).toMatchObject({ registry: "docker.io", repository: "library/alpine", reference: "3.21" });
     expect(a.platform).toBe("linux/amd64");
+    expect(a.layers).toBe(true);
     expect(a.reviewer).toBeUndefined();
     expect(a.secondReviewer).toBeUndefined();
   });
@@ -162,6 +163,11 @@ describe("parseImageArgs", () => {
     expect(a.new.reference).toBe(D);
     expect(a).toMatchObject({ platform: "linux/arm64/v8", json: "out.json", reviewer: { name: "r" }, secondReviewer: { name: "r" } });
     expect(a.now.toISOString()).toBe("2026-10-26T12:00:00.000Z");
+  });
+
+  test("--no-layers turns the layer read off, in any position", () => {
+    expect(parseImageArgs(["alpine:3.20", "--no-layers", "alpine:3.21"]).layers).toBe(false);
+    expect(parseImageArgs(["alpine:3.20", "alpine:3.21", "--no-layers"]).layers).toBe(false);
   });
 
   test("different repositories, a bad ref, platform or date, an unknown flag or a missing value is refused", () => {
