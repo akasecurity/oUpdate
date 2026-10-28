@@ -6,3 +6,11 @@ email	acceptance/cases.json
 email	test/fixtures/locks/package-lock-v3.json
 fleet-host-quoted	test/fixtures/locks/package-lock-v3.json
 email	test/requirements.test.ts
+# post-0.2.3 test fixtures: made-up ssh/git urls, an RFC 1918 reviewer address, a husky script string
+fleet-host-quoted	test/apply/npm.test.ts
+email	test/bunlock.test.ts
+email	test/npmlock.test.ts
+email	test/pylock.test.ts
+private-ip	test/reviewer-openai.test.ts
+# the release script pushes over ssh urls for github.com
+email	scripts/release.ts

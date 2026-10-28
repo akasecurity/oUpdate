@@ -6,3 +6,4 @@ acceptance-results/
 replay-work*/
 replay-results/
 !test/fixtures/**/*.log
+.release/
