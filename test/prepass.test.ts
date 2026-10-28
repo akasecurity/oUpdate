@@ -100,6 +100,18 @@ describe("prepass: npm", () => {
     const r = prepass("npm", files({ "package/package.json": body("a.js") }), files({ "package/package.json": body("evil.js") }));
     expect(r.hard.map((s) => s.kind)).toContain("install-script");
   });
+
+  test("a run-s glob with many stars finishes quickly and still matches", () => {
+    const glob = "*a".repeat(12);
+    const scripts: Record<string, string> = { postinstall: `run-s ${glob} build:*`, "build:js": "node a.js" };
+    for (let i = 0; i < 40; i++) scripts[`${"a".repeat(16 + i)}b`] = "node ok.js";
+    const old = JSON.stringify({ name: "x", scripts });
+    const now = JSON.stringify({ name: "x", scripts: { ...scripts, "build:js": "node evil.js" } });
+    const t = performance.now();
+    const r = prepass("npm", files({ "package/package.json": old }), files({ "package/package.json": now }));
+    expect(performance.now() - t).toBeLessThan(100);
+    expect(r.hard.map((s) => s.kind)).toContain("install-script");
+  });
 });
 
 describe("prepass: content signals (soft)", () => {

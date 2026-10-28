@@ -220,6 +220,34 @@ function binName(token: string): string {
   return token.replace(/^.*\//, "").replace(/\.cmd$/i, "");
 }
 
+// `*` is any run of characters, including empty and `/`. Every other character is literal.
+// Two pointers, no RegExp: a run of stars cannot backtrack exponentially over the text.
+export function starMatch(pattern: string, text: string): boolean {
+  let pi = 0;
+  let ti = 0;
+  let starP = -1;
+  let starT = -1;
+  while (ti < text.length) {
+    if (pi < pattern.length && pattern[pi] === "*") {
+      starP = pi;
+      starT = ti;
+      pi++;
+      continue;
+    }
+    if (pi < pattern.length && pattern[pi] === text[ti]) {
+      pi++;
+      ti++;
+      continue;
+    }
+    if (starP === -1) return false;
+    starT++;
+    pi = starP + 1;
+    ti = starT;
+  }
+  while (pi < pattern.length && pattern[pi] === "*") pi++;
+  return pi === pattern.length;
+}
+
 function referencedScripts(argv: string[], scripts: Record<string, unknown>): string[] {
   let i = 0;
   while (i < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i]!)) i++;
@@ -245,8 +273,7 @@ function referencedScripts(argv: string[], scripts: Record<string, unknown>): st
       if (a === "--") break;
       if (a.startsWith("-")) continue;
       if (a.includes("*")) {
-        const re = new RegExp(`^${a.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
-        for (const k of keys) if (re.test(k)) names.push(k);
+        for (const k of keys) if (starMatch(a, k)) names.push(k);
       } else names.push(a);
     }
   }

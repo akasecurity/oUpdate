@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { reviewUpdate, parseVerdict, chunkDiff, classifyOutcome, rankPriorityPaths, lastResolveCalls, type LayerName } from "../src/review.ts";
+import { reviewUpdate, parseVerdict, chunkDiff, classifyOutcome, rankPriorityPaths, lastResolveCalls, entryPaths, type LayerName } from "../src/review.ts";
 import type { Registry } from "../src/adapters/ecosystem/types.ts";
 import type { AdvisoryFeed, Advisory } from "../src/adapters/advisory/osv.ts";
 import { markLink, markLabeled, type FileMap } from "../src/prepass.ts";
@@ -2282,6 +2282,22 @@ describe("newly reached files", () => {
       expect(r.decision).toBe(c.decision ?? "land");
       if (c.decision === "hold") expect(r.layers.find((l) => l.layer === "prepass")?.detail ?? "").toContain("install-script");
     }
+  });
+
+  test("a star export over many near-miss names finishes quickly", () => {
+    const pattern = "*a".repeat(12);
+    const map: FileMap = new Map([
+      ["package.json", enc(JSON.stringify({ name: "lib", exports: { "./*": `./${pattern}`, "./lib/*.js": "./lib/*.js" } }))],
+      ["lib/x.js", enc("ok\n")],
+      ["lib/nested/x.js", enc("ok\n")],
+    ]);
+    for (let i = 0; i < 40; i++) map.set(`${"a".repeat(16 + i)}b`, enc("x\n"));
+    const t = performance.now();
+    const entries = entryPaths(map);
+    expect(performance.now() - t).toBeLessThan(100);
+    expect(entries.has("lib/x.js")).toBe(true);
+    expect(entries.has("lib/nested/x.js")).toBe(true);
+    expect([...entries].some((p) => p.endsWith("b") && !p.includes("."))).toBe(false);
   });
 
   // Two typescript trees are about 23MB each and the diff cannot yield. A busy host

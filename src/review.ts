@@ -6,7 +6,7 @@
 import { benignBinary } from "./benign-binary.ts";
 import { cooldownVerdict } from "./cooldown.ts";
 import { shown } from "./ident.ts";
-import { prepass, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, expandNpmScripts, npmHookFileArgs, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
+import { prepass, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, expandNpmScripts, npmHookFileArgs, starMatch, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
 import { newFindings, type Finding } from "./adapters/scanner/types.ts";
@@ -202,9 +202,15 @@ export function entryPaths(files: FileMap, placed: FileMap = files, scope: { scr
       if (!expand && typeof rel === "string" && rel.includes("*")) return;
       const full = typeof rel === "string" && rel ? resolveIn(dir, rel) : undefined;
       if (full === undefined) return;
-      const re = new RegExp(`^${full.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
-      for (const r of full.includes("*") ? (members ?? keys) : [full]) {
-        const k = re.test(r) ? at(r) : undefined;
+      if (!full.includes("*")) {
+        const k = at(full);
+        if (k !== undefined) out.add(k);
+        return;
+      }
+      // resolveIn already applied `.` and `..`. `*` then matches any path, including across `/`.
+      for (const r of members ?? keys) {
+        if (!starMatch(full, r)) continue;
+        const k = at(r);
         if (k !== undefined) out.add(k);
       }
     };
