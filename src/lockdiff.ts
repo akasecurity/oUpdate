@@ -17,6 +17,8 @@ export interface LockChange {
   registry?: string;
   /** Set when the version is the same but its source or hashes in the lockfile changed: what they were and are. */
   swapped?: { from: string; to: string };
+  /** Set when the lockfile records neither a source nor a hash for the new version. */
+  unhashed?: boolean;
   /** Set when the new version comes from no registry (git, url, file); `source` says where. */
   direct?: DirectKind;
   source?: string;
@@ -56,6 +58,7 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
       if (p.integrity) c.toIntegrity = p.integrity;
       if (p.artifacts) c.toArtifacts = p.artifacts;
       if (p.registry) c.registry = p.registry;
+      if (p.unhashed) c.unhashed = true;
       if (p.direct) Object.assign(c, { direct: p.direct, source: p.source });
       out.push(c);
       continue;
@@ -70,6 +73,7 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
     if (p.integrity) c.toIntegrity = p.integrity;
     if (p.artifacts) c.toArtifacts = p.artifacts;
     if (p.registry) c.registry = p.registry;
+    if (p.unhashed) c.unhashed = true;
     if (p.direct) Object.assign(c, { direct: p.direct, source: p.source });
     out.push(c);
   }

@@ -12,6 +12,24 @@ export interface OpenAIReviewerConfig {
   timeoutMs?: number;
   extraBody?: Record<string, unknown>;
   headers?: Record<string, string>;
+  /** Response headers a 2xx answer must carry. Names are compared case-insensitively, values exactly. */
+  expectHeaders?: Record<string, string>;
+  /** Waits before each retry of a 503 or a refused connection (a local model cold-loading); default about 21 s in all. */
+  retryDelaysMs?: number[];
+}
+
+const COLD_LOAD_DELAYS_MS = [1000, 2000, 4000, 6000, 8000];
+
+const refused = (e: unknown) => /ECONNREFUSED|ConnectionRefused/.test(`${(e as { code?: string })?.code ?? ""} ${e instanceof Error ? e.message : String(e)}`);
+
+// A 2xx from another server is not an answer. The first mismatch is the reason; this base is not retried.
+function unexpectedHeader(headers: Headers, expect: Record<string, string> | undefined): string | undefined {
+  if (!expect) return;
+  for (const [name, want] of Object.entries(expect)) {
+    const got = headers.get(name);
+    if (got !== want) return `answer ${name} ${got ?? "missing"}, expected ${want}`;
+  }
+  return;
 }
 
 // Base URL (trimmed, with or without /v1 in any case) to the chat endpoint; a query string stays after the path.
@@ -42,7 +60,9 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
             errors.push(`${base}: skipped, the ${cfg.apiKeyEnv} key is not sent over plain http to a non-loopback host (use https)`);
             continue;
           }
-          const r = await fetch(url, {
+          // One deadline for this base, retries included; a fallback base gets its own.
+          const signal = AbortSignal.timeout(cfg.timeoutMs ?? 900_000);
+          const send = () => fetch(url, {
             method: "POST",
             headers: { "content-type": "application/json", ...cfg.headers, ...(key ? { authorization: `Bearer ${key}` } : {}) },
             body: JSON.stringify({
@@ -52,19 +72,41 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
               messages: [{ role: "user", content: prompt }],
               ...cfg.extraBody,
             }),
-            signal: AbortSignal.timeout(cfg.timeoutMs ?? 900_000),
+            signal,
             // Bun's fetch has its own 300 s default; slow local models need the signal alone.
             timeout: false,
             // keySafeUrl vets this URL only: a followed redirect would carry the key, or a credential in the
             // configured headers, on to wherever it points. Never followed, keyed or not.
             redirect: "manual",
           } as RequestInit);
+          let r: Response | undefined;
+          for (const wait of [...(cfg.retryDelaysMs ?? COLD_LOAD_DELAYS_MS), undefined]) {
+            try {
+              r = await send();
+              if (r.status !== 503) break;
+              if (wait !== undefined) await r.body?.cancel().catch(() => {});
+            } catch (e) {
+              if (!refused(e) || wait === undefined) throw e;
+            }
+            if (wait === undefined) break;
+            await new Promise<void>((res, rej) => {
+              const t = setTimeout(res, wait);
+              signal.addEventListener("abort", () => (clearTimeout(t), rej(signal.reason)), { once: true });
+            });
+          }
+          if (!r) throw new Error("no response");
           if (r.status >= 300 && r.status < 400) {
             errors.push(`${base}: redirect (${r.status}) not followed, the key and headers go only to the configured URL`);
             continue;
           }
           if (!r.ok) {
             errors.push(`${base}: ${r.status}`);
+            continue;
+          }
+          const mismatch = unexpectedHeader(r.headers, cfg.expectHeaders);
+          if (mismatch) {
+            await r.body?.cancel().catch(() => {});
+            errors.push(`${base}: ${mismatch}`);
             continue;
           }
           const body = (await r.json()) as { choices?: { message?: { content?: string }; finish_reason?: string }[] };

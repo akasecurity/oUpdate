@@ -95,11 +95,10 @@ export function parsePnpmLock(text: string): LockedPackage[] {
       // Another package's or version's tarball: the install fetches it, a review of name@version would not read it.
       if (!npmCanonicalTarball(res.tarball, id.name, id.version)) direct = "url";
       else registry = npmPrivateRegistry(res.tarball);
-    } else if (!res.integrity) {
-      // No tarball and no integrity: nothing says what the install fetches or checks, so it is never read as none.
-      throw new Error(`cannot read ${key}: a registry entry with neither a tarball nor an integrity`);
     }
     const p: LockedPackage = { ...id };
+    // No tarball and no integrity: nothing says what the install fetches or checks. The gate holds it for a person.
+    if (res.tarball === undefined && !res.integrity) p.unhashed = true;
     if (direct) p.direct = direct;
     if (res.integrity !== undefined) {
       try {

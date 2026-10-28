@@ -13,6 +13,7 @@ import { LOCK_NAMES, parseLock } from "./lockfile/index.ts";
 import { stripTrailingCommas } from "./lockfile/bunlock.ts";
 import { pep503 } from "./lockfile/pylock.ts";
 import type { Ecosystem } from "./prepass.ts";
+import { badName, badVersion, inert, shown } from "./ident.ts";
 import type { ReviewResult } from "./review.ts";
 
 /** A package version a PR brings in, with the ecosystem of the lockfile that pins it. */
@@ -45,10 +46,15 @@ export type PrivateRegistryPolicy = "list" | "hold" | "review";
 export const PRIVATE_REGISTRY_POLICIES: PrivateRegistryPolicy[] = ["hold", "list", "review"];
 export const PRIVATE_REGISTRY_DEFAULT: PrivateRegistryPolicy = "hold";
 
-const privateNote = (c: Change) => `not reviewed (private registry ${c.registry})`;
+const privateNote = (c: Change) => `not reviewed (private registry ${shown(c.registry ?? "")})`;
 
 function heldPrivate(c: Change): ReviewResult {
   return { eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, decision: "hold", layers: [{ layer: "gate", verdict: "stop", detail: `${privateNote(c)}; a person decides` }] };
+}
+
+/** Why a change's name or version cannot be a registry release's (a direct source has no version of its own), or undefined. */
+function malformedIdent(c: Change): string | undefined {
+  return badName(c.eco, c.name) ?? (c.direct ? undefined : badVersion(c.to) ?? (c.from ? badVersion(c.from) : undefined));
 }
 
 /** A change the gate cannot review against a registry: it fails the PR for a person to decide. */
@@ -84,7 +90,8 @@ function notGated(pr: Pull, repo: string, bots: string[], prefixes: string[]): s
 }
 
 export function gateState(results: ReviewResult[]): StatusState {
-  if (results.every((r) => r.decision === "land")) return "success";
+  // Nothing reviewed (every change listed as not reviewed) is no evidence of a pass.
+  if (results.length && results.every((r) => r.decision === "land")) return "success";
   const hard = results.some((r) => r.decision === "hold" && r.layers.some((l) => l.verdict === "stop" && l.layer !== "cooldown"));
   return hard ? "failure" : "pending";
 }
@@ -95,12 +102,12 @@ function errored(c: Change, e: unknown): ReviewResult {
 
 function comment(sha: string, locks: string, state: StatusState, results: ReviewResult[], unreviewed: Change[]): string {
   const lines = [MARKER, verdictLine(sha, state), `**oupdate: ${state}** (${locks})`, ""];
-  for (const r of results) if (r.malicious?.length) lines.push(`**MALICIOUS: ${r.name} ${r.to} (${r.malicious.join(", ")}).** Do not merge, and check where this version is already installed.`, "");
+  for (const r of results) if (r.malicious?.length) lines.push(`**MALICIOUS: ${shown(r.name)} ${shown(r.to)} (${r.malicious.join(", ")}).** Do not merge, and check where this version is already installed.`, "");
   for (const r of results) {
-    lines.push(`- \`${r.name} ${r.from || "(new)"} -> ${r.to}\`: **${r.decision}**`);
-    for (const l of r.layers) lines.push(`  - ${l.layer} ${l.verdict}: ${l.detail.replace(/\s+/g, " ").slice(0, 300)}`);
+    lines.push(`- \`${shown(r.name)} ${r.from ? shown(r.from) : "(new)"} -> ${shown(r.to)}\`: **${r.decision}**`);
+    for (const l of r.layers) lines.push(`  - ${l.layer} ${l.verdict}: ${inert(l.detail.replace(/\s+/g, " ").slice(0, 300))}`);
   }
-  for (const c of unreviewed) lines.push(`- \`${c.name} ${c.from || "(new)"} -> ${c.to}\`: ${privateNote(c)}`);
+  for (const c of unreviewed) lines.push(`- \`${shown(c.name)} ${c.from ? shown(c.from) : "(new)"} -> ${shown(c.to)}\`: ${privateNote(c)}`);
   return lines.join("\n");
 }
 
@@ -554,7 +561,7 @@ async function lockChanges(a: GateArgs, pr: Pull, paths: string[]): Promise<{ fo
     for (const c of diff) {
       // A version is one review only when every lockfile has it from the same place: a copy from git, another
       // registry, other bytes or a swapped source is kept, so its restriction is never lost to a public twin.
-      const key = JSON.stringify([head.eco, c.name, c.from, c.to, c.toIntegrity, c.toArtifacts, c.registry, c.direct, c.direct && c.source, c.swapped]);
+      const key = JSON.stringify([head.eco, c.name, c.from, c.to, c.toIntegrity, c.toArtifacts, c.registry, c.unhashed, c.direct, c.direct && c.source, c.swapped]);
       if (seen.has(key)) continue;
       seen.add(key);
       changes.push({ ...c, eco: head.eco });
@@ -604,7 +611,7 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
     // A lockfile that does not parse is never read as "no changes": hold the PR and say why.
     const why = e instanceof Error ? e.message : String(e);
     await a.forge.setStatus(a.repo, pr.headSha, { state: "pending", context, description: why.slice(0, 200) });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, `**oupdate: pending** (${paths.join(", ")})`, "", why].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, `**oupdate: pending** (${paths.join(", ")})`, "", inert(why.replace(/\s+/g, " "))].join("\n"));
     return { number: pr.number, state: "pending", results: [] };
   }
   const locks = found.join(", ");
@@ -625,11 +632,16 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
   }
   // A git, url or file source has no registry release to review; the same version with another source or hash
   // would pass a registry review of name@version without the swap being seen. Both fail for a person.
-  const unreviewable = changes.filter((c) => c.direct || c.swapped);
+  const malformed = new Map(changes.flatMap((c) => { const w = malformedIdent(c); return w ? [[c, w] as const] : []; }));
+  const unreviewable = changes.filter((c) => malformed.has(c) || c.direct || c.unhashed || c.swapped);
   const results: ReviewResult[] = unreviewable.map((c) =>
-    c.direct
-      ? heldUnreviewable(c, `not from a registry (${c.direct} ${c.source ?? "?"})`)
-      : heldUnreviewable(c, `same version, but the lockfile changed where it comes from or its hash (${c.swapped!.from || "none"} -> ${c.swapped!.to || "none"})`),
+    malformed.has(c)
+      ? heldUnreviewable(c, malformed.get(c)!)
+      : c.direct
+      ? heldUnreviewable(c, `not from a registry (${c.direct} ${shown(c.source ?? "?")})`)
+      : c.unhashed
+        ? heldUnreviewable(c, "the lockfile records neither where it is fetched from nor a hash, so what the install checks is unknown")
+        : heldUnreviewable(c, `same version, but the lockfile changed where it comes from or its hash (${shown(c.swapped!.from) || "none"} -> ${shown(c.swapped!.to) || "none"})`),
   );
   const policy = a.privateRegistry ?? PRIVATE_REGISTRY_DEFAULT;
   const priv = policy === "review" ? [] : changes.filter((c) => c.registry && !unreviewable.includes(c));

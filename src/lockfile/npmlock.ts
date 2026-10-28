@@ -5,7 +5,7 @@
 // as direct dependencies with their `resolved` as the source; so are links (`link: true`, `resolved` the folder) and
 // local folders outside node_modules (a workspace package, or `../x`), the key as the source: an install runs their
 // code from the repo or the disk, which no registry review sees. An entry with a version but no `resolved` (with or
-// without an integrity) is from the default registry; one with neither a resolved nor a version throws.
+// without an integrity) is from the default registry, marked unhashed when it has no integrity either (the gate holds it); one with neither a resolved nor a version throws.
 
 import { sriHashes } from "../targets/pins/npm.ts";
 import { directKind, npmCanonicalTarball, npmPrivateRegistry, type LockedPackage } from "./types.ts";
@@ -58,6 +58,8 @@ export function parseNpmLock(text: string): LockedPackage[] {
       else registry = npmPrivateRegistry(e.resolved);
     } else if (!semver) throw new Error(`cannot read ${key}: no resolved and no registry version (${JSON.stringify(e.version ?? null)})`);
     const p: LockedPackage = { name, version: typeof e.version === "string" ? e.version : (e.resolved ?? "") };
+    // No resolved and no integrity: nothing says what the install fetches or checks. The gate holds it for a person.
+    if (typeof e.resolved !== "string" && e.integrity === undefined) p.unhashed = true;
     if (direct) p.direct = direct;
     // Every hash npm wrote (sha1 too) is checked on the download; one the gate cannot check throws, holding the PR.
     if (e.integrity !== undefined) {

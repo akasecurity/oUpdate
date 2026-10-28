@@ -43,7 +43,7 @@ oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is n
 Install a release tag, not the tip of `main`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
 
 ```
-git clone --branch v0.2.3 https://github.com/akasecurity/oupdate.git
+git clone --branch v0.2.4 https://github.com/akasecurity/oupdate.git
 cd oupdate
 git rev-parse HEAD
 bun install
@@ -134,7 +134,7 @@ jobs:
     steps:
       - uses: oven-sh/setup-bun@<commit-sha>    # pin actions to a full commit sha
       - uses: actions/checkout@<commit-sha>
-        with: { repository: akasecurity/oupdate, ref: v0.2.3, path: .oupdate }
+        with: { repository: akasecurity/oupdate, ref: v0.2.4, path: .oupdate }
       - run: >
           bun .oupdate/src/cli.ts gate --forge github --repo "$GITHUB_REPOSITORY"
           --token-env GITHUB_TOKEN --gate-login "github-actions[bot]"
@@ -265,6 +265,8 @@ It writes `DIR/inventory.json` (the snapshot for the next run) and `DIR/reports/
      }
    }
    ```
+
+   The openai reviewer also takes optional `headers` and `expectHeaders`. `headers` are sent on the request. `expectHeaders` names response headers a 2xx answer must carry: the name is compared case-insensitively and the value exactly. A mismatch discards that answer (`<base>: answer <header> <got>, expected <want>`, or `missing` when the header is absent) and the next base is tried. It is not retried. To refuse an answer the fleet router served from its cloud fallback, set `"expectHeaders": {"x-ofleet-served-by": "local"}`.
 
 2. `oupdate host --apply --dry-run` prints the run and a dry-run summary. Read the tier split, the holds and the notices it would have sent. It writes `dry-run-<log file name>` beside the log, never the dated log itself, and its header and summary are named so that nothing reading a log takes a dry run for a run.
 3. `oupdate host --apply` is the live run. The exit code is 1 when anything failed.
