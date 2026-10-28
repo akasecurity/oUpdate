@@ -77,6 +77,14 @@ describe("parseListing", () => {
     expect(() => L(["-rw-r--r--  0 0      0           2 Oct 27 23:11 etc/gone", "-rw-r--r--  0 0      0           0 Oct 27 23:11 etc/.wh.gone"].join("\n"))).toThrow(/whiteout and an entry/);
   });
 
+  test("a name or target holding bsdtar's link separator is refused, not split at a guess", () => {
+    // A link named `libssl.so.3 -> libssl.so.3.0` to `true` lists exactly like a link `libssl.so.3` to `libssl.so.3.0 -> true`.
+    expect(() => L("lrwxr-xr-x  0 0      0           0 Oct 27 23:11 ./usr/lib/libssl.so.3 -> libssl.so.3.0 -> true")).toThrow(/ambiguous member name/);
+    expect(() => L("hrw-r--r--  0 0      0           0 Oct 27 23:11 ./usr/lib/libssl.so.3 link to x link to ./usr/lib/libssl.so.3.0")).toThrow(/ambiguous member name/);
+    expect(() => L("-rw-r--r--  0 0      0           2 Oct 27 23:11 ./etc/a -> b")).toThrow(/ambiguous member name/);
+    expect(() => L("lrwxr-xr-x  0 0      0           0 Oct 27 23:11 ./usr/lib/libssl.so.3 -> libssl.so.3.0")).not.toThrow();
+  });
+
   test("a line it cannot read throws instead of being skipped", () => {
     expect(() => L("garbage")).toThrow(/unreadable listing/);
   });
@@ -160,6 +168,13 @@ describe("ImageTree", () => {
     });
   });
 
+  test("a bsdtar call past the time limit is stopped and refused", async () => {
+    await withTmp(async (dir) => {
+      const { t } = tree(dir, ["base.tar"], { ...LIMITS, timeoutMs: 1 });
+      await expect(MergedIndex.build(t)).rejects.toThrow(/bsdtar did not list the layer within 1 ms/);
+    });
+  });
+
   test("a listing over the entry cap is stopped while it is read", async () => {
     await withTmp(async (dir) => {
       const { t } = tree(dir, ["base.tar"], { ...LIMITS, maxEntries: 2 });
@@ -229,6 +244,18 @@ describe("MergedIndex", () => {
     expect(idx.get("mid")).toMatchObject({ layer: "sha256:low", member: "data", size: 9 });
     const cyc = parseListing("sha256:c", "f", ["hrw-r--r--  0 0      0           0 Oct 27 23:11 a link to b", "hrw-r--r--  0 0      0           0 Oct 27 23:11 b link to a"].join("\n"));
     expect(MergedIndex.fromListings([cyc]).problems).toEqual(["hard link target unresolved: a -> b", "hard link target unresolved: b -> a"]);
+  });
+
+  test("a member under a lower layer's link or file makes that path a directory, as an overlay unpack does, and is a problem", () => {
+    const low = parseListing("sha256:low", "f", ["lrwxr-xr-x  0 0      0           0 Oct 27 23:11 lib -> usr/lib", "-rwxr-xr-x  0 0      0           3 Oct 27 23:11 usr/lib/run", "-rw-r--r--  0 0      0           3 Oct 27 23:11 opt"].join("\n"));
+    const high = parseListing("sha256:high", "f", ["-rwxr-xr-x  0 0      0           4 Oct 27 23:11 lib/run", "-rw-r--r--  0 0      0           4 Oct 27 23:11 opt/x/y"].join("\n"));
+    const idx = MergedIndex.fromListings([low, high]);
+    expect(idx.get("lib")!.type).toBe("dir");
+    expect(idx.resolve("lib/run")).toEqual({ final: "lib/run", links: [] });
+    expect(idx.get("lib/run")!.layer).toBe("sha256:high");
+    expect(idx.get("opt")!.type).toBe("dir");
+    expect(idx.get("opt/x")!.type).toBe("dir");
+    expect(idx.problems).toEqual(["layer writes under a lower symlink: lib/run (lib becomes a directory)", "layer writes under a lower file: opt/x/y (opt becomes a directory)"]);
   });
 
   test("members with no directory entries above them get implicit directories", async () => {

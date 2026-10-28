@@ -33,6 +33,7 @@ export const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const TAG = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 const ARCHES = ["amd64", "arm64"];
 const TIMEOUT_MS = 60_000;
+const MAX_REDIRECTS = 5;
 const dec = new TextDecoder();
 
 export const sha256Digest = (b: Uint8Array) => `sha256:${new Bun.CryptoHasher("sha256").update(b).digest("hex")}`;
@@ -236,16 +237,27 @@ export function registrySource(deps: { fetch?: typeof fetch } = {}): OciImageSou
     const base = `https://${ref.registry === "docker.io" ? "registry-1.docker.io" : ref.registry}/v2/${ref.repository}/`;
     const label = `${ref.repository}${DIGEST.test(ref.reference) ? "@" : ":"}${ref.reference}`;
     let token: string | undefined;
-    const send = (path: string, accept: string[]) =>
-      f(base + path, {
-        headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), accept: accept.join(", "), "user-agent": "oupdate" },
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
+    // Redirects are followed by hand (a blob usually moves to a CDN): https only, a few hops, and the token goes only to
+    // the registry's own origin, never to the host a redirect names.
+    const origin = new URL(base).origin;
+    const send = async (path: string, accept: string[]): Promise<Response> => {
+      let url = new URL(base + path);
+      for (let hop = 0; ; hop++) {
+        const auth: Record<string, string> = token && url.origin === origin ? { authorization: `Bearer ${token}` } : {};
+        const r = await f(url, { headers: { ...auth, accept: accept.join(", "), "user-agent": "oupdate" }, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) });
+        const to = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
+        if (!to) return r;
+        if (hop >= MAX_REDIRECTS) throw new Error(`registry: over ${MAX_REDIRECTS} redirects for ${path}`);
+        url = new URL(to, url);
+        if (url.protocol !== "https:") throw new Error(`registry redirect to a non-https URL for ${path}`);
+      }
+    };
     const get = async (path: string, accept: string[]) => {
       let r = await send(path, accept);
       const challenge = r.status === 401 && !token ? bearerChallenge(r.headers.get("www-authenticate")) : undefined;
       if (challenge) {
         const u = new URL(challenge.realm!);
+        if (u.protocol !== "https:") throw new Error(`registry token realm is not https: ${u.origin}`);
         if (challenge.service) u.searchParams.set("service", challenge.service);
         if (challenge.scope) u.searchParams.set("scope", challenge.scope);
         const tr = await f(u, { headers: { "user-agent": "oupdate" }, signal: AbortSignal.timeout(TIMEOUT_MS) });

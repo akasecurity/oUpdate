@@ -1,5 +1,5 @@
 // Layer fixtures for the image-layer tests: the tarballs in test/fixtures/oci/ as an ImageLayers whose fetch copies a file.
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sha256Digest, type ImageDetail, type ImageLayers, type LayerInfo } from "../src/adapters/oci/registry.ts";
@@ -49,8 +49,32 @@ export async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
-/** A layer built at test time: path -> file text, `{ link }` for a symlink, `{ dir }` for an (empty) directory. */
-export type LayerSpec = Record<string, string | { link: string } | { dir: true }>;
+/** A layer built at test time: path -> file text, `{ text, mode }` for a file with a mode, `{ link }` for a symlink, `{ dir }` for an (empty) directory. */
+export type LayerSpec = Record<string, string | { text: string; mode: number } | { link: string } | { dir: true }>;
+
+function writeSpec(root: string, spec: LayerSpec): void {
+  for (const [p, v] of Object.entries(spec)) {
+    const abs = join(root, p);
+    mkdirSync(dirname(abs), { recursive: true });
+    if (typeof v === "string") writeFileSync(abs, v);
+    else if ("text" in v) {
+      writeFileSync(abs, v.text);
+      chmodSync(abs, v.mode);
+    } else if ("link" in v) symlinkSync(v.link, abs);
+    else mkdirSync(abs, { recursive: true });
+  }
+}
+
+/** A tar of exactly the named members, with no entries for the directories above them; returns its path. */
+export function bareTar(dir: string, tag: string, spec: LayerSpec): string {
+  const root = join(dir, `${tag}.bare`);
+  mkdirSync(root, { recursive: true });
+  writeSpec(root, spec);
+  const tar = join(dir, `${tag}.tar`);
+  const r = Bun.spawnSync(["bsdtar", "--uid", "0", "--gid", "0", "--numeric-owner", "-cf", tar, "-C", root, ...Object.keys(spec)]);
+  if (r.exitCode !== 0) throw new Error(`bsdtar ${tar}: ${r.stderr.toString()}`);
+  return tar;
+}
 
 /** An image of layers built from specs with bsdtar into `dir` (oldest first); nothing is fetched from anywhere. */
 export function specLayers(dir: string, tag: string, specs: (LayerSpec | { tar: string })[]): ImageLayers {
@@ -64,13 +88,7 @@ export function specLayers(dir: string, tag: string, specs: (LayerSpec | { tar: 
     spec = spec as LayerSpec;
     const root = join(dir, `${tag}-${i}.root`);
     mkdirSync(root, { recursive: true });
-    for (const [p, v] of Object.entries(spec)) {
-      const abs = join(root, p);
-      mkdirSync(dirname(abs), { recursive: true });
-      if (typeof v === "string") writeFileSync(abs, v);
-      else if ("link" in v) symlinkSync(v.link, abs);
-      else mkdirSync(abs, { recursive: true });
-    }
+    writeSpec(root, spec);
     const tar = join(dir, `${tag}-${i}.tar`);
     const r = Bun.spawnSync(["bsdtar", "--uid", "0", "--gid", "0", "--numeric-owner", "-cf", tar, "-C", root, "."]);
     if (r.exitCode !== 0) throw new Error(`bsdtar ${tar}: ${r.stderr.toString()}`);

@@ -6,10 +6,11 @@
 
 import type { ImageDetail, ImageLayers } from "./adapters/oci/registry.ts";
 import { scanSurface } from "./apply/surface.ts";
+import { benignBinary } from "./benign-binary.ts";
 import { diffSeq, renderLineDiff } from "./linediff.ts";
 import { ImageTree, LayerError, LIMITS, MergedIndex, type FsNode, type LayerStore } from "./oci-fs.ts";
 import { SOFT_PATTERNS, type FileMap } from "./prepass.ts";
-import { chunkDiff, SCOPE_NOTE, type Scope } from "./review.ts";
+import { chunkDiff, hashedBinary, SCOPE_NOTE, type Scope } from "./review.ts";
 import type { ImageEvidence } from "./targets/nas/answer.ts";
 
 export interface LayerReview {
@@ -572,7 +573,14 @@ export async function reviewLayers(a: { old: ImageLayers; new: ImageLayers; newE
       continue;
     }
     const own = dbChanged || exec ? await ownerOf(c.path) : undefined;
-    if (!mandatory && own && pk.changed.has(own) && c.n.type === "file" && !exec && (!c.o || sameMeta)) {
+    // Ownership is the image's own claim (its dpkg lists and database), so it can set aside a text file but never vouch
+    // for a binary one: a changed binary is judged by its bytes (the first 8000 say whether it is one) and goes on to hold.
+    const ownedText = async () => {
+      const nh = await newT.head(c.n!, 8000);
+      const oh = c.o?.type === "file" ? await oldT.head(c.o, 8000) : undefined;
+      return !hashedBinary(c.path, oh, nh) || benignBinary(c.path, nh);
+    };
+    if (!mandatory && own && pk.changed.has(own) && c.n.type === "file" && !exec && (!c.o || sameMeta) && (await ownedText())) {
       counts.owned++;
       continue;
     }
@@ -641,6 +649,7 @@ export async function reviewLayers(a: { old: ImageLayers; new: ImageLayers; newE
   const newF: FileMap = new Map();
   const ranks = new Map<string, number>();
   const texts: { path: string; before?: string; after: string }[] = [];
+  const binaries: string[] = [];
   for (const s of shown) {
     const bytes = async (t: ImageTree, n: FsNode | undefined) => (!n ? undefined : n.type === "symlink" ? linkText(n) : n.type === "file" ? await t.read(n) : undefined);
     const nb = await bytes(newT, s.n);
@@ -654,14 +663,17 @@ export async function reviewLayers(a: { old: ImageLayers; new: ImageLayers; newE
       continue;
     }
     const ob = await bytes(oldT, s.o);
-    // A changed start target is always shown, ranked first, with its hash and size, but it is not a hold by itself: an
-    // app update replaces its start binary every time. The reviewers judge it; the checks above still apply to it.
     if (exec && !s.own && !s.entry && (isElf(nb) || isBinary(nb))) hits.push(`unpackaged binary ${kind}: ${s.path} (sha256 ${sha(nb)})`);
+    // As in a package review: a binary reaches the reviewers only as a hash, so their APPROVE does not cover it. Any
+    // added or changed binary holds, executable or not, packaged or not (the image vouches for its own packages), a start
+    // target included; only a benign format whose bytes match its name (an image, a font) may pass on its hash.
+    if (s.n.type === "file" && hashedBinary(s.path, ob, nb) && (s.entry || !benignBinary(s.path, nb))) binaries.push(s.path);
     newF.set(s.path, nb);
     if (ob) oldF.set(s.path, ob);
     ranks.set(s.path, s.rank);
     if (!isBinary(nb) && !(ob && isBinary(ob))) texts.push({ path: s.path, before: ob && dec.decode(ob), after: dec.decode(nb) });
   }
+  if (binaries.length) hits.push(`not model-reviewable: binary file(s) ${binaries.join(", ")}; needs a human`);
   for (const t of texts) {
     const diff = renderLineDiff(t.before, t.after);
     hits.push(...scanSurface([{ path: t.path, diff }]));

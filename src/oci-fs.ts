@@ -15,9 +15,21 @@ export interface Limits {
   maxContent: number;
   /** Largest file shown to a reviewer; a bigger one is only named. */
   maxShown: number;
+  /** Milliseconds one bsdtar call (a listing or one file's read) may run before it is stopped. */
+  timeoutMs?: number;
 }
 
-export const LIMITS: Limits = { maxCompressed: 2_000_000_000, maxEntries: 500_000, maxContent: 300_000_000, maxShown: 1_000_000 };
+export const LIMITS: Limits = { maxCompressed: 2_000_000_000, maxEntries: 500_000, maxContent: 300_000_000, maxShown: 1_000_000, timeoutMs: 300_000 };
+
+/** Stops `p` after `ms`; `timedOut()` says whether it was this that stopped it. */
+function deadline(p: { kill(): void }, ms: number): { timedOut: () => boolean; clear: () => void } {
+  let hit = false;
+  const t = setTimeout(() => {
+    hit = true;
+    p.kill();
+  }, ms);
+  return { timedOut: () => hit, clear: () => clearTimeout(t) };
+}
 
 /** Why a layer could not be read; the review holds on it whatever the reviewers say. */
 export class LayerError extends Error {
@@ -107,6 +119,10 @@ export function parseListing(digest: string, file: string, text: string, maxEntr
     let link: string | undefined;
     if (m[1]![0] === "l" && name.includes(" -> ")) [name, link] = [name.slice(0, name.indexOf(" -> ")), name.slice(name.indexOf(" -> ") + 4)];
     if (m[1]![0] === "h" && name.includes(" link to ")) [name, link] = [name.slice(0, name.indexOf(" link to ")), name.slice(name.indexOf(" link to ") + 9)];
+    // bsdtar prints a link as `name -> target` (`name link to target`), and both sides are the layer's to choose: a name or
+    // target that holds a separator makes the split a guess (a link named `a -> b` reads as a link `a` to `b -> ...`), so
+    // the layer is refused rather than split.
+    if ([name, link ?? ""].some((x) => x.includes(" -> ") || x.includes(" link to "))) throw new LayerError(digest, `ambiguous member name: ${m[6]!.slice(0, 120)}`);
     if (isUnsafeMember(name) || (link !== undefined && m[1]![0] === "h" && isUnsafeMember(link))) throw new LayerError(digest, `unsafe member name: ${name}`);
     const path = norm(name);
     if (!path) continue;
@@ -150,27 +166,34 @@ const globSafe = (member: string): string => member.replace(/[\\*?[\]]/g, "\\$&"
  * `bsdtar -tv` output read as it arrives: the entry cap (counted in lines) and a per-entry byte bound are enforced while
  * reading, and bsdtar is stopped the moment either passes, so a hostile layer cannot make the listing grow without limit.
  */
-async function streamListing(digest: string, file: string, maxEntries: number): Promise<string> {
+async function streamListing(digest: string, file: string, maxEntries: number, timeoutMs: number): Promise<string> {
   const p = Bun.spawn(["bsdtar", "-tv", "--numeric-owner", "-f", file], { stdout: "pipe", stderr: "pipe" });
+  const timer = deadline(p, timeoutMs);
   const errText = new Response(p.stderr).text();
   const dec = new TextDecoder();
   const maxBytes = Math.max(maxEntries, 0) * 4096;
   let text = "";
   let lines = 0;
   let bytes = 0;
-  const reader = p.stdout.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    bytes += value.length;
-    for (const b of value) if (b === 10) lines++;
-    if (lines > maxEntries || bytes > maxBytes) {
-      p.kill();
-      throw new LayerError(digest, `layer lists more than ${maxEntries} entries, over the cap`);
+  let rc: number;
+  try {
+    const reader = p.stdout.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.length;
+      for (const b of value) if (b === 10) lines++;
+      if (lines > maxEntries || bytes > maxBytes) {
+        p.kill();
+        throw new LayerError(digest, `layer lists more than ${maxEntries} entries, over the cap`);
+      }
+      text += dec.decode(value, { stream: true });
     }
-    text += dec.decode(value, { stream: true });
+    rc = await p.exited;
+  } finally {
+    timer.clear();
   }
-  const rc = await p.exited;
+  if (timer.timedOut()) throw new LayerError(digest, `bsdtar did not list the layer within ${timeoutMs} ms`);
   if (rc !== 0) throw new LayerError(digest, `bsdtar could not list the layer: ${(await errText).trim().split("\n")[0]}`);
   return text + dec.decode();
 }
@@ -208,7 +231,7 @@ export class LayerStore {
     }
     this.fetched.push(layer.digest);
     const room = this.limits.maxEntries - this.entries;
-    const listed = await streamListing(layer.digest, file, room);
+    const listed = await streamListing(layer.digest, file, room, this.limits.timeoutMs ?? LIMITS.timeoutMs!);
     const listing = parseListing(layer.digest, file, listed, room);
     this.entries += listing.entries.size + listing.whiteouts.size + listing.opaque.size;
     if (this.entries > this.limits.maxEntries) throw new LayerError(layer.digest, `layers list over the ${this.limits.maxEntries} entry cap`);
@@ -226,37 +249,69 @@ export class LayerStore {
     return p;
   }
 
-  private async pull(node: FsNode, listing: LayerListing): Promise<Uint8Array> {
+  /** The first `n` bytes of a regular file (all of it when it is no longer), counted against the content budget. */
+  head(node: FsNode, listing: LayerListing, n: number): Promise<Uint8Array> {
+    if (node.size <= n) return this.read(node, listing);
+    const key = `${node.layer}\0${node.member}\0${n}`;
+    let p = this.contents.get(key);
+    if (!p) {
+      p = this.pull(node, listing, n);
+      this.contents.set(key, p);
+    }
+    return p;
+  }
+
+  private async pull(node: FsNode, listing: LayerListing, upTo?: number): Promise<Uint8Array> {
     if (node.type !== "file") throw new LayerError(node.layer, `not a regular file: ${node.path}`);
-    this.contentRead += node.size;
+    const want = upTo === undefined ? node.size : Math.min(upTo, node.size);
+    this.contentRead += want;
     if (this.contentRead > this.limits.maxContent) throw new LayerError(node.layer, `content read passes the ${this.limits.maxContent} byte cap at ${node.path}`);
     // Streamed: the bytes are counted as they arrive, and the pull stops at the size the header declares.
     const p = Bun.spawn(["bsdtar", "-xOf", listing.file, "--", globSafe(node.member)], { stdout: "pipe", stderr: "pipe" });
+    const ms = this.limits.timeoutMs ?? LIMITS.timeoutMs!;
+    const timer = deadline(p, ms);
     const errText = new Response(p.stderr).text();
     const chunks: Uint8Array[] = [];
     let total = 0;
-    const reader = p.stdout.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.length;
-      if (total > node.size) {
-        p.kill();
-        throw new LayerError(node.layer, `${node.path} is longer than the ${node.size} bytes its header declares`);
+    let rc: number;
+    try {
+      const reader = p.stdout.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (want < node.size && total + value.length >= want) {
+          chunks.push(value.subarray(0, want - total));
+          total = want;
+          p.kill();
+          break;
+        }
+        total += value.length;
+        if (total > node.size) {
+          p.kill();
+          throw new LayerError(node.layer, `${node.path} is longer than the ${node.size} bytes its header declares`);
+        }
+        chunks.push(value);
       }
-      chunks.push(value);
+      rc = await p.exited;
+    } finally {
+      timer.clear();
     }
-    const rc = await p.exited;
+    if (timer.timedOut()) throw new LayerError(node.layer, `bsdtar did not read ${node.path} within ${ms} ms`);
+    if (want < node.size && total === want) return concat(chunks, total);
     if (rc !== 0) throw new LayerError(node.layer, `bsdtar could not read ${node.path}: ${(await errText).trim().split("\n")[0]}`);
     if (total !== node.size) throw new LayerError(node.layer, `${node.path} is ${total} bytes, its header declares ${node.size}`);
-    const out = new Uint8Array(total);
-    let at = 0;
-    for (const c of chunks) {
-      out.set(c, at);
-      at += c.length;
-    }
-    return out;
+    return concat(chunks, total);
   }
+}
+
+function concat(chunks: Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
 }
 
 /** One side's layers, oldest first, resolved newest first. */
@@ -311,6 +366,12 @@ export class ImageTree {
   async read(node: FsNode): Promise<Uint8Array> {
     const i = this.layers.findIndex((l) => l.digest === node.layer);
     return this.store.read(node, await this.list(i));
+  }
+
+  /** The first `n` bytes of a file. */
+  async head(node: FsNode, n: number): Promise<Uint8Array> {
+    const i = this.layers.findIndex((l) => l.digest === node.layer);
+    return this.store.head(node, await this.list(i), n);
   }
 }
 
@@ -381,8 +442,14 @@ export class MergedIndex {
       let set = this.kids.get(par);
       if (!set) this.kids.set(par, (set = new Set()));
       set.add(c);
-      if (par === "" || this.nodes.has(par)) break;
+      const up = this.nodes.get(par);
+      if (par === "" || up?.type === "dir") break;
+      // A layer unpacked on its own (overlay) makes a directory for a member's parent, and that directory hides a lower
+      // layer's link or file at the same path; it does not write through the link. A runtime that applies layers in place
+      // may follow it instead, so the merge models the overlay result and the review holds on it.
+      if (up) this.problems.push(`layer writes under a lower ${up.type}: ${path} (${par} becomes a directory)`);
       this.nodes.set(par, dirNode(par));
+      if (up) break;
       c = par;
     }
   }

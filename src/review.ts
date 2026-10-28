@@ -117,7 +117,8 @@ function shownAsText(path: string, bytes: Uint8Array | undefined): boolean {
   return CODE_EXT.test(path) || PRIORITY_NAME.test(path) || (!!bytes && bytes[0] === 0x23 && bytes[1] === 0x21);
 }
 
-function hashedBinary(path: string, before: Uint8Array | undefined, after: Uint8Array | undefined): boolean {
+/** A file the reviewer sees only as a hash: binary bytes (a NUL in the first 8000 bytes, before or after) and not shown as text. */
+export function hashedBinary(path: string, before: Uint8Array | undefined, after: Uint8Array | undefined): boolean {
   return !shownAsText(path, after) && ((!!after && isBinary(after)) || (!!before && isBinary(before)));
 }
 

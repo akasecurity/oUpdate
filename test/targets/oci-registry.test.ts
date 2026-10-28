@@ -104,6 +104,10 @@ interface RegFx {
   cmd?: unknown;
   /** Also serve the index under this digest: a registry answering a digest ref with other bytes. */
   serveAs?: string;
+  /** The challenge's token realm. */
+  realm?: string;
+  /** Answer the config blob with a 307 to this URL, which serves it. */
+  redirect?: string;
 }
 
 function registry(fx: RegFx = {}) {
@@ -144,12 +148,14 @@ function registry(fx: RegFx = {}) {
     const url = String(input);
     const auth = new Headers(init?.headers).get("authorization") ?? "";
     calls.push({ url, auth });
-    if (url.startsWith("https://auth.example/token?")) return Response.json({ token: "anon" });
+    if (url.startsWith("https://auth.example/token?") || url.startsWith("http://auth.example/token?")) return Response.json({ token: "anon" });
+    if (fx.redirect && url === fx.redirect) return new Response(new Uint8Array(served.get(`blobs/${digests["amd64-config"]}`)!.bytes), { headers: { "content-type": IMG_CONFIG } });
     const path = url.replace("https://lscr.example/v2/linuxserver/radarr/", "");
     if (challenge !== "none" && auth !== "Bearer anon") {
-      const headers: Record<string, string> = challenge === "bearer" ? { "www-authenticate": 'Bearer realm="https://auth.example/token",service="lscr.example",scope="repository:linuxserver/radarr:pull"' } : {};
+      const headers: Record<string, string> = challenge === "bearer" ? { "www-authenticate": `Bearer realm="${fx.realm ?? "https://auth.example/token"}",service="lscr.example",scope="repository:linuxserver/radarr:pull"` } : {};
       return new Response("unauthorized", { status: 401, headers });
     }
+    if (fx.redirect && path === `blobs/${digests["amd64-config"]}`) return new Response(null, { status: 307, headers: { location: fx.redirect } });
     const s = served.get(path);
     if (!s) return new Response("no", { status: 404 });
     return new Response(new Uint8Array(s.bytes), { headers: { "content-type": s.type } });
@@ -198,6 +204,21 @@ describe("registrySource", () => {
     // One token, then every later request carries it.
     expect(r.calls.filter((c) => c.url.startsWith("https://auth.example/")).length).toBe(1);
     expect(r.calls.at(-1)!.auth).toBe("Bearer anon");
+  });
+
+  test("a token realm that is not https is refused before it is asked", async () => {
+    const r = registry({ realm: "http://auth.example/token" });
+    await expect(r.src.imageEvidence(RADARR(":1.0"), "linux/amd64")).rejects.toThrow("registry token realm is not https: http://auth.example");
+    expect(r.calls.some((c) => c.url.startsWith("http://auth.example/"))).toBe(false);
+  });
+
+  test("a redirect to another origin is followed without the token; a redirect to plain http is refused", async () => {
+    const r = registry({ redirect: "https://cdn.example/blob/config" });
+    expect((await r.src.imageEvidence(RADARR(":1.0"), "linux/amd64")).config).toBe(r.digests["amd64-config"]);
+    const cdn = r.calls.filter((c) => c.url.startsWith("https://cdn.example/"));
+    expect(cdn).toHaveLength(1);
+    expect(cdn[0]!.auth).toBe("");
+    await expect(registry({ redirect: "http://cdn.example/blob/config" }).src.imageEvidence(RADARR(":1.0"), "linux/amd64")).rejects.toThrow("registry redirect to a non-https URL");
   });
 
   test("an arm64 platform picks the arm64 entry, with or without the variant", async () => {
