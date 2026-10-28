@@ -4,12 +4,13 @@
 // release workflows, packaging, new executables) and any binary. Plain source files are counted,
 // not read. Deterministic findings on the surface FLAG before any reviewer call.
 
+import { benignBinary } from "../benign-binary.ts";
+
 export type Git = (dir: string, args: string[]) => Promise<{ rc: number; out: string }>;
 
 const MANIFEST = /^(setup\.py|setup\.cfg|pyproject\.toml|MANIFEST\.in|Pipfile(\.lock)?|requirements[^/]*\.txt|package(-lock)?\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|uv\.lock|poetry\.lock|Cargo\.(toml|lock)|build\.rs|Package\.(swift|resolved)|Gemfile(\.lock)?|go\.(mod|sum)|CMakeLists\.txt|GNUmakefile|[Mm]akefile|Dockerfile[^/]*|install[^/]*)$/;
 const DIRS = /^(Formula|HomebrewFormula|Casks|\.github|\.circleci|packaging|scripts?|bin|ci)\//;
 const EXT = /\.(sh|bash|zsh|lock|cmake|plist|rb|podspec|gemspec|pbxproj|xcconfig|entitlements|mk)$/;
-const BENIGN_BINARY = /\.(png|jpe?g|gif|ico|icns|webp|pdf|ttf|otf|woff2?)$/i;
 
 /** Files brew or a build may run, fetch or resolve dependencies from. */
 export function isSurfaceFile(path: string): boolean {
@@ -60,6 +61,13 @@ export interface Surface {
 
 export type SurfaceResult = { ok: true; surface: Surface } | { ok: false; why: string };
 
+// git's text wrapper turns a PNG's 0x89 into a replacement character, so the magic bytes come from the blob.
+function blobBytes(dir: string, rev: string, path: string): Uint8Array | undefined {
+  const p = Bun.spawnSync(["git", "-C", dir, "cat-file", "blob", "--", `${rev}:${path}`], { stdout: "pipe", stderr: "pipe" });
+  if ((p.exitCode ?? 1) !== 0 || !p.stdout) return undefined;
+  return new Uint8Array(p.stdout);
+}
+
 /** The surface of the diff oldRev..head in the tap checkout. */
 export async function gatherSurface(git: Git, dir: string, oldRev: string, head: string): Promise<SurfaceResult> {
   const range = `${oldRev}..${head}`;
@@ -67,10 +75,10 @@ export async function gatherSurface(git: Git, dir: string, oldRev: string, head:
   const raw = await git(dir, [...base, "--raw", range]);
   const num = await git(dir, [...base, "--numstat", range]);
   if (raw.rc !== 0 || num.rc !== 0) return { ok: false, why: "git could not list the release diff" };
-  const modes = new Map<string, { from: string; to: string }>();
+  const modes = new Map<string, { from: string; to: string; status: string }>();
   for (const l of raw.out.split("\n")) {
-    const m = l.match(/^:(\d+) (\d+) \S+ \S+ \S+\t(.+)$/);
-    if (m) modes.set(m[3]!, { from: m[1]!, to: m[2]! });
+    const m = l.match(/^:(\d+) (\d+) \S+ \S+ (\S+)\t(.+)$/);
+    if (m) modes.set(m[4]!, { from: m[1]!, to: m[2]!, status: m[3]! });
   }
   const binary = new Set<string>();
   for (const l of num.out.split("\n")) {
@@ -83,7 +91,10 @@ export async function gatherSurface(git: Git, dir: string, oldRev: string, head:
   for (const [path, m] of modes) {
     const execNew = m.to === "100755" && m.from !== "100755";
     const link = m.to === "120000" && m.from !== "120000";
-    if (binary.has(path) && !BENIGN_BINARY.test(path)) findings.push(`${path}: binary file added or changed`);
+    if (binary.has(path)) {
+      const rev = m.status.startsWith("D") ? oldRev : head;
+      if (!benignBinary(path, blobBytes(dir, rev, path))) findings.push(`${path}: binary file added or changed`);
+    }
     if (isSurfaceFile(path) || execNew || link) read.push(path);
     else otherCount++;
   }

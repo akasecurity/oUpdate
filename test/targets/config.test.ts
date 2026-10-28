@@ -1,7 +1,11 @@
 // The targets file: strict keys, one id and one status file per target, reach kinds declared even when
 // not built, and pin-bump only over a git reach.
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { parseTargetsConfig } from "../../src/targets/config.ts";
+import { groupKeys } from "../../src/targets/pins/config.ts";
 import { isDue } from "../../src/targets/model.ts";
 
 const PIN_LEG = {
@@ -123,6 +127,27 @@ describe("parseTargetsConfig", () => {
 
   test("pin-bump needs a git reach", () => {
     expect(() => parse(withTarget(4, { legs: [PIN_LEG] }))).toThrow("targets[4].legs[0]: pin-bump needs a git reach");
+  });
+
+  test("one git target can carry two pin-bump legs, pins.env and host-pins.env", () => {
+    const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures/two-pin-legs.json"), "utf8");
+    const c = parseTargetsConfig(text);
+    expect(c.targets).toHaveLength(1);
+    const t = c.targets[0]!;
+    expect(t.reach).toEqual({ kind: "git", repo: "/repo/ofleet-dev", remote: "origin", base: "main" });
+    expect(t.legs.map((l) => (l.kind === "pin-bump" ? l.pinsPath : l.kind))).toEqual(["sandbox/base/pins.env", "sandbox/base/host-pins.env"]);
+    const host = t.legs[1];
+    if (host?.kind !== "pin-bump") throw new Error("second leg is not pin-bump");
+    expect(host).toMatchObject({ branchPrefix: "oupdate/", trainAskDir: "/srv/oupdate/train-asks", push: false, cooldownDays: 2 });
+    expect(host.groups.map((g) => g.name)).toEqual(["lima", "colima", "docker-cli"]);
+    const lima = host.groups[0];
+    if (lima?.source !== "github-release") throw new Error("lima is not github-release");
+    expect(lima.assetKeys).toEqual({ LIMA_ASSET: "lima-{v}-Darwin-arm64.tar.gz" });
+    const colima = host.groups[1];
+    if (colima?.source !== "github-release") throw new Error("colima is not github-release");
+    expect(colima.assetKeys).toEqual({ COLIMA_ASSET: "colima-Darwin-arm64" });
+    expect(host.groups[2]).toMatchObject({ source: "docker-static", propose: false });
+    expect(host.groups.flatMap(groupKeys).sort()).toEqual(["COLIMA_ASSET", "COLIMA_SHA256", "COLIMA_VERSION", "DOCKER_CLI_ASSET", "DOCKER_CLI_SHA256", "DOCKER_CLI_VERSION", "LIMA_ASSET", "LIMA_SHA256", "LIMA_VERSION"]);
   });
 
   test("isDue: nightly every day, weekly on its day only", () => {

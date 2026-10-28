@@ -76,6 +76,16 @@ describe("renderLineDiff", () => {
     expect(out.length).toBeLessThan(next.length / 4);
   });
 
+  test("a whitespace-only change inside a long line is marked", () => {
+    const pad = "a".repeat(520);
+    const inserted = renderLineDiff(`const s="${pad}";`, `const s="${pad.slice(0, 200)} ${pad.slice(200)}";`);
+    expect(inserted).toContain('" "');
+    expect(inserted).toMatch(/^~/m);
+    const tab = renderLineDiff(`${pad} x`, `${pad}\tx`);
+    expect(tab).toContain('"\\t"');
+    expect(tab).toContain('" "');
+  });
+
   test("every changed token of a minified line is rendered", () => {
     const base = Array.from({ length: 300 }, (_, i) => `a${i}();`).join("");
     const next = base.replace("a10();", "b10();").replace("a250();", "eval(atob('Zm9v'));");

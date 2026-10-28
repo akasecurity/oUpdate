@@ -23,10 +23,10 @@ const APPROVED = "/conf.test/approved-taps.tsv";
 const brewLine = (summary: string[]) => summary.find((l) => l.startsWith("  brew: ")) ?? "";
 const npmLine = (summary: string[]) => summary.find((l) => l.startsWith("  npm:  ")) ?? "";
 
-async function run(script: HostScript, o: { cfg?: Parameters<typeof testConfig>[0]; dryRun?: boolean; tb?: ReturnType<typeof fakeTypeB>; gk?: GkOps; appNet?: AppNet } = {}) {
+async function run(script: HostScript, o: { cfg?: Parameters<typeof testConfig>[0]; dryRun?: boolean; tb?: ReturnType<typeof fakeTypeB>; gk?: GkOps; appNet?: AppNet; bunExec?: string } = {}) {
   const h = fakeHost(script);
   const tb = o.tb ?? fakeTypeB(0);
-  const res = await applyHost(testConfig(o.cfg), h.exec, h.fs, { dryRun: o.dryRun ?? false, reviewer: scripted([], "APPROVE\nno attack indicators found").r, typeB: tb.typeB, gk: o.gk, appNet: o.appNet, now: new Date(2026, 9, 22, 7, 0) });
+  const res = await applyHost(testConfig(o.cfg), h.exec, h.fs, { dryRun: o.dryRun ?? false, reviewer: scripted([], "APPROVE\nno attack indicators found").r, typeB: tb.typeB, gk: o.gk, appNet: o.appNet, bunExec: o.bunExec, now: new Date(2026, 9, 22, 7, 0) });
   const text = [...res.log, ...res.summary].join("\n");
   return { ...res, ...h, tb, text, brew: brewLine(res.summary), npm: npmLine(res.summary) };
 }
@@ -808,5 +808,29 @@ describe("stale owners in the run (OUP-b10)", () => {
     expect([...r.files.keys()].some((k) => k.includes("/queue/"))).toBe(false);
     expect(r.files.has(OUT)).toBe(true);
     expect(r.res.log).toContain("    dry-run: would queue gui/501/org.example.serving for an idle restart");
+  });
+});
+
+describe("the bun this run executes", () => {
+  test("Homebrew's bun is held out of the upgrade set and reported", async () => {
+    const r = await run(
+      { formulas: "bun good-a", verbose: "bun (1.0) < 1.1\ngood-a (1.0) < 1.1", formulaTaps: { bun: "homebrew/core", "good-a": "homebrew/core" } },
+      { bunExec: "/brew/Cellar/bun/1.0/bin/bun" },
+    );
+    expect(r.log).toContain("  holding bun (runs under it)");
+    expect(r.calls).not.toContain("brew upgrade bun");
+    expect(r.calls).toContain("brew upgrade good-a");
+    expect(r.brew).toContain("HELD: bun (runs under it)");
+    expect(r.brew).toContain("upgraded: good-a");
+    expect(r.text).not.toContain("bun (1.0) < 1.1");
+  });
+
+  test("bun is upgraded when this run is not Homebrew's formula", async () => {
+    const r = await run(
+      { formulas: "bun", verbose: "bun (1.0) < 1.1", formulaTaps: { bun: "homebrew/core" } },
+      { bunExec: "/nonexistent/oup-bun/bin/bun" },
+    );
+    expect(r.calls).toContain("brew upgrade bun");
+    expect(r.log.some((l) => l.includes("runs under it"))).toBe(false);
   });
 });

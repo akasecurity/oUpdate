@@ -35,6 +35,20 @@ describe("parseBunLock", () => {
     for (const bad of ["sha512-x", "md5-1B2M2Y8AsgTpgAmY7PhCfg=="]) expect(() => parseBunLock(`{"packages":{"ms":["ms@2.1.3","",{},"${bad}"]}}`)).toThrow(/ms@2.1.3.*integrity/);
   });
 
+  test("a private tarball url that is not a .tgz is a url dependency, not a private registry", () => {
+    const one = (url: string) => parseBunLock(`{"packages":{"ms":["ms@2.1.3","${url}",{},"sha1-qUPrMeIDqWcUgN6EdBPTCCs/AYs="]}}`);
+    for (const url of ["https://npm.corp.example/evil/-/evil-6.6.6.tar.bz2", "https://npm.corp.example/evil/-/evil-6.6.6.tar.xz", "https://codeload.github.com/org/repo/tar.gz/v2.1.3", "https://files.example.com/pkgs/ms-2.1.3.tar.bz2/"]) {
+      const p = one(url)[0]!;
+      expect(p.direct).toBe("url");
+      expect(p.source).toBe(url);
+      expect(p.registry).toBeUndefined();
+    }
+    expect(one("https://npm.corp.example/")[0]).toMatchObject({ registry: "npm.corp.example" });
+    expect(one("https://npm.corp.example/")[0]!.direct).toBeUndefined();
+    expect(one("https://artifacts.example/repository/npm-private/")[0]).toMatchObject({ registry: "artifacts.example" });
+    expect(one("https://artifacts.example/repository/npm-private/")[0]!.direct).toBeUndefined();
+  });
+
   test("a tarball url that is not the registry's own for name@version is a url dependency", () => {
     const one = (url: string) => parseBunLock(`{"packages":{"ms":["ms@2.1.3","${url}",{},"sha1-qUPrMeIDqWcUgN6EdBPTCCs/AYs="]}}`);
     expect(one("https://registry.npmjs.org/evil/-/evil-6.6.6.tgz")).toMatchObject([{ name: "ms", version: "2.1.3", direct: "url", source: "https://registry.npmjs.org/evil/-/evil-6.6.6.tgz" }]);

@@ -1,6 +1,9 @@
 // pnpm-lock.yaml -> registry packages, from the `packages` keys:
-//   v9: name@version   v6: /name@version(peer@x)   v5 and older: /name/version_peer@x+y
-// Peer suffixes are stripped. Url, git and directory entries (no registry version) are read as direct
+//   v9: name@version in `packages` (metadata); installed instances live in `snapshots` (peer-suffixed keys)
+//   v6: /name@version(peer@x)   v5 and older: /name/version_peer@x+y
+// v6-v8 peer suffixes are stripped. v9 reads every snapshot and fails closed when its `packages` entry is
+// missing. A peer suffix does not change the tarball, so instances dedupe on name@version, source and digest.
+// Url, git and directory entries (no registry version) are read as direct
 // dependencies with their tarball, repo or directory as the source. An importer's own `link:` or `file:` resolution
 // is a direct file dependency, its path taken from the lockfile's folder, unless it links to another importer (a
 // workspace package, not a package). A tarball resolution names its registry: a non-default host is a private registry.
@@ -37,6 +40,43 @@ function keyId(key: string, v: number): { name: string; version: string } | unde
   return { name: k.slice(0, cut), version: v >= 6 ? k.slice(cut + 1) : k.slice(cut + 1).replace(/_.*$/, "") };
 }
 
+/**
+ * Where a v9 snapshot key's peer suffix starts, or -1 when it has none. A `(patch_hash=…)` stays on the
+ * packages key; peers, if any, are the parenthesized suffix after it. Same split as pnpm's dependency-path.
+ */
+function peersIndexOf(depPath: string): number {
+  if (!depPath.endsWith(")")) return -1;
+  let open = 1;
+  for (let i = depPath.length - 2; i >= 0; i--) {
+    if (depPath[i] === "(") open--;
+    else if (depPath[i] === ")") open++;
+    else if (!open) {
+      if (depPath.substring(i + 1).startsWith("(patch_hash=")) return depPath.indexOf("(", i + 2);
+      return i + 1;
+    }
+  }
+  return -1;
+}
+
+/** v9: one row per snapshot, resolved through `packages`. Older lockfiles: the `packages` map, as before. */
+function packageInstances(lock: { packages?: Record<string, Entry>; snapshots?: unknown }, v: number): { key: string; e: Entry | undefined }[] {
+  const packages = lock.packages ?? {};
+  const snaps = lock.snapshots;
+  if (v < 9 || snaps == null) return Object.entries(packages).map(([key, e]) => ({ key, e }));
+  if (typeof snaps !== "object" || Array.isArray(snaps)) throw new Error("pnpm-lock.yaml snapshots is not a map");
+  const covered = new Set<string>();
+  const out: { key: string; e: Entry | undefined }[] = [];
+  for (const snapKey of Object.keys(snaps)) {
+    const at = peersIndexOf(snapKey);
+    const key = at === -1 ? snapKey : snapKey.slice(0, at);
+    if (!Object.hasOwn(packages, key)) throw new Error(`cannot read snapshot ${snapKey}: no packages entry`);
+    covered.add(key);
+    out.push({ key, e: packages[key] });
+  }
+  for (const [key, e] of Object.entries(packages)) if (!covered.has(key)) out.push({ key, e });
+  return out;
+}
+
 const IMPORTER_FIELDS = ["dependencies", "devDependencies", "optionalDependencies"];
 
 /**
@@ -66,7 +106,7 @@ function importerLocals(lock: Record<string, unknown>): LockedPackage[] {
 }
 
 export function parsePnpmLock(text: string): LockedPackage[] {
-  const lock = Bun.YAML.parse(text) as { lockfileVersion?: string | number; packages?: Record<string, Entry> };
+  const lock = Bun.YAML.parse(text) as { lockfileVersion?: string | number; packages?: Record<string, Entry>; snapshots?: unknown };
   const v = Number.parseFloat(String(lock.lockfileVersion ?? ""));
   if (!Number.isFinite(v)) throw new Error("pnpm-lock.yaml has no lockfileVersion");
   const seen = new Set<string>();
@@ -77,7 +117,7 @@ export function parsePnpmLock(text: string): LockedPackage[] {
     seen.add(k);
     out.push(d);
   }
-  for (const [key, e] of Object.entries(lock.packages ?? {})) {
+  for (const { key, e } of packageInstances(lock, v)) {
     const id = keyId(key, v);
     const res = e?.resolution ?? {};
     if (!id || !/^\d+\.\d+\.\d+/.test(id.version) || res.type || (res.tarball !== undefined && !/^https?:\/\//.test(res.tarball))) {

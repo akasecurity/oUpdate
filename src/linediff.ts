@@ -83,8 +83,10 @@ function tokenDiff(oldLine: string, newLine: string): string | undefined {
     let del = "";
     let add = "";
     while (i < ops.length && ops[i]!.op !== "=") {
-      if (ops[i]!.op === "-") del += ops[i]!.v;
-      else add += ops[i]!.v;
+      // A whitespace token as JSON, so a space or a tab inside a minified line is visible.
+      const bit = /^\s+$/.test(ops[i]!.v) ? JSON.stringify(ops[i]!.v) : ops[i]!.v;
+      if (ops[i]!.op === "-") del += bit;
+      else add += bit;
       i++;
     }
     if (del) out += `[-${del}-]`;

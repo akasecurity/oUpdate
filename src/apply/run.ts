@@ -30,6 +30,7 @@
 // The Claude Code native update (secure-update's claude_step) runs in the npm phase after npm,
 // when apply.claudeCode names an executable binary.
 
+import { realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { appBundleUpgrade, realAppNet, type AppNet } from "./appbundle.ts";
 import { isStopping as execStopping, onStop } from "./exec.ts";
@@ -79,6 +80,8 @@ export interface ApplyOptions {
   ownerClock?: { now(): number; sleep(ms: number): Promise<void>; httpStatus(url: string): Promise<number> };
   /** The owner waiter's lock, taken around a release check's inline restarts and checks (default: the real flock). */
   ownerLock?: { take(path: string): Promise<boolean>; release(path: string): Promise<void> };
+  /** This run's bun binary (default: process.execPath). Homebrew's bun formula is held out of the upgrade set. */
+  bunExec?: string;
 }
 
 export interface ApplyResult {
@@ -104,6 +107,32 @@ const DECLARED_DEPS = ["--include-build", "--include-optional"];
 const PKG_NAME = /^[\w@.+-]+(\/[\w@.+-]+){0,2}$/;
 const uniq = (xs: string[]) => [...new Set(xs)];
 const last = (n: string) => n.split("/").at(-1)!;
+
+/**
+ * True when `execPath` is Homebrew's bun formula: a Cellar keg, or the stable bin link that
+ * resolves into one. A host run that upgrades that formula replaces the binary it is running.
+ */
+export function runsUnderBrewBun(execPath: string): boolean {
+  let path = execPath;
+  try {
+    path = realpathSync(execPath);
+  } catch {
+    // Not on disk (a test path, or a keg already removed): judge the path as given.
+  }
+  const segs = path.split("/");
+  const i = segs.lastIndexOf("Cellar");
+  return i >= 0 && segs[i + 1] === "bun";
+}
+
+/** Drops formulae named bun when this process is that Homebrew formula. */
+export function holdRunningBun(names: string[], execPath: string): { kept: string[]; held: string[] } {
+  if (!runsUnderBrewBun(execPath)) return { kept: names, held: [] };
+  const held: string[] = [];
+  const kept: string[] = [];
+  for (const n of names) (last(n) === "bun" ? held : kept).push(n);
+  return { kept, held };
+}
+
 /** A name is listed when an entry equals it or their last path segments are equal (bare or tap-qualified, literal). */
 /**
  * The FAILED entry for a command that timed out: the package for an upgrade (a brew name by its
@@ -255,7 +284,10 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     rcNotes: [] as string[],
     rcHeld: [] as string[],
     rcHeldNames: [] as string[],
+    /** Formulae named bun held because this process is that Homebrew binary. */
+    selfBun: [] as string[],
   };
+  const brewHeld = () => [...cfg.caskExclude, ...heldFromPinned(b.pinned), ...b.selfBun.flatMap((n) => [n, last(n)]), ...b.rcHeldNames];
   const npmFailed: string[] = [];
 
   // Every command goes through here: brew never auto-updates, and a timeout is a FAILED entry of
@@ -583,7 +615,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   await step("brew", "stuck tracking", async () => {
     if (dryRun || b.noBrew) return;
     const q = await x([cfg.brew, "outdated", "--json=v2", "--greedy-auto-updates", ...(b.fetchHead ? ["--fetch-HEAD"] : [])]);
-    const pending = q.rc === 0 ? pendingFromOutdated(q.out, [...cfg.caskExclude, ...heldFromPinned(b.pinned), ...b.rcHeldNames]) : undefined;
+    const pending = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld()) : undefined;
     if (pending === undefined) {
       await brewFailed("pending-query");
       return;
@@ -760,6 +792,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       b.appNotes.join("; "),
       b.stuck.length ? `STUCK: ${b.stuck.join(" ")}` : "",
       b.pinned.length ? `PINNED: ${b.pinned.join(" ")}` : "",
+      b.selfBun.length ? `HELD: ${b.selfBun.map((n) => `${n} (runs under it)`).join(", ")}` : "",
       b.rcHeld.length ? `HELD by release check: ${b.rcHeld.join(" ")}` : "",
       b.rcNotes.length ? `release check: ${b.rcNotes.join(", ")}` : "",
       b.pinWarn, stale, b.linkageNote, b.waiterNote, notifyNote,
@@ -829,6 +862,13 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
         if (!have.includes(n) && !gatedOutdated.includes(n)) gatedOutdated.push(n);
       }
     }
+
+    // The bun this run is executing. Upgrading Homebrew's bun replaces that binary mid-run
+    // (brew cleanup then deletes the keg). It is held; a deliberate step updates it later.
+    const self = holdRunningBun(formulas, opts.bunExec ?? process.execPath);
+    for (const n of self.held) log.push(`  holding ${n} (runs under it)`);
+    b.selfBun.push(...self.held);
+    formulas = self.kept;
 
     // Pinned tools (brew pin, or a repo's pins.json) are held, never upgraded.
     const pinnedQ = await x([cfg.brew, "list", "--pinned"]);
@@ -913,7 +953,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       return;
     }
     // Excluded and held names stay out of the review table too (literal, by last segment).
-    const hide = [...cfg.caskExclude, ...heldFromPinned(b.pinned), ...b.rcHeldNames];
+    const hide = brewHeld();
     const verbose = `${vq.out}${vq.err}`.split("\n").filter((l) => !named(hide, l.trim().split(/\s+/)[0] ?? "")).join("\n");
     log.push(verbose.trimEnd(), "");
 
