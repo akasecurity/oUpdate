@@ -1,4 +1,4 @@
-// gce-patch test fakes (placeholders only). Builders for the broker's inventory answer as the broker spec gives it:
+// gce-patch test fakes (placeholders only). Builders for the broker's inventory answer as the broker gives it:
 // one JSON object with the VM, its instance id, the inventory's update time, os_info, the installed set by name and
 // every upgradable candidate with the broker's archive-index verdict ({security: {suite}} or {hold: {reason}}).
 import { createHash } from "node:crypto";
@@ -7,7 +7,7 @@ import type { Exec } from "../../src/apply/exec.ts";
 import type { GceBroker } from "../../src/targets/gce/broker.ts";
 import type { Clock } from "../../src/targets/gce/job.ts";
 import type { Reach } from "../../src/targets/model.ts";
-import { credreqArgs, fakeExec, type Call, type Rule } from "./fakes.ts";
+import { clientArgs, fakeExec, type Call, type Rule } from "./fakes.ts";
 
 export const VM_A = "vm-a";
 export const VM_B = "vm-b";
@@ -55,7 +55,7 @@ export interface InvOpts {
 
 export const OS_INFO = { short_name: "ubuntu", version: "24.04", architecture: "x86_64", kernel_version: "6.8.0-1015-gcp" };
 
-/** An inventory answer's own fields; the broker sends them beside run_id and seq (§8.3). */
+/** An inventory answer's own fields; the broker sends them beside run_id and seq. */
 export function inventory(o: InvOpts = {}): Record<string, unknown> {
   return {
     vm: o.vm ?? VM_A,
@@ -82,12 +82,12 @@ export function inv(o: InvOpts = {}): Inventory {
   return d.value;
 }
 
-export const GCE: GceBroker = { credreq: "/opt/credreq", baseUrl: "https://broker.example.invalid", readAction: "cloud.osc.read", patchAction: "cloud.osc.patch" };
-/** A VM's run id: 32 lowercase hex characters (rev 15c), the same for every read of the VM. */
+export const GCE: GceBroker = { client: "/opt/broker-client", baseUrl: "https://broker.example.invalid", readAction: "cloud.osc.read", patchAction: "cloud.osc.patch" };
+/** A VM's run id: 32 lowercase hex characters, the same for every read of the VM. */
 export const runOf = (vm: string) => createHash("md5").update(`run:${vm}`).digest("hex");
 /** Another run's id, for run-change tests. */
 export const OTHER_RUN = "0000000000000000000000000000beef";
-/** The broker process ids (rev 15a §8): BOOT for every answer the fake makes, BOOT2 for a restarted broker. */
+/** The broker process ids: BOOT for every answer the fake makes, BOOT2 for a restarted broker. */
 export const BOOT = "0123456789abcdef0123456789abcdef";
 export const BOOT2 = "fedcba9876543210fedcba9876543210";
 
@@ -133,14 +133,14 @@ export interface GceRequest {
   wait: number;
   params: Record<string, unknown>;
   at?: number;
-  /** The stdout credreq gave back, as the caller received it. */
+  /** The stdout the broker client gave back, as the caller received it. */
   out?: string;
 }
 
 /**
- * The the broker spec broker as rev 15a §8 gives it: the credreq target is the VM; every answer carries the run id, a per-VM
- * seq (refusals included) and, right after it, the broker's boot id (BOOT; scripted replies get it too, see withBoot). inventory answers {run_id, seq, <the §8.3 fields>} and mints the VM's run on its first read;
- * job.status answers {run_id, seq, <the §8.6 fields>}; patch answers {run_id, seq, job_id, sent} with sent = every APPROVE name. A VM not in
+ * The gce-patch broker as its caller contract gives it: the client's target is the VM; every answer carries the run id, a per-VM
+ * seq (refusals included) and, right after it, the broker's boot id (BOOT; scripted replies get it too, see withBoot). inventory answers {run_id, seq, <the inventory fields>} and mints the VM's run on its first read;
+ * job.status answers {run_id, seq, <the job.status fields>}; patch answers {run_id, seq, job_id, sent} with sent = every APPROVE name. A VM not in
  * the scene is refused {seq, refused: "gce-osc: unknown vm"} with no run, as the catalog would.
  */
 export function fakeGce(g: FakeGce, b: GceBroker = GCE): { rule: Rule; requests: GceRequest[] } {
@@ -149,8 +149,8 @@ export function fakeGce(g: FakeGce, b: GceBroker = GCE): { rule: Rule; requests:
   let n = 0;
   const next = <T>(xs: T[] | undefined, i: number) => (xs?.length ? xs[Math.min(i, xs.length - 1)] : undefined);
   const rule: Rule = (argv) => {
-    if (argv[0] !== b.credreq) return undefined;
-    const a = credreqArgs(argv);
+    if (argv[0] !== b.client) return undefined;
+    const a = clientArgs(argv);
     if (!a) return { rc: 2, err: "usage: bad arguments" };
     requests.push({ action: a.action, vm: a.target, wait: a.wait, params: a.params, ...(g.clock ? { at: g.clock.now() } : {}) });
     const vm = g.vms?.[a.target];
@@ -203,4 +203,4 @@ export function fakeClock(start: number): Clock & { slept: number[] } {
   return { slept, now: () => t, sleep: async (ms) => void (slept.push(ms), (t += ms)) };
 }
 
-export const GCE_REACH: Extract<Reach, { kind: "gce-patch" }> = { kind: "gce-patch", project: "example-proj", vms: [VM_A, VM_B], actions: ["cloud.osc.read", "cloud.osc.patch"], baseUrl: "https://broker.example.invalid", credreq: "/opt/credreq" };
+export const GCE_REACH: Extract<Reach, { kind: "gce-patch" }> = { kind: "gce-patch", project: "example-proj", vms: [VM_A, VM_B], actions: ["cloud.osc.read", "cloud.osc.patch"], baseUrl: "https://broker.example.invalid", client: "/opt/broker-client" };

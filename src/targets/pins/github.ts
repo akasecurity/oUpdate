@@ -2,7 +2,7 @@
 // the newest non-draft, non-prerelease release whose tag fits the group's template; each hash is the
 // asset's published `digest` (the same field the app-bundle phase trusts), and an asset must sit on the
 // project's own release download path. `assetKeys` are rewritten to that asset's file name at the new
-// version, so a pin like LIMA_ASSET stays in step with the version and the hash.
+// version, so a pin like TOOL_ASSET stays in step with the version and the hash.
 
 import { newer, realAppNet, type GhRelease } from "../../apply/appbundle.ts";
 import type { GithubGroup } from "./config.ts";

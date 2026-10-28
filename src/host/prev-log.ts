@@ -1,8 +1,11 @@
-// the previous updater's launchagent log: the last "=== <host> summary ===" block
-// and the run header before it. Two holds show only in the run body, between the two:
+// The previous updater's run log: the last "=== <host> summary ===" block and the run header before it,
+// "=== [<prefix>-]<name> <host> <date> …" (name: compat.ts previousUpdater; a host run writes "oupdate-<name>", so its
+// own logs read the same way). Two holds show only in the run body, between the two:
 // a Type B FLAG (a third-party tap's formula review) and a CASK_EXCLUDE skip.
 
-export interface SuSummary {
+import { DEFAULT_COMPAT } from "../targets/compat.ts";
+
+export interface PrevSummary {
   date?: string;
   // pinned: held because a repo's pins.json lists them; brew-pinned ones are left to Outdated.pinned.
   brew: { upgraded: string[]; failed: string[]; flagged: string[]; stuck: string[]; pinned?: string[]; excluded?: string[] };
@@ -14,8 +17,8 @@ export interface SuSummary {
 
 const words = (s: string) => s.split(/\s+/).filter(Boolean);
 
-function parseBrew(line: string): SuSummary["brew"] {
-  const b: SuSummary["brew"] = { upgraded: [], failed: [], flagged: [], stuck: [] };
+function parseBrew(line: string): PrevSummary["brew"] {
+  const b: PrevSummary["brew"] = { upgraded: [], failed: [], flagged: [], stuck: [] };
   for (const raw of line.split(";")) {
     const p = raw.trim();
     let m: RegExpMatchArray | null;
@@ -29,8 +32,8 @@ function parseBrew(line: string): SuSummary["brew"] {
   return b;
 }
 
-function parseNpm(line: string): SuSummary["npm"] {
-  const n: SuSummary["npm"] = { upgraded: [], flagged: false, failed: [] };
+function parseNpm(line: string): PrevSummary["npm"] {
+  const n: PrevSummary["npm"] = { upgraded: [], flagged: false, failed: [] };
   for (const raw of line.split(";")) {
     const p = raw.trim();
     const up = p.match(/^upgraded:(.*)$/);
@@ -40,7 +43,7 @@ function parseNpm(line: string): SuSummary["npm"] {
     if (failed) n.failed!.push(failed[1]!);
     const cc = p.match(/^claude-code: (\S+)$/);
     if (cc) n.claudeCode = cc[1];
-    // the previous updater's "FAILED (rc=<rc>, on <ver>)" and oupdate's "FAILED (timeout, on <ver>)".
+    // The previous updater's "FAILED (rc=<rc>, on <ver>)" and oupdate's "FAILED (timeout, on <ver>)".
     const ccf = p.match(/^claude-code: FAILED \((?:rc=\d+|timeout), on (\S+)\)$/);
     if (ccf) {
       n.claudeCodeFailed = true;
@@ -50,15 +53,19 @@ function parseNpm(line: string): SuSummary["npm"] {
   return n;
 }
 
-export function parseSuSummary(log: string, host: string): SuSummary | null {
+const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export function parsePrevSummary(log: string, host: string, name: string = DEFAULT_COMPAT.previousUpdater): PrevSummary | null {
+  const header = new RegExp(`^=== (?:\\S+-)?${escape(name)} `);
+  const dated = new RegExp(`^=== (?:\\S+-)?${escape(name)} (\\S+) (\\d{4}-\\d\\d-\\d\\d)`);
   const lines = log.split("\n");
   const at = lines.lastIndexOf(`=== ${host} summary ===`);
   if (at < 0) return null;
-  const s: SuSummary = { brew: { upgraded: [], failed: [], flagged: [], stuck: [] }, npm: { upgraded: [] }, aborted: false };
+  const s: PrevSummary = { brew: { upgraded: [], failed: [], flagged: [], stuck: [] }, npm: { upgraded: [] }, aborted: false };
   const typeB: string[] = [];
   const excluded: string[] = [];
   for (let i = at - 1; i >= 0; i--) {
-    const h = lines[i]!.match(/^=== (?:\S+-)?host-update (\S+) (\d{4}-\d\d-\d\d)/);
+    const h = lines[i]!.match(dated);
     if (h && h[1] === host) {
       s.date = h[2];
       break;
@@ -72,7 +79,7 @@ export function parseSuSummary(log: string, host: string): SuSummary | null {
     const l = lines[i]!;
     // The next run's header ends this block; so does any oupdate header (a dry run's included), so
     // lines of a later dry run never stand in for the run's own.
-    if (/^=== (?:\S+-)?host-update /.test(l) || /^=== oupdate[ -]/.test(l)) break;
+    if (header.test(l) || /^=== oupdate[ -]/.test(l)) break;
     if (/^=== ABORTED:/.test(l)) s.aborted = true;
     const m = l.match(/^\s+(brew|npm):\s+(.*)$/);
     if (m?.[1] === "brew") s.brew = parseBrew(m[2]!);

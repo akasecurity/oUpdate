@@ -1,16 +1,16 @@
-// The one patch request per VM (spec §5 caller rules; the broker spec `gce.osconfig.patch`): `credreq <patch action> <vm>
-// --param verb=patch --param run_id=… --param-json verdict=…`. A card per job, one VM per job, never an empty list. The
-// reply shape and the card statuses are the broker spec, and there is no window field (Q-10); a change lands
-// in this file only. A pending card, a lost reply, an error or anything not recognized is unknown: the job may run. A
-// broker refusal, or a card denied or expired, means nothing ran; that includes a card approved while the role is still
-// busy ("role busy": the job never starts; the broker sends it 30 s before this request's deadline, inside credreq's wait),
-// a VM the broker suspended after drift ("vm suspended", until a card acknowledges it), and a Lock epoch change right
-// before the execute send ("locked": the broker voids the intent and does not suspend the VM, rev 15 §4.3). After any of
-// these, no other VM is patched this run. A denied reply whose reason is a gce-osc §8 refusal (a job verdict refused
-// before the card) is that refusal, seq included, not a card denial.
+// The one patch request per VM: `<client> <patch action> <vm>
+// --param verb=patch --param run_id=… --param-json verdict=…`. One approval per job, one VM per job, never an empty list. The
+// reply shape and the approval statuses are the broker's caller contract, and there is no window field; a change lands
+// in this file only. A pending approval, a lost reply, an error or anything not recognized is unknown: the job may run. A
+// broker refusal, or an approval denied or expired, means nothing ran; that includes an approval granted while the role is still
+// busy ("role busy": the job never starts; the broker sends it 30 s before this request's deadline, inside the client's wait),
+// a VM the broker suspended after drift ("vm suspended", until it is acknowledged), and a Lock epoch change right
+// before the execute send ("locked": the broker voids the intent and does not suspend the VM). After any of
+// these, no other VM is patched this run. A denied reply whose reason is a structured broker refusal (a job verdict refused
+// before the approval) is that refusal, seq included, not an approval denial.
 
 import type { Exec } from "../../apply/exec.ts";
-import { credreqCall, isObj, short, tail, type Reply } from "../credreq.ts";
+import { brokerCall, isObj, short, tail, type Reply } from "../broker-client.ts";
 import { reasonRefusal, takeSeq, type GceBroker, type GceSession } from "./broker.ts";
 import { approvedNames, type PatchVerdict } from "./verdict.ts";
 import { JOB_ID, MAX_NAMES, PATCH_DEADLINE_S, PKG } from "./verbs.ts";
@@ -32,7 +32,7 @@ export interface PatchLatch {
 }
 export const newLatch = (): PatchLatch => ({ attempted: new Set() });
 
-export async function gcePatch(b: GceBroker, exec: Exec, s: GceSession, v: PatchVerdict, latch: PatchLatch, cardWaitS: number): Promise<PatchResult> {
+export async function gcePatch(b: GceBroker, exec: Exec, s: GceSession, v: PatchVerdict, latch: PatchLatch, approvalWaitS: number): Promise<PatchResult> {
   const no = (why: string): PatchResult => ({ outcome: "refused", sent: false, why: `patch: ${why}` });
   const names = approvedNames(v);
   if (!b.patchAction) return no("the reach names no patch action");
@@ -47,7 +47,7 @@ export async function gcePatch(b: GceBroker, exec: Exec, s: GceSession, v: Patch
   let r: PatchResult;
   try {
     const params = [{ key: "run_id", value: s.runId }, { key: "verdict", value: JSON.stringify(v), json: true }];
-    const c = await credreqCall(b, exec, b.patchAction, s.vm, "patch", params, PATCH_DEADLINE_S + cardWaitS);
+    const c = await brokerCall(b, exec, b.patchAction, s.vm, "patch", params, PATCH_DEADLINE_S + approvalWaitS);
     r = c.ok ? patchReply(s, names, c.reply) : { outcome: "unknown", why: `patch: ${c.why}` };
   } catch (e) {
     // An Exec that throws may have sent the request.
@@ -65,7 +65,7 @@ export function patchReply(s: GceSession, approved: string[], reply: Reply): Pat
   const runId = s.runId!;
   const res = isObj(result) ? result : {};
   const rid = reply.requestId ? { requestId: reply.requestId } : {};
-  // A broker answer (a refusal or a created job) carries a seq; a card status with no answer (pending, denied) does not.
+  // A broker answer (a refusal or a created job) carries a seq; an approval status with no answer (pending, denied) does not.
   if (isObj(result) && Object.keys(result).length) {
     const bad = takeSeq(s, result);
     if (bad) return { outcome: "unknown", why: `patch: ${bad}`, ...rid };
@@ -74,8 +74,8 @@ export function patchReply(s: GceSession, approved: string[], reply: Reply): Pat
     if (res.run_id !== runId) return { outcome: "unknown", why: `patch: a refusal for another run (${String(res.run_id ?? "none")}, expected ${runId}): ${short(res.refused)}`, ...rid };
     return { outcome: "refused", sent: true, why: `patch: refused by the broker, nothing ran: ${short(res.refused)}`, ...rid };
   }
-  if (status === "denied" || status === "expired") return { outcome: "refused", sent: true, why: `patch: card ${status}, nothing ran${tail(reason)}`, ...rid };
-  if (status === "pending") return { outcome: "unknown", why: "patch: waits on a card on the page and may still run", ...rid };
+  if (status === "denied" || status === "expired") return { outcome: "refused", sent: true, why: `patch: approval ${status}, nothing ran${tail(reason)}`, ...rid };
+  if (status === "pending") return { outcome: "unknown", why: "patch: waits on an approval and may still run", ...rid };
   if (status !== "approved") return { outcome: "unknown", why: `patch: broker ${status}${tail(reason)}`, ...rid };
   if (res.run_id !== runId) return { outcome: "unknown", why: `patch: the broker's run changed (${String(res.run_id ?? "none")}, expected ${runId})`, ...rid };
   const jobId = res.job_id;
@@ -90,7 +90,7 @@ export function patchReply(s: GceSession, approved: string[], reply: Reply): Pat
 }
 
 /**
- * The summary fragment for a patch that did not start; every one carries a digest trouble word. Only the caller's own
+ * The summary fragment for a patch that did not start; every one carries a trouble word. Only the caller's own
  * reasons (a request not sent) reach the summary; the broker's text, which can name packages, stays in the log line.
  */
 export function patchSummary(r: Exclude<PatchResult, { outcome: "started" }>): string {

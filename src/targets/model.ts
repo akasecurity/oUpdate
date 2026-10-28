@@ -1,46 +1,49 @@
-// The target model (spec §2): one OS target is an id, its OS, how oupdate reaches it, the update legs
-// it runs, when it runs, and where its one summary line is published for a status reader.
+// The target model: one OS target is an id, its OS, how oupdate reaches it, the update legs
+// it runs, when it runs, and where its one summary line is published.
 
 import type { PinBumpLeg } from "./pins/config.ts";
 
-export type TargetOs = "macos" | "nasos" | "linux";
+/** The built-in target OS names; a target plugin (registry.ts) can add more. */
+export const BUILTIN_OS = ["macos", "linux"] as const;
+export type TargetOs = string;
 
-export type Reach =
+/**
+ * A reach or leg kind that a target plugin parses and runs (registry.ts): `plugin` tells it apart from the built-in
+ * kinds; the plugin's own type adds its fields.
+ */
+export type PluginReach = { kind: string; plugin: true };
+export type PluginLeg = { kind: string; plugin: true };
+
+export type BuiltinReach =
   | { kind: "local" }
   | { kind: "git"; repo: string; remote: string; base: string }
-  /**
-   * Fixed scripts on the target, run by the broker (spec §4). `host` is the broker's catalog target; `actions` holds one
-   * `<name>.read` and at most one `<name>.write` catalog action; `credreq` is run with CREDBROKER_BASE_URL=`baseUrl`.
-   */
-  | { kind: "broker-script"; host: string; actions: string[]; baseUrl: string; credreq: string }
   | { kind: "vm-agent"; vm: string; agent: string }
   /**
-   * The broker's OS Config patch job over exact VM names (spec §5). `actions` holds one `<name>.read` and at most one
-   * `<name>.patch` catalog action; `credreq` is run with CREDBROKER_BASE_URL=`baseUrl`. `project` is for the log only:
+   * The broker's OS Config patch job over exact VM names. `actions` holds one `<name>.read` and at most one
+   * `<name>.patch` catalog action; the broker client is run with `baseUrl` in its environment. `project` is for the log only:
    * the broker's catalog pins each VM's project, zone and instance id.
    */
-  | { kind: "gce-patch"; project: string; vms: string[]; actions: string[]; baseUrl: string; credreq: string }
+  | { kind: "gce-patch"; project: string; vms: string[]; actions: string[]; baseUrl: string; client: string }
   | { kind: "docker"; on: string };
+export type Reach = BuiltinReach | PluginReach;
 
 /** Legs the spec names that this runner does not run yet: each reports "not checked" with trouble. */
 export const UNBUILT_LEGS = ["brew", "npm", "claude-code", "app-bundle"] as const;
 export type UnbuiltLegKind = (typeof UNBUILT_LEGS)[number];
 
-/** The NAS legs (spec §4), over the broker-script reach. Review only unless `apply` is true. */
-export const NAS_LEGS = ["docker-compose", "nas-plugin", "nas-os"] as const;
+/** Docker Compose images, over a reach that opens a broker session. Review only unless `apply` is true. */
 export type ComposeLeg = { kind: "docker-compose"; apply: boolean; prune: boolean };
-export type PluginLeg = { kind: "nas-plugin"; apply: boolean };
-export type OsLeg = { kind: "nas-os" };
-export type NasLeg = ComposeLeg | PluginLeg | OsLeg;
 
 /**
- * VM OS packages over the gce-patch reach (spec §5). Review only unless `apply` is true. `cooldownDays` counts from the
- * first run that saw a candidate (kept in `seenTo`); `cardWaitS` is how long one patch request waits on its card.
+ * VM OS packages over the gce-patch reach. Review only unless `apply` is true. `cooldownDays` counts from the
+ * first run that saw a candidate (kept in `seenTo`); `approvalWaitS` is how long one patch request waits on its approval.
  */
-export type OsPackagesLeg = { kind: "os-packages"; apply: boolean; cooldownDays: number; seenTo: string; cardWaitS: number };
+export type OsPackagesLeg = { kind: "os-packages"; apply: boolean; cooldownDays: number; seenTo: string; approvalWaitS: number };
 
-export type Leg = PinBumpLeg | NasLeg | OsPackagesLeg | { kind: UnbuiltLegKind };
-export const isNasLeg = (l: Leg): l is NasLeg => (NAS_LEGS as readonly string[]).includes(l.kind);
+export type BuiltinLeg = PinBumpLeg | ComposeLeg | OsPackagesLeg | { kind: UnbuiltLegKind };
+export type Leg = BuiltinLeg | PluginLeg;
+export const isPluginLeg = (l: Leg): l is PluginLeg => "plugin" in l;
+export const isPluginReach = (r: Reach): r is PluginReach => "plugin" in r;
 
 /** day: 0 is Sunday, as Date.getDay. */
 export type Schedule = { every: "night" } | { every: "week"; day: number };
@@ -51,17 +54,17 @@ export interface Target {
   reach: Reach;
   legs: Leg[];
   schedule: Schedule;
-  /** Absolute path of the status tsv a status reader reads (host, date, rev, summary rows). */
+  /** Absolute path of the status tsv it publishes (host, date, rev, summary rows). */
   summaryTo: string;
-  /** Absolute .jsonl path: each real run appends the night's parity facts (spec §6). */
+  /** Absolute .jsonl path: each real run appends the night's parity facts. */
   parityTo?: string;
 }
 
-/** The deterministic facts of a NAS night that the parity run compares with the previous updater script, plus the model opinions. */
+/** The deterministic facts of a night that the parity run compares with the previous updater script's log, plus the model opinions. */
 export interface ParityFacts {
   changed?: string[];
   pregate?: string[];
-  verdict?: { primary: string; secondary: string };
+  verdict?: { first: string; second: string };
   plugins?: string[];
   os?: string;
 }

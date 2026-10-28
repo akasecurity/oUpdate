@@ -1,4 +1,4 @@
-// The os-packages leg over the gce-patch reach (spec §5 and its caller rules; the broker spec). The VMs run one at a
+// The os-packages leg over the gce-patch reach. The VMs run one at a
 // time, in the reach's order. For each: one inventory read (the VM's full upgrade set, with the broker's archive-index
 // and dependency check of every candidate); the rule review (origin, cooldown, the 200-name cap); both models; then,
 // only with `apply: true` on a real run and inside the run's 2 h binding, one patch request carrying that VM's approved
@@ -9,9 +9,9 @@
 // compare are all clean. A VM that ends with any trouble stops every later patch this run. Summaries are fixed phrases and
 // counts; names, versions and every broker or decode reason go to the log.
 
-import { requestLine } from "../credreq.ts";
+import { requestLine } from "../broker-client.ts";
 import type { LegResult, OsPackagesLeg } from "../model.ts";
-import type { NasReviewers } from "../nas/review.ts";
+import type { ReviewerPair } from "../compose/review.ts";
 import type { OpenGce } from "../reach.ts";
 import type { LegContext, TargetFs } from "../run.ts";
 import { decodeInventory, pkgKey, type Inventory } from "./answer.ts";
@@ -23,10 +23,11 @@ import { freshInventory, POST_WAIT } from "./post.ts";
 import { aptPrompt, aptRules, packageLine, reviewApt } from "./review.ts";
 import { noteSeen, readSeen, writeSeen, type Seen } from "./seen.ts";
 import { patchVerdict } from "./verdict.ts";
+import { verdictReviewers } from "../broker/broker.ts";
 
 export interface GceLegDeps {
-  /** The first reviewer and the second opinion (the targets file's `reviewer` and `secondReviewer`). */
-  reviewers: NasReviewers;
+  /** The first and the second reviewer (the targets file's `reviewer` and `secondReviewer`). */
+  reviewers: ReviewerPair;
   fs: TargetFs;
   clock: Clock;
   /** The run's one latch (run.ts runTargets), shared by every gce-patch target. */
@@ -50,7 +51,7 @@ const clip = (s: string) => (s.length > 400 ? `${s.slice(0, 400)}…` : s);
 
 const POST_PHRASE: Record<PostCheck, string | undefined> = {
   clean: undefined,
-  drift: "FLAG — the broker's post-check found drift (the VM is suspended until a card acknowledges it)",
+  drift: "FLAG — the broker's post-check found drift (the VM is suspended until it is acknowledged)",
   "not-checked": "FAILED — the broker's post-check could not check the VM (it is suspended; outcome unknown)",
 };
 
@@ -101,7 +102,7 @@ async function afterJob(vm: string, g: OpenGce, s: GceSession, inv: Inventory, p
 }
 
 /**
- * After a patch with no reply (rev 15 §8.5, §8.6): the run's latest job, an orphan or voided intent, or no job, for
+ * After a patch with no reply: the run's latest job, an orphan or voided intent, or no job, for
  * the log only; the outcome stays unknown and the VM latched whatever it says. Not asked once the run's binding is past
  * `until`.
  */
@@ -112,7 +113,7 @@ async function jobByRun(g: OpenGce, s: GceSession, clock: Clock, until: number):
   const d = decodeJobByRun(j.answer);
   if (!d.ok) return `${d.why} (whether the patch ran is unknown)`;
   if (d.value.kind === "void") return `a voided intent ${d.value.intentId} (nothing ran)`;
-  if (d.value.kind === "orphan") return `an orphan intent ${d.value.intentId}${d.value.post ? `, post-check ${d.value.post}` : ""} (no job was recorded; the VM is suspended until a card acknowledges it)`;
+  if (d.value.kind === "orphan") return `an orphan intent ${d.value.intentId}${d.value.post ? `, post-check ${d.value.post}` : ""} (no job was recorded; the VM is suspended until it is acknowledged)`;
   const job = d.value.job;
   return `job ${job.jobId} ${job.state}, VM ${job.instanceState}${job.post ? `, post-check ${job.post}` : ""}`;
 }
@@ -142,7 +143,7 @@ async function oneVm(vm: string, leg: OsPackagesLeg, ctx: LegContext, g: OpenGce
   const v = await reviewApt(deps.reviewers, aptPrompt({ vm, os: `${inv.os.shortName} ${inv.os.version}`, packages: rules.eligible }));
   lines.push(...v.lines);
   if (!v.approved) {
-    const who = v.primary !== "APPROVE" ? `primary ${v.primary}` : `secondary ${v.secondary}`;
+    const who = v.first !== "APPROVE" ? `first ${v.first}` : `second ${v.second}`;
     return { summary: `blocked (review: ${who}) · held ${inv.candidates.length}`, trouble: true };
   }
   const names = new Set(rules.eligible.map((c) => c.name));
@@ -153,8 +154,8 @@ async function oneVm(vm: string, leg: OsPackagesLeg, ctx: LegContext, g: OpenGce
     return { summary: `blocked (patch: not asked: the review ran past the broker run's 2 h binding)${heldTail(nHeld)}`, trouble: true };
   }
   // Both reviewers approved, so both are configured.
-  const verdict = patchVerdict(inv, names, { primary: deps.reviewers.primary!.name, secondary: deps.reviewers.secondary!.name }, s);
-  const p = await gcePatch(g.broker, g.exec, s, verdict, latch, leg.cardWaitS);
+  const verdict = patchVerdict(inv, names, verdictReviewers({ first: deps.reviewers.first!.name, second: deps.reviewers.second!.name }, g.broker.reviewerKeys), s);
+  const p = await gcePatch(g.broker, g.exec, s, verdict, latch, leg.approvalWaitS);
   lines.push(clip(requestLine(p)));
   if (p.outcome === "unknown") lines.push(clip(`job.status after the patch reply was lost: ${await jobByRun(g, s, deps.clock, minted + BINDING_MS - READ_MARGIN_MS)}`));
   if (p.outcome !== "started") return { summary: `${patchSummary(p)}${heldTail(nHeld)}`, trouble: true };
@@ -163,7 +164,7 @@ async function oneVm(vm: string, leg: OsPackagesLeg, ctx: LegContext, g: OpenGce
 
 export async function osPackagesLeg(leg: OsPackagesLeg, ctx: LegContext, deps: GceLegDeps): Promise<LegResult> {
   const g = ctx.reach;
-  if (g.kind !== "gce-patch") return { lines: [], summary: `not checked — error: leg os-packages over reach ${g.kind} not built`, trouble: true };
+  if ("plugin" in g || g.kind !== "gce-patch") return { lines: [], summary: `not checked — error: leg os-packages over reach ${g.kind} not built`, trouble: true };
   const lines: string[] = [];
   const parts: string[] = [];
   let trouble = false;

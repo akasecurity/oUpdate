@@ -1,4 +1,4 @@
-// The deterministic formula gates, ported from the previous updater's helpers (test/port/02, section 2b).
+// The deterministic formula gates, ported from the previous updater's helpers.
 import { describe, expect, test } from "bun:test";
 import { artifactKind, formulaDeps, formulaUrls, loadsOtherFiles, supportFilesChanged, urlOrigin } from "../../src/apply/formula-gates.ts";
 

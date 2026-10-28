@@ -8,10 +8,10 @@ import { osPackagesLeg } from "../../src/targets/gce/leg.ts";
 import { newLatch } from "../../src/targets/gce/patch.ts";
 import { parseTime } from "../../src/targets/gce/verbs.ts";
 import type { OsPackagesLeg, Target } from "../../src/targets/model.ts";
-import type { NasReviewers } from "../../src/targets/nas/review.ts";
+import type { ReviewerPair } from "../../src/targets/compose/review.ts";
 import type { OpenGce } from "../../src/targets/reach.ts";
-import { DIGEST_TROUBLE } from "../../src/targets/summary.ts";
-import { fakeReviewer } from "./fake-nas.ts";
+import { TROUBLE_WORDS } from "../../src/targets/summary.ts";
+import { fakeReviewer } from "./fake-broker.ts";
 import { after, BOOT2, CANDS, fakeClock, fakeGce, GCE, GCE_REACH, INSTALLED, inventory, job, JOB_END, jobOf, runOf, VM_A, VM_B, type FakeGce, type FakeReply, type GceVm } from "./fake-gce.ts";
 import { fakeExec, memFs } from "./fakes.ts";
 
@@ -31,10 +31,10 @@ type Post = "clean" | "drift" | "not-checked" | null;
 const DONE = (vm: string, instance = "SUCCEEDED", state = "SUCCEEDED", post: Post = "clean") => job(vm, state, instance, JOB_END, post ?? undefined);
 const vmScene = (vm: string, over: Partial<GceVm> = {}): GceVm => ({ inventory: [inventory({ vm }), postInv(vm)], jobs: [job(vm, "PATCHING", "APPLYING_PATCHES"), DONE(vm)], ...over });
 const TARGET: Target = { id: "cloud-vms", os: "linux", reach: GCE_REACH, legs: [], schedule: { every: "night" }, summaryTo: "/status/cloud-vms.tsv" };
-const leg = (apply = false, over: Partial<OsPackagesLeg> = {}): OsPackagesLeg => ({ kind: "os-packages", apply, cooldownDays: 2, seenTo: SEEN, cardWaitS: 3600, ...over });
-const both = (): NasReviewers => ({ primary: fakeReviewer("first-model", "APPROVE").reviewer, secondary: fakeReviewer("secondary-model", "APPROVE").reviewer });
+const leg = (apply = false, over: Partial<OsPackagesLeg> = {}): OsPackagesLeg => ({ kind: "os-packages", apply, cooldownDays: 2, seenTo: SEEN, approvalWaitS: 3600, ...over });
+const both = (): ReviewerPair => ({ first: fakeReviewer("first-model", "APPROVE").reviewer, second: fakeReviewer("second-model", "APPROVE").reviewer });
 
-function setup(g: FakeGce, vms: string[] = [VM_A], seen: string | null = OLD_SEEN, reviewers: NasReviewers | ((c: Clock) => NasReviewers) = both(), readError?: { error: string }) {
+function setup(g: FakeGce, vms: string[] = [VM_A], seen: string | null = OLD_SEEN, reviewers: ReviewerPair | ((c: Clock) => ReviewerPair) = both(), readError?: { error: string }) {
   const clock = fakeClock(START);
   const f = fakeGce({ ...g, clock });
   const { exec } = fakeExec([f.rule]);
@@ -74,7 +74,7 @@ describe("os-packages leg", () => {
     expect(t.patches()[0]!.params).toEqual({
       verb: "patch",
       run_id: runOf(VM_A),
-      verdict: { items: { curl: "HOLD", libssl3t64: "APPROVE", openssl: "APPROVE" }, reviewers: { primary: "first-model", secondary: "secondary-model" }, evidence_sha256: createHash("sha256").update(JSON.stringify(JSON.parse(t.requests[0]!.out!).result)).digest("hex") },
+      verdict: { items: { curl: "HOLD", libssl3t64: "APPROVE", openssl: "APPROVE" }, reviewers: { first: "first-model", second: "second-model" }, evidence_sha256: createHash("sha256").update(JSON.stringify(JSON.parse(t.requests[0]!.out!).result)).digest("hex") },
     });
     expect(r.lines).toContain(`patch: job ${jobOf(VM_A)} started for 2 package(s) [broker request req-2]`);
     expect(r.lines).toContain("  patched openssl");
@@ -94,12 +94,12 @@ describe("os-packages leg", () => {
   });
 
   test("a model FLAG holds the VM with trouble and sends nothing", async () => {
-    const t = setup({ vms: { [VM_A]: vmScene(VM_A) } }, [VM_A], OLD_SEEN, { primary: fakeReviewer("first-model", "FLAG\n1. openssl").reviewer, secondary: fakeReviewer("secondary-model", "APPROVE").reviewer });
-    expect(await t.run(leg(true))).toMatchObject({ summary: "vm-a: blocked (review: primary FLAG) · held 3", trouble: true });
+    const t = setup({ vms: { [VM_A]: vmScene(VM_A) } }, [VM_A], OLD_SEEN, { first: fakeReviewer("first-model", "FLAG\n1. openssl").reviewer, second: fakeReviewer("second-model", "APPROVE").reviewer });
+    expect(await t.run(leg(true))).toMatchObject({ summary: "vm-a: blocked (review: first FLAG) · held 3", trouble: true });
     expect(t.patches()).toHaveLength(0);
   });
 
-  test("a clean night with alarming package names leaves no digest trouble word and no names in the summary (Review Focus 1)", async () => {
+  test("a clean night with alarming package names leaves no trouble word and no names in the summary (Review Focus 1)", async () => {
     const installed: [string, string][] = [["liberror-perl", "0.17029-2"], ["libblockdev3", "3.1.1-1"]];
     const candidates = [
       { name: "liberror-perl", installed: "0.17029-2", available: "0.17029-2ubuntu0.1" },
@@ -110,7 +110,7 @@ describe("os-packages leg", () => {
     const t = setup({ vms: { [VM_A]: scene } }, [VM_A], null);
     const r = await t.run(leg(true, { cooldownDays: 0 }));
     expect(r).toMatchObject({ summary: "vm-a: patched 2", trouble: false });
-    expect(DIGEST_TROUBLE.test(r.summary)).toBe(false);
+    expect(TROUBLE_WORDS.test(r.summary)).toBe(false);
     expect(r.summary).not.toContain("lib");
     expect(r.lines).toContain("  patched liberror-perl");
   });
@@ -127,7 +127,7 @@ describe("os-packages leg", () => {
     const t = setup({ vms: { [VM_A]: vmScene(VM_A, { inventory: [inventory({ vm: VM_A }), postInv(VM_A, { ...CLEAN, bash: "5.2.21-2ubuntu5" })], jobs: [DONE(VM_A, "SUCCEEDED", "SUCCEEDED", "drift")] }), [VM_B]: vmScene(VM_B) } }, [VM_A, VM_B]);
     const r = await t.run(leg(true));
     expect(r.trouble).toBe(true);
-    expect(r.summary).toBe("vm-a: at reviewed version 2 · FLAG — 1 change(s) not approved after the job · FLAG — the broker's post-check found drift (the VM is suspended until a card acknowledges it) · held 1 · vm-b: blocked (patch: not asked: an earlier VM this run ended with trouble (vm-a)) · held 1");
+    expect(r.summary).toBe("vm-a: at reviewed version 2 · FLAG — 1 change(s) not approved after the job · FLAG — the broker's post-check found drift (the VM is suspended until it is acknowledged) · held 1 · vm-b: blocked (patch: not asked: an earlier VM this run ended with trouble (vm-a)) · held 1");
     expect(r.lines).toContain("  UNAPPROVED bash 5.2.21-2ubuntu4 -> 5.2.21-2ubuntu5");
     expect(t.patches().map((p) => p.vm)).toEqual([VM_A]);
   });
@@ -136,7 +136,7 @@ describe("os-packages leg", () => {
     const one = setup({ vms: { [VM_A]: vmScene(VM_A, { inventory: [inventory({ vm: VM_A }), postInv(VM_A, { ...CLEAN, bash: "5.2.21-2ubuntu5" })] }) } });
     expect(await one.run(leg(true))).toMatchObject({ summary: "vm-a: at reviewed version 2 · FLAG — 1 change(s) not approved after the job · FLAG — the broker's post-check and the caller's compare disagree · held 1", trouble: true });
     const two = setup({ vms: { [VM_A]: vmScene(VM_A, { jobs: [DONE(VM_A, "SUCCEEDED", "SUCCEEDED", "drift")] }) } });
-    expect(await two.run(leg(true))).toMatchObject({ summary: "vm-a: at reviewed version 2 · FLAG — the broker's post-check found drift (the VM is suspended until a card acknowledges it) · FLAG — the broker's post-check and the caller's compare disagree · held 1", trouble: true });
+    expect(await two.run(leg(true))).toMatchObject({ summary: "vm-a: at reviewed version 2 · FLAG — the broker's post-check found drift (the VM is suspended until it is acknowledged) · FLAG — the broker's post-check and the caller's compare disagree · held 1", trouble: true });
   });
 
   test("a not-checked post-check is FAILED with outcome unknown, never patched", async () => {
@@ -160,7 +160,7 @@ describe("os-packages leg", () => {
     expect(r.summary).not.toContain("patched");
   });
 
-  test("a card still pending is FAILED with outcome unknown, asks the VM's job status once, and stops the next VM (Review Focus 3)", async () => {
+  test("an approval still pending is FAILED with outcome unknown, asks the VM's job status once, and stops the next VM (Review Focus 3)", async () => {
     const t = setup({ vms: { [VM_A]: vmScene(VM_A, { replies: { patch: { status: "pending" } } }), [VM_B]: vmScene(VM_B) } }, [VM_A, VM_B]);
     const r = await t.run(leg(true));
     expect(r.trouble).toBe(true);
@@ -178,9 +178,9 @@ describe("os-packages leg", () => {
   });
 
   test.each([
-    ["an orphan intent", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, intent: { intent_id: "int-0001", state: "orphan" } } }, "job.status after the patch reply was lost: an orphan intent int-0001 (no job was recorded; the VM is suspended until a card acknowledges it)"],
+    ["an orphan intent", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, intent: { intent_id: "int-0001", state: "orphan" } } }, "job.status after the patch reply was lost: an orphan intent int-0001 (no job was recorded; the VM is suspended until it is acknowledged)"],
     ["a voided intent", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, intent: { intent_id: "int-0002", state: "void" } } }, "job.status after the patch reply was lost: a voided intent int-0002 (nothing ran)"],
-    ["a broker restart that answers from its chain under a new boot, seq 1 (rev 15a §8)", { status: "approved", result: { run_id: runOf(VM_A), seq: 1, boot: BOOT2, job_id: jobOf(VM_A), state: "PATCHING", instance_state: "STARTED" } }, `job.status after the patch reply was lost: job ${jobOf(VM_A)} PATCHING, VM STARTED`],
+    ["a broker restart that answers from its chain under a new boot, seq 1", { status: "approved", result: { run_id: runOf(VM_A), seq: 1, boot: BOOT2, job_id: jobOf(VM_A), state: "PATCHING", instance_state: "STARTED" } }, `job.status after the patch reply was lost: job ${jobOf(VM_A)} PATCHING, VM STARTED`],
     ["a broker restart whose new boot does not start at seq 1", { status: "approved", result: { run_id: runOf(VM_A), seq: 3, boot: BOOT2, job_id: jobOf(VM_A), state: "PATCHING", instance_state: "STARTED" } }, "job.status after the patch reply was lost: job.status: the broker's seq 3 under a new boot is not 1 (whether the patch ran is unknown)"],
     // Under the same boot the broker did not restart: a seq that starts again or jumps is refused.
     ["a seq that starts again at 1 under the same boot", { status: "approved", result: { run_id: runOf(VM_A), seq: 1, job_id: jobOf(VM_A), state: "PATCHING", instance_state: "STARTED" } }, "job.status after the patch reply was lost: job.status: the broker's seq 1 repeats (whether the patch ran is unknown)"],
@@ -205,7 +205,7 @@ describe("os-packages leg", () => {
     expect(t.latch.stopped).toBe(VM_A);
   });
 
-  test("a locked refusal (the intent voided, rev 15) is blocked with nothing ran, latches, and says nothing of an orphan", async () => {
+  test("a locked refusal (the intent voided) is blocked with nothing ran, latches, and says nothing of an orphan", async () => {
     const t = setup({ vms: { [VM_A]: vmScene(VM_A, { replies: { patch: { status: "approved", result: { run_id: runOf(VM_A), seq: 2, refused: "gce-osc: locked" } } } }), [VM_B]: vmScene(VM_B) } }, [VM_A, VM_B]);
     const r = await t.run(leg(true));
     expect(r.summary).toBe("vm-a: blocked — nothing ran (see the targets log) · held 1 · vm-b: blocked (patch: not asked: an earlier VM this run ended with trouble (vm-a)) · held 1");
@@ -231,12 +231,12 @@ describe("os-packages leg", () => {
     expect(r.lines).toContain("inventory: refused by the broker: gce-osc: unknown vm");
   });
 
-  test("every not-checked summary carries a digest trouble word of its own", async () => {
+  test("every not-checked summary carries a trouble word of its own", async () => {
     const t = setup({ vms: { [VM_A]: { inventory: [inventory({ extra: { env: "x" } })] } } }, [VM_A, VM_B]);
     const r = await t.run(leg(false));
-    for (const part of r.summary.split(" · ")) expect(DIGEST_TROUBLE.test(part)).toBe(true);
+    for (const part of r.summary.split(" · ")) expect(TROUBLE_WORDS.test(part)).toBe(true);
     const local = await osPackagesLeg(leg(false), { target: TARGET, reach: { kind: "local", exec: fakeExec([]).exec }, dryRun: false, now: NOW }, { reviewers: both(), fs: memFs().fs, clock: fakeClock(0), latch: newLatch() });
-    expect(DIGEST_TROUBLE.test(local.summary)).toBe(true);
+    expect(TROUBLE_WORDS.test(local.summary)).toBe(true);
   });
 
   test("an unreadable first-seen file holds every package with trouble and is left as it was", async () => {
@@ -262,14 +262,14 @@ describe("os-packages leg: any trouble on a VM stops every later patch this run"
 
   test("a review FLAG on one VM stops the next VM's patch", async () => {
     let calls = 0;
-    const flagFirst: NasReviewers = { primary: fakeReviewer("first-model", () => (calls++ === 0 ? "FLAG\nno" : "APPROVE")).reviewer, secondary: fakeReviewer("secondary-model", "APPROVE").reviewer };
+    const flagFirst: ReviewerPair = { first: fakeReviewer("first-model", () => (calls++ === 0 ? "FLAG\nno" : "APPROVE")).reviewer, second: fakeReviewer("second-model", "APPROVE").reviewer };
     const t = setup({ vms: { [VM_A]: vmScene(VM_A), [VM_B]: vmScene(VM_B) } }, [VM_A, VM_B], OLD_SEEN, flagFirst);
-    expect((await t.run(leg(true))).summary).toBe("vm-a: blocked (review: primary FLAG) · held 3 · vm-b: blocked (patch: not asked: an earlier VM this run ended with trouble (vm-a)) · held 1");
+    expect((await t.run(leg(true))).summary).toBe("vm-a: blocked (review: first FLAG) · held 3 · vm-b: blocked (patch: not asked: an earlier VM this run ended with trouble (vm-a)) · held 1");
     expect(t.patches()).toHaveLength(0);
   });
 });
 
-describe("os-packages leg: a broker restart mid-run (rev 15a §8)", () => {
+describe("os-packages leg: a broker restart mid-run", () => {
   test("a new boot on the post-job inventory is trouble, never patched, and latched", async () => {
     const t = setup({ vms: { [VM_A]: vmScene(VM_A, { replies: { inventory: (p) => (p.run_id ? { status: "approved", result: { run_id: runOf(VM_A), seq: 1, boot: BOOT2, ...postInv(VM_A) } } : { status: "approved", result: { run_id: runOf(VM_A), seq: 1, ...inventory({ vm: VM_A }) } }) } }), [VM_B]: vmScene(VM_B) } }, [VM_A, VM_B]);
     const r = await t.run(leg(true));
@@ -313,12 +313,12 @@ describe("os-packages leg: the run's one latch", () => {
 describe("os-packages leg inside the broker's run binding", () => {
   test("a review that runs past the 2 h binding sends no patch", async () => {
     let calls = 0;
-    const slow = (c: Clock): NasReviewers => ({
-      primary: fakeReviewer("first-model", () => {
+    const slow = (c: Clock): ReviewerPair => ({
+      first: fakeReviewer("first-model", () => {
         if (calls++ === 1) void c.sleep(2 * 60 * MIN);
         return "APPROVE";
       }).reviewer,
-      secondary: fakeReviewer("secondary-model", "APPROVE").reviewer,
+      second: fakeReviewer("second-model", "APPROVE").reviewer,
     });
     const t = setup({ vms: { [VM_A]: vmScene(VM_A), [VM_B]: vmScene(VM_B) } }, [VM_A, VM_B], OLD_SEEN, slow);
     const r = await t.run(leg(true));
@@ -330,7 +330,7 @@ describe("os-packages leg inside the broker's run binding", () => {
   test("the worst case fits: the patch goes inside 2 h of the run's mint, and every later read inside 1 h of the job's end", async () => {
     const running = Array.from({ length: 30 }, () => job(VM_A, "PATCHING", "APPLYING_PATCHES"));
     const t = setup({ vms: { [VM_A]: vmScene(VM_A, { inventory: [inventory({ vm: VM_A }), postInv(VM_A, CLEAN, JOB_END)], jobs: [...running, DONE(VM_A, "SUCCEEDED", "SUCCEEDED", null)] }) } });
-    const r = await t.run(leg(true, { cardWaitS: 5400 }));
+    const r = await t.run(leg(true, { approvalWaitS: 5400 }));
     expect(r.summary).toBe("vm-a: error: no inventory newer than the job's end · FAILED — no result from the broker's post-check · held 1");
     const [mint, patch, ...later] = t.requests;
     expect(patch!.params.verb).toBe("patch");

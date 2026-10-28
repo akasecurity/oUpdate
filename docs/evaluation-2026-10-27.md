@@ -16,20 +16,20 @@ For the effect of the 0.2.1 and 0.2.2 releases on these cases, see [Update: 0.2.
 - **Core set:** the 9 attacks and 8 clean releases of 26 Oct, plus the 4 evasion cases. Eight attacks come from DataDog's public [malicious-software-packages dataset](https://github.com/DataDog/malicious-software-packages-dataset); the ninth is the reconstructed litellm 1.107.0 release (sdist and wheel), run by its own replay script.
 - **Extended set:** the core cases plus 17 more dataset attacks and 17 more clean releases, 25 and 25 in all, plus the replay and the 4 evasion cases. Each clean release is the real registry release before the attacked one.
 - **Reviewers:**
-  - the local model: the same mid-size open-weights model as on 26 Oct,;
+  - the local model: the same mid-size open-weights model as on 26 Oct, served locally;
   - Claude Haiku (small tier), through its command-line client with no tools;
   - OpenAI Codex (fast tier), through its command-line client, read-only, with no tools.
 - **Layers:** as on 26 Oct. Pre-pass and reviewer on; scan on with no scanner configured; advisory, cooldown and gate off.
-- **Runs**, all on 26 Oct 2026 (PDT):
+- **Runs**, all on 26 Oct 2026:
 
-| Run | Reviewer | Set | Time | oUpdate commit |
-| --- | --- | --- | --- | --- |
-| core 1 to 5 | local model | core | 19:05 to 20:11 | `a9cde05` |
-| core | Claude Haiku (small tier) | core | 19:05 to 19:23 | `a9cde05` |
-| core | OpenAI Codex (fast tier) | core | 19:11 to 19:19 | `a9cde05` |
-| extended | local model | all | 20:57 to 22:32 | `4f4831d` |
-| extended | Claude Haiku (small tier) | all | 22:32 to 23:19 | `70f09a8` |
-| extended | OpenAI Codex (fast tier) | all | 22:30 to 22:51 | `70f09a8` |
+| Run | Reviewer | Set | oUpdate commit |
+| --- | --- | --- | --- |
+| core 1 to 5 | local model | core | `a9cde05` |
+| core | Claude Haiku (small tier) | core | `a9cde05` |
+| core | OpenAI Codex (fast tier) | core | `a9cde05` |
+| extended | local model | all | `4f4831d` |
+| extended | Claude Haiku (small tier) | all | `70f09a8` |
+| extended | OpenAI Codex (fast tier) | all | `70f09a8` |
 
 The review and pre-pass code is the same at all three commits. The first tries at core runs 3 to 5 could not fetch the dataset samples (GitHub API rate limit, HTTP 403), so 7 or 8 attacks per try were not judged. They were run again from a shared sample cache, and only the reruns count here. In every run counted on this page, no case was left unjudged for a fetch or model error.
 
@@ -155,10 +155,10 @@ Two releases followed this evaluation. The numbers above are from 0.2.0 code and
 
 The local model and Claude Haiku (small tier) ran the extended set again at 0.2.1, with the same cases, layers and sample cache as above. OpenAI Codex (fast tier) was not run again, so its numbers are still the 0.2.0 ones above.
 
-| Run | Reviewer | Set | Time (PDT) | oUpdate commit |
+| Run | Reviewer | Set | Dates | oUpdate commit |
 | --- | --- | --- | --- | --- |
-| extended | local model | all | 26 Oct 23:46 to 27 Oct 02:54 | `3d64634` |
-| extended | Claude Haiku (small tier) | all | 27 Oct 02:54 to 03:27 | `3d64634` |
+| extended | local model | all | 26 to 27 Oct | `3d64634` |
+| extended | Claude Haiku (small tier) | all | 27 Oct | `3d64634` |
 
 The review and pre-pass code at `3d64634` is the same as in the 0.2.1 release. No case was left unjudged for a fetch or model error.
 

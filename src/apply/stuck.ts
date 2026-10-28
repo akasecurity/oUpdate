@@ -1,4 +1,4 @@
-// Stuck tracking, ported from the previous updater's su_track_stuck and su_brew_track_pending. A package
+// Stuck tracking, ported from the previous updater's stuck and pending trackers. A package
 // still pending after its run is counted; once it has been pending STUCK_AFTER runs in a row it
 // is reported as stuck. State is one line per item: "<lane>\t<item>\t<runs>\t<first seen>", where
 // an item is "<name>=<target version>", so a new target starts a fresh count. Each call rebuilds

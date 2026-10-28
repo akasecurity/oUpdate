@@ -4,9 +4,9 @@ import { describe, expect, test } from "bun:test";
 import { checkImage, renderImage } from "../src/image.ts";
 import { LIMITS } from "../src/oci-fs.ts";
 import { parseImageRef, type ImageLayers, type ImageRef, type OciImageSource } from "../src/adapters/oci/registry.ts";
-import type { ImageEvidence } from "../src/targets/nas/answer.ts";
-import { reviewDiff } from "../src/targets/nas/evidence.ts";
-import { fakeReviewer } from "./targets/fake-nas.ts";
+import type { ImageEvidence } from "../src/targets/broker/answer.ts";
+import { reviewDiff } from "../src/targets/compose/evidence.ts";
+import { fakeReviewer } from "./targets/fake-broker.ts";
 import { fakeLayers } from "./oci-helpers.ts";
 
 const OLD = parseImageRef("registry.example/team/app-a:5.14.0");
@@ -47,13 +47,13 @@ function source(oldImg: ImageLayers, newImg: ImageLayers, withLayers = true): Oc
 
 const OLD_LAYERS = ["base.tar", "old-top.tar"];
 
-async function run(newNames: string[], opts: { primary?: string; secondary?: string; layers?: boolean; limits?: typeof LIMITS; budget?: { chunkChars: number; maxParts: number }; newOpts?: Parameters<typeof fakeLayers>[1]; withLayers?: boolean } = {}) {
+async function run(newNames: string[], opts: { first?: string; second?: string; layers?: boolean; limits?: typeof LIMITS; budget?: { chunkChars: number; maxParts: number }; newOpts?: Parameters<typeof fakeLayers>[1]; withLayers?: boolean } = {}) {
   const src = source(fakeLayers(OLD_LAYERS), fakeLayers(newNames, opts.newOpts), opts.withLayers);
-  const r = fakeReviewer("primary-m", opts.primary ?? APPROVE);
-  const o = opts.secondary === undefined ? undefined : fakeReviewer("secondary-m", opts.secondary);
+  const r = fakeReviewer("first-m", opts.first ?? APPROVE);
+  const o = opts.second === undefined ? undefined : fakeReviewer("second-m", opts.second);
   const res = await checkImage(
     { old: OLD, new: NEW, platform: "linux/amd64", now: NOW, layers: opts.layers ?? true, layerLimits: opts.limits, layerBudget: opts.budget },
-    { source: src, reviewers: { primary: r.reviewer, secondary: o?.reviewer } },
+    { source: src, reviewers: { first: r.reviewer, second: o?.reviewer } },
   );
   return { res, r, o, src };
 }
@@ -76,7 +76,7 @@ describe("checkImage with layers", () => {
     expect(src.expects).toEqual([OLD_EV.digest, NEW_EV.digest]);
     const moved = source(fakeLayers(OLD_LAYERS), fakeLayers([...OLD_LAYERS, "new-run.tar.gz"]));
     moved.imageEvidence = async (ref) => (ref.text === OLD.text ? OLD_EV : ev("c"));
-    const res = await checkImage({ old: OLD, new: NEW, platform: "linux/amd64", now: NOW, layers: true }, { source: moved, reviewers: { primary: fakeReviewer("r", APPROVE).reviewer } });
+    const res = await checkImage({ old: OLD, new: NEW, platform: "linux/amd64", now: NOW, layers: true }, { source: moved, reviewers: { first: fakeReviewer("r", APPROVE).reviewer } });
     expect(res.decision).toBe("hold");
     expect(res.hits[0]).toContain("LAYERS UNREADABLE");
     expect(res.hits[0]).toContain("now resolves to");
@@ -88,45 +88,45 @@ describe("checkImage with layers", () => {
   });
 
   test("a FLAG holds, and the parts after it are not asked", async () => {
-    const { res, r } = await run(["base.tar", "old-top.tar", "new-run.tar.gz", "new-cacert.tar"], { primary: FLAG });
+    const { res, r } = await run(["base.tar", "old-top.tar", "new-run.tar.gz", "new-cacert.tar"], { first: FLAG });
     expect(res.decision).toBe("hold");
-    expect(res.why).toBe("review: primary FLAG");
+    expect(res.why).toBe("review: first FLAG");
     expect(r.prompts).toHaveLength(1);
   });
 
   test("a write to ld.so.preload holds whatever the reviewers say", async () => {
-    const { res } = await run([...OLD_LAYERS, "new-preload.tar"], { secondary: APPROVE });
+    const { res } = await run([...OLD_LAYERS, "new-preload.tar"], { second: APPROVE });
     expect(res.decision).toBe("hold");
     expect(res.why).toMatch(/^pre-gate: \d+ hits?$/);
     expect(res.hits).toContain("startup path added: etc/ld.so.preload");
-    expect(res.primary).toBe("APPROVE");
+    expect(res.first).toBe("APPROVE");
   });
 
   test("a write spelled etc//ld.so.preload holds end to end, whatever the reviewers say", async () => {
-    const { res } = await run([...OLD_LAYERS, "new-slashes.tar"], { secondary: APPROVE });
+    const { res } = await run([...OLD_LAYERS, "new-slashes.tar"], { second: APPROVE });
     expect(res.decision).toBe("hold");
     expect(res.hits).toContain("startup path added: etc/ld.so.preload");
-    expect(res.primary).toBe("APPROVE");
+    expect(res.first).toBe("APPROVE");
   });
 
   test("a root opaque whiteout holds end to end as an unreadable layer", async () => {
-    const { res } = await run([...OLD_LAYERS, "new-rootopq.tar"], { secondary: APPROVE });
+    const { res } = await run([...OLD_LAYERS, "new-rootopq.tar"], { second: APPROVE });
     expect(res.decision).toBe("hold");
     expect(res.hits[0]).toMatch(/^LAYERS UNREADABLE: sha256:[0-9a-f]{64}: root opaque whiteout$/);
   });
 
   test("a 1,000,001-byte file holds end to end: the reviewers never saw its content", async () => {
-    const { res } = await run([...OLD_LAYERS, "new-big.tar.gz"], { secondary: APPROVE });
+    const { res } = await run([...OLD_LAYERS, "new-big.tar.gz"], { second: APPROVE });
     expect(res.decision).toBe("hold");
     expect(res.hits).toContain("content not shown: app/server.py added (1000001 bytes, over the 1000000 byte limit)");
   });
 
   test("a start target that resolves to nothing holds", async () => {
-    const { res } = await run([...OLD_LAYERS, "new-run.tar.gz"], { secondary: APPROVE });
+    const { res } = await run([...OLD_LAYERS, "new-run.tar.gz"], { second: APPROVE });
     expect(res.decision).toBe("land");
     const src = source(fakeLayers(OLD_LAYERS), fakeLayers([...OLD_LAYERS, "new-run.tar.gz"]));
     src.imageEvidence = async (ref) => (ref.text === OLD.text ? OLD_EV : { ...NEW_EV, entrypoint: '["/missing/bin"]' });
-    const held = await checkImage({ old: OLD, new: NEW, platform: "linux/amd64", now: NOW, layers: true }, { source: src, reviewers: { primary: fakeReviewer("r", APPROVE).reviewer } });
+    const held = await checkImage({ old: OLD, new: NEW, platform: "linux/amd64", now: NOW, layers: true }, { source: src, reviewers: { first: fakeReviewer("r", APPROVE).reviewer } });
     expect(held.decision).toBe("hold");
     expect(held.hits).toContain("start target unresolved: /missing/bin");
   });
@@ -167,7 +167,7 @@ describe("checkImage with layers", () => {
   });
 
   test("a diff over the part budget stops for a human and never lands, even on APPROVE", async () => {
-    const { res } = await run([...OLD_LAYERS, "new-setuid.tar", "new-cacert.tar"], { budget: { chunkChars: 40, maxParts: 1 }, secondary: APPROVE });
+    const { res } = await run([...OLD_LAYERS, "new-setuid.tar", "new-cacert.tar"], { budget: { chunkChars: 40, maxParts: 1 }, second: APPROVE });
     expect(res.decision).toBe("hold");
     expect(res.hits.length).toBeGreaterThan(0);
   });
@@ -198,7 +198,7 @@ describe("checkImage with layers", () => {
   test("renderImage shows the layer line after the reviewer line", async () => {
     const { res } = await run([...OLD_LAYERS, "new-run.tar.gz"]);
     const lines = renderImage(res).split("\n");
-    expect(lines[3]).toBe("  reviewer  primary APPROVE · secondary not asked");
+    expect(lines[3]).toBe("  reviewer  first APPROVE · second not asked");
     expect(lines[4]).toMatch(/^  layers    layers: 3 read/);
   });
 });

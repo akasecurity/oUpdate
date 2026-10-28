@@ -1,4 +1,4 @@
-// Ported from the previous updater's cask-gatekeeper cases (test/port/06). They run on real xattr, file
+// Ported from the previous updater's cask-gatekeeper cases. They run on real xattr, file
 // and find (macOS only) against copies of /bin/echo, with the Team ID and notarization gates faked.
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";

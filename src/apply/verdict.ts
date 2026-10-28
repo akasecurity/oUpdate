@@ -23,7 +23,7 @@ import { foldConfusables } from "./ground.ts";
 export const CLARIFY =
   "Answer with APPROVE or FLAG alone on the first line. If you APPROVE, do not use the words flag, block, blocks, hold, reject or deny anywhere in your reply.";
 
-// Conservative on purpose (the previous updater's verdictOf): even a negated hold or flag is ambiguous.
+// Conservative on purpose (as the previous updater's verdict reader was): even a negated hold or flag is ambiguous.
 const CONTRADICTION = [
   /\b(FLAG\w*|HOLD|REJECT\w*|DENY|DENIED|BLOCK\w*)\b/i,
   /\b(not|never|cannot|don't|do not)\s+approve\b/i,

@@ -1,4 +1,4 @@
-// The NAS parity run (spec §6). Each night oupdate's NAS legs run in review-only mode before the previous updater script and
+// The parity run. Each night oupdate's broker legs run in review-only mode before the previous updater script and
 // record one jsonl line: the deterministic facts (changed images, plugin update list, OS line, pre-gate hits) and the
 // two model opinions. This module reads the script's log for the same night back into the same facts, compares them,
 // and keeps the ledger. Any deterministic difference resets the count of matching nights. A verdict difference does not
@@ -6,7 +6,7 @@
 // matching nights in a row and no open adjudication anywhere in the ledger.
 
 import type { ParityFacts } from "./model.ts";
-import { nasApproved } from "./nas/evidence.ts";
+import { approvedAnswer } from "./compose/evidence.ts";
 
 export const PARITY_NIGHTS = 7;
 
@@ -15,7 +15,7 @@ export interface NightFacts {
   plugins: string[] | "unknown";
   os: string;
   pregate: string[];
-  /** `<primary>/<secondary>` opinions. */
+  /** `<first>/<second>` opinions. */
   verdict: string;
 }
 export interface ScriptNight extends NightFacts {
@@ -38,7 +38,7 @@ export function recordFacts(r: OupRecord | undefined): NightFacts {
     plugins: r.plugins ? uniqSorted(r.plugins) : "unknown",
     os: r.os ?? "not checked",
     pregate: [...(r.pregate ?? [])].sort(),
-    verdict: r.verdict ? `${r.verdict.primary}/${r.verdict.secondary}` : "not asked/not asked",
+    verdict: r.verdict ? `${r.verdict.first}/${r.verdict.second}` : "not asked/not asked",
   };
 }
 
@@ -50,12 +50,12 @@ export function parseScriptLog(text: string): ScriptNight {
   let changed: string[] | undefined;
   let plugins: string[] | undefined;
   let os = "not checked";
-  let primary = "not asked";
-  let secondary = "not asked";
+  let first = "not asked";
+  let second = "not asked";
   const pregate: string[] = [];
   const diffs: { ref: string; diff: string }[] = [];
   let item: { ref: string; lines: string[] } | undefined;
-  let block: { who: "primary" | "secondary"; text: string[] } | undefined;
+  let block: { who: "first" | "second"; text: string[] } | undefined;
   let gate = false;
   let upToDate = false;
   const endItem = () => {
@@ -68,9 +68,9 @@ export function parseScriptLog(text: string): ScriptNight {
         block.text.push(l.slice(2));
         continue;
       }
-      const v = nasApproved(block.text.join("\n")) ? "APPROVE" : "FLAG";
-      if (block.who === "primary") primary = v;
-      else secondary = v;
+      const v = approvedAnswer(block.text.join("\n")) ? "APPROVE" : "FLAG";
+      if (block.who === "first") first = v;
+      else second = v;
       block = undefined;
     }
     if (gate) {
@@ -127,9 +127,9 @@ export function parseScriptLog(text: string): ScriptNight {
       }
       continue;
     }
-    if (l.startsWith("┌─ LLM second opinion")) block = { who: "secondary", text: [] };
-    else if (l.startsWith("┌─ LLM (")) block = { who: "primary", text: [] };
-    else if (l === "  LLM review skipped — AI host unreachable") primary = "unavailable";
+    if (l.startsWith("┌─ LLM second opinion")) block = { who: "second", text: [] };
+    else if (l.startsWith("┌─ LLM (")) block = { who: "first", text: [] };
+    else if (l === "  LLM review skipped — AI host unreachable") first = "unavailable";
     else if (l.startsWith("  STRUCTURAL PRE-GATE:")) gate = true;
     else if (l.startsWith("OS UPDATE AVAILABLE: ")) os = l.slice("OS ".length);
     else if (l === "OS: up to date") os = "up to date";
@@ -145,7 +145,7 @@ export function parseScriptLog(text: string): ScriptNight {
     plugins: plugins ? uniqSorted(plugins) : "unknown",
     os,
     pregate: pregate.sort(),
-    verdict: `${primary}/${secondary}`,
+    verdict: `${first}/${second}`,
   };
 }
 

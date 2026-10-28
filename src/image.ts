@@ -1,7 +1,7 @@
 // `oupdate image <old-ref> <new-ref>`: the compose leg's container review for one repin, with the evidence read from a
-// registry instead of a NAS. The same diff (Entrypoint/Cmd and the history lines the new image adds), the same pre-gate,
+// registry instead of through the broker. The same diff (Entrypoint/Cmd and the history lines the new image adds), the same pre-gate,
 // prompt and reviewers. A side that cannot be read is BASELINE MISSING, which the pre-gate always holds. One reviewer
-// is enough unless a second is given; then both must approve, as on the NAS.
+// is enough unless a second is given; then both must approve, as in the compose leg.
 //
 // With `layers` the review also reads the layer contents (image-layers.ts): the config's ENV, USER, VOLUME, HEALTHCHECK and
 // ONBUILD changes and the package and file changes follow the history diff in part 1, and the changed files go to the
@@ -13,10 +13,10 @@ import { join } from "node:path";
 import type { ImageRef, OciImageSource } from "./adapters/oci/registry.ts";
 import { reviewLayers, type LayerBudget, type LayerReview } from "./image-layers.ts";
 import { LayerError, LayerStore, LIMITS, type Limits } from "./oci-fs.ts";
-import type { ImageEvidence } from "./targets/nas/answer.ts";
-import { layerDiffs, nasApproved, reviewDiff, structuralHits } from "./targets/nas/evidence.ts";
-import { composePrompt } from "./targets/nas/prompt.ts";
-import { reviewTwice, type NasReviewers, type Opinion } from "./targets/nas/review.ts";
+import type { ImageEvidence } from "./targets/broker/answer.ts";
+import { layerDiffs, approvedAnswer, reviewDiff, structuralHits } from "./targets/compose/evidence.ts";
+import { composePrompt } from "./targets/compose/prompt.ts";
+import { reviewTwice, type ReviewerPair, type Opinion } from "./targets/compose/review.ts";
 import { stamp } from "./targets/summary.ts";
 
 export interface ImageCheckArgs {
@@ -48,14 +48,14 @@ export interface ImageCheckResult {
   why: string;
   diff: string;
   hits: string[];
-  primary: Opinion;
-  secondary: Opinion;
+  first: Opinion;
+  second: Opinion;
   lines: string[];
   /** The layer line: what was read, or that nothing was. Absent when the check did not ask. */
   layers?: string;
 }
 
-const NO_SECONDARY = "secondary: no reviewer configured";
+const NO_SECOND = "second: no reviewer configured";
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
 
 const unreadable = (digest: string, why: string) => `LAYERS UNREADABLE: ${digest}: ${why}`;
@@ -75,7 +75,8 @@ async function readLayers(a: ImageCheckArgs, deps: { source: OciImageSource }, o
   }
 }
 
-export async function checkImage(a: ImageCheckArgs, deps: { source: OciImageSource; reviewers: NasReviewers }): Promise<ImageCheckResult> {
+/** `baseline`: the host's known-normal baseline for the prompt (a target plugin's, registry.ts), else the default. */
+export async function checkImage(a: ImageCheckArgs, deps: { source: OciImageSource; reviewers: ReviewerPair; baseline?: string }): Promise<ImageCheckResult> {
   const lines: string[] = [];
   const read = async (side: "old" | "new", ref: ImageRef): Promise<ImageEvidence | undefined> => {
     try {
@@ -89,7 +90,7 @@ export async function checkImage(a: ImageCheckArgs, deps: { source: OciImageSour
   const newE = await read("new", a.new);
   const base = { repository: `${a.new.registry}/${a.new.repository}`, old: a.old.text, new: a.new.text, from: a.old.reference, to: a.new.reference, platform: a.platform, oldDigest: oldE?.digest, newDigest: newE?.digest };
   if (oldE?.config && oldE.config === newE?.config) {
-    return { ...base, decision: "land", why: "unchanged", diff: "", hits: [], primary: "not asked", secondary: "not asked", lines };
+    return { ...base, decision: "land", why: "unchanged", diff: "", hits: [], first: "not asked", second: "not asked", lines };
   }
 
   let diff = reviewDiff(oldE, newE);
@@ -101,7 +102,7 @@ export async function checkImage(a: ImageCheckArgs, deps: { source: OciImageSour
     const got = await readLayers(a, deps, oldE, newE);
     if ("unreadable" in got) {
       const hit = got.unreadable;
-      return { ...base, decision: "hold", why: "layers unreadable", diff, hits: [hit], primary: "not asked", secondary: "not asked", lines, layers: "layers: not read" };
+      return { ...base, decision: "hold", why: "layers unreadable", diff, hits: [hit], first: "not asked", second: "not asked", lines, layers: "layers: not read" };
     }
     const lr = got.review;
     diff = [diff, ...lr.extra].filter(Boolean).join("\n");
@@ -112,24 +113,24 @@ export async function checkImage(a: ImageCheckArgs, deps: { source: OciImageSour
   }
   const all = layerDiffs([{ ref: a.new.text, diff }]);
   const hits = [...structuralHits(all), ...layerHits];
-  const second = deps.reviewers.secondary !== undefined;
-  const prompts = [composePrompt(stamp(a.now).slice(0, 10), [a.new.text], all), ...parts.map((p, i) => composePrompt(stamp(a.now).slice(0, 10), [a.new.text], layerDiffs([{ ref: `${a.new.text} (layer files, part ${i + 1} of ${parts.length})`, diff: p }])))];
-  let primary: Opinion = "APPROVE";
-  let secondary: Opinion = second ? "APPROVE" : "not asked";
+  const two = deps.reviewers.second !== undefined;
+  const prompts = [composePrompt(stamp(a.now).slice(0, 10), [a.new.text], all, deps.baseline), ...parts.map((p, i) => composePrompt(stamp(a.now).slice(0, 10), [a.new.text], layerDiffs([{ ref: `${a.new.text} (layer files, part ${i + 1} of ${parts.length})`, diff: p }]), deps.baseline))];
+  let first: Opinion = "APPROVE";
+  let second: Opinion = two ? "APPROVE" : "not asked";
   let approved = true;
   for (const prompt of prompts) {
-    const v = await reviewTwice(deps.reviewers, prompt, nasApproved);
-    lines.push(...(second ? v.lines : v.lines.filter((l) => l !== NO_SECONDARY)));
-    const ok = second ? v.approved : v.primary === "APPROVE";
+    const v = await reviewTwice(deps.reviewers, prompt, approvedAnswer);
+    lines.push(...(two ? v.lines : v.lines.filter((l) => l !== NO_SECOND)));
+    const ok = two ? v.approved : v.first === "APPROVE";
     if (ok) continue;
     // A part that is not approved holds the update; the parts after it are not asked.
-    primary = v.primary;
-    secondary = second ? v.secondary : "not asked";
+    first = v.first;
+    second = two ? v.second : "not asked";
     approved = false;
     break;
   }
-  const why = hits.length ? `pre-gate: ${plural(hits.length, "hit")}` : primary !== "APPROVE" ? `review: primary ${primary}` : !approved ? `review: secondary ${secondary}` : narrowed ? narrowed : "approved";
-  return { ...base, decision: !hits.length && approved && !narrowed ? "land" : "hold", why, diff, hits, primary, secondary, lines, ...(layers ? { layers } : {}) };
+  const why = hits.length ? `pre-gate: ${plural(hits.length, "hit")}` : first !== "APPROVE" ? `review: first ${first}` : !approved ? `review: second ${second}` : narrowed ? narrowed : "approved";
+  return { ...base, decision: !hits.length && approved && !narrowed ? "land" : "hold", why, diff, hits, first, second, lines, ...(layers ? { layers } : {}) };
 }
 
 export function renderImage(r: ImageCheckResult): string {
@@ -139,7 +140,7 @@ export function renderImage(r: ImageCheckResult): string {
     `  diff      ${plural(n, "new line")}`,
     `  pre-gate  ${plural(r.hits.length, "hit")}`,
     ...r.hits.map((h) => `    ${h}`),
-    `  reviewer  primary ${r.primary} · secondary ${r.secondary}`,
+    `  reviewer  first ${r.first} · second ${r.second}`,
     ...(r.layers ? [`  layers    ${r.layers}`] : []),
     ...r.lines,
   ].join("\n");

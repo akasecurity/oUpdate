@@ -1,4 +1,4 @@
-// Pinned tools are held, never upgraded (ported from the previous updater's su_pin_filter). A tool is
+// Pinned tools are held, never upgraded (ported from the previous updater's pin filter). A tool is
 // held when brew pins it (formulae only: `brew outdated` still lists pinned formulae, and naming
 // one to `brew upgrade` is an error) or when a repo lists it in a pins.json at its root:
 //   {"brew": {"duckdb": "1.5.5"}, "cask": {"brave-browser": "1.97"}}

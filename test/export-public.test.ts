@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { badCommitEmails } from "../scripts/export-public";
+import { badCommitEmails, parseExclude } from "../scripts/export-public";
 
 function git(cwd: string, args: string[], email: string) {
   const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: email };
@@ -27,4 +27,9 @@ test("badCommitEmails flags author or committer emails other than the noreply ad
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("parseExclude reads repo-relative paths and refuses any that leave the tree", () => {
+  expect(parseExclude("# note\n.publish-exclude\n\nsrc/targets/ext\n  replay  \n")).toEqual([".publish-exclude", "src/targets/ext", "replay"]);
+  for (const bad of ["/etc", "a/../b", "./a", "a//b", ".."]) expect(() => parseExclude(bad)).toThrow("not a repo-relative path");
 });

@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { detailLines, diffIndexes, dirChange, EXACT_MANDATORY, holderDirs, LAYER_BUDGET, linkAliases, reviewLayers, type LayerBudget } from "../src/image-layers.ts";
 import { LayerStore, LIMITS, MergedIndex, parseListing, type FsNode, type LayerListing } from "../src/oci-fs.ts";
-import type { ImageEvidence } from "../src/targets/nas/answer.ts";
+import type { ImageEvidence } from "../src/targets/broker/answer.ts";
 import { bareTar, fakeLayers, hardlinkTar, noDetail, specLayers, withTmp, type LayerSpec } from "./oci-helpers.ts";
 
 const EV: ImageEvidence = { entrypoint: '["/app/server"]', cmd: "null", history: [] };
@@ -572,7 +572,7 @@ describe("dirChange", () => {
     expect(dirChange("usr/local/bin", dir(0o755), dir(0o755, 1000), true)).toEqual({ line: "METADATA dir usr/local/bin: uid 0 -> 1000", hit: "directory owner changed: usr/local/bin (uid 0 -> 1000, gid 0 -> 0)" });
     expect(dirChange("opt/x", dir(0o755), dir(0o755, 1000), false)).toEqual({ line: "METADATA dir opt/x: uid 0 -> 1000" });
   });
-  test("a new group or world writable bit holds when important; losing one does not; a new directory is judged by its mode", () => {
+  test("a new group or other write bit holds when important; losing one does not; a new directory is judged by its mode", () => {
     expect(dirChange("a", dir(0o777), dir(0o755), true).hit).toBeUndefined();
     expect(dirChange("a", undefined, dir(0o777), true).hit).toBe("directory permissions weakened: a (mode 0777)");
     expect(dirChange("a", undefined, dir(0o755), true)).toEqual({});

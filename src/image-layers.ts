@@ -11,7 +11,7 @@ import { diffSeq, renderLineDiff } from "./linediff.ts";
 import { ImageTree, LayerError, LIMITS, MergedIndex, type FsNode, type LayerStore } from "./oci-fs.ts";
 import { SOFT_PATTERNS, type FileMap } from "./prepass.ts";
 import { chunkDiff, hashedBinary, SCOPE_NOTE, type Scope } from "./review.ts";
-import type { ImageEvidence } from "./targets/nas/answer.ts";
+import type { ImageEvidence } from "./targets/broker/answer.ts";
 
 export interface LayerReview {
   /** Lines that follow today's history diff in part 1. */
@@ -170,7 +170,7 @@ const oct = (m: number) => (m & 0o7777).toString(8).padStart(4, "0");
 
 /**
  * What a directory's change looks like: a METADATA line for any change of mode or owner, and a hit when it weakens the
- * directory (a new group or world writable bit, a sticky bit dropped from a writable directory, or another owner) where that matters: `important` is a PATH directory,
+ * directory (a new write bit for the group or for others, a sticky bit dropped from a writable directory, or another owner) where that matters: `important` is a PATH directory,
  * one holding a start input, or a startup or persistence directory. A new directory is judged by its mode alone.
  */
 export function dirChange(path: string, o: FsNode | undefined, n: FsNode, important: boolean): { line?: string; hit?: string } {

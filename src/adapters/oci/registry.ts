@@ -4,9 +4,9 @@
 // in, and a digest is checked for shape before it goes into a URL.
 //
 // registrySource reads one platform's image from any registry that allows anonymous pulls (the 401 bearer challenge,
-// followed with no credentials) and maps its config blob to the ImageEvidence the NAS sends for `oupdate image`.
+// followed with no credentials) and maps its config blob to the ImageEvidence a broker reach sends, for `oupdate image`.
 
-import { jsonArgv, type ImageEvidence } from "../../targets/nas/answer.ts";
+import { jsonArgv, type ImageEvidence } from "../../targets/broker/answer.ts";
 
 export interface OciImage {
   arch: string;

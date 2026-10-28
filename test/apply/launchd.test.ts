@@ -47,7 +47,7 @@ describe("parseLaunchdArgs", () => {
     for (const f of ["--bun", "--app", "--home", "--stdout"]) expect(() => parse(swap(f, "rel/path"))).toThrow(new RegExp(`${f} must be an absolute path`));
     expect(() => parse([...base, "--config", "config.json"])).toThrow(/--config must be an absolute path/);
   });
-  test("a stdout file named 2*.log is refused: the digest reads the newest 2*.log", () => {
+  test("a stdout file named 2*.log is refused: a log reader takes the newest 2*.log", () => {
     expect(() => parse(swap("--stdout", "/var/log/oupdate/20261022.log"))).toThrow(/starts with 2/);
     expect(() => parse(swap("--stdout", "/var/log/oupdate/2.txt"))).toThrow(/starts with 2/);
     expect(parse(swap("--stdout", "/var/log/2026/launchd.log")).stdout).toBe("/var/log/2026/launchd.log");

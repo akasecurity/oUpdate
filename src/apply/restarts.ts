@@ -1,5 +1,5 @@
 // Restart the launchd service of every package this run upgraded, ported from step 7 of
-// the previous updater's brew_section. Without it brew swaps the binary on disk while the running daemon
+// the previous updater's brew phase. Without it brew swaps the binary on disk while the running daemon
 // stays on the old one until a reboot. A deferred service (config) is never restarted here: the
 // stale-keg check hands it to its idle waiter. Only a service that actually restarted is listed as
 // restarted; one that could not be is "FAILED to restart", never dropped.

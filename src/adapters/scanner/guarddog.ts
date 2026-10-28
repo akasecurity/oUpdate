@@ -71,7 +71,7 @@ export interface GuardDogScannerConfig {
   // Command with {eco} and {dir} placeholders, run with no shell, e.g. a
   // `docker run --network none ... -v {dir}:/scan:ro image {eco} scan /scan --output-format json`.
   argv: string[];
-  // Where the per-scan directory goes. A colima/docker VM only mounts $HOME, so put it there.
+  // Where the per-scan directory goes. A Docker VM on macOS only mounts $HOME, so put it there.
   workRoot?: string;
   // The scanned dir as the scanner sees it (the container mount), stripped from paths.
   stripPrefix?: string;

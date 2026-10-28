@@ -1,4 +1,4 @@
-// Type A deterministic policy, ported from the previous updater's tests (test/port/12a).
+// Type A deterministic policy, ported from the previous updater's tests.
 import { describe, expect, test } from "bun:test";
 import { DEFAULTS } from "../../src/apply/config.ts";
 import { typeAReview } from "../../src/apply/typea.ts";

@@ -1,12 +1,12 @@
-// A patch job's status and what it means to the caller. The
-// answer shape and the state names are rev 13 §8.6 (open question Q-6); a change lands in this file only. `post` is the
-// broker's own post-check result once it has finished: clean, drift (the VM is suspended until a card acknowledges it)
+// A patch job's status (chain-recorded job ids only) and what it means to the caller. The
+// answer shape and the state names are the broker's caller contract; a change lands in this file only. `post` is the
+// broker's own post-check result once it has finished: clean, drift (the VM is suspended until it is acknowledged)
 // or not-checked (no fresh inventory in 30 min, also suspended). It is the authority on the job's effect. A Google patch job
 // ends SUCCEEDED, COMPLETED_WITH_ERRORS, CANCELED or TIMED_OUT; the VM's own state is the instance detail. Only SUCCEEDED
 // on both is ok; a failure on the VM is failed; a cancel, a timeout or any other mix is unknown.
 
 import type { Exec } from "../../apply/exec.ts";
-import type { Decoded } from "../nas/answer.ts";
+import type { Decoded } from "../broker/answer.ts";
 import { isObj, obj, optStr, reqStr } from "../strict.ts";
 import { gceRead, type GceBroker, type GceSession } from "./broker.ts";
 import { JOB_ID, parseTime } from "./verbs.ts";
@@ -31,7 +31,7 @@ export interface JobStatus {
   post?: PostCheck;
 }
 
-/** answer: the job.status reply's fields without run_id and seq (rev 13 §8.6). With no expected job id (the VM's job after a patch with no reply), any job id inside its rule is taken. */
+/** answer: the job.status reply's fields without run_id and seq. With no expected job id (the VM's job after a patch with no reply), any job id inside its rule is taken. */
 export function decodeJob(answer: unknown, expected: string | undefined): Decoded<JobStatus> {
   try {
     const o = obj(answer, "job.status", ["job_id", "state", "instance_state", "end_time", "post"]);
@@ -72,7 +72,7 @@ export interface Clock {
 }
 export const realClock: Clock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 
-/** The job's duration (1800 s, the broker spec) plus 5 min, polled every 30 s. */
+/** The job's duration (1800 s) plus 5 min, polled every 30 s. */
 export const JOB_WAIT = { everyMs: 30_000, forMs: 35 * 60_000 };
 
 export async function waitJob(b: GceBroker, exec: Exec, s: GceSession, jobId: string, clock: Clock, w = JOB_WAIT): Promise<Decoded<JobStatus>> {
@@ -90,7 +90,7 @@ export async function waitJob(b: GceBroker, exec: Exec, s: GceSession, jobId: st
 const INTENT_ID = /^[A-Za-z0-9._:-]{1,80}$/;
 
 /**
- * job.status by run ({run_id, vm}, rev 15 §8.6): the run's latest job, or its latest intent with no job: an orphan (the
+ * job.status by run ({run_id, vm}): the run's latest job, or its latest intent with no job: an orphan (the
  * execute answer was lost; the VM is suspended) or a voided intent (refused `locked` before the send; nothing ran).
  */
 export type JobByRun = { kind: "job"; job: JobStatus } | { kind: "orphan"; intentId: string; post?: PostCheck } | { kind: "void"; intentId: string };
@@ -121,7 +121,7 @@ export const POST_EVERY_MS = 60_000;
 
 /**
  * Polls the job until the broker's post-check result appears, or until `until` (epoch ms on the clock), the caller's
- * read window: the run answers reads until 1 h after the job's end (rev 12 §8.1). A lost read ends the wait.
+ * read window: the run answers reads until 1 h after the job's end. A lost read ends the wait.
  */
 export async function waitPost(b: GceBroker, exec: Exec, s: GceSession, jobId: string, clock: Clock, until: number): Promise<Decoded<JobStatus>> {
   for (;;) {

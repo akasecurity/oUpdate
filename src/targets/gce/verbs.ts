@@ -1,16 +1,16 @@
 // The gce-patch reach's verbs as oupdate asks them: each read verb's answer cap and deadline, and the value
-// rules that every package name, version, id and time must pass. The caps and deadlines are the broker spec;
+// rules that every package name, version, id and time must pass. The caps and deadlines are the broker's caller contract;
 // a change lands in this file only. An answer over its cap is refused by the broker and again here, never cut. The
 // instance and vulns verbs exist on the broker but this leg does not ask them.
 
 export type GceReadVerb = "inventory" | "job.status";
 
 export const GCE_READ_VERBS: Record<GceReadVerb, { capBytes: number; deadlineS: number }> = {
-  // The full installed set, plus the broker's streamed archive-index check of every candidate (three suites, the broker spec).
+  // The full installed set, plus the broker's streamed archive-index check of every candidate (three suites).
   inventory: { capBytes: 2 * 1024 * 1024, deadlineS: 300 },
   "job.status": { capBytes: 4 * 1024, deadlineS: 30 },
 };
-/** The patch verb's own deadline (the broker's pre-execute re-reads, §2.1), on top of the leg's card wait. */
+/** The patch verb's own deadline (the broker's pre-execute re-reads), on top of the leg's approval wait. */
 export const PATCH_DEADLINE_S = 300;
 
 /** apt.exclusivePackages: 1 to 200 names, each of this form. */

@@ -1,7 +1,7 @@
 // Stale-keg owners restarted at an idle moment (config staleOwners). A kickstart cuts off live work,
 // so a launchd job matching a staleOwners glob is not restarted by the stale-keg check: it is queued
 // and a detached waiter (oupdate itself, `host --stale-owners-waiter`) restarts the queued jobs one
-// at a time, as a model server's waiter does: an exclusive lock, outcome files the next run reports and
+// at a time, as the Example waiter does: an exclusive lock, outcome files the next run reports and
 // removes, and launchd never killing it with the run's process group.
 //
 // Per job: wait for idle (the owner's probe argv exits 0, else no ESTABLISHED TCP on its pid for
@@ -21,7 +21,7 @@
 // removed. A waiter that finds the record "restarting" treats that restart as failed (never retried);
 // "waiting" (nothing was done yet) goes back to the queue.
 //
-// Files under <stateDir>/owner-restarts (a name without the digest's trouble word "stale", which a
+// Files under <stateDir>/owner-restarts (a name without a status reader's trouble word "stale", which a
 // clean outcome must not carry): queue/<target>.json (one per job, so the run adding and the waiter
 // taking never rewrite one file), outcomes/<time>-<pid>-<n>.txt (one per result, read and removed one
 // by one), failed (one label per line), inprogress.json, lock (flocked, never deleted) and lock.info.

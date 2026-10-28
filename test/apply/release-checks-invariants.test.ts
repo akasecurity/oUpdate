@@ -41,10 +41,10 @@ import { scripted } from "./helpers.ts";
 const OLD = "1.1.0";
 const FROM = "1.2.0";
 const TO = "1.3.0";
-const PENDING = "/state.test/release-checks/pending/splash.json";
-const HOLD = "/state.test/release-checks/holds/splash.json";
+const PENDING = "/state.test/release-checks/pending/gadget.json";
+const HOLD = "/state.test/release-checks/holds/gadget.json";
 const LSOF_HEAD = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n";
-const LABEL = "com.max.splash-server";
+const LABEL = "com.max.gadget-server";
 const RUNS = 5;
 
 type Hooks = "both" | "after" | "none";
@@ -89,12 +89,12 @@ interface Case {
   /** The owner job's processes already run on the older retained keg (OLD, kept on disk) before the first run. */
   startOld?: boolean;
   /**
-   * A second formula, good-a, outdated until upgraded, whose new release depends on splash (runtime,
-   * or build only); its installed release does not. Its brew upgrade installs splash's candidate
-   * when splash is outdated, as brew does a dependency.
+   * A second formula, good-a, outdated until upgraded, whose new release depends on gadget (runtime,
+   * or build only); its installed release does not. Its brew upgrade installs gadget's candidate
+   * when gadget is outdated, as brew does a dependency.
    */
   dependent?: "runtime" | "build-only";
-  /** splash is not installed at the start (no keg), its candidate held (a hold file present) or not. */
+  /** gadget is not installed at the start (no keg), its candidate held (a hold file present) or not. */
   absent?: "held" | "unheld";
   /**
    * An older keg (1.1.0) is retained too, and the owner job's first restart after the upgrade (new)
@@ -136,7 +136,7 @@ const isExecFault = (k: Kind) => k === "rc1" || k === "rc1-effect" || k === "mal
 /** Runs one case across up to RUNS runs; returns the events and the world at the end. */
 async function explore(c: Case) {
   const check: ReleaseCheck = {
-    formula: "example/tap/splash", command: ["/opt/gate.test/check"], retries: c.retries ?? 1, timeoutSec: 900,
+    formula: "example/tap/gadget", command: ["/opt/gate.test/check"], retries: c.retries ?? 1, timeoutSec: 900,
     ...(c.hooks === "both" ? { before: ["svcctl", "off", "--now"] } : {}),
     ...(c.hooks !== "none" ? { after: ["svcctl", "on"] } : {}),
     ...(c.owners.startsWith("named") || c.owners.startsWith("wrapper") ? { owners: [LABEL] } : {}),
@@ -145,12 +145,12 @@ async function explore(c: Case) {
   const named = c.owners.startsWith("named");
   /** The owner's own pid maps the keg and its child does too, the child outliving each restart. */
   const parentLeak = c.owners === "svc-leak" || c.owners === "named-leak";
-  const staleOwners = svc ? [{ match: "org.example.splash", probe: ["/opt/svc.test/idle"] }] : named ? [{ match: LABEL, probe: ["/opt/svc.test/idle"] }] : c.owners.startsWith("orphan") ? [{ match: "org.example.custom" }] : undefined;
+  const staleOwners = svc ? [{ match: "org.example.gadget", probe: ["/opt/svc.test/idle"] }] : named ? [{ match: LABEL, probe: ["/opt/svc.test/idle"] }] : c.owners.startsWith("orphan") ? [{ match: "org.example.custom" }] : undefined;
   // The world.
   const files = new Map<string, string>();
   const kegs = new Set(c.absent ? [] : c.retained || c.startOld || c.respawn === OLD || c.retryRespawn === OLD ? [OLD, FROM] : [FROM]);
   let linked = c.absent ? "" : FROM;
-  if (c.absent === "held") files.set(HOLD, `${JSON.stringify({ formula: "splash", version: TO, from: FROM, at: "2026-10-25 04:00" })}\n`);
+  if (c.absent === "held") files.set(HOLD, `${JSON.stringify({ formula: "gadget", version: TO, from: FROM, at: "2026-10-25 04:00" })}\n`);
   /** The candidate was installed once (the restored restart comes after it). */
   let upgradedOnce = false;
   /** The retained keg already started on (once). */
@@ -231,13 +231,13 @@ async function explore(c: Case) {
     const outdated = kegs.size > 0 && [...kegs].sort().at(-1)! < TO;
     const dep = c.dependent && !depDone;
     const h = fakeHost({
-      formulas: [...(dep ? ["good-a"] : []), ...(outdated ? ["splash"] : [])].join(" "),
-      verbose: [...(dep ? ["good-a (1.0) < 1.1"] : []), ...(outdated ? [`example/tap/splash (${[...kegs].sort().at(-1)}) < ${TO}`] : [])].join("\n"),
-      formulaTaps: { splash: "example/tap", "good-a": "homebrew/core" },
+      formulas: [...(dep ? ["good-a"] : []), ...(outdated ? ["gadget"] : [])].join(" "),
+      verbose: [...(dep ? ["good-a (1.0) < 1.1"] : []), ...(outdated ? [`example/tap/gadget (${[...kegs].sort().at(-1)}) < ${TO}`] : [])].join("\n"),
+      formulaTaps: { gadget: "example/tap", "good-a": "homebrew/core" },
     });
-    const lsofAll = () => LSOF_HEAD + [...procKeg].map(([pid, v]) => `splash ${pid} u txt REG 1,4 1 2 /brew/Cellar/splash/${v}/bin/splash\n`).join("");
-    const services = () => (ownerPid ? `\t\t      ${ownerPid}      - \t${svc ? "org.example.splash" : LABEL}\n` : "");
-    const target = svc ? "gui/501/org.example.splash" : `system/${LABEL}`;
+    const lsofAll = () => LSOF_HEAD + [...procKeg].map(([pid, v]) => `gadget ${pid} u txt REG 1,4 1 2 /brew/Cellar/gadget/${v}/bin/gadget\n`).join("");
+    const services = () => (ownerPid ? `\t\t      ${ownerPid}      - \t${svc ? "org.example.gadget" : LABEL}\n` : "");
+    const target = svc ? "gui/501/org.example.gadget" : `system/${LABEL}`;
     /** A restart of the owner job; `on`: its new processes start from that keg (a respawn pinned to it). */
     const kick = (on?: string) => {
       if (wrapper) {
@@ -285,23 +285,23 @@ async function explore(c: Case) {
     const answer = async (argv: string[], opt: Parameters<Exec>[1] = {}): Promise<ExecResult> => {
       const line = argv.join(" ");
       const ok = (out = ""): ExecResult => ({ rc: 0, out, err: "" });
-      if (line === "brew info --json=v2 splash" || line === "brew info --json=v2 example/tap/splash") {
+      if (line === "brew info --json=v2 gadget" || line === "brew info --json=v2 example/tap/gadget") {
         if (c.upgrade === "concurrent" && !other) {
           other = true;
           kegs.clear();
           kegs.add(TO);
           linked = TO;
         }
-        return ok(JSON.stringify({ formulae: [{ name: "splash", full_name: "example/tap/splash", tap: "example/tap", keg_only: false, linked_keg: linked || null, installed: [...kegs].sort().map((version) => ({ version })), versions: { stable: TO }, revision: 0 }] }));
+        return ok(JSON.stringify({ formulae: [{ name: "gadget", full_name: "example/tap/gadget", tap: "example/tap", keg_only: false, linked_keg: linked || null, installed: [...kegs].sort().map((version) => ({ version })), versions: { stable: TO }, revision: 0 }] }));
       }
-      if (line === "/usr/bin/readlink /brew/opt/splash") return linked ? ok(`../Cellar/splash/${linked}\n`) : { rc: 1, out: "", err: "" };
-      if (line === "brew --cellar splash") return ok("/brew/Cellar/splash\n");
+      if (line === "/usr/bin/readlink /brew/opt/gadget") return linked ? ok(`../Cellar/gadget/${linked}\n`) : { rc: 1, out: "", err: "" };
+      if (line === "brew --cellar gadget") return ok("/brew/Cellar/gadget\n");
       if (line.startsWith("brew deps ") && line.endsWith(" good-a") && c.dependent) {
         // brew as it answers: a plain query reads the installed keg's runtime dependencies; any
         // include flag, the candidate's declared ones (build ones only with --include-build).
         const flags = argv.slice(2, -1);
         const declared = flags.some((f) => f.startsWith("--include-"));
-        return ok(declared && (c.dependent === "runtime" || flags.includes("--include-build")) ? "zlib\nsplash\n" : "zlib\n");
+        return ok(declared && (c.dependent === "runtime" || flags.includes("--include-build")) ? "zlib\ngadget\n" : "zlib\n");
       }
       if (line.startsWith("brew deps ")) return ok("");
       if (line === "brew upgrade good-a" && c.dependent) {
@@ -314,23 +314,23 @@ async function explore(c: Case) {
         }
         return ok("upgraded\n");
       }
-      if (line === "brew list --formula --full-name") return ok(`${c.dependent ? "good-a\n" : ""}${kegs.size ? "example/tap/splash\n" : ""}`);
+      if (line === "brew list --formula --full-name") return ok(`${c.dependent ? "good-a\n" : ""}${kegs.size ? "example/tap/gadget\n" : ""}`);
       if (line === "brew list --cask") return ok("");
       if (line === "brew trust --formula --json=v1") return ok("[]");
-      if (line === "brew upgrade example/tap/splash") {
+      if (line === "brew upgrade example/tap/gadget") {
         if (c.upgrade === "noop") return ok("already up to date\n");
         upgradedOnce = true;
         kegs.add(TO);
         linked = TO;
         return ok("upgraded\n");
       }
-      if (line === "brew uninstall example/tap/splash") {
+      if (line === "brew uninstall example/tap/gadget") {
         events.push({ run, k: "uninstall", only: kegs.size <= 1 });
         if (linked) kegs.delete(linked);
         linked = "";
         return ok();
       }
-      if (line === "brew link example/tap/splash") {
+      if (line === "brew link example/tap/gadget") {
         linked = [...kegs].sort().at(-1) ?? "";
         return ok();
       }
@@ -355,20 +355,20 @@ async function explore(c: Case) {
         if (argv.includes("-p")) {
           const pid = argv[argv.indexOf("-p") + 1]!;
           const v = procKeg.get(pid);
-          return ok(LSOF_HEAD + (v ? `splash ${pid} u txt REG 1,4 1 2 /brew/Cellar/splash/${v}/bin/splash\n` : ""));
+          return ok(LSOF_HEAD + (v ? `gadget ${pid} u txt REG 1,4 1 2 /brew/Cellar/gadget/${v}/bin/gadget\n` : ""));
         }
         return ok(lsofAll());
       }
       if (argv[0] === "ps") {
         const pid = argv[4]!;
-        if (wrapper && pid === ownerPid) return ok(`${argv[2] === "comm=" ? "sh" : argv[2] === "command=" ? "sh -c splash serve" : "1"}\n`);
+        if (wrapper && pid === ownerPid) return ok(`${argv[2] === "comm=" ? "sh" : argv[2] === "command=" ? "sh -c gadget serve" : "1"}\n`);
         if (!procKeg.has(pid)) return { rc: 1, out: "", err: "" };
-        return ok(`${argv[2] === "comm=" ? "splash" : argv[2] === "command=" ? "splash serve" : (parentOf.get(pid) ?? "1")}\n`);
+        return ok(`${argv[2] === "comm=" ? "gadget" : argv[2] === "command=" ? "gadget serve" : (parentOf.get(pid) ?? "1")}\n`);
       }
       if (line === "launchctl print gui/501") return ok(`gui/501 = {\n\tservices = {\n${svc ? services() : ""}\t}\n}\n`);
       if (line === "launchctl print system") return ok(`system = {\n\tservices = {\n${named || wrapper ? services() : ""}\t}\n}\n`);
       if (line === `launchctl print ${target}` && c.owners !== "none") {
-        const plist = svc ? "/home.test/Library/LaunchAgents/org.example.splash.plist" : `/Library/LaunchDaemons/${LABEL}.plist`;
+        const plist = svc ? "/home.test/Library/LaunchAgents/org.example.gadget.plist" : `/Library/LaunchDaemons/${LABEL}.plist`;
         return ok(`\tstate = running\n\tpid = ${ownerPid}\n\tpath = ${plist}\n`);
       }
       if (line === `launchctl kickstart -k ${target}` || line === `sudo -n launchctl kickstart -k ${target}`) {
@@ -392,7 +392,7 @@ async function explore(c: Case) {
       if (isStopping() && !opt.force) return { rc: 143, out: "", err: "oupdate is stopping: not started" };
       const e = await enter(`exec ${line}`);
       if (e.skip) return { rc: 137, out: "", err: "killed" };
-      if (line === "brew upgrade example/tap/splash") events.push({ run, k: "upgrade" });
+      if (line === "brew upgrade example/tap/gadget") events.push({ run, k: "upgrade" });
       const f = e.fault;
       // Notices are delivered (a failed notice is the notifier's fault, not the state machine's).
       const faulty = argv[0] !== "send-notice";
@@ -434,8 +434,8 @@ async function explore(c: Case) {
       await crashAfter(e.fault);
       return v;
     };
-    const dirs = () => new Set(["/brew/Cellar", "/brew/Cellar/splash", ...[...kegs].map((v) => `/brew/Cellar/splash/${v}`)]);
-    const plists = named || wrapper ? [`/Library/LaunchDaemons/${LABEL}.plist`] : svc ? ["/home.test/Library/LaunchAgents/org.example.splash.plist"] : [];
+    const dirs = () => new Set(["/brew/Cellar", "/brew/Cellar/gadget", ...[...kegs].map((v) => `/brew/Cellar/gadget/${v}`)]);
+    const plists = named || wrapper ? [`/Library/LaunchDaemons/${LABEL}.plist`] : svc ? ["/home.test/Library/LaunchAgents/org.example.gadget.plist"] : [];
     const fs: ApplyFs = {
       ...h.fs,
       exists: async (p) => files.has(p) || dirs().has(p) || plists.includes(p),
@@ -492,7 +492,7 @@ function violations(c: Case, w: Awaited<ReturnType<typeof explore>>): string[] {
   const restoredPassAt = ev.findIndex((e) => e.k === "pending" && e.rec.restoredVerdict === "pass");
   const excepted = failAt >= 0 && restoredPassAt < 0;
   // A notice of its own (the run's done notice, which repeats every run, is no alert).
-  const rcNotice = (from = 0) => ev.slice(from).some((e) => e.k === "notify" && !e.text.includes("host-update done") && e.text.includes("splash") && /release check/.test(e.text));
+  const rcNotice = (from = 0) => ev.slice(from).some((e) => e.k === "notify" && !e.text.includes("host-update done") && e.text.includes("gadget") && /release check/.test(e.text));
   // I1
   // A SIGKILL between a successful after and the write that records it: after runs again (at least once, never left off).
   // Or the write that records it failing (EACCES): the record cannot say after ran.
@@ -577,7 +577,7 @@ function violations(c: Case, w: Awaited<ReturnType<typeof explore>>): string[] {
   // I7
   for (const e of ev) if (e.k === "uninstall" && e.only) out.push(`I7: run ${e.run} uninstalled the only installed keg`);
   // I8
-  for (const e of ev) if (e.k === "pulled") out.push(`I8: run ${e.run} upgraded good-a, which pulled splash ${TO} in as a dependency`);
+  for (const e of ev) if (e.k === "pulled") out.push(`I8: run ${e.run} upgraded good-a, which pulled gadget ${TO} in as a dependency`);
   // I5
   for (let run = 1; run <= RUNS; run++) {
     const inRun = ev.filter((e) => e.run === run && (e.k === "after" || e.k === "check"));
@@ -745,7 +745,7 @@ describe("release checks: the state machine explored (invariants I1-I8)", () => 
         // Not vacuous: once the gated formula passes, the dependent goes ahead.
         if (!faults.length && outcome === "pass") {
           if (w.depDone) upgradedLater++;
-          else bad.push(`${describeCase(c)}: good-a never upgraded after splash passed`);
+          else bad.push(`${describeCase(c)}: good-a never upgraded after gadget passed`);
         }
       }
     }
@@ -770,7 +770,7 @@ describe("release checks: the state machine explored (invariants I1-I8)", () => 
         cases++;
         const w = await explore(c);
         for (const v of violations(c, w)) bad.push(`${describeCase(c)}: ${v}`);
-        if (w.events.some((e) => e.k === "check" || e.k === "upgrade")) bad.push(`${describeCase(c)}: splash was checked or upgraded though it is not installed`);
+        if (w.events.some((e) => e.k === "check" || e.k === "upgrade")) bad.push(`${describeCase(c)}: gadget was checked or upgraded though it is not installed`);
       }
     }
     if (process.env.INV_DEBUG) console.log(`absent: ${cases} cases`);

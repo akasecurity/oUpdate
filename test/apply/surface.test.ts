@@ -169,7 +169,7 @@ describe("typeBReview with upstreamTaps", () => {
 describe("upstreamTaps config", () => {
   test("off by default; lowercased when given; must be a list", () => {
     expect(parseApplyConfig(JSON.stringify({ apply: { stateDir: "/s.test" } }), "h").upstreamTaps).toEqual([]);
-    expect(parseApplyConfig(JSON.stringify({ apply: { stateDir: "/s.test", upstreamTaps: ["owner/exampleapp"] } }), "h").upstreamTaps).toEqual(["owner/exampleapp"]);
+    expect(parseApplyConfig(JSON.stringify({ apply: { stateDir: "/s.test", upstreamTaps: ["Owner/ExampleApp"] } }), "h").upstreamTaps).toEqual(["owner/exampleapp"]);
     expect(() => parseApplyConfig(JSON.stringify({ apply: { stateDir: "/s.test", upstreamTaps: "owner/exampleapp" } }), "h")).toThrow();
   });
 });

@@ -1,4 +1,4 @@
-// Ported from the previous updater's waiter cases (test/port/07): the handoff of a deferred service to its
+// Ported from the previous updater's waiter cases: the handoff of a deferred service to its
 // idle waiter, and the waiter report. The waiter is a real script started detached.
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -97,7 +97,7 @@ describe("handoff", () => {
     await Bun.sleep(200);
     expect(f.calls()).toEqual([]);
   });
-  test("a missing waiter script is a failure the digest sees", async () => {
+  test("a missing waiter script is a failure a status reader sees", async () => {
     const f = fixture();
     const note = await handoff(f.env, { ...f.s, waiter: join(f.dir, "nope.sh") }, "/k", false);
     expect(note).toBe(`svc stale — FAILED: ${join(f.dir, "nope.sh")} missing, nothing will restart it`);
@@ -291,7 +291,7 @@ describe("staleKegCheck with the real handoff", () => {
   });
 });
 
-// the stale-owner waiter (owner-waiter.ts). Every launchctl, lsof and probe call is a fake.
+// The stale-owner waiter (owner-waiter.ts). Every launchctl, lsof and probe call is a fake.
 describe("owner waiter", () => {
   const Q = "/state.test/owner-restarts";
   const CELLAR = "/brew/Cellar";

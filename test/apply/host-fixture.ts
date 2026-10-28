@@ -1,5 +1,5 @@
 // A scripted host for the apply run: brew, lsof, launchctl, npm and the notify command answer from
-// a script, as the previous updater's brewMocks did, and the file system is in memory. Every command
+// a script, as the previous updater's brew mocks did, and the file system is in memory. Every command
 // line is recorded in order, so tests can assert on what ran and in which order.
 import type { ApplyConfig } from "../../src/apply/config.ts";
 import { DEFAULTS } from "../../src/apply/config.ts";

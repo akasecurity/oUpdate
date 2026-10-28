@@ -1,14 +1,14 @@
-// The os-packages review (spec §5): distro-signed apt only, with no source diff. A candidate is eligible when the broker's
+// The os-packages review: distro-signed apt only, with no source diff. A candidate is eligible when the broker's
 // archive-index check passed (origin "security") and its first-seen date is past the cooldown, and at most 200 names go
 // in one job. Dependencies are the broker's to check, so the caller has no dependency rule. The eligible set then goes to both models,
 // which must each APPROVE (the broker refuses an APPROVE without both reviewers). Which reviewers the verdict names,
-// and that both models are asked, is the broker spec; a change lands in this file only. The prompt
+// and that both models are asked, is the broker's caller contract; a change lands in this file only. The prompt
 // carries only names and versions that passed their rules, fenced as untrusted data, and never a broker hold reason.
 
 import { cooldownVerdict } from "../../cooldown.ts";
 import { parseVerdict, VERDICT_CONTRACT } from "../../review.ts";
-import { untrusted } from "../nas/prompt.ts";
-import { reviewTwice, type NasReviewers, type NasVerdict } from "../nas/review.ts";
+import { untrusted } from "../compose/prompt.ts";
+import { reviewTwice, type ReviewerPair, type PairVerdict } from "../compose/review.ts";
 import { pkgKey, type Candidate, type Inventory } from "./answer.ts";
 import { MAX_NAMES } from "./verbs.ts";
 
@@ -67,4 +67,4 @@ ${untrusted("vm", `name: ${a.vm}\nos: ${a.os}`)}
 ${untrusted("packages", a.packages.map(packageLine).join("\n"))}`;
 }
 
-export const reviewApt = (r: NasReviewers, prompt: string): Promise<NasVerdict> => reviewTwice(r, prompt, (t) => parseVerdict(t) === "APPROVE");
+export const reviewApt = (r: ReviewerPair, prompt: string): Promise<PairVerdict> => reviewTwice(r, prompt, (t) => parseVerdict(t) === "APPROVE");

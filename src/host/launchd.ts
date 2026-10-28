@@ -146,7 +146,7 @@ export function parseLaunchdArgs(argv: string[], deps: LaunchdDeps = {}): Launch
   const stdout = f.get("--stdout") ?? fromCfg.stdout;
   if (!stdout) throw new Error("--launchd-plist needs --stdout FILE (the default sits beside the config's apply.logFile, and none was given)");
   abs("--stdout", stdout);
-  if (basename(stdout).startsWith("2")) throw new Error(`--stdout ${stdout}: a name that starts with 2 looks like a run log to the digest, which reads the newest 2*.log`);
+  if (basename(stdout).startsWith("2")) throw new Error(`--stdout ${stdout}: a name that starts with 2 looks like a run log to a log reader, which takes the newest 2*.log`);
   return { label, user, hour, minute, home, bun, app, stdout, path, ...(config ? { config } : {}) };
 }
 

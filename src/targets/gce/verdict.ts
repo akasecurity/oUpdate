@@ -1,16 +1,17 @@
-// The patch request's verdict. Its keys, its item set and the sha's input are the broker spec; a change lands in this file only.
+// The patch request's verdict (a verdict per package, APPROVE or HOLD, the reviewer ids and the evidence
+// sha). Its keys, its item set and the sha's input are the broker's caller contract; a change lands in this file only.
 // items names every candidate of the VM's latest inventory and nothing else (the review read: no other inventory is read
 // before the patch), keyed by the inventory's name strings; the sha is sha256 over each inventory answer's
-// re-serialized object (rev 14a §8.4, broker.ts evidenceText) in ascending seq, through nas/broker.ts evidenceSha.
+// re-serialized object in ascending seq, through broker/broker.ts evidenceSha.
 
-import { evidenceSha } from "../nas/broker.ts";
+import { evidenceSha } from "../broker/broker.ts";
 import type { Inventory } from "./answer.ts";
 import type { GceSession } from "./broker.ts";
 
 export interface PatchVerdict {
   items: Record<string, "APPROVE" | "HOLD">;
-  /** The configured reviewers' names (rev 12 §8.4, Q-9). */
-  reviewers: { primary: string; secondary: string };
+  /** The configured reviewers' names, under the broker's two keys (broker/broker.ts verdictReviewers). */
+  reviewers: Record<string, string>;
   evidence_sha256: string;
 }
 

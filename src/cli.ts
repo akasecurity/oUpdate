@@ -26,8 +26,8 @@ import { realFs } from "./apply/fs.ts";
 import { spawnRunner } from "./host/probe.ts";
 import { checkClientKeys, readKeyFiles, renderKeys, failing } from "./clientkeys.ts";
 import { appRev, parseTargetsCommand, targetsMain } from "./targets/cli.ts";
+import { loadRegistry } from "./targets/registry.ts";
 import { realTargetFs } from "./targets/run.ts";
-import { realNasOsReleases } from "./targets/nas/os.ts";
 import { parityMain, parseParityCommand } from "./targets/parity-cli.ts";
 import { fetchVerified, realNpmSource } from "./targets/pins/npm.ts";
 import { realDockerSource } from "./targets/pins/docker.ts";
@@ -387,7 +387,8 @@ async function imageMain(argv: string[]): Promise<number> {
   const a = parseImageArgs(argv);
   const r = await checkImage(a, {
     source: registrySource(),
-    reviewers: { primary: a.reviewer ? makeReviewer(a.reviewer) : undefined, secondary: a.secondReviewer ? makeReviewer(a.secondReviewer) : undefined },
+    baseline: (await loadRegistry()).containerBaseline,
+    reviewers: { first: a.reviewer ? makeReviewer(a.reviewer) : undefined, second: a.secondReviewer ? makeReviewer(a.secondReviewer) : undefined },
   });
   if (a.json) writeFileSync(a.json, JSON.stringify(r, null, 2) + "\n");
   console.log(renderImage(r));
@@ -440,7 +441,7 @@ async function targetsCli(argv: string[]): Promise<number> {
     tmpDir: tmpdir(),
     sources: { npm: realNpmSource(), github: realGithubSource, oci: dockerHubSource(), snapshot: realSnapshotSource, docker: realDockerSource },
     makeReviewer,
-    releases: realNasOsReleases(),
+    registry: await loadRegistry(),
     reviewNpm: (spec) => (p) =>
       runReview({
         eco: "npm", name: p.name, from: p.from, to: p.to, oldIntegrity: p.fromIntegrity, newIntegrity: p.toIntegrity,
@@ -464,11 +465,14 @@ if (import.meta.main) {
         process.exit(0);
       }
       if (hc.mode === "owner-waiter") process.exit(await ownerWaiterMain(hc, { exec: realExec }));
+      // A target plugin may keep an older deployment's updater name in the run header (targets/compat.ts).
+      const compat = (await loadRegistry()).compat;
+      const named = compat.previousUpdater ? { previousUpdater: compat.previousUpdater } : {};
       if (hc.mode !== "report") {
-        const { rc } = await applyMain(hc, { exec: realExec, fs: realFs });
+        const { rc } = await applyMain(hc, { exec: realExec, fs: realFs, ...named, ...(compat.jobRunners ? { jobRunners: compat.jobRunners } : {}) });
         process.exit(rc);
       }
-      const { text } = await hostMain(hc.args, { run: spawnRunner, feed: osvFeed(), now: new Date() });
+      const { text } = await hostMain(hc.args, { run: spawnRunner, feed: osvFeed(), now: new Date(), ...named });
       console.log(text);
       process.exit(0);
     }

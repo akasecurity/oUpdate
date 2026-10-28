@@ -1,0 +1,35 @@
+=== host-update box 2026-10-25 03:00 ===
+  jitter: sleeping 12s (skip with SKIP_JITTER=1)
+
+--- plugins ---
+Checking for plugin updates...
+  example.plugin: 2026.09.01 -> 2026.10.01
+  Updating example.plugin...
+  other.plugin: up to date (2026.08.01)
+
+--- containers ---
+
+--- layer diff ---
+  registry.example/team/app-a:1: running image -> candidate
+    RUN echo v2
+
+--- LLM review (local-model) ---
+
+┌─ LLM (local-model @ https://first.example.invalid) ─────────────────
+│ 1. none
+│ 2. Verdict: APPROVE
+└───────────────────────────────────────────────────
+┌─ LLM second opinion (second https://second.example.invalid) ───────
+│ 1. none
+│ 2. Verdict: APPROVE
+└───────────────────────────────────────────────────
+
+--- OS ---
+Current: 1.4.0
+Latest:  1.4.0
+OS: up to date
+
+=== box summary ===
+  plugins:    updated: example.plugin
+  containers: updated (1 pulled)
+  OS:         up to date

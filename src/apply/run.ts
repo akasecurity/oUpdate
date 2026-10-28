@@ -1,6 +1,6 @@
 // The host apply run, ported from the previous updater's host script: the brew phase, then the npm phase,
-// then one summary block in the previous updater's own format ("=== <host> summary ===", "  brew: ...",
-// "  npm:  ..."), so the host shadow parser (src/host/prev-log.ts) and a status reader read it
+// then one summary block in that updater's own format ("=== <host> summary ===", "  brew: ...",
+// "  npm:  ..."), so the host shadow parser (src/host/prev-log.ts) and any log reader read it
 // unchanged, then the end-of-run notice.
 //
 // Order: waiter report → brew (update → outdated → excludes and pins → tap tiers → Type A review
@@ -27,10 +27,11 @@
 // browser-specific dequarantine (the Gatekeeper release covers casks generally), the tap revision
 // log lines and the App Store phase ("not checked" in the summary).
 //
-// The Claude Code native update (the previous updater's claude_step) runs in the npm phase after npm,
+// The Claude Code native update (the previous updater's Claude step) runs in the npm phase after npm,
 // when apply.claudeCode names an executable binary.
 
 import { realpathSync } from "node:fs";
+import { DEFAULT_COMPAT } from "../targets/compat.ts";
 import { basename, dirname, join } from "node:path";
 import { appBundleUpgrade, realAppNet, type AppNet } from "./appbundle.ts";
 import { isStopping as execStopping, onStop } from "./exec.ts";
@@ -82,6 +83,10 @@ export interface ApplyOptions {
   ownerLock?: { take(path: string): Promise<boolean>; release(path: string): Promise<void> };
   /** This run's bun binary (default: process.execPath). Homebrew's bun formula is held out of the upgrade set. */
   bunExec?: string;
+  /** The previous updater's name the run header and done notice keep (compat.ts; default host-update). */
+  previousUpdater?: string;
+  /** Job runner commands when the config names none (compat.ts). */
+  jobRunners?: readonly string[];
 }
 
 export interface ApplyResult {
@@ -245,8 +250,9 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     };
   }
   const stamp = `${today} ${p2(now.getHours())}:${p2(now.getMinutes())}`;
-  // A dry run's header is not the previous updater's, so the shadow parser never takes it for a run.
-  log.push(dryRun ? `=== oupdate dry run ${host} ${stamp} ===` : `=== oupdate-host-update ${host} ${stamp} ===`);
+  // A dry run's header does not carry the updater name, so the shadow parser never takes it for a run.
+  const prevName = opts.previousUpdater ?? DEFAULT_COMPAT.previousUpdater;
+  log.push(dryRun ? `=== oupdate dry run ${host} ${stamp} ===` : `=== oupdate-${prevName} ${host} ${stamp} ===`);
   if (dryRun) log.push("dry run: every check runs; nothing is upgraded, restarted, cleaned or written, and notices are logged only");
   else if (cfg.notify === undefined) log.push("notify: not configured (apply.notify) — notices are logged here, never sent");
 
@@ -567,6 +573,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       restartHelper: cfg.restartHelper,
       labelRestart: cfg.labelRestart,
       staleKegUnlisted: cfg.staleKegUnlisted,
+      jobRunners: cfg.jobRunners ?? opts.jobRunners ?? [],
       ownerHanded,
       detachedLog: join(cfg.stateDir, "restart.log"),
       staleOwners: cfg.staleOwners,
@@ -641,8 +648,8 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     });
   }
 
-  // ── Claude Code (native), the previous updater's claude_step ──
-  // The native build updates itself in place; the background updater stays off on every host, so this
+  // ── Claude Code (native) ──
+  // The native build updates itself in place; with its background updater off, this
   // explicit call is the only update path. Not executable: skipped with no word, as the bash did.
   let ccPart: string | undefined = "claude-code: not configured";
   if (cfg.claudeCode) {
@@ -751,7 +758,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   ];
   for (const l of summary) sink?.(l);
   // A run being stopped by a signal sends no done notice: its ABORTED line is the last word.
-  if (!dryRun && !opts.isStopping?.()) await notify(`📋 <b>${host} host-update done (oupdate)</b>\nbrew: ${brewStatus}\nnpm:  ${npmLine}\nmas:  ${mas}`);
+  if (!dryRun && !opts.isStopping?.()) await notify(`📋 <b>${host} ${prevName} done (oupdate)</b>\nbrew: ${brewStatus}\nnpm:  ${npmLine}\nmas:  ${mas}`);
   return { log, summary, rc };
 
   function assembleBrew(): string {

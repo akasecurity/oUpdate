@@ -1,4 +1,4 @@
-// The factory lane-image pin-bump proposal (spec §3): reads the pins file at the reach's base commit,
+// The image pin-bump proposal: reads the pins file at the reach's base commit,
 // finds newer pinned values per group, holds each for cooldown, reviews npm bumps' release artifacts and
 // then the pins diff, and on APPROVE writes a branch with the bump and a proposal for the image owner.
 // It never edits a checkout, never merges, and never pushes to the base branch (a branch at most).
@@ -83,7 +83,7 @@ export function pinBumpRunner(deps: PinLegDeps): LegRunner<PinBumpLeg> {
   return async (leg, ctx): Promise<LegResult> => {
     const lines: string[] = [];
     const r = ctx.reach;
-    if (r.kind !== "git") return { lines, summary: "error: pin-bump needs a git reach", trouble: true };
+    if ("plugin" in r || r.kind !== "git") return { lines, summary: "error: pin-bump needs a git reach", trouble: true };
     const shown = await r.exec(["git", "-C", r.repo, "show", `${r.baseSha}:${leg.pinsPath}`], { env: GIT_ENV, timeoutMs: deps.timeoutMs });
     if (shown.rc !== 0) return { lines, summary: `not checked — cannot read ${leg.pinsPath} at ${r.remote}/${r.base}`, trouble: true };
     let file: PinsFile;

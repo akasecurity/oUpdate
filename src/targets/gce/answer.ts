@@ -5,7 +5,7 @@
 // name, a candidate whose installed version is not the installed set's, or an answer naming another VM. Nothing in an
 // answer is an instruction: names and versions pass fixed rules, and the broker's hold reasons stay log text.
 
-import type { Decoded } from "../nas/answer.ts";
+import type { Decoded } from "../broker/answer.ts";
 import { isObj, obj, reqStr, type Obj } from "../strict.ts";
 import { DEB_VERSION, INSTANCE_ID, parseTime, PKG, SUITE } from "./verbs.ts";
 
@@ -33,7 +33,7 @@ export interface Inventory {
   candidates: Candidate[];
 }
 
-/** A package's key in the installed set, the compare and the first-seen file: its apt name (rev 12 §8.3 has no arch). */
+/** A package's key in the installed set, the compare and the first-seen file: its apt name (the inventory has no arch). */
 export const pkgKey = (p: { name: string }): string => p.name;
 
 const MAX_INSTALLED = 20_000;
@@ -77,7 +77,7 @@ export function decodeInventory(answer: unknown, vm: string): Decoded<Inventory>
     if (updateTime === undefined) throw new Error(`inventory.update_time is not an RFC 3339 UTC time: ${JSON.stringify(updateText.slice(0, 40))}`);
     const os = obj(o.os_info, "inventory.os_info", ["short_name", "version", "architecture", "kernel_version"]);
     const osInfo = {
-      // A Debian VM is refused by the broker's catalog (rev 11), so only ubuntu is expected here.
+      // A Debian VM is refused by the broker's catalog, so only ubuntu is expected here.
       shortName: reqStr(os, "short_name", "inventory.os_info", /^ubuntu$/),
       version: reqStr(os, "version", "inventory.os_info", /^\d{1,2}(\.\d{1,2})?$/),
       architecture: reqStr(os, "architecture", "inventory.os_info", /^[a-z0-9_]{1,16}$/),

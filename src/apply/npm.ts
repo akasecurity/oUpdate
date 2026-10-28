@@ -1,4 +1,4 @@
-// The npm globals phase, ported minimally from the previous updater's npm_section: list the outdated
+// The npm globals phase, ported minimally from the previous updater's npm phase: list the outdated
 // globals, read each new version's scripts and tarball and the installed version's scripts, force a
 // FLAG on literal attack indicators, on a new or changed install hook and on any hook npm runs on
 // install even when unchanged (a model is not trusted with what a pattern does reliably, and this lane
@@ -117,7 +117,7 @@ export async function npmSection(exec: Exec, r: Reviewer, o: NpmOptions): Promis
   // `npm outdated` exits 1 when something is outdated: the answer decides, not the exit code.
   const q = await exec([o.npm, "outdated", "-g", "--json"]);
   if (q.rc === 127) {
-    // An ERROR, so the run exits non-zero and the digest sees it: npm globals went unchecked.
+    // An ERROR, so the run exits non-zero and a status reader sees it: npm globals went unchecked.
     log.push(`npm: ${o.npm} not found — not checked`);
     return { status: `ERROR — ${o.npm} not found, npm globals not checked`, log };
   }

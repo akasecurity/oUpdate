@@ -84,9 +84,9 @@ describe("parsePinBumpLeg", () => {
 
   test("an asset name must be a template this group already hashes", () => {
     const g = LEG().groups;
-    const paired = { ...g[1], assets: { TOOL_SHA256_X64: "tool_{v}_linux_amd64.tar.gz", COLIMA_SHA256: "colima-Darwin-arm64" }, assetKeys: { COLIMA_ASSET: "colima-Darwin-arm64" } };
-    expect(P({ groups: [paired] }).groups[0]).toMatchObject({ assetKeys: { COLIMA_ASSET: "colima-Darwin-arm64" } });
-    expect(() => P({ groups: [{ ...g[1], assetKeys: { LIMA_ASSET: "lima-{v}-Darwin-arm64.tar.gz" } }] })).toThrow('leg.groups[0].assetKeys["LIMA_ASSET"] must name an asset hashed in assets');
+    const paired = { ...g[1], assets: { TOOL_SHA256_X64: "tool_{v}_linux_amd64.tar.gz", CTRTOOL_SHA256: "ctrtool-Darwin-arm64" }, assetKeys: { CTRTOOL_ASSET: "ctrtool-Darwin-arm64" } };
+    expect(P({ groups: [paired] }).groups[0]).toMatchObject({ assetKeys: { CTRTOOL_ASSET: "ctrtool-Darwin-arm64" } });
+    expect(() => P({ groups: [{ ...g[1], assetKeys: { VMTOOL_ASSET: "vmtool-{v}-Darwin-arm64.tar.gz" } }] })).toThrow('leg.groups[0].assetKeys["VMTOOL_ASSET"] must name an asset hashed in assets');
   });
 
   test("docker-static owns its three pins and never proposes", () => {

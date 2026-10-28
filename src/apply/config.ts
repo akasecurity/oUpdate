@@ -91,6 +91,12 @@ export interface ApplyConfig {
   /** A stale-keg label not in labelRestart: "kickstart" (the default) restarts it, "report" only names it. */
   staleKegUnlisted?: "kickstart" | "report";
   /**
+   * Job runner commands (names, e.g. "jobrunner"): a stale process with no launchd job of its own whose command line is
+   * `<runner> run …` is a detached job, named with its `--job` id and never restarted. Absent: a target plugin's list
+   * (targets/compat.ts), else none.
+   */
+  jobRunners?: string[];
+  /**
    * Stale-keg launchd jobs restarted only at an idle moment, by a detached waiter, one at a time
    * (see owner-waiter.ts). `match` is a label glob; it comes before labelRestart and staleKegUnlisted.
    */
@@ -130,7 +136,7 @@ export const DEFAULTS = {
 
 const KEYS = new Set([
   "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "hostPrefixes", "pinRoots",
-  "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "npmRegistry", "caps",
+  "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "jobRunners", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
 
@@ -308,6 +314,8 @@ export function parseApplyConfig(text: string, fallbackHost: string, env: Record
   }
   const staleKegUnlisted = a.staleKegUnlisted === "report" ? "report" : "kickstart";
   if (a.staleKegUnlisted !== undefined && a.staleKegUnlisted !== staleKegUnlisted) throw new Error(`${w}.staleKegUnlisted must be "kickstart" or "report"`);
+  const jobRunners = list(a, "jobRunners", w);
+  if (jobRunners?.some((r) => !/^[A-Za-z0-9._-]+$/.test(r))) throw new Error(`${w}.jobRunners must be command names (letters, digits, ".", "_" and "-")`);
   if (a.appBundles !== undefined && !Array.isArray(a.appBundles)) throw new Error(`${w}.appBundles must be an array`);
   if (a.deferred !== undefined && !Array.isArray(a.deferred)) throw new Error(`${w}.deferred must be an array`);
   if (a.releaseChecks !== undefined && !Array.isArray(a.releaseChecks)) throw new Error(`${w}.releaseChecks must be an array`);
@@ -342,6 +350,7 @@ export function parseApplyConfig(text: string, fallbackHost: string, env: Record
     restartHelper,
     labelRestart,
     staleKegUnlisted,
+    ...(jobRunners ? { jobRunners } : {}),
     ...(a.staleOwners !== undefined ? { staleOwners: (a.staleOwners as unknown[]).map(staleOwner) } : {}),
     appBundles: ((a.appBundles as unknown[] | undefined) ?? []).map(appBundle),
     notify: list(a, "notify", w),

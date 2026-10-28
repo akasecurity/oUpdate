@@ -1,18 +1,18 @@
 // One patch request per VM: only the run id and the verdict, a verdict for every candidate name, never an empty list,
-// a card's outcome and every lost reply mapped as the NAS legs map them, and the latch after anything unclean.
+// an approval's outcome and every lost reply mapped as the compose legs map them, and the latch after anything unclean.
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { Exec } from "../../src/apply/exec.ts";
 import { gceRead, newGceSession } from "../../src/targets/gce/broker.ts";
 import { gcePatch, newLatch, patchSummary, type PatchLatch } from "../../src/targets/gce/patch.ts";
 import { approvedNames, patchVerdict, type PatchVerdict } from "../../src/targets/gce/verdict.ts";
-import { DIGEST_TROUBLE } from "../../src/targets/summary.ts";
+import { TROUBLE_WORDS } from "../../src/targets/summary.ts";
 import { fakeExec } from "./fakes.ts";
 import { fakeGce, GCE, inv, inventory, jobOf, runOf, VM_A, type FakeReply } from "./fake-gce.ts";
 import { OTHER_RUN } from "./fake-gce.ts";
 import { BOOT, BOOT2 } from "./fake-gce.ts";
 
-const R = { primary: "first-model", secondary: "secondary-model" };
+const R = { first: "first-model", second: "second-model" };
 const APPROVE = new Set(["openssl", "libssl3t64"]);
 
 async function minted(patch?: FakeReply, wrap?: (e: Exec) => Exec) {
@@ -42,7 +42,7 @@ describe("gcePatch", () => {
     const { exec, calls, requests, s, v } = await minted();
     const r = await gcePatch(GCE, exec, s, v, newLatch(), 3600);
     expect(r).toEqual({ outcome: "started", jobId: jobOf(VM_A), sent: ["libssl3t64", "openssl"], dropped: [], why: `patch: job ${jobOf(VM_A)} started for 2 package(s)`, requestId: "req-2" });
-    expect(calls[1]!.argv).toEqual(["/opt/credreq", "cloud.osc.patch", VM_A, "--why", "oupdate patch", "--wait", "3900", "--param", "verb=patch", "--param", `run_id=${runOf(VM_A)}`, "--param-json", `verdict=${JSON.stringify(v)}`]);
+    expect(calls[1]!.argv).toEqual(["/opt/broker-client", "cloud.osc.patch", VM_A, "--why", "oupdate patch", "--wait", "3900", "--param", "verb=patch", "--param", `run_id=${runOf(VM_A)}`, "--param-json", `verdict=${JSON.stringify(v)}`]);
     expect(Object.keys(requests[1]!.params).sort()).toEqual(["run_id", "verb", "verdict"]);
   });
 
@@ -63,7 +63,7 @@ describe("gcePatch", () => {
   });
 
   test.each([
-    ["a card still pending", { status: "pending" }, "patch: waits on a card on the page and may still run"],
+    ["an approval still pending", { status: "pending" }, "patch: waits on an approval and may still run"],
     ["a broker withheld", { status: "withheld", reason: "locked" }, "patch: broker withheld: locked"],
     ["an approval with no job id", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, sent: ["openssl"] } }, "patch: approved with no valid job id: outcome unknown"],
     ["a sent list naming an unapproved package", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, job_id: jobOf(VM_A), sent: ["openssl", "bash"] } }, `patch: job ${jobOf(VM_A)}: the broker's sent list is not a non-empty subset of the approved names`],
@@ -86,12 +86,12 @@ describe("gcePatch", () => {
     const summary = patchSummary(r as Exclude<typeof r, { outcome: "started" }>);
     expect(summary).toBe("FAILED — patch outcome unknown, the patch may have run (the broker's own post-check covers it)");
     expect(summary).not.toContain(OTHER_RUN);
-    expect(DIGEST_TROUBLE.test(summary)).toBe(true);
+    expect(TROUBLE_WORDS.test(summary)).toBe(true);
   });
 
-  test("a credreq timeout and an Exec that throws are unknown (Review Focus 3)", async () => {
+  test("a client timeout and an Exec that throws are unknown (Review Focus 3)", async () => {
     const timeout = await minted(undefined, (e) => async (argv, o) => (argv[1] === "cloud.osc.patch" ? { rc: 143, out: "", err: "", timedOut: true } : e(argv, o)));
-    expect(await gcePatch(GCE, timeout.exec, timeout.s, timeout.v, newLatch(), 3600)).toEqual({ outcome: "unknown", why: "patch: credreq timed out after 3930 s" });
+    expect(await gcePatch(GCE, timeout.exec, timeout.s, timeout.v, newLatch(), 3600)).toEqual({ outcome: "unknown", why: "patch: the broker client timed out after 3930 s" });
     const thrown = await minted(undefined, (e) => async (argv, o) => {
       if (argv[1] === "cloud.osc.patch") throw new Error("spawn failed");
       return e(argv, o);
@@ -100,12 +100,12 @@ describe("gcePatch", () => {
   });
 
   test.each([
-    ["a denied card", { status: "denied", reason: "operator said no" }, "patch: card denied, nothing ran: operator said no"],
-    ["an expired card", { status: "expired" }, "patch: card expired, nothing ran"],
+    ["a denied approval", { status: "denied", reason: "operator said no" }, "patch: approval denied, nothing ran: operator said no"],
+    ["an expired approval", { status: "expired" }, "patch: approval expired, nothing ran"],
     ["a broker refusal", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, refused: "gce-osc: approves held" } }, "patch: refused by the broker, nothing ran: gce-osc: approves held"],
-    ["a card approved while the role is still busy (Q-5)", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, refused: "gce-osc: role busy" } }, "patch: refused by the broker, nothing ran: gce-osc: role busy"],
-    ["a VM the broker suspended (Q-7)", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, refused: "gce-osc: vm suspended" } }, "patch: refused by the broker, nothing ran: gce-osc: vm suspended"],
-    ["a Lock epoch change before the send, which voids the intent (rev 15 §8.5)", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, refused: "gce-osc: locked" } }, "patch: refused by the broker, nothing ran: gce-osc: locked"],
+    ["an approval granted while the role is still busy", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, refused: "gce-osc: role busy" } }, "patch: refused by the broker, nothing ran: gce-osc: role busy"],
+    ["a VM the broker suspended", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, refused: "gce-osc: vm suspended" } }, "patch: refused by the broker, nothing ran: gce-osc: vm suspended"],
+    ["a Lock epoch change before the send, which voids the intent", { status: "approved", result: { run_id: runOf(VM_A), seq: 2, refused: "gce-osc: locked" } }, "patch: refused by the broker, nothing ran: gce-osc: locked"],
   ] as [string, FakeReply, string][])("%s is blocked with nothing ran, and latches", async (_what, reply, why) => {
     const { exec, s, v } = await minted(reply);
     const latch: PatchLatch = newLatch();
@@ -115,7 +115,7 @@ describe("gcePatch", () => {
     expect(patchSummary(r as Exclude<typeof r, { outcome: "started" }>)).toBe("blocked — nothing ran (see the targets log)");
   });
 
-  test("the patch reply's seq is recorded, so a later answer cannot reuse it (rev 13 §8)", async () => {
+  test("the patch reply's seq is recorded, so a later answer cannot reuse it", async () => {
     const { exec, s, v } = await minted();
     await gcePatch(GCE, exec, s, v, newLatch(), 3600);
     expect(s.seqs).toEqual([1, 2]);
@@ -150,9 +150,9 @@ describe("gcePatch", () => {
       expect(await gcePatch(GCE, other.exec, other.s, other.v, newLatch(), 3600)).toEqual({ outcome: "unknown", why: `patch: a refusal for another run (${OTHER_RUN}, expected ${runOf(VM_A)}): gce-osc: verdict refused`, requestId: "req-2" });
     });
 
-    test("a plain card denial takes no seq; the next answer continues from the last", async () => {
+    test("a plain approval denial takes no seq; the next answer continues from the last", async () => {
       const { exec, s, v } = await deniedThenStatus("operator said no", 2);
-      expect(await gcePatch(GCE, exec, s, v, newLatch(), 3600)).toEqual({ outcome: "refused", sent: true, why: "patch: card denied, nothing ran: operator said no", requestId: "req-2" });
+      expect(await gcePatch(GCE, exec, s, v, newLatch(), 3600)).toEqual({ outcome: "refused", sent: true, why: "patch: approval denied, nothing ran: operator said no", requestId: "req-2" });
       expect(s.seqs).toEqual([1]);
       expect((await gceRead(GCE, exec, s, "job.status", { vm: VM_A })).ok).toBe(true);
       expect(s.seqs).toEqual([1, 2]);

@@ -58,18 +58,18 @@ describe("oupdate host", () => {
       expect(existsSync(join(state, "inventory.json"))).toBe(true);
       expect(existsSync(join(state, "reports", "2026-10-21.json"))).toBe(true);
       expect(one.report.compare?.upgraded.baseline).toBe(false);
-      expect(one.text).toMatch(/^host hosta 2026-10-21: .*DIFFERS from the previous updater; agreeing weeks in a row: 0/);
-      expect(one.text).toContain("outdated, not held by the previous updater: brotli npm");
+      expect(one.text).toMatch(/^host hosta 2026-10-21: .*DIFFERS from host-update; agreeing weeks in a row: 0/);
+      expect(one.text).toContain("outdated, not held by host-update: brotli npm");
       const two = await hostMain(a, { ...fixtureRunner(), feed: { query: async () => [] }, now: new Date("2026-10-21T21:00:00") });
       expect(two.report.compare?.upgraded.baseline).toBe(true);
       // nothing changed between the two snapshots, while the previous updater claims upgrades
-      expect(two.report.compare?.upgraded.onlySecureUpdate).toContain("example-tool");
+      expect(two.report.compare?.upgraded.onlyPrevious).toContain("example-tool");
     } finally {
       rmSync(state, { recursive: true, force: true });
     }
   });
 
-  test("a missing the previous updater log: report with a note, no comparison", async () => {
+  test("a missing previous updater log: report with a note, no comparison", async () => {
     const state = mkdtempSync(join(tmpdir(), "oupdate-host-"));
     try {
       const r = await hostMain({ host: "hosta", state, prevLog: join(state, "absent.log") }, { ...fixtureRunner(), feed: { query: async () => [] }, now: new Date("2026-10-21T20:00:00") });

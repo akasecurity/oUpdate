@@ -1,4 +1,4 @@
-// The npm globals phase, ported minimally from the previous updater's npm_section (slice 7).
+// The npm globals phase, ported minimally from the previous updater's npm phase (slice 7).
 import { describe, expect, test } from "bun:test";
 import type { Exec } from "../../src/apply/exec.ts";
 import { npmHardHit, npmSection, parseNpmOutdated, type NpmOptions } from "../../src/apply/npm.ts";

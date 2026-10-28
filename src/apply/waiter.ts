@@ -7,7 +7,7 @@
 // The waiter script's contract: `--holder` prints the pid of a running waiter (rc 0) or fails;
 // `--recover` undoes a drain a dead waiter left behind; `<keg>` waits and restarts. A hold file
 // stops every start or restart; a quarantine file (an install that did not match its review)
-// too. Both notes avoid the status reader's trouble words: a held service is the intended state.
+// too. Both notes avoid a status reader's trouble words: a held service is the intended state.
 
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, statSync } from "node:fs";

@@ -1,6 +1,6 @@
 // Ordered diff for the reviewer prompt. Replaces a set-based diff that dropped any line
 // present anywhere in both versions, which made changed files look truncated to the
-// model (node-ipc 12.0.0's `}` in the 10-27 extended eval, an earlier change).
+// model (node-ipc 12.0.0's `}` in the 10-27 extended eval).
 
 export type Op = { op: "=" | "-" | "+"; v: string };
 

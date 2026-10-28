@@ -28,7 +28,7 @@ describe("decodeJob", () => {
   });
 });
 
-describe("decodeJob, the broker's post-check (rev 12 §8.6)", () => {
+describe("decodeJob, the broker's post-check", () => {
   test("post is clean, drift or not-checked once the post-check has finished", () => {
     for (const post of ["clean", "drift", "not-checked"] as const) {
       const d = decodeJob(job(VM_A, "SUCCEEDED", "SUCCEEDED", JOB_END, post), J);
@@ -44,7 +44,7 @@ describe("decodeJob, the broker's post-check (rev 12 §8.6)", () => {
   });
 });
 
-describe("decodeJobByRun (rev 14 §8.6)", () => {
+describe("decodeJobByRun", () => {
   test("the run's latest job, or an orphan intent with its post-check result if any", () => {
     expect(decodeJobByRun(job(VM_A, "PATCHING", "STARTED"))).toMatchObject({ ok: true, value: { kind: "job", job: { jobId: J, state: "PATCHING" } } });
     expect(decodeJobByRun({ intent: { intent_id: "int-0001", state: "orphan" } })).toEqual({ ok: true, value: { kind: "orphan", intentId: "int-0001" } });
@@ -52,7 +52,7 @@ describe("decodeJobByRun (rev 14 §8.6)", () => {
     expect(decodeJobByRun({ intent: { intent_id: "int-0001", state: "running" } })).toEqual({ ok: false, why: 'job.status.intent.state is not valid: "running"' });
   });
 
-  test("a voided intent (rev 15 §8.6) decodes, and never with a post-check result", () => {
+  test("a voided intent decodes, and never with a post-check result", () => {
     expect(decodeJobByRun({ intent: { intent_id: "int-0002", state: "void" } })).toEqual({ ok: true, value: { kind: "void", intentId: "int-0002" } });
     expect(decodeJobByRun({ intent: { intent_id: "int-0002", state: "void" }, post: "clean" })).toEqual({ ok: false, why: "job.status: a voided intent has no post-check result" });
     expect(decodeJobByRun({ intent: { intent_id: "int 1", state: "orphan" } })).toEqual({ ok: false, why: 'job.status.intent.intent_id is not valid: "int 1"' });

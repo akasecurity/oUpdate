@@ -1,4 +1,4 @@
-// gce-patch reads: one credreq call per read with the VM as the target, the VM's run minted by its first inventory and
+// gce-patch reads: one broker client call per read with the VM as the target, the VM's run minted by its first inventory and
 // carried after, each inventory answer kept with its seq, and every refusal, run change, cap or seq fault a failure.
 import { describe, expect, test } from "bun:test";
 import type { Exec } from "../../src/apply/exec.ts";
@@ -6,18 +6,18 @@ import { decodeInventory } from "../../src/targets/gce/answer.ts";
 import { gceRead, newGceSession } from "../../src/targets/gce/broker.ts";
 import { decodeJob, decodeJobByRun } from "../../src/targets/gce/job.ts";
 import { patchReply } from "../../src/targets/gce/patch.ts";
-import { evidenceSha } from "../../src/targets/nas/broker.ts";
+import { evidenceSha } from "../../src/targets/broker/broker.ts";
 import { BOOT, BOOT2, OTHER_RUN, GCE, gceExec, inventory, job, jobOf, runOf, VM_A, type FakeGce } from "./fake-gce.ts";
 
 const SCENE: FakeGce = { vms: { [VM_A]: { inventory: [inventory(), inventory({ updateTime: "2026-10-26T03:30:00Z" })], jobs: [job(VM_A, "PATCHING", "STARTED")] } } };
 
 describe("gceRead", () => {
-  test("the first inventory is one credreq call with the VM as target and no run id; it mints the VM's run", async () => {
+  test("the first inventory is one broker client call with the VM as target and no run id; it mints the VM's run", async () => {
     const { exec, calls, requests } = gceExec(SCENE);
     const s = newGceSession(VM_A);
     expect(await gceRead(GCE, exec, s, "inventory")).toEqual({ ok: true, answer: inventory() });
-    expect(calls[0]!.argv).toEqual(["/opt/credreq", "cloud.osc.read", VM_A, "--why", "oupdate inventory", "--wait", "315", "--param", "verb=inventory"]);
-    expect(calls[0]!.env).toEqual({ CREDBROKER_BASE_URL: "https://broker.example.invalid" });
+    expect(calls[0]!.argv).toEqual(["/opt/broker-client", "cloud.osc.read", VM_A, "--why", "oupdate inventory", "--wait", "315", "--param", "verb=inventory"]);
+    expect(calls[0]!.env).toEqual({ BROKER_BASE_URL: "https://broker.example.invalid" });
     expect(calls[0]!.timeoutMs).toBe(345_000);
     expect(s.runId).toBe(runOf(VM_A));
     expect(s.evidence).toEqual([{ seq: 1, answer: JSON.stringify({ run_id: runOf(VM_A), seq: 1, boot: BOOT, ...inventory() }) }]);
@@ -76,7 +76,7 @@ describe("gceRead", () => {
     expect(await gceRead(GCE, exec, s, "inventory")).toEqual({ ok: false, why: "inventory: the broker's seq 1 repeats" });
   });
 
-  test("every answer carries a seq, refusals included, and no seq repeats across verbs (rev 12 §8)", async () => {
+  test("every answer carries a seq, refusals included, and no seq repeats across verbs", async () => {
     const noSeq = gceExec({ vms: { [VM_A]: { inventory: [inventory()], replies: { "job.status": { status: "approved", result: { run_id: runOf(VM_A), ...job(VM_A, "PATCHING", "STARTED") } } } } } });
     const s1 = newGceSession(VM_A);
     await gceRead(GCE, noSeq.exec, s1, "inventory");
@@ -88,7 +88,7 @@ describe("gceRead", () => {
     expect(s2.evidence.map((e) => e.seq)).toEqual([1]);
   });
 
-  test("job.status answers are seq-counted but never evidence; by run it asks with {run_id, vm} (rev 14 §8.6)", async () => {
+  test("job.status answers are seq-counted but never evidence; by run it asks with {run_id, vm}", async () => {
     const { exec, calls } = gceExec(SCENE);
     const s = newGceSession(VM_A);
     await gceRead(GCE, exec, s, "inventory");
@@ -119,7 +119,7 @@ describe("gceRead", () => {
     expect(first).toEqual({ ok: false, why: "inventory: the broker's seq 1 is not the next one (expected 5)" });
   });
 
-  test("seqs run 1, 2, 3 … with no gap: an initial gap and a middle gap are refused (rev 13 §8)", async () => {
+  test("seqs run 1, 2, 3 … with no gap: an initial gap and a middle gap are refused", async () => {
     const initial = gceExec({ vms: { [VM_A]: { replies: { inventory: { status: "approved", result: { run_id: runOf(VM_A), seq: 2, ...inventory() } } } } } });
     expect(await gceRead(GCE, initial.exec, newGceSession(VM_A), "inventory")).toEqual({ ok: false, why: "inventory: the broker's seq 2 is not the next one (expected 1)" });
     const middle = gceExec({ vms: { [VM_A]: { inventory: [inventory()], replies: { "job.status": { status: "approved", result: { run_id: runOf(VM_A), seq: 3, ...job(VM_A, "PATCHING", "STARTED") } } } } } });
@@ -128,8 +128,8 @@ describe("gceRead", () => {
     expect(await gceRead(GCE, middle.exec, s, "job.status", { job_id: jobOf(VM_A) })).toEqual({ ok: false, why: "job.status: the broker's seq 3 is not the next one (expected 2)" });
   });
 
-  test("the evidence sha is rev 14a §8.4: the whole answer object re-serialized as received, in seq order (vector, placeholder values)", async () => {
-    // The b129-vectors/evidence-sha.ts vector (rev 15c: hex run id and boot after seq), with only the VM name swapped for
+  test("the evidence sha: the whole answer object re-serialized as received, in seq order (vector, placeholder values)", async () => {
+    // The broker's evidence-sha test vector (hex run id and boot after seq), with only the VM name swapped for
     // a placeholder: seq 1 compact with a \u00e9 escape, seq 3 with spaces and a trailing newline. Its own expected sha is
     // computed the vector's way.
     const a1 = '{"run_id":"7c1d0e9f2a3b4c5d6e7f8091a2b3c4d5","seq":1,"boot":"0f1e2d3c4b5a69788796a5b4c3d2e1f0","vm":"vm-a","instance_id":"123","update_time":"2026-10-26T07:00:00Z","os_info":{"short_name":"ubuntu","version":"24.04","architecture":"x86_64","kernel_version":"6.8.0"},"installed":[{"name":"caf\\u00e9","version":"1"}],"candidates":[{"name":"openssl","installed":"3.0.13-0ubuntu3.4","available":"3.0.13-0ubuntu3.5","broker":{"security":{"suite":"noble-security"}}}]}';
@@ -155,7 +155,7 @@ describe("gceRead", () => {
     expect(s.evidence).toEqual([]);
   });
 
-  describe("boot (rev 15a §8)", () => {
+  describe("boot", () => {
     test.each([
       ["no boot", { boot: null }],
       ["a boot that is not 32 hex characters", { boot: "ABC" }],
@@ -204,7 +204,7 @@ describe("gceRead", () => {
       gceExec({ vms: { [VM_A]: { inventory: [inventory()], replies: { "job.status": (p) => (p.job_id ? { status: "denied", reason } : { status: "approved", result: { run_id: run, seq: next, ...job(VM_A, "PATCHING", "STARTED") } }) } } } });
     const refusal = (over: Record<string, unknown>) => JSON.stringify({ run_id: run, seq: 2, boot: BOOT, refused: "gce-osc: unknown job", ...over });
 
-    test("a §8 refusal in the deny reason takes its seq, so the next read at seq + 1 succeeds", async () => {
+    test("a structured refusal in the deny reason takes its seq, so the next read at seq + 1 succeeds", async () => {
       const { exec } = scene(`  ${refusal({})}\n`, 3);
       const s = newGceSession(VM_A);
       await gceRead(GCE, exec, s, "inventory");
@@ -228,7 +228,7 @@ describe("gceRead", () => {
 
     test.each([
       ["plain text", "caller not listed"],
-      ["JSON with no §8 shape", JSON.stringify({ refuse: "unknown key: x" })],
+      ["JSON with no refusal shape", JSON.stringify({ refuse: "unknown key: x" })],
       ["a refusal without the gce-osc prefix", JSON.stringify({ run_id: run, seq: 2, boot: BOOT, refused: "unknown job" })],
       ["a refusal with no boot", JSON.stringify({ run_id: run, seq: 2, refused: "gce-osc: unknown job" })],
     ])("a deny reason that is %s takes no seq; the next answer continues from the last", async (_what, reason) => {
@@ -241,7 +241,7 @@ describe("gceRead", () => {
       expect(s.seqs).toEqual([1, 2]);
     });
 
-    test("only a denied status is read for a refusal: an expired card with the same text takes no seq", async () => {
+    test("only a denied status is read for a refusal: an expired approval with the same text takes no seq", async () => {
       const { exec } = gceExec({ vms: { [VM_A]: { inventory: [inventory()], replies: { "job.status": { status: "expired", reason: refusal({}) } } } } });
       const s = newGceSession(VM_A);
       await gceRead(GCE, exec, s, "inventory");
@@ -265,7 +265,7 @@ describe("gceRead", () => {
     });
   });
 
-  describe("run id and the exact §8 shapes (rev 15c)", () => {
+  describe("run id and the exact answer shapes", () => {
     test("a run id that is not 32 lowercase hex is refused", async () => {
       for (const id of ["run-vm-a-0001", "7C1D0E9F2A3B4C5D6E7F8091A2B3C4D5", "7c1d0e9f2a3b4c5d6e7f8091a2b3c4d"]) {
         const { exec } = gceExec({ vms: { [VM_A]: { replies: { inventory: { status: "approved", result: { run_id: id, seq: 1, ...inventory() } } } } } });
@@ -273,7 +273,7 @@ describe("gceRead", () => {
       }
     });
 
-    test("every §8 answer, with boot right after seq, passes the strict decoders: inventory, job.status, orphan, void, refusal, patch", async () => {
+    test("every answer shape, with boot right after seq, passes the strict decoders: inventory, job.status, orphan, void, refusal, patch", async () => {
       const run = runOf(VM_A);
       const head = (seq: number) => ({ run_id: run, seq, boot: BOOT });
       const bodies = [

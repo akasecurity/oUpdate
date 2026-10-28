@@ -110,7 +110,7 @@ export async function proposeBranch(i: ProposeInput): Promise<ProposeResult> {
   }
 }
 
-export interface TrainAskInput {
+export interface ProposalInput {
   target: string;
   repo: string;
   remote: string;
@@ -125,9 +125,9 @@ export interface TrainAskInput {
   held: string[];
 }
 
-export function proposalText(a: TrainAskInput): string {
+export function proposalText(a: ProposalInput): string {
   const lines = [
-    `oupdate proposal: ${a.target}`,
+    `oupdate pin proposal: ${a.target}`,
     "",
     `Branch:   ${a.branch}`,
     `Commit:   ${a.commit} on ${a.remote}/${a.base} ${a.baseSha}`,

@@ -1,4 +1,4 @@
-// Ported from the previous updater's tap-approval and Type B cases (test/port/03): the review routing,
+// Ported from the previous updater's tap-approval and Type B cases: the review routing,
 // the install-time tap pin, the off-tap dependency gate and the advisory review of unapproved taps.
 import { afterAll, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";

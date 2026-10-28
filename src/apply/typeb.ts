@@ -1,6 +1,5 @@
 // Type B upgrades (packages from a reviewed third-party tap), ported from the previous updater's
-// type_b_brew_review, su_type_b_upgrades, su_tap_unchanged_since_review,
-// su_offtap_deps_current and su_awaiting_tap_approval.
+// Type B review, Type B upgrades, tap-unchanged and off-tap dependency checks and tap approval.
 //
 // Not ported yet, so held (fail closed) with a notice that says so:
 //   - a source-built package: its source diff review (the GitHub compare) is a later slice, so

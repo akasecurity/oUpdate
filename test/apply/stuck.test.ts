@@ -1,4 +1,4 @@
-// Ported from the previous updater's stuck-tracking and pin cases (test/port/04 and the pin rule, §9b).
+// Ported from the previous updater's stuck-tracking and pin cases.
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

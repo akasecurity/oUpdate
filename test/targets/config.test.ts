@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { parseTargetsConfig } from "../../src/targets/config.ts";
 import { groupKeys } from "../../src/targets/pins/config.ts";
-import { isDue } from "../../src/targets/model.ts";
+import { isDue, isPluginLeg } from "../../src/targets/model.ts";
+import { testRegistry } from "./fake-broker.ts";
+import { makeRegistry } from "../../src/targets/registry.ts";
 
 const PIN_LEG = {
   kind: "pin-bump",
@@ -21,14 +23,15 @@ const ROOT = () => ({
   reviewer: { type: "command", name: "local", argv: ["/bin/cat"] },
   targets: [
     { id: "images", os: "linux", reach: { kind: "git", repo: "/repo" }, legs: [PIN_LEG], schedule: "weekly:sun", summaryTo: "/srv/oupdate/status/images.tsv" },
-    { id: "storage-box", os: "nasos", reach: { kind: "broker-script", host: "box-1", actions: ["storage.read"], baseUrl: "https://broker.example.invalid" }, legs: [{ kind: "docker-compose" }, { kind: "nas-os" }], schedule: "nightly", summaryTo: "/srv/oupdate/status/storage-box.tsv" },
+    { id: "host-a", os: "test-os", reach: { kind: "test-broker" }, legs: [{ kind: "docker-compose" }, { kind: "test-leg" }], schedule: "nightly", summaryTo: "/srv/oupdate/status/host-a.tsv" },
     { id: "vm-one", os: "linux", reach: { kind: "vm-agent", vm: "vm-one", agent: "agent-one" }, legs: [{ kind: "docker-compose" }], schedule: "nightly", summaryTo: "/srv/oupdate/status/vm-one.tsv" },
     { id: "stack", os: "macos", reach: { kind: "docker", on: "images" }, legs: [{ kind: "docker-compose" }], schedule: "nightly", summaryTo: "/srv/oupdate/status/stack.tsv" },
     { id: "laptop", os: "macos", reach: { kind: "local" }, legs: [{ kind: "brew" }], schedule: "nightly", summaryTo: "/srv/oupdate/status/laptop.tsv" },
     { id: "vm-set", os: "linux", reach: GP, legs: [{ kind: "os-packages", seenTo: "/srv/oupdate/state/vm-set-seen.json" }], schedule: "nightly", summaryTo: "/srv/oupdate/status/vm-set.tsv" },
   ],
 });
-const parse = (v: unknown) => parseTargetsConfig(JSON.stringify(v));
+const REG = testRegistry();
+const parse = (v: unknown) => parseTargetsConfig(JSON.stringify(v), process.env, REG);
 const withTarget = (i: number, over: Record<string, unknown>) => {
   const r = ROOT();
   (r.targets as Record<string, unknown>[])[i] = { ...r.targets[i], ...over };
@@ -40,17 +43,17 @@ describe("parseTargetsConfig", () => {
     const c = parse(ROOT());
     expect(c.logDir).toBe("/srv/oupdate/log");
     expect(c.reviewer).toMatchObject({ type: "command", name: "local" });
-    expect(c.targets.map((t) => t.reach.kind)).toEqual(["git", "broker-script", "vm-agent", "docker", "local", "gce-patch"]);
+    expect(c.targets.map((t) => t.reach.kind)).toEqual(["git", "test-broker", "vm-agent", "docker", "local", "gce-patch"]);
     expect(c.targets[0]!.reach).toEqual({ kind: "git", repo: "/repo", remote: "origin", base: "main" });
     expect(c.targets[0]!.schedule).toEqual({ every: "week", day: 0 });
     expect(c.targets[1]!.schedule).toEqual({ every: "night" });
     expect(c.targets[0]!.legs[0]).toMatchObject({ kind: "pin-bump", cooldownDays: 2 });
-    expect(c.targets[1]!.legs).toEqual([{ kind: "docker-compose", apply: false, prune: true }, { kind: "nas-os" }]);
+    expect(c.targets[1]!.legs).toEqual([{ kind: "docker-compose", apply: false, prune: true }, { kind: "test-leg", plugin: true }]);
   });
 
   test("gce-patch needs a project id, distinct VM names, one read action, at most one patch action and a base URL", () => {
     const at = (reach: unknown) => () => parse(withTarget(5, { reach }));
-    expect(parse(ROOT()).targets[5]!.reach).toEqual({ ...GP, credreq: "credreq" });
+    expect(parse(ROOT()).targets[5]!.reach).toEqual({ ...GP, client: "broker-client" });
     expect(at({ ...GP, project: "Proj_One" })).toThrow("targets[5].reach.project");
     expect(at({ ...GP, vms: [] })).toThrow("targets[5].reach.vms must be a non-empty array");
     expect(at({ ...GP, vms: ["vm-one", "*"] })).toThrow("targets[5].reach.vms");
@@ -59,7 +62,19 @@ describe("parseTargetsConfig", () => {
     expect(at({ ...GP, actions: ["cloud.osc.patch"] })).toThrow("targets[5].reach.actions must be one <name>.read action and at most one <name>.patch action");
     expect(at({ ...GP, actions: ["cloud.osc.read", "cloud.osc.write"] })).toThrow("targets[5].reach.actions must be one <name>.read action and at most one <name>.patch action");
     expect(at({ ...GP, baseUrl: undefined })).toThrow("targets[5].reach.baseUrl is required");
-    expect(at({ ...GP, credreq: "bin/credreq" })).toThrow("targets[5].reach.credreq must be an absolute path");
+    expect(at({ ...GP, client: "bin/broker-client" })).toThrow("targets[5].reach.client must be an absolute path");
+  });
+
+  test("a plugin's older key names are read as the current ones, and its client command is the default", () => {
+    const reg = { ...REG, compat: makeRegistry([{ compat: { configKeys: { brokerCmd: "client", askDir: "proposalDir" }, brokerClient: { command: "legacy-client" } } }]).compat };
+    const text = (reach: unknown) => JSON.stringify(withTarget(5, { reach }));
+    expect(parseTargetsConfig(text(GP), {}, reg).targets[5]!.reach).toEqual({ ...GP, client: "legacy-client" });
+    expect(parseTargetsConfig(text({ ...GP, brokerCmd: "/opt/old" }), {}, reg).targets[5]!.reach).toEqual({ ...GP, client: "/opt/old" });
+    // Both names at once: the current one wins and the strict parser names the old one.
+    expect(() => parseTargetsConfig(text({ ...GP, brokerCmd: "/opt/old", client: "/opt/new" }), {}, reg)).toThrow("targets[5].reach: unknown key brokerCmd");
+    const { proposalDir, ...rest } = PIN_LEG;
+    const asks = withTarget(0, { legs: [{ ...rest, askDir: proposalDir }] });
+    expect(parseTargetsConfig(JSON.stringify(asks), {}, reg).targets[0]!.legs[0]).toMatchObject({ kind: "pin-bump", proposalDir: "/asks" });
   });
 
   test("a VM appears in at most one gce-patch target, across projects too", () => {
@@ -71,16 +86,16 @@ describe("parseTargetsConfig", () => {
   });
 
   test("os-packages: defaults, a linux gce-patch target only, apply only with a patch action, and its own first-seen file", () => {
-    expect(parse(ROOT()).targets[5]!.legs).toEqual([{ kind: "os-packages", apply: false, cooldownDays: 2, cardWaitS: 3600, seenTo: "/srv/oupdate/state/vm-set-seen.json" }]);
+    expect(parse(ROOT()).targets[5]!.legs).toEqual([{ kind: "os-packages", apply: false, cooldownDays: 2, approvalWaitS: 3600, seenTo: "/srv/oupdate/state/vm-set-seen.json" }]);
     const legAt = (l: Record<string, unknown>, over: Record<string, unknown> = {}) => () => parse(withTarget(5, { legs: [{ kind: "os-packages", seenTo: "/s/seen.json", ...l }], ...over }));
-    expect(legAt({ apply: true, cooldownDays: 0, cardWaitS: 600 })().targets[5]!.legs[0]).toEqual({ kind: "os-packages", apply: true, cooldownDays: 0, cardWaitS: 600, seenTo: "/s/seen.json" });
+    expect(legAt({ apply: true, cooldownDays: 0, approvalWaitS: 600 })().targets[5]!.legs[0]).toEqual({ kind: "os-packages", apply: true, cooldownDays: 0, approvalWaitS: 600, seenTo: "/s/seen.json" });
     expect(legAt({}, { os: "macos" })).toThrow("targets[5].legs[0]: os-packages needs a linux target with a gce-patch reach");
     expect(legAt({}, { reach: { kind: "vm-agent", vm: "vm-one", agent: "agent-one" } })).toThrow("targets[5].legs[0]: os-packages needs a linux target with a gce-patch reach");
     expect(legAt({ apply: true }, { reach: { ...GP, actions: ["cloud.osc.read"] } })).toThrow("targets[5].legs[0]: apply needs a gce-patch reach with a .patch action");
     expect(legAt({ seenTo: "seen.json" })).toThrow("targets[5].legs[0].seenTo must be an absolute path");
     expect(legAt({ seenTo: "/s/seen.txt" })).toThrow("targets[5].legs[0].seenTo must end in .json");
-    expect(legAt({ cardWaitS: 30 })).toThrow("targets[5].legs[0].cardWaitS must be a whole number of seconds from 60 to 5400");
-    expect(legAt({ cardWaitS: 6000 })).toThrow("targets[5].legs[0].cardWaitS must be a whole number of seconds from 60 to 5400");
+    expect(legAt({ approvalWaitS: 30 })).toThrow("targets[5].legs[0].approvalWaitS must be a whole number of seconds from 60 to 5400");
+    expect(legAt({ approvalWaitS: 6000 })).toThrow("targets[5].legs[0].approvalWaitS must be a whole number of seconds from 60 to 5400");
     expect(legAt({ extra: 1 })).toThrow("targets[5].legs[0]: unknown key extra");
     const two = ROOT();
     (two.targets as Record<string, unknown>[])[2] = { id: "vm-two", os: "linux", reach: { ...GP, vms: ["vm-three"] }, legs: [{ kind: "os-packages", seenTo: "/srv/oupdate/state/vm-set-seen.json" }], schedule: "nightly", summaryTo: "/srv/oupdate/status/vm-two.tsv" };
@@ -113,15 +128,15 @@ describe("parseTargetsConfig", () => {
   });
 
   test("os, reach, legs and schedule are checked", () => {
-    expect(() => parse(withTarget(0, { os: "windows" }))).toThrow("targets[0].os must be macos, nasos or linux");
-    expect(() => parse(withTarget(0, { reach: { kind: "ssh" } }))).toThrow("targets[0].reach.kind must be local, git, broker-script, vm-agent, gce-patch or docker");
+    expect(() => parse(withTarget(0, { os: "windows" }))).toThrow("targets[0].os must be macos, linux or test-os");
+    expect(() => parse(withTarget(0, { reach: { kind: "ssh" } }))).toThrow("targets[0].reach.kind must be local, git, vm-agent, gce-patch, docker or test-broker");
     expect(() => parse(withTarget(0, { reach: { kind: "git", repo: "/repo", base: "a/../b" } }))).toThrow("targets[0].reach.base must be a branch name");
-    expect(() => parse(withTarget(1, { reach: { kind: "broker-script", host: "box-1", actions: [] } }))).toThrow("targets[1].reach.actions must be a non-empty array");
+    expect(() => parse(withTarget(1, { reach: { kind: "test-broker", extra: 1 } }))).toThrow("targets[1].reach: unknown key extra");
     expect(() => parse(withTarget(3, { reach: { kind: "docker", on: "nowhere" } }))).toThrow("targets[3].reach.on names no other target: nowhere");
     expect(() => parse(withTarget(3, { reach: { kind: "docker", on: "stack" } }))).toThrow("targets[3].reach.on names no other target: stack");
     expect(() => parse(withTarget(0, { legs: [] }))).toThrow("targets[0].legs must be a non-empty array");
     expect(() => parse(withTarget(0, { legs: [{ kind: "flatpak" }] }))).toThrow("targets[0].legs[0].kind must be pin-bump, os-packages or one of");
-    expect(() => parse(withTarget(1, { legs: [{ kind: "nas-os", extra: 1 }] }))).toThrow("targets[1].legs[0]: unknown key extra");
+    expect(() => parse(withTarget(1, { legs: [{ kind: "test-leg", extra: 1 }] }))).toThrow("targets[1].legs[0]: unknown key extra");
     expect(() => parse(withTarget(0, { schedule: "hourly" }))).toThrow('targets[0].schedule must be "nightly" or "weekly:<sun|mon|tue|wed|thu|fri|sat>"');
   });
 
@@ -135,19 +150,19 @@ describe("parseTargetsConfig", () => {
     expect(c.targets).toHaveLength(1);
     const t = c.targets[0]!;
     expect(t.reach).toEqual({ kind: "git", repo: "/repo/example", remote: "origin", base: "main" });
-    expect(t.legs.map((l) => (l.kind === "pin-bump" ? l.pinsPath : l.kind))).toEqual(["sandbox/base/pins.env", "sandbox/base/host-pins.env"]);
+    expect(t.legs.map((l) => (!isPluginLeg(l) && l.kind === "pin-bump" ? l.pinsPath : l.kind))).toEqual(["sandbox/base/pins.env", "sandbox/base/host-pins.env"]);
     const host = t.legs[1];
-    if (host?.kind !== "pin-bump") throw new Error("second leg is not pin-bump");
-    expect(host).toMatchObject({ branchPrefix: "oupdate/", proposalDir: "/srv/oupdate/train-asks", push: false, cooldownDays: 2 });
-    expect(host.groups.map((g) => g.name)).toEqual(["lima", "colima", "docker-cli"]);
-    const lima = host.groups[0];
-    if (lima?.source !== "github-release") throw new Error("lima is not github-release");
-    expect(lima.assetKeys).toEqual({ LIMA_ASSET: "lima-{v}-Darwin-arm64.tar.gz" });
-    const colima = host.groups[1];
-    if (colima?.source !== "github-release") throw new Error("colima is not github-release");
-    expect(colima.assetKeys).toEqual({ COLIMA_ASSET: "colima-Darwin-arm64" });
+    if (!host || isPluginLeg(host) || host.kind !== "pin-bump") throw new Error("second leg is not pin-bump");
+    expect(host).toMatchObject({ branchPrefix: "oupdate/", proposalDir: "/srv/oupdate/proposals", push: false, cooldownDays: 2 });
+    expect(host.groups.map((g) => g.name)).toEqual(["vmtool", "ctrtool", "docker-cli"]);
+    const vmtool = host.groups[0];
+    if (vmtool?.source !== "github-release") throw new Error("vmtool is not github-release");
+    expect(vmtool.assetKeys).toEqual({ VMTOOL_ASSET: "vmtool-{v}-Darwin-arm64.tar.gz" });
+    const ctrtool = host.groups[1];
+    if (ctrtool?.source !== "github-release") throw new Error("ctrtool is not github-release");
+    expect(ctrtool.assetKeys).toEqual({ CTRTOOL_ASSET: "ctrtool-Darwin-arm64" });
     expect(host.groups[2]).toMatchObject({ source: "docker-static", propose: false });
-    expect(host.groups.flatMap(groupKeys).sort()).toEqual(["COLIMA_ASSET", "COLIMA_SHA256", "COLIMA_VERSION", "DOCKER_CLI_ASSET", "DOCKER_CLI_SHA256", "DOCKER_CLI_VERSION", "LIMA_ASSET", "LIMA_SHA256", "LIMA_VERSION"]);
+    expect(host.groups.flatMap(groupKeys).sort()).toEqual(["CTRTOOL_ASSET", "CTRTOOL_SHA256", "CTRTOOL_VERSION", "DOCKER_CLI_ASSET", "DOCKER_CLI_SHA256", "DOCKER_CLI_VERSION", "VMTOOL_ASSET", "VMTOOL_SHA256", "VMTOOL_VERSION"]);
   });
 
   test("isDue: nightly every day, weekly on its day only", () => {
@@ -158,38 +173,32 @@ describe("parseTargetsConfig", () => {
     expect(isDue({ every: "week", day: 0 }, mon)).toBe(false);
   });
 
-  test("broker-script reach: one .read action, at most one .write action, a base URL, credreq defaulted", () => {
-    expect(parse(ROOT()).targets[1]!.reach).toEqual({ kind: "broker-script", host: "box-1", actions: ["storage.read"], baseUrl: "https://broker.example.invalid", credreq: "credreq" });
-    const bad = (reach: Record<string, unknown>) => () => parse(withTarget(1, { reach: { kind: "broker-script", host: "box-1", baseUrl: "https://broker.example.invalid", ...reach } }));
-    expect(bad({ actions: ["storage.write"] })).toThrow("targets[1].reach.actions must be one <name>.read action and at most one <name>.write action");
-    expect(bad({ actions: ["a.read", "b.read"] })).toThrow("must be one <name>.read action");
-    expect(bad({ actions: ["a.read", "a.exec"] })).toThrow("must be one <name>.read action");
-    expect(bad({ actions: ["a read"] })).toThrow("targets[1].reach.actions must be an array of valid non-empty strings");
-    expect(bad({ actions: ["a.read"], baseUrl: "file:///tmp/x" })).toThrow("targets[1].reach.baseUrl is not valid");
-    expect(bad({ actions: ["a.read"], credreq: "credreq" })).toThrow("targets[1].reach.credreq must be an absolute path");
-    expect(() => parse(withTarget(1, { reach: { kind: "broker-script", host: "box-1", actions: ["a.read"] } }))).toThrow("targets[1].reach.baseUrl is required");
-  });
-
-  test("NAS legs: apply defaults to false and prune to true; apply needs a write action; plugin and OS legs need a broker-script reach", () => {
+  test("docker-compose: apply defaults to false and prune to true; apply needs a reach with a write action", () => {
     const legs = (l: unknown[], reach?: unknown) => parse(withTarget(1, { legs: l, ...(reach ? { reach } : {}) })).targets[1]!.legs;
-    expect(legs([{ kind: "docker-compose", prune: false }, { kind: "nas-plugin" }])).toEqual([{ kind: "docker-compose", apply: false, prune: false }, { kind: "nas-plugin", apply: false }]);
-    expect(() => legs([{ kind: "docker-compose", apply: true }])).toThrow("targets[1].legs[0]: apply needs a broker-script reach with a .write action");
-    const rw = { kind: "broker-script", host: "box-1", actions: ["storage.read", "storage.write"], baseUrl: "https://broker.example.invalid" };
-    expect(legs([{ kind: "docker-compose", apply: true }, { kind: "nas-plugin", apply: true }], rw)).toEqual([{ kind: "docker-compose", apply: true, prune: true }, { kind: "nas-plugin", apply: true }]);
-    expect(() => parse(withTarget(2, { legs: [{ kind: "nas-os" }] }))).toThrow("targets[2].legs[0]: nas-os needs a broker-script reach");
+    expect(legs([{ kind: "docker-compose", prune: false }])).toEqual([{ kind: "docker-compose", apply: false, prune: false }]);
+    expect(() => legs([{ kind: "docker-compose", apply: true }])).toThrow("targets[1].legs[0]: apply needs a reach with a write action");
+    expect(() => parse(withTarget(2, { legs: [{ kind: "docker-compose", apply: true }] }))).toThrow("targets[2].legs[0]: apply needs a reach with a write action");
+    expect(legs([{ kind: "docker-compose", apply: true }], { kind: "test-broker", write: true })).toEqual([{ kind: "docker-compose", apply: true, prune: true }]);
     expect(() => legs([{ kind: "docker-compose", apply: "yes" }])).toThrow("targets[1].legs[0].apply must be true or false");
   });
 
+  test("a plugin's kinds parse only with the plugin loaded, and its leg check applies", () => {
+    expect(() => parse(withTarget(2, { legs: [{ kind: "test-leg" }] }))).toThrow("targets[2].legs[0]: test-leg needs a test-broker reach");
+    expect(() => parseTargetsConfig(JSON.stringify(ROOT()))).toThrow("targets[1].os must be macos or linux");
+    expect(() => parseTargetsConfig(JSON.stringify(withTarget(1, { os: "linux" })))).toThrow("targets[1].reach.kind must be local, git, vm-agent, gce-patch or docker");
+    expect(() => parseTargetsConfig(JSON.stringify(withTarget(1, { os: "linux", reach: { kind: "local" } })))).toThrow("targets[1].legs[1].kind must be pin-bump, os-packages or one of docker-compose, brew");
+  });
+
   test("parityTo and secondReviewer", () => {
-    expect(parse({ ...ROOT(), secondReviewer: { type: "command", name: "secondary", argv: ["/bin/cat"] } }).secondReviewer?.name).toBe("secondary");
+    expect(parse({ ...ROOT(), secondReviewer: { type: "command", name: "second", argv: ["/bin/cat"] } }).secondReviewer?.name).toBe("second");
     expect(parse(withTarget(1, { parityTo: "/srv/oupdate/parity/box.jsonl" })).targets[1]!.parityTo).toBe("/srv/oupdate/parity/box.jsonl");
     expect(() => parse(withTarget(1, { parityTo: "/srv/oupdate/parity/box.tsv" }))).toThrow("targets[1].parityTo must end in .jsonl");
     expect(() => parse(withTarget(1, { parityTo: "parity.jsonl" }))).toThrow("targets[1].parityTo must be an absolute path");
   });
   test("${NAME} in a config value is read from the environment; unset or empty is an error naming it (#9)", () => {
     const text = JSON.stringify({ ...ROOT(), logDir: "${OUP_LOG}/log" });
-    expect(parseTargetsConfig(text, { OUP_LOG: "/srv/oupdate" }).logDir).toBe("/srv/oupdate/log");
-    expect(() => parseTargetsConfig(text, {})).toThrow("OUP_LOG");
-    expect(() => parseTargetsConfig(text, { OUP_LOG: "" })).toThrow("OUP_LOG");
+    expect(parseTargetsConfig(text, { OUP_LOG: "/srv/oupdate" }, REG).logDir).toBe("/srv/oupdate/log");
+    expect(() => parseTargetsConfig(text, {}, REG)).toThrow("OUP_LOG");
+    expect(() => parseTargetsConfig(text, { OUP_LOG: "" }, REG)).toThrow("OUP_LOG");
   });
 });

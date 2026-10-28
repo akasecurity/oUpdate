@@ -82,7 +82,7 @@ describe("firstVerdict: line 1 must be exactly APPROVE", () => {
   });
 });
 
-// Ported from the previous updater's chunked-review cases (test/port/01, section 1a).
+// Ported from the previous updater's chunked-review cases.
 describe("reviewChunk: one chunk, at most two calls", () => {
   test("a FLAG first line is a FLAG", async () => {
     const { r } = scripted(["FLAG\nsuspicious"]);

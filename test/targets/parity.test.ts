@@ -1,31 +1,31 @@
 // Parity: the script's log read back into the same facts oupdate records, compared night by night, and the ledger's
-// streak, reset and adjudication rules (spec §6).
+// streak, reset and adjudication rules.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { addNight, compareNight, LEDGER_HEAD, ledgerStatus, parseLedger, parseScriptLog, recordFacts, renderLedger, type LedgerRow, type OupRecord } from "../../src/targets/parity.ts";
 
-const APP = "registry.example/team/app:1";
-const fixture = (n: string) => readFileSync(join(import.meta.dir, "../fixtures/nas", n), "utf8");
+const APP = "registry.example/team/app-a:1";
+const fixture = (n: string) => readFileSync(join(import.meta.dir, "../fixtures/updater", n), "utf8");
 const PLANTED_HIT = 'ENTRYPOINT/CMD changed: ["/init"]|null -> ["/bin/sh","-c","/app/hooks/prestart.sh && /init"]|null';
-const rec = (o: Partial<OupRecord> = {}): OupRecord => ({ date: "2026-10-25", target: "storage-box", rev: "r", checked: true, changed: [APP], pregate: [], verdict: { primary: "APPROVE", secondary: "APPROVE" }, plugins: ["example.plugin 2026.09.01 -> 2026.10.01"], os: "up to date", ...o });
+const rec = (o: Partial<OupRecord> = {}): OupRecord => ({ date: "2026-10-25", target: "host-a", rev: "r", checked: true, changed: [APP], pregate: [], verdict: { first: "APPROVE", second: "APPROVE" }, plugins: ["example.plugin 2026.09.01 -> 2026.10.01"], os: "up to date", ...o });
 
 describe("parseScriptLog", () => {
   test("a clean night", () => {
-    expect(parseScriptLog(fixture("script-night.log"))).toEqual({
+    expect(parseScriptLog(fixture("night.log"))).toEqual({
       date: "2026-10-25", final: "updated (1 pulled)", diffs: [{ ref: APP, diff: "RUN echo v2" }],
       changed: [APP], plugins: ["example.plugin 2026.09.01 -> 2026.10.01"], os: "up to date", pregate: [], verdict: "APPROVE/APPROVE",
     });
   });
 
   test("the planted night: the pre-gate hit, the block, the OS update", () => {
-    const n = parseScriptLog(fixture("script-planted.log"));
-    expect(n).toMatchObject({ date: "2026-10-26", final: "blocked (1 pulled — review failed)", changed: [APP], plugins: [], os: "UPDATE AVAILABLE: 7.1.4 -> 7.2.0", pregate: [PLANTED_HIT], verdict: "APPROVE/APPROVE" });
+    const n = parseScriptLog(fixture("planted.log"));
+    expect(n).toMatchObject({ date: "2026-10-26", final: "blocked (1 pulled — review failed)", changed: [APP], plugins: [], os: "UPDATE AVAILABLE: 1.4.0 -> 1.5.0", pregate: [PLANTED_HIT], verdict: "APPROVE/APPROVE" });
     expect(n.diffs).toEqual([{ ref: APP, diff: `${PLANTED_HIT}\nRUN echo v2` }]);
   });
 
   test("a night with no container or plugin section is unknown there", () => {
-    expect(parseScriptLog("=== prev-update box 2026-10-25 04:12 ===\nOS: up to date\n")).toMatchObject({ changed: "unknown", plugins: "unknown", os: "up to date" });
+    expect(parseScriptLog("=== host-update box 2026-10-25 03:00 ===\nOS: up to date\n")).toMatchObject({ changed: "unknown", plugins: "unknown", os: "up to date" });
     expect(parseScriptLog("containers: all images up to date\n").changed).toEqual([]);
     expect(parseScriptLog("  LLM review skipped — AI host unreachable\n").verdict).toBe("unavailable/not asked");
   });
@@ -33,17 +33,17 @@ describe("parseScriptLog", () => {
 
 describe("compareNight", () => {
   test("oupdate's record and the script's log agree on a clean night", () => {
-    const c = compareNight("2026-10-25", recordFacts(rec()), parseScriptLog(fixture("script-night.log")));
+    const c = compareNight("2026-10-25", recordFacts(rec()), parseScriptLog(fixture("night.log")));
     expect(c).toEqual({ date: "2026-10-25", fields: { changed: true, plugins: true, os: true, pregate: true }, match: true, verdictOupdate: "APPROVE/APPROVE", verdictScript: "APPROVE/APPROVE" });
   });
 
   test("and on the planted night", () => {
-    const r = rec({ date: "2026-10-26", pregate: [PLANTED_HIT], plugins: [], os: "UPDATE AVAILABLE: 7.1.4 -> 7.2.0" });
-    expect(compareNight("2026-10-26", recordFacts(r), parseScriptLog(fixture("script-planted.log"))).match).toBe(true);
+    const r = rec({ date: "2026-10-26", pregate: [PLANTED_HIT], plugins: [], os: "UPDATE AVAILABLE: 1.4.0 -> 1.5.0" });
+    expect(compareNight("2026-10-26", recordFacts(r), parseScriptLog(fixture("planted.log"))).match).toBe(true);
   });
 
   test("a differing plugin list, an unchecked night or a missing record does not match", () => {
-    const script = parseScriptLog(fixture("script-night.log"));
+    const script = parseScriptLog(fixture("night.log"));
     expect(compareNight("2026-10-25", recordFacts(rec({ plugins: [] })), script).fields.plugins).toBe(false);
     expect(compareNight("2026-10-25", recordFacts(rec({ checked: false })), script).match).toBe(false);
     expect(compareNight("2026-10-25", recordFacts(undefined), script)).toMatchObject({ match: false, fields: { changed: false, plugins: false, os: false } });

@@ -1,9 +1,10 @@
 // One host report: inventory, outdated, OSV advisories for npm globals, and the
-// shadow comparison against that day's previous updater summary. Report-only.
+// shadow comparison against that day's summary from the previous updater's log (prev-log.ts). Report-only.
 
 import { parseBrewInfo, parseBrewOutdated, parseNpmLs, parseNpmOutdated, parseDockerImages, parseSwVers, parseSoftwareUpdate, parseCliVersions, type Item, type Outdated } from "./collect.ts";
-import { parseSuSummary, type SuSummary } from "./prev-log.ts";
+import { parsePrevSummary, type PrevSummary } from "./prev-log.ts";
 import { compareRun, type Comparison } from "./compare.ts";
+import { DEFAULT_COMPAT } from "../targets/compat.ts";
 import type { Advisory, AdvisoryFeed } from "../adapters/advisory/osv.ts";
 
 export interface RawProbe {
@@ -24,7 +25,7 @@ export interface HostReport {
   inventory: Item[];
   outdated: Outdated[];
   advisories: Advisory[] | null;
-  secureUpdate: SuSummary | null;
+  previous: PrevSummary | null;
   compare: Comparison | null;
   notes: string[];
 }
@@ -33,7 +34,7 @@ export function localDate(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-export async function hostReport(a: { host: string; raw: RawProbe; prevLog: string; prev: Item[] | undefined; feed: AdvisoryFeed; now: Date }): Promise<HostReport> {
+export async function hostReport(a: { host: string; raw: RawProbe; prevLog: string; prev: Item[] | undefined; feed: AdvisoryFeed; now: Date; previousUpdater?: string }): Promise<HostReport> {
   const notes: string[] = [];
   const inventory: Item[] = [
     parseSwVers(a.raw.swVers),
@@ -49,10 +50,11 @@ export async function hostReport(a: { host: string; raw: RawProbe; prevLog: stri
   } catch (e) {
     notes.push(`advisory lookup failed: ${e instanceof Error ? e.message : String(e)}`);
   }
-  const su = parseSuSummary(a.prevLog, a.host);
-  if (!su) notes.push(`no previous updater summary for ${a.host}`);
-  else if (su.aborted) notes.push("the previous updater run aborted");
-  if (su && !a.prev) notes.push("no previous snapshot: upgrade comparison starts next run");
-  const compare = su ? compareRun({ prev: a.prev, cur: inventory, outdated, su }) : null;
-  return { host: a.host, date: su?.date ?? localDate(a.now), generatedAt: a.now.toISOString(), inventory, outdated, advisories, secureUpdate: su, compare, notes };
+  const name = a.previousUpdater ?? DEFAULT_COMPAT.previousUpdater;
+  const summary = parsePrevSummary(a.prevLog, a.host, name);
+  if (!summary) notes.push(`no ${name} summary for ${a.host}`);
+  else if (summary.aborted) notes.push(`${name} run aborted`);
+  if (summary && !a.prev) notes.push("no previous snapshot: upgrade comparison starts next run");
+  const compare = summary ? compareRun({ prev: a.prev, cur: inventory, outdated, summary }) : null;
+  return { host: a.host, date: summary?.date ?? localDate(a.now), generatedAt: a.now.toISOString(), inventory, outdated, advisories, previous: summary, compare, notes };
 }

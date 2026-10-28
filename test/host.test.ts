@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseBrewInfo, parseBrewOutdated, parseNpmLs, parseNpmOutdated, parseDockerImages, parseSwVers, parseSoftwareUpdate, parseCliVersions } from "../src/host/collect.ts";
-import { parseSuSummary } from "../src/host/prev-log.ts";
+import { parsePrevSummary } from "../src/host/prev-log.ts";
 import { compareRun, weeklyStreak } from "../src/host/compare.ts";
 import { hostReport, type RawProbe } from "../src/host/report.ts";
 
@@ -49,9 +49,9 @@ describe("collect parsers", () => {
   });
 });
 
-describe("the previous updater summary", () => {
+describe("previous updater summary", () => {
   test("last summary block of the host, with the run date", () => {
-    const s = parseSuSummary(fx("prev.log"), "hosta")!;
+    const s = parsePrevSummary(fx("prev.log"), "hosta")!;
     expect(s.date).toBe("2026-10-21");
     expect(s.brew.upgraded).toEqual(["ca-certificates", "docker", "llvm", "example-tool", "python@3.11", "python@3.15", "example-net", "example-app"]);
     expect(s.brew.stuck).toEqual(["example/svc/svc"]);
@@ -68,7 +68,7 @@ describe("the previous updater summary", () => {
       "  mas:  n/a — mas not installed",
       "=== ABORTED: host-update on hostb exited 1 — this run did NOT complete ===",
     ].join("\n");
-    const s = parseSuSummary(log, "hostb")!;
+    const s = parsePrevSummary(log, "hostb")!;
     expect(s.brew.upgraded).toEqual(["c-ares", "go", "gcloud-cli"]);
     expect(s.brew.failed).toEqual(["example-app"]);
     expect(s.brew.flagged).toEqual(["terraform"]);
@@ -78,23 +78,23 @@ describe("the previous updater summary", () => {
   });
   test("PINNED: a repo pin is held; a brew pin is left to the pinned flag", () => {
     const log = ["=== host-update hostd 2026-10-23 07:00 ===", "=== hostd summary ===", "  brew: upgraded: uv; PINNED: duckdb(example-repo) ripgrep(brew pin) brave-browser(example-browser-repo)", "  npm:  nothing to update"].join("\n");
-    expect(parseSuSummary(log, "hostd")!.brew.pinned).toEqual(["duckdb", "brave-browser"]);
+    expect(parsePrevSummary(log, "hostd")!.brew.pinned).toEqual(["duckdb", "brave-browser"]);
   });
   test("a host-named script header (=== x-host-update host date) gives the date too", () => {
     const log = ["=== hostc-host-update hostc 2026-10-21 07:00 ===", "=== hostc summary ===", "  brew: upgraded: uv", "  npm:  nothing to update", "[notify] hostc host-update done"].join("\n");
-    expect(parseSuSummary(log, "hostc")?.date).toBe("2026-10-21");
+    expect(parsePrevSummary(log, "hostc")?.date).toBe("2026-10-21");
   });
   test("npm FLAGGED holds the whole pending batch; FAILED names the package", () => {
     const flag = ["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", "  brew: upgraded: node", "  npm:  FLAGGED — reviewer unavailable; claude-code: 2.1.308"].join("\n");
-    expect(parseSuSummary(flag, "hostd")!.npm).toEqual({ upgraded: [], flagged: true, failed: [], claudeCode: "2.1.308" });
+    expect(parsePrevSummary(flag, "hostd")!.npm).toEqual({ upgraded: [], flagged: true, failed: [], claudeCode: "2.1.308" });
     const wide = ["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", "  npm:        FLAGGED — reviewer unavailable"].join("\n");
-    expect(parseSuSummary(wide, "hostd")!.npm.flagged).toBe(true);
+    expect(parsePrevSummary(wide, "hostd")!.npm.flagged).toBe(true);
     const fail = ["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", "  npm:  FAILED — agent-browser; claude-code: 2.1.308"].join("\n");
-    expect(parseSuSummary(fail, "hostd")!.npm).toEqual({ upgraded: [], flagged: false, failed: ["agent-browser"], claudeCode: "2.1.308" });
+    expect(parsePrevSummary(fail, "hostd")!.npm).toEqual({ upgraded: [], flagged: false, failed: ["agent-browser"], claudeCode: "2.1.308" });
   });
   test("claude-code: a version, the previous updater's FAILED (rc, on ver) and oupdate's FAILED (timeout, on ver)", () => {
     // Mutant caught: a FAILED claude-code part read as fine (no claudeCodeFailed), or "unknown" kept as a version.
-    const npm = (part: string) => parseSuSummary(["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", `  npm:  nothing to update; ${part}`].join("\n"), "hostd")!.npm;
+    const npm = (part: string) => parsePrevSummary(["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", `  npm:  nothing to update; ${part}`].join("\n"), "hostd")!.npm;
     expect(npm("claude-code: 2.1.309")).toEqual({ upgraded: [], flagged: false, failed: [], claudeCode: "2.1.309" });
     expect(npm("claude-code: FAILED (rc=1, on 2.1.308)")).toEqual({ upgraded: [], flagged: false, failed: [], claudeCode: "2.1.308", claudeCodeFailed: true });
     expect(npm("claude-code: FAILED (rc=1, on unknown)")).toEqual({ upgraded: [], flagged: false, failed: [], claudeCodeFailed: true });
@@ -112,11 +112,11 @@ describe("the previous updater summary", () => {
       "[notify] ⚠️ hostd Type B FLAG — terraform (formula)",
       "[advisory — not notified] ⚠️ hostd Type B FLAG — svc",
       "=== hostd summary ===",
-      "  brew: upgraded: uv; FLAGGED — awaiting tap approval: example/tap (splash 1.3.0→1.4.0, review: FLAG (formula-only, prebuilt)) — approve a tap",
+      "  brew: upgraded: uv; FLAGGED — awaiting tap approval: example/tap (gadget 1.3.0→1.4.0, review: FLAG (formula-only, prebuilt)) — approve a tap",
       "  npm:  nothing to update",
     ].join("\n");
-    const b = parseSuSummary(log, "hostd")!.brew;
-    expect(b.flagged).toEqual(["splash", "terraform", "svc"]);
+    const b = parsePrevSummary(log, "hostd")!.brew;
+    expect(b.flagged).toEqual(["gadget", "terraform", "svc"]);
     expect(b.excluded).toEqual(["zoom"]);
   });
   test("a dry run or one-off logged after the run never stands in for it (slice 7 re-review)", () => {
@@ -135,19 +135,19 @@ describe("the previous updater summary", () => {
       "  npm:  dry-run OK",
       "=== STOPPED: oupdate dry run on hostd got SIGINT — not a run, nothing more was done ===",
     ].join("\n");
-    const s = parseSuSummary(log, "hostd")!;
+    const s = parsePrevSummary(log, "hostd")!;
     expect(s.brew.failed).toEqual(["foo"]);
     expect(s.brew.upgraded).toEqual(["uv"]);
     expect(s.npm.failed).toEqual(["bar"]);
     expect(s.aborted).toBe(false);
   });
   test("no summary for the host: null", () => {
-    expect(parseSuSummary(fx("prev.log"), "other")).toBeNull();
+    expect(parsePrevSummary(fx("prev.log"), "other")).toBeNull();
   });
 });
 
 describe("compare", () => {
-  const su = { date: "2026-10-21", brew: { upgraded: ["uv", "example-app"], failed: [], flagged: ["terraform"], stuck: ["example/svc/svc"] }, npm: { upgraded: [] as string[] }, aborted: false };
+  const summary = { date: "2026-10-21", brew: { upgraded: ["uv", "example-app"], failed: [], flagged: ["terraform"], stuck: ["example/svc/svc"] }, npm: { upgraded: [] as string[] }, aborted: false };
   const prev = [
     { kind: "brew-formula" as const, name: "uv", version: "1.0" },
     { kind: "brew-cask" as const, name: "example-app", version: "1.4.3" },
@@ -163,51 +163,51 @@ describe("compare", () => {
       { kind: "brew-formula" as const, name: "example/tf/terraform", installed: "1.16.5", current: "1.16.6", pinned: false },
       { kind: "brew-formula" as const, name: "example/svc/svc", installed: "HEAD-a", current: "HEAD", pinned: false },
     ];
-    const c = compareRun({ prev, cur, outdated, su });
+    const c = compareRun({ prev, cur, outdated, summary });
     expect(c.agree).toBe(true);
-    expect(c.upgraded).toEqual({ baseline: true, onlyInventory: [], onlySecureUpdate: [] });
-    expect(c.held).toEqual({ onlyInventory: [], onlySecureUpdate: [] });
+    expect(c.upgraded).toEqual({ baseline: true, onlyInventory: [], onlyPrevious: [] });
+    expect(c.held).toEqual({ onlyInventory: [], onlyPrevious: [] });
   });
   test("disagree: an outdated package the previous updater did not hold, a claimed upgrade with no version change", () => {
     const outdated = [{ kind: "brew-formula" as const, name: "brotli", installed: "1.2.0", current: "1.2.0_1", pinned: false }];
-    const c = compareRun({ prev, cur: prev, outdated, su });
+    const c = compareRun({ prev, cur: prev, outdated, summary });
     expect(c.agree).toBe(false);
-    expect(c.upgraded.onlySecureUpdate).toEqual(["example-app", "uv"]);
+    expect(c.upgraded.onlyPrevious).toEqual(["example-app", "uv"]);
     expect(c.held.onlyInventory).toEqual(["brotli"]);
-    expect(c.held.onlySecureUpdate).toEqual(["example/svc/svc", "terraform"]);
+    expect(c.held.onlyPrevious).toEqual(["example/svc/svc", "terraform"]);
   });
   test("a package a repo pins is held: the previous updater reports it PINNED, so outdated agrees", () => {
     const outdated = [{ kind: "brew-formula" as const, name: "duckdb", installed: "1.5.5", current: "2.0.0", pinned: false }];
-    const c = compareRun({ prev, cur, outdated, su: { ...su, brew: { ...su.brew, flagged: [], stuck: [], pinned: ["duckdb"] } } });
-    expect(c.held).toEqual({ onlyInventory: [], onlySecureUpdate: [] });
+    const c = compareRun({ prev, cur, outdated, summary: { ...summary, brew: { ...summary.brew, flagged: [], stuck: [], pinned: ["duckdb"] } } });
+    expect(c.held).toEqual({ onlyInventory: [], onlyPrevious: [] });
   });
   test("a pinned outdated package is expected, not a disagreement", () => {
     const outdated = [{ kind: "brew-formula" as const, name: "brotli", installed: "1", current: "2", pinned: true }];
-    const c = compareRun({ prev, cur, outdated, su: { ...su, brew: { ...su.brew, flagged: [], stuck: [] } } });
+    const c = compareRun({ prev, cur, outdated, summary: { ...summary, brew: { ...summary.brew, flagged: [], stuck: [] } } });
     expect(c.held.onlyInventory).toEqual([]);
   });
   test("npm FLAGGED: every outdated npm global is held; FAILED holds the named one", () => {
     const outdated = [{ kind: "npm-global" as const, name: "npm", installed: "11.20.0", current: "12.2.1", pinned: false }];
-    const base = { ...su, brew: { ...su.brew, flagged: [], stuck: [] } };
-    expect(compareRun({ prev, cur, outdated, su: { ...base, npm: { upgraded: [], flagged: true, failed: [] } } }).held).toEqual({ onlyInventory: [], onlySecureUpdate: [] });
-    expect(compareRun({ prev, cur, outdated, su: { ...base, npm: { upgraded: [], flagged: false, failed: ["npm"] } } }).held).toEqual({ onlyInventory: [], onlySecureUpdate: [] });
-    expect(compareRun({ prev, cur, outdated, su: base }).held.onlyInventory).toEqual(["npm"]);
+    const base = { ...summary, brew: { ...summary.brew, flagged: [], stuck: [] } };
+    expect(compareRun({ prev, cur, outdated, summary: { ...base, npm: { upgraded: [], flagged: true, failed: [] } } }).held).toEqual({ onlyInventory: [], onlyPrevious: [] });
+    expect(compareRun({ prev, cur, outdated, summary: { ...base, npm: { upgraded: [], flagged: false, failed: ["npm"] } } }).held).toEqual({ onlyInventory: [], onlyPrevious: [] });
+    expect(compareRun({ prev, cur, outdated, summary: base }).held.onlyInventory).toEqual(["npm"]);
   });
   test("a brew node upgrade explains a changed npm global (the node bottle ships its own npm)", () => {
     const p = [...prev, { kind: "brew-formula" as const, name: "node", version: "25.1" }, { kind: "npm-global" as const, name: "npm", version: "12.0.2" }];
     const c2 = [...cur, { kind: "brew-formula" as const, name: "node", version: "25.2" }, { kind: "npm-global" as const, name: "npm", version: "11.20.0" }];
-    const base = { ...su, brew: { ...su.brew, flagged: [], stuck: [] } };
-    expect(compareRun({ prev: p, cur: c2, outdated: [], su: { ...base, brew: { ...base.brew, upgraded: [...base.brew.upgraded, "node"] } } }).upgraded.onlyInventory).toEqual([]);
+    const base = { ...summary, brew: { ...summary.brew, flagged: [], stuck: [] } };
+    expect(compareRun({ prev: p, cur: c2, outdated: [], summary: { ...base, brew: { ...base.brew, upgraded: [...base.brew.upgraded, "node"] } } }).upgraded.onlyInventory).toEqual([]);
     // without a node upgrade the npm change stays unexplained (node is then also unexplained)
-    expect(compareRun({ prev: p, cur: c2, outdated: [], su: base }).upgraded.onlyInventory).toEqual(["node", "npm"]);
+    expect(compareRun({ prev: p, cur: c2, outdated: [], summary: base }).upgraded.onlyInventory).toEqual(["node", "npm"]);
   });
   test("an excluded cask is held", () => {
     const outdated = [{ kind: "brew-cask" as const, name: "zoom", installed: "6.1", current: "6.2", pinned: false }];
-    const c = compareRun({ prev, cur, outdated, su: { ...su, brew: { ...su.brew, flagged: [], stuck: [], excluded: ["zoom"] } } });
-    expect(c.held).toEqual({ onlyInventory: [], onlySecureUpdate: [] });
+    const c = compareRun({ prev, cur, outdated, summary: { ...summary, brew: { ...summary.brew, flagged: [], stuck: [], excluded: ["zoom"] } } });
+    expect(c.held).toEqual({ onlyInventory: [], onlyPrevious: [] });
   });
   test("first run: no baseline, upgrade side skipped", () => {
-    const c = compareRun({ prev: undefined, cur, outdated: [], su: { ...su, brew: { ...su.brew, flagged: [], stuck: [] } } });
+    const c = compareRun({ prev: undefined, cur, outdated: [], summary: { ...summary, brew: { ...summary.brew, flagged: [], stuck: [] } } });
     expect(c.upgraded.baseline).toBe(false);
     expect(c.agree).toBe(true);
   });
@@ -232,7 +232,7 @@ describe("hostReport", () => {
     brewInfo: fx("brew-info.json"), brewOutdated: fx("brew-outdated.json"), npmLs: fx("npm-ls.json"), npmOutdated: fx("npm-outdated.json"),
     docker: fx("docker.jsonl"), swVers: fx("sw_vers.txt"), softwareUpdate: fx("softwareupdate.txt"), clis: fx("clis.txt"),
   };
-  test("inventory, outdated, advisories for npm globals, comparison against the previous updater's block", async () => {
+  test("inventory, outdated, advisories for npm globals, comparison against the previous updater block", async () => {
     const queried: string[] = [];
     const feed = { query: async (pkgs: { ecosystem: string; name: string; version: string }[]) => { queried.push(...pkgs.map((p) => `${p.ecosystem}:${p.name}@${p.version}`)); return []; } };
     const r = await hostReport({ host: "hosta", raw, prevLog: fx("prev.log"), prev: undefined, feed, now: new Date("2026-10-21T20:00:00Z") });
@@ -246,7 +246,7 @@ describe("hostReport", () => {
   test("no previous updater block: compare is null and the report says so", async () => {
     const r = await hostReport({ host: "otherhost", raw, prevLog: "", prev: undefined, feed: { query: async () => [] }, now: new Date("2026-10-21T20:00:00Z") });
     expect(r.compare).toBeNull();
-    expect(r.notes).toContain("no previous updater summary for otherhost");
+    expect(r.notes).toContain("no host-update summary for otherhost");
   });
   test("a failed advisory lookup is a note, never 'no advisories'", async () => {
     const r = await hostReport({ host: "hosta", raw, prevLog: fx("prev.log"), prev: undefined, feed: { query: async () => { throw new Error("osv 503"); } }, now: new Date() });

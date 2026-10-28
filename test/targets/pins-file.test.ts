@@ -64,13 +64,13 @@ describe("pins file", () => {
     const f = parsePins(text);
     expect(renderPins(f)).toBe(text);
     const v = pinValues(f);
-    expect([...v.keys()]).toEqual(["LIMA_VERSION", "LIMA_ASSET", "LIMA_SHA256", "COLIMA_VERSION", "COLIMA_ASSET", "COLIMA_SHA256", "DOCKER_CLI_VERSION", "DOCKER_CLI_ASSET", "DOCKER_CLI_SHA256"]);
-    expect(v.get("LIMA_VERSION")).toBe("2.2.1");
-    expect(v.get("LIMA_ASSET")).toBe("lima-2.2.1-Darwin-arm64.tar.gz");
-    expect(v.get("COLIMA_ASSET")).toBe("colima-Darwin-arm64");
+    expect([...v.keys()]).toEqual(["VMTOOL_VERSION", "VMTOOL_ASSET", "VMTOOL_SHA256", "CTRTOOL_VERSION", "CTRTOOL_ASSET", "CTRTOOL_SHA256", "DOCKER_CLI_VERSION", "DOCKER_CLI_ASSET", "DOCKER_CLI_SHA256"]);
+    expect(v.get("VMTOOL_VERSION")).toBe("2.2.1");
+    expect(v.get("VMTOOL_ASSET")).toBe("vmtool-2.2.1-Darwin-arm64.tar.gz");
+    expect(v.get("CTRTOOL_ASSET")).toBe("ctrtool-Darwin-arm64");
     expect(v.get("DOCKER_CLI_VERSION")).toBe("29.9.2");
     expect(v.get("DOCKER_CLI_ASSET")).toBe("docker-29.9.2.tgz");
     expect(f.lines.filter((l) => l.kind === "text" && l.text.startsWith("#")).length).toBeGreaterThan(0);
-    expect(f.lines.some((l) => l.kind === "pin" && l.key === "LIMA_VERSION" && l.value === "2.2.1")).toBe(true);
+    expect(f.lines.some((l) => l.kind === "pin" && l.key === "VMTOOL_VERSION" && l.value === "2.2.1")).toBe(true);
   });
 });

@@ -25,12 +25,12 @@ oUpdate does five separate jobs. Ask which ones the user wants, and don't set up
 
 Clone to a stable path the user will keep, such as `~/.oupdate/app`. A scheduled job runs from this path, so it must not be under a temporary directory.
 
-Install the latest release tag, not the tip of `main`. Show the user the commit `git rev-parse HEAD` prints next to the one on https://github.com/akasecurity/oupdate/releases, and stop if they differ.
+Install the latest release tag listed on https://github.com/akasecurity/oupdate/releases, not the tip of `main`. Show the user the tag `git describe --tags` prints next to that release, and stop if they differ.
 
 ```bash
-git clone --branch v0.2.6 https://github.com/akasecurity/oupdate.git ~/.oupdate/app
+git clone --branch <latest release tag> https://github.com/akasecurity/oupdate.git ~/.oupdate/app
 cd ~/.oupdate/app
-git rev-parse HEAD
+git describe --tags
 bun install
 ```
 
@@ -47,7 +47,7 @@ The reviewer spec is one JSON object:
 { "type": "openai", "name": "local", "baseUrls": ["http://127.0.0.1:8080/v1"], "model": "<model>" }
 ```
 
-Optional keys: `apiKeyEnv`, `maxTokens` (default 4096), `timeoutMs` (default 900000), `headers` and `expectHeaders`. `headers` are sent on the request. `expectHeaders` names response headers a 2xx answer must carry: the name is compared case-insensitively and the value exactly. A mismatch discards that answer (`<base>: answer <header> <got>, expected <want>`, or `missing` when the header is absent) and the next base is tried. It is not retried. To refuse an answer a model proxy served from its cloud fallback, set `"expectHeaders": {"x-served-by": "local"}`. Without a reviewer, oUpdate holds every update that needs a review.
+Optional keys: `apiKeyEnv`, `maxTokens` (default 4096), `timeoutMs` (default 900000), `headers` and `expectHeaders`. `headers` are sent on the request. `expectHeaders` names response headers a 2xx answer must carry: the name is compared case-insensitively and the value exactly. A mismatch discards that answer (`<base>: answer <header> <got>, expected <want>`, or `missing` when the header is absent) and the next base is tried. It is not retried. To refuse an answer a model proxy served from its cloud fallback, set `"expectHeaders": {"x-served-by": "local"}` (the header your proxy sets). Without a reviewer, oUpdate holds every update that needs a review.
 
 Check the endpoint with a known-clean update. It should end in `LAND`, with `reviewer pass ... APPROVE`:
 

@@ -130,7 +130,7 @@ describe("openaiReviewer API key transport", () => {
     process.env.OUPDATE_TEST_KEY = "k-123";
     const sent = spyFetch();
     try {
-      const r = openaiReviewer({ name: "cloud", baseUrls: ["http://primary.example:8080/v1", "http://10.0.0.5/v1"], model: "m1", apiKeyEnv: "OUPDATE_TEST_KEY" });
+      const r = openaiReviewer({ name: "cloud", baseUrls: ["http://proxy.example:8080/v1", "http://10.0.0.5/v1"], model: "m1", apiKeyEnv: "OUPDATE_TEST_KEY" });
       await expect(r.review("x")).rejects.toThrow(/not sent over plain http/);
       expect(sent).toEqual([]);
     } finally {
@@ -142,7 +142,7 @@ describe("openaiReviewer API key transport", () => {
     process.env.OUPDATE_TEST_KEY = "k-123";
     const sent = spyFetch();
     try {
-      const r = openaiReviewer({ name: "cloud", baseUrls: ["http://primary.example/v1", "https://api.example/v1"], model: "m1", apiKeyEnv: "OUPDATE_TEST_KEY" });
+      const r = openaiReviewer({ name: "cloud", baseUrls: ["http://proxy.example/v1", "https://api.example/v1"], model: "m1", apiKeyEnv: "OUPDATE_TEST_KEY" });
       expect(await r.review("x")).toContain("APPROVE");
       expect(sent).toEqual([{ url: "https://api.example/v1/chat/completions", auth: "Bearer k-123" }]);
       for (const loop of ["http://127.0.0.1:8080/v1", "http://localhost:8080/v1", "http://[::1]:8080/v1"]) {

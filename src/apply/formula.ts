@@ -1,5 +1,5 @@
 // Review of a third-party tap's formula before it installs, ported from the previous updater's
-// su_formula_review. The deterministic gates run first (formula-gates.ts); then the whole
+// formula review. The deterministic gates run first (formula-gates.ts); then the whole
 // current formula file, plus its git diff since the tap revision the installed version came
 // from, goes to the reviewer through chunkedReview. An APPROVE records the tap pin (package,
 // tap dir, the HEAD reviewed, formula path), which the install checks again right before it

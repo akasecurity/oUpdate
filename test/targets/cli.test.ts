@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { appRev, parseTargetsCommand, targetsMain, type TargetsMainDeps } from "../../src/targets/cli.ts";
 import { parseTargetsConfig } from "../../src/targets/config.ts";
+import { EMPTY_REGISTRY } from "../../src/targets/registry.ts";
 import { fakeClock, GCE_REACH, gceExec, inventory, VM_A } from "./fake-gce.ts";
 import { fakeExec, memFs } from "./fakes.ts";
 
@@ -29,7 +30,7 @@ function deps(files: Record<string, string>) {
       docker: { listing: async () => { throw new Error("unused"); } },
     },
     makeReviewer: (s) => (specs.push(s.name), { name: s.name, review: async () => "APPROVE\nfine" }),
-    releases: { latest: async () => "7.1.4" },
+    registry: EMPTY_REGISTRY,
     reviewNpm: () => async () => { throw new Error("unused"); },
     out: (l) => out.push(l),
   };
@@ -66,7 +67,7 @@ describe("oupdate targets", () => {
 
   test("the example config parses", () => {
     const c = parseTargetsConfig(readFileSync(join(ROOT, "scripts", "targets.config.example.json"), "utf8"));
-    expect(c.targets.map((t) => t.id)).toEqual(["images", "storage-box", "cloud-vms"]);
+    expect(c.targets.map((t) => t.id)).toEqual(["images", "cloud-vms"]);
   });
 
   test("src/cli.ts dispatches targets and reports a usage error with exit 2", () => {
@@ -75,26 +76,26 @@ describe("oupdate targets", () => {
     expect(r.stderr.toString()).toContain("oupdate: targets needs --apply");
   });
 
-  test("the second reviewer is made for the NAS legs", async () => {
+  test("the second reviewer is made for the two-reviewer legs", async () => {
     const cfg = JSON.parse(CONFIG);
-    cfg.secondReviewer = { type: "command", name: "secondary", argv: ["/bin/cat"] };
+    cfg.secondReviewer = { type: "command", name: "second", argv: ["/bin/cat"] };
     const { d, specs } = deps({ "/etc/t.json": JSON.stringify(cfg) });
     await targetsMain({ config: "/etc/t.json", dryRun: true, only: [] }, d);
-    expect(specs).toEqual(["local", "secondary"]);
+    expect(specs).toEqual(["local", "second"]);
   });
 
   test("targetsMain wires both reviewers and the clock into the os-packages leg", async () => {
     const config = JSON.stringify({
       logDir: "/log",
       reviewer: { type: "command", name: "first-model", argv: ["/bin/cat"] },
-      secondReviewer: { type: "command", name: "secondary-model", argv: ["/bin/cat"] },
+      secondReviewer: { type: "command", name: "second-model", argv: ["/bin/cat"] },
       targets: [{ id: "cloud-vms", os: "linux", reach: { ...GCE_REACH, vms: [VM_A] }, legs: [{ kind: "os-packages", seenTo: "/state/seen.json", cooldownDays: 0 }], schedule: "nightly", summaryTo: "/status/cloud-vms.tsv" }],
     });
     const { d, out, specs } = deps({ "/etc/t.json": config });
     d.exec = gceExec({ vms: { [VM_A]: { inventory: [inventory()] } } }).exec;
     d.clock = fakeClock(0);
     expect(await targetsMain({ config: "/etc/t.json", dryRun: false, only: [] }, d)).toBe(0);
-    expect(specs).toEqual(["first-model", "secondary-model"]);
+    expect(specs).toEqual(["first-model", "second-model"]);
     expect(out).toContain("cloud-vms: vm-a: would patch 2 · held 1");
   });
 });

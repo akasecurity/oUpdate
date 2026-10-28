@@ -2,10 +2,10 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkCutover, expandEnv, checkLanding, checkSwitched, parseOutcomes, parseReplay, render, scoreAcceptance, type HostCfg } from "../scripts/eval.ts";
+import { checkAgreement, expandEnv, checkLanding, checkReplaced, parseOutcomes, parseReplay, render, scoreAcceptance, type HostCfg } from "../scripts/eval.ts";
 import { loadSets, setCounts } from "../acceptance/sets.ts";
 
-const host = (root: string): HostCfg => ({ name: "h", root, oupdatePlist: "on.plist", previousUpdaterPlist: "su.plist", stateDir: "state" });
+const host = (root: string): HostCfg => ({ name: "h", root, oupdatePlist: "on.plist", previousUpdaterPlist: "old.plist", stateDir: "state" });
 
 test("parses acceptance and replay summaries", () => {
   const o = parseOutcomes("MAL  a-1: STOPPED hold (stopped by scan)\nCTRL c-1: PASSED land\n    scan  stop  x");
@@ -14,25 +14,25 @@ test("parses acceptance and replay summaries", () => {
   expect(parseReplay("wheel-local: STOPPED hold\n  prepass stop x").get("wheel-local")).toBe("STOPPED");
 });
 
-test("switched: oupdate on and the previous updater off; unreadable root is not run", () => {
+test("replaced: oupdate on and the previous updater off; unreadable root is not run", () => {
   const d = mkdtempSync(join(tmpdir(), "ev-"));
-  expect(checkSwitched([host(join(d, "nope"))]).status).toBe("not run");
-  expect(checkSwitched([host(d)]).status).toBe("fail");
+  expect(checkReplaced([host(join(d, "nope"))]).status).toBe("not run");
+  expect(checkReplaced([host(d)]).status).toBe("fail");
   writeFileSync(join(d, "on.plist"), "");
-  expect(checkSwitched([host(d)]).status).toBe("pass");
-  writeFileSync(join(d, "su.plist"), "");
-  expect(checkSwitched([host(d)]).status).toBe("fail");
-  writeFileSync(join(d, "su.plist.disabled"), "");
-  expect(checkSwitched([host(d)]).status).toBe("pass");
+  expect(checkReplaced([host(d)]).status).toBe("pass");
+  writeFileSync(join(d, "old.plist"), "");
+  expect(checkReplaced([host(d)]).status).toBe("fail");
+  writeFileSync(join(d, "old.plist.disabled"), "");
+  expect(checkReplaced([host(d)]).status).toBe("pass");
 });
 
-test("cutover: report held differences fail unless waived", () => {
+test("agreement: report held differences fail unless waived", () => {
   const d = mkdtempSync(join(tmpdir(), "ev-"));
-  expect(checkCutover([host(d)]).status).toBe("not run");
+  expect(checkAgreement([host(d)]).status).toBe("not run");
   mkdirSync(join(d, "state/reports"), { recursive: true });
-  writeFileSync(join(d, "state/reports/2026-10-23.json"), JSON.stringify({ compare: { held: { onlyInventory: ["duckdb"], onlySecureUpdate: [] } } }));
-  expect(checkCutover([host(d)]).status).toBe("fail");
-  expect(checkCutover([{ ...host(d), waive: [{ name: "duckdb", why: "manual pin" }] }]).status).toBe("pass");
+  writeFileSync(join(d, "state/reports/2026-10-23.json"), JSON.stringify({ compare: { held: { onlyInventory: ["duckdb"], onlyPrevious: [] } } }));
+  expect(checkAgreement([host(d)]).status).toBe("fail");
+  expect(checkAgreement([{ ...host(d), waive: [{ name: "duckdb", why: "manual pin" }] }]).status).toBe("pass");
 });
 
 test("landing and score", () => {

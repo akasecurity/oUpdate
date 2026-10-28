@@ -54,8 +54,8 @@ export function memFs(seed: Record<string, string> = {}): { fs: TargetFs; files:
   return { fs, files };
 }
 
-/** A credreq argv: action, target, --why, --wait and each --param / --param-json (JSON parsed); undefined on anything else. */
-export function credreqArgs(argv: string[]): { action: string; target: string; why: string; wait: number; params: Record<string, unknown> } | undefined {
+/** A broker client argv: action, target, --why, --wait and each --param / --param-json (JSON parsed); undefined on anything else. */
+export function clientArgs(argv: string[]): { action: string; target: string; why: string; wait: number; params: Record<string, unknown> } | undefined {
   const [, action = "", target = "", ...rest] = argv;
   const params: Record<string, unknown> = {};
   let why = "";

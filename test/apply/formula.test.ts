@@ -1,4 +1,4 @@
-// Ported from the previous updater's formula-review cases (test/port/02, section 2b): a real git tap per
+// Ported from the previous updater's formula-review cases: a real git tap per
 // case, brew faked through FormulaEnv. The package is example/tool/tool (the source fixture's
 // own tap is renamed).
 import { afterAll, describe, expect, test } from "bun:test";

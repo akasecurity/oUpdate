@@ -1,5 +1,5 @@
 // Chunked review of a formula, tap or source diff, ported from the previous updater's
-// su_chunked_review. The diff is split into chunks under a line cap and a byte cap; each
+// chunked review. The diff is split into chunks under a line cap and a byte cap; each
 // chunk is reviewed with reviewChunk (at most two calls); the first chunk that does not
 // APPROVE stops the review, which is then a FLAG and is notified once.
 //

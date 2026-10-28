@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { closeRc, isStopping, KILL_GRACE_MS, killLive, liveGroups, onStop, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
 import { realReleaseLock, realTakeLock } from "../../src/apply/owner-waiter.ts";
 import { applyMain, logPath, ownerWaiterArgv, ownerWaiterMain, parseHostCommand } from "../../src/host/cli.ts";
-import { parseSuSummary } from "../../src/host/prev-log.ts";
+import { parsePrevSummary } from "../../src/host/prev-log.ts";
 import { fakeHost } from "./host-fixture.ts";
 
 const root = mkdtempSync(join(tmpdir(), "oupdate-apply-cli-"));
@@ -222,7 +222,7 @@ describe("the log file (slice 7 review)", () => {
   });
 
   test("3: a dry run and a one-off never write the dated log; a stopped dry run says STOPPED, never ABORTED", async () => {
-    // Mutants caught (re-review 1): dry runs and one-offs appended to the dated file the digest and
+    // Mutants caught (re-review 1): dry runs and one-offs appended to the dated file a log reader and
     // the shadow read, and a dry run's Ctrl-C wrote the real "=== ABORTED: oupdate-host-update" line.
     const dir = join(root, "side");
     const c = config({ logFile: join(dir, "{date}.log") });
@@ -234,8 +234,8 @@ describe("the log file (slice 7 review)", () => {
     const dry = readFileSync(join(dir, "dry-run-20261022.log"), "utf8");
     expect(dry).toContain("=== hosta dry-run summary (nothing applied) ===");
     expect(dry).not.toContain("=== hosta summary ===");
-    expect(dry).not.toMatch(/^=== (\S+-)?the previous updater /m);
-    expect(parseSuSummary(dry, "hosta")).toBeNull();
+    expect(dry).not.toMatch(/^=== (\S+-)?host-update /m);
+    expect(parsePrevSummary(dry, "hosta")).toBeNull();
     expect(readFileSync(join(dir, "gatekeeper-20261022.log"), "utf8")).toContain("tool: restored quarantine on 0 file(s)");
 
     const handlers = new Map<string, () => void>();
@@ -394,7 +394,7 @@ describe("the log file (slice 7 review)", () => {
   });
 
   test("4: {date} in logFile is the run's local date as YYYYMMDD", async () => {
-    // Mutant caught: a fixed log path (the digest reads the newest dated file).
+    // Mutant caught: a fixed log path (a log reader takes the newest dated file).
     expect(logPath("/logs.test/{date}.log", new Date(2026, 0, 5, 23, 59))).toBe("/logs.test/20260105.log");
     const dir = join(root, "dated");
     const c = config({ logFile: join(dir, "{date}.log") });

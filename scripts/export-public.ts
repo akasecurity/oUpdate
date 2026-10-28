@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // Public export: builds the open-source tree from this repo's HEAD as one fresh commit.
-// Scope: every tracked file except replay/ (deployment replays) and PRIVATE_FILES (the release script), plus LICENSE (MIT), the
+// Scope: every tracked file except the paths listed in .publish-exclude (deployment replays, the release script, target
+// plugins kept private, and that list itself), plus LICENSE (MIT), the
 // public README sections and the package.json / tsconfig.json edits below. It runs
 // scripts/oss-scan.ts over the result before committing and fails on any finding.
 // Commit dates come from the source HEAD, so the same source gives the same export commit.
@@ -11,10 +12,17 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { scanHosts } from "./oss-scan.ts";
 
 export const AUTHOR = { name: "Will Lin", email: "222731067+alsoknownaswill@users.noreply.github.com" };
 const SRC = resolve(dirname(import.meta.path), "..");
-const PRIVATE_FILES = ["scripts/release.ts", "test/release.test.ts"];
+
+/** .publish-exclude: one repo-relative path per line, `#` comments; a path must stay inside the tree. */
+export function parseExclude(text: string): string[] {
+  const paths = text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  for (const p of paths) if (p.startsWith("/") || p.split("/").some((x) => x === ".." || x === "." || x === "")) throw new Error(`.publish-exclude: not a repo-relative path: ${p}`);
+  return paths;
+}
 
 export function run(cwd: string, argv: string[], env: Record<string, string> = {}): string {
   const p = Bun.spawnSync(argv, { cwd, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
@@ -27,31 +35,27 @@ export function run(cwd: string, argv: string[], env: Record<string, string> = {
 const README_EDITS: [string, string][] = [
   [
     "Work in progress; the quickstart comes with the CLI.\n",
-    `Early release, built from tools that run in production; the interfaces may still change. The easiest way to install it is to ask your coding agent to set it up; see [Set up with your agent](#set-up-with-your-agent).
+    `Early release. The easiest way to install it is to ask your coding agent to set it up; see [Set up with your agent](#set-up-with-your-agent).
 
 ## Install
 
 oUpdate is a Bun and TypeScript tool. It needs [Bun](https://bun.sh); there is no build step.
 
-Install a release tag, not the tip of \`main\`, and check that the commit matches the one on the [release page](https://github.com/akasecurity/oupdate/releases):
+Install the latest release tag from the [release page](https://github.com/akasecurity/oupdate/releases), not the tip of \`main\`, and check that \`git describe --tags\` prints that tag:
 
 \`\`\`
-git clone --branch v0.2.6 https://github.com/akasecurity/oupdate.git
+git clone --branch <latest release tag> https://github.com/akasecurity/oupdate.git
 cd oupdate
-git rev-parse HEAD
+git describe --tags
 bun install
 bun src/cli.ts review npm ms 2.1.2 2.1.3
 \`\`\`
 
 \`bin\` in \`package.json\` maps \`oupdate\` to \`src/cli.ts\`, so \`bun link\` gives you an \`oupdate\` command.
 
-### Before you run it
+### What it runs
 
-oUpdate becomes part of your supply chain, so read it before you trust it:
-- It has no runtime dependencies. \`bun.lock\` holds only the dev tools (TypeScript and Bun's types).
-- \`review\` and \`gate\` download release archives from the registry and read them; they never install a package or run its code (archives are read with \`bsdtar\`; the optional GuardDog layer runs in the container you give it). The network calls go to the package registries, OSV, your reviewer endpoint and, for \`gate\`, your forge.
-- \`image\` reads two images' manifests and config blobs from their container registry; it never pulls a layer or runs the image.
-- Nothing runs as root unless you schedule \`host --apply\` as a LaunchDaemon yourself. Start with \`host --apply --dry-run\`: it runs every check and changes nothing on disk.
+oUpdate has no runtime dependencies; \`bun.lock\` holds only the dev tools (TypeScript and Bun's types). \`review\` and \`gate\` download release archives from the registry and read them with \`bsdtar\`; they never install a package or run its code, and the optional GuardDog layer runs in the container you give it. The network calls go to the package registries, OSV, your reviewer endpoint and, for \`gate\`, your forge. \`image\` reads two images' manifests and config blobs from their container registry and never pulls a layer or runs the image. Nothing runs as root unless you schedule \`host --apply\` as a LaunchDaemon yourself; \`host --apply --dry-run\` runs every check and changes nothing on disk.
 
 ### Set up with your agent
 
@@ -74,15 +78,11 @@ Most commands take their settings as flags (\`--reviewer\`, \`--scanner\`, \`--t
 `,
   ],
   [
-    "the last summary block of the previous updater's log:",
-    "the last summary block of the previous updater's run log (its log: `--prev-log`):",
-  ],
-  [
     /## Ported test specs[\s\S]*?(?=## Gates)/.source,
     "",
   ],
   ["## Gates\n", "## Development\n"],
-  ["OUPDATE_SCAN_DENY=<file outside the repo> bun run scan\n```\n", "bun run scan\n```\n\n`bun run scan` (`scripts/scan.ts`) checks tracked files for home paths, tailnet names, private IPs, non-reserved emails and secrets. `scripts/oss-scan.ts` adds hostname and secret rules. Set `OUPDATE_SCAN_DENY` to a file outside the repo (one word per line) for your own deny list.\n"],
+  ["OUPDATE_SCAN_DENY=<file outside the repo> bun run scan\n```\n", "bun run scan\n```\n\n`bun run scan` (`scripts/scan.ts`) checks tracked files for home paths, tailnet names, private IPs, non-reserved emails and secrets. `scripts/oss-scan.ts` adds hostname and secret rules. Set `OUPDATE_SCAN_DENY` to a file outside the repo (one word per line) for your own deny list, and `OUPDATE_SCAN_HOSTS` (a comma list) or a `.publish-hosts` file (one name per line) for your own host names.\n"],
   ["## Eval check 6\n", "## Evaluation\n"],
   [
     "`scripts/eval.ts` check 6 runs `oss-scan` over the tracked files and checks 1 and 2 on a clean sample config. `scripts/sample.config.example.json` is that config: one local OpenAI-compatible reviewer, placeholders only. `${NAME}` in any config value is read from the environment. Point `sampleConfig` in your eval config (see `scripts/eval.config.example.json`) at a copy, then:",
@@ -91,7 +91,7 @@ Most commands take their settings as flags (\`--reviewer\`, \`--scanner\`, \`--t
   [/## Publish checklist[\s\S]*$/.source, "## License\n\nMIT. See [LICENSE](LICENSE).\n"],
 ];
 // Entries built from a regex source (the section removals) are applied as regexes.
-const REGEX_EDITS = new Set([README_EDITS[2]![0], README_EDITS[README_EDITS.length - 1]![0]]);
+const REGEX_EDITS = new Set(README_EDITS.map(([from]) => from).filter((from) => from.includes("[\\s\\S]")));
 
 export function publicReadme(src: string): string {
   let out = src;
@@ -164,9 +164,10 @@ export function writeExportTree(target: string): void {
   run(SRC, ["git", "archive", "--format=tar", "-o", tar, "HEAD"]);
   run(target, ["tar", "-xf", tar]);
   rmSync(tar);
-  rmSync(join(target, "replay"), { recursive: true, force: true });
-  // The release script drives our own publish flow (local paths, our forge layout): private, like replay/.
-  for (const f of PRIVATE_FILES) rmSync(join(target, f), { force: true });
+  // The list comes from the exported HEAD itself; without it nothing is published.
+  const list = join(target, ".publish-exclude");
+  if (!existsSync(list)) throw new Error("HEAD has no .publish-exclude: nothing exported");
+  for (const p of parseExclude(readFileSync(list, "utf8"))) rmSync(join(target, p), { recursive: true, force: true });
 
   const pj = join(target, "package.json");
   writeFileSync(pj, replaceOnce(readFileSync(pj, "utf8"), '  "private": true,\n', '  "private": true,\n  "license": "MIT",\n', "package.json"));
@@ -177,9 +178,15 @@ export function writeExportTree(target: string): void {
   writeFileSync(join(target, "LICENSE"), LICENSE);
 }
 
-// Runs scripts/oss-scan.ts over the tracked files (git index) of `dir`; throws on any finding.
+/** The host names in this repo's .publish-hosts (kept out of the export), as OUPDATE_SCAN_HOSTS; none without the file. */
+export function hostsEnv(): Record<string, string> {
+  const hosts = scanHosts(undefined, join(SRC, ".publish-hosts"));
+  return hosts.length ? { OUPDATE_SCAN_HOSTS: hosts.join(",") } : {};
+}
+
+// Runs scripts/oss-scan.ts over the tracked files (git index) of `dir`, with this repo's host names; throws on any finding.
 export function ossScan(dir: string): void {
-  const scan = Bun.spawnSync(["bun", "scripts/oss-scan.ts"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  const scan = Bun.spawnSync(["bun", "scripts/oss-scan.ts"], { cwd: dir, env: { ...process.env, ...hostsEnv() }, stdout: "pipe", stderr: "pipe" });
   if (scan.exitCode !== 0) throw new Error(`oss-scan found problems in the export:\n${scan.stdout.toString()}${scan.stderr.toString()}`);
 }
 

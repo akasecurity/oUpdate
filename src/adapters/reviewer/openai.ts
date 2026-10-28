@@ -1,5 +1,5 @@
 // Reviewer over any OpenAI-compatible /v1/chat/completions endpoint (a local
-// model server, a primary, or a hosted API). Base URLs are tried in order.
+// model server, a proxy, or a hosted API). Base URLs are tried in order.
 
 import type { Reviewer } from "../../review.ts";
 

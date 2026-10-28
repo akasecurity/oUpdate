@@ -1,49 +1,48 @@
-// Shadow comparison against the previous updater: (a) what changed since the previous
-// snapshot vs what the previous updater says it upgraded; (b) what is still outdated
-// vs what the previous updater held (flagged, stuck, failed, repo-pinned, cask-excluded; a flagged npm batch holds
-// every outdated npm global). A brew node upgrade also changes the npm global, since the node
-// bottle ships its own npm. Names match on their
-// last path segment (the previous updater names core formulae short, taps in full).
+// Shadow comparison against the previous updater: (a) what changed since the previous snapshot vs what its
+// summary says it upgraded; (b) what is still outdated vs what it held (flagged, stuck, failed, repo-pinned,
+// cask-excluded; a flagged npm batch holds every outdated npm global). A brew node upgrade also changes the npm global,
+// since the node bottle ships its own npm. Names match on their last path segment (the summary names core formulae
+// short, taps in full).
 
 import type { Item, Outdated } from "./collect.ts";
-import type { SuSummary } from "./prev-log.ts";
+import type { PrevSummary } from "./prev-log.ts";
 
 const COVERED = new Set(["brew-formula", "brew-cask", "npm-global"]);
 const key = (name: string) => name.split("/").at(-1)!;
 
-function diff(inv: string[], su: string[]): { onlyInventory: string[]; onlySecureUpdate: string[] } {
+function diff(inv: string[], summary: string[]): { onlyInventory: string[]; onlyPrevious: string[] } {
   const ik = new Map(inv.map((n) => [key(n), n]));
-  const sk = new Map(su.map((n) => [key(n), n]));
+  const sk = new Map(summary.map((n) => [key(n), n]));
   return {
     onlyInventory: [...ik].filter(([k]) => !sk.has(k)).map(([, n]) => n).sort(),
-    onlySecureUpdate: [...sk].filter(([k]) => !ik.has(k)).map(([, n]) => n).sort(),
+    onlyPrevious: [...sk].filter(([k]) => !ik.has(k)).map(([, n]) => n).sort(),
   };
 }
 
 export interface Comparison {
-  upgraded: { baseline: boolean; onlyInventory: string[]; onlySecureUpdate: string[] };
-  held: { onlyInventory: string[]; onlySecureUpdate: string[] };
+  upgraded: { baseline: boolean; onlyInventory: string[]; onlyPrevious: string[] };
+  held: { onlyInventory: string[]; onlyPrevious: string[] };
   agree: boolean;
 }
 
-export function compareRun(a: { prev: Item[] | undefined; cur: Item[]; outdated: Outdated[]; su: SuSummary }): Comparison {
+export function compareRun(a: { prev: Item[] | undefined; cur: Item[]; outdated: Outdated[]; summary: PrevSummary }): Comparison {
   const outdated = a.outdated.filter((o) => COVERED.has(o.kind) && !o.pinned);
   const held = diff(
     outdated.map((o) => o.name),
     [
-      ...a.su.brew.flagged, ...a.su.brew.stuck, ...a.su.brew.failed, ...(a.su.brew.pinned ?? []), ...(a.su.brew.excluded ?? []),
-      ...(a.su.npm.flagged ? outdated.filter((o) => o.kind === "npm-global").map((o) => o.name) : []),
-      ...(a.su.npm.failed ?? []),
+      ...a.summary.brew.flagged, ...a.summary.brew.stuck, ...a.summary.brew.failed, ...(a.summary.brew.pinned ?? []), ...(a.summary.brew.excluded ?? []),
+      ...(a.summary.npm.flagged ? outdated.filter((o) => o.kind === "npm-global").map((o) => o.name) : []),
+      ...(a.summary.npm.failed ?? []),
     ],
   );
-  let upgraded: Comparison["upgraded"] = { baseline: false, onlyInventory: [], onlySecureUpdate: [] };
+  let upgraded: Comparison["upgraded"] = { baseline: false, onlyInventory: [], onlyPrevious: [] };
   if (a.prev) {
     const before = new Map(a.prev.map((i) => [`${i.kind}:${i.name}`, i.version]));
     const changed = a.cur.filter((i) => COVERED.has(i.kind) && before.get(`${i.kind}:${i.name}`) !== i.version).map((i) => i.name);
-    const nodeNpm = a.su.brew.upgraded.includes("node") && changed.includes("npm") ? ["npm"] : [];
-    upgraded = { baseline: true, ...diff(changed, [...a.su.brew.upgraded, ...a.su.npm.upgraded, ...nodeNpm]) };
+    const nodeNpm = a.summary.brew.upgraded.includes("node") && changed.includes("npm") ? ["npm"] : [];
+    upgraded = { baseline: true, ...diff(changed, [...a.summary.brew.upgraded, ...a.summary.npm.upgraded, ...nodeNpm]) };
   }
-  const empty = (d: { onlyInventory: string[]; onlySecureUpdate: string[] }) => !d.onlyInventory.length && !d.onlySecureUpdate.length;
+  const empty = (d: { onlyInventory: string[]; onlyPrevious: string[] }) => !d.onlyInventory.length && !d.onlyPrevious.length;
   return { upgraded, held, agree: empty(upgraded) && empty(held) };
 }
 

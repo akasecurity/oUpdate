@@ -1,5 +1,5 @@
 // App-bundle upgrades (apply.appBundles): a macOS .app that is installed outside brew and published
-// as a signed, notarized disk image on the project's GitHub release (e.g. a model server app: its bundle ships
+// as a signed, notarized disk image on the project's GitHub release (e.g. Example: its bundle ships
 // precompiled Metal kernels that brew's bottle lacks). Dry-run by default like everything else.
 //
 // A release is installed only when every gate passes, in this order:

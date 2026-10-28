@@ -1,4 +1,4 @@
-// oupdate host --report-only: one shadow report beside the previous updater.
+// oupdate host --report-only: one shadow report beside the previous updater (its log: --prev-log).
 // Writes STATE/inventory.json (the snapshot the next run diffs against) and
 // STATE/reports/<date>.json, then prints a summary with the weekly agreement streak.
 //
@@ -22,11 +22,13 @@ import { applyHost, gatekeeperAction } from "../apply/run.ts";
 import { ownerDir, realHttpStatus, realReleaseLock, realTakeLock, runOwnerWaiter } from "../apply/owner-waiter.ts";
 import { realFs } from "../apply/fs.ts";
 import { parseLaunchdArgs, type LaunchdArgs } from "./launchd.ts";
+import { DEFAULT_COMPAT } from "../targets/compat.ts";
 
 export interface HostArgs {
   host: string;
   state: string;
-  prevLog: string;
+  /** The previous updater's run log; absent: no comparison. */
+  prevLog?: string;
 }
 
 const FLAGS = new Set(["--host", "--state", "--prev-log"]);
@@ -48,31 +50,32 @@ export function parseHostArgs(argv: string[]): HostArgs {
   return {
     host: flags.get("--host") ?? hostname().split(".")[0]!,
     state: flags.get("--state")!,
-    prevLog: flags.get("--prev-log") ?? join(homedir(), "Library/Logs/host-update/launchagent.log"),
+    ...(flags.has("--prev-log") ? { prevLog: flags.get("--prev-log")! } : {}),
   };
 }
 
-export function renderHost(r: HostReport, streak: number): string {
+export function renderHost(r: HostReport, streak: number, name: string = DEFAULT_COMPAT.previousUpdater): string {
   const c = r.compare;
-  const lines = [`host ${r.host} ${r.date}: ${r.inventory.length} items, ${r.outdated.length} outdated, ${r.advisories === null ? "advisories unknown" : `${r.advisories.length} advisories`}, ${c ? (c.agree ? "AGREES with the previous updater" : "DIFFERS from the previous updater") : "no comparison"}; agreeing weeks in a row: ${streak}`];
+  const lines = [`host ${r.host} ${r.date}: ${r.inventory.length} items, ${r.outdated.length} outdated, ${r.advisories === null ? "advisories unknown" : `${r.advisories.length} advisories`}, ${c ? (c.agree ? `AGREES with ${name}` : `DIFFERS from ${name}`) : "no comparison"}; agreeing weeks in a row: ${streak}`];
   if (c && c.upgraded.baseline) {
-    if (c.upgraded.onlyInventory.length) lines.push(`  changed, not in the previous updater's upgraded: ${c.upgraded.onlyInventory.join(" ")}`);
-    if (c.upgraded.onlySecureUpdate.length) lines.push(`  the previous updater upgraded, no version change seen: ${c.upgraded.onlySecureUpdate.join(" ")}`);
+    if (c.upgraded.onlyInventory.length) lines.push(`  changed, not in ${name}'s upgraded: ${c.upgraded.onlyInventory.join(" ")}`);
+    if (c.upgraded.onlyPrevious.length) lines.push(`  ${name} upgraded, no version change seen: ${c.upgraded.onlyPrevious.join(" ")}`);
   }
-  if (c?.held.onlyInventory.length) lines.push(`  outdated, not held by the previous updater: ${c.held.onlyInventory.join(" ")}`);
-  if (c?.held.onlySecureUpdate.length) lines.push(`  held by the previous updater, not outdated now: ${c.held.onlySecureUpdate.join(" ")}`);
+  if (c?.held.onlyInventory.length) lines.push(`  outdated, not held by ${name}: ${c.held.onlyInventory.join(" ")}`);
+  if (c?.held.onlyPrevious.length) lines.push(`  held by ${name}, not outdated now: ${c.held.onlyPrevious.join(" ")}`);
   for (const a of r.advisories ?? []) lines.push(`  ${a.malicious ? "MALICIOUS" : a.severity} ${a.pkg.name}@${a.pkg.version}: ${a.id} ${a.summary}`);
   for (const n of r.notes) lines.push(`  note: ${n}`);
   return lines.join("\n");
 }
 
-export async function hostMain(a: HostArgs, deps: { run: Runner; feed: AdvisoryFeed; now: Date }): Promise<{ report: HostReport; text: string }> {
+export async function hostMain(a: HostArgs, deps: { run: Runner; feed: AdvisoryFeed; now: Date; previousUpdater?: string }): Promise<{ report: HostReport; text: string }> {
   const inv = join(a.state, "inventory.json");
   const reports = join(a.state, "reports");
   mkdirSync(reports, { recursive: true });
   const prev = existsSync(inv) ? (JSON.parse(readFileSync(inv, "utf8")) as { inventory: Item[] }).inventory : undefined;
-  const prevLog = existsSync(a.prevLog) ? readFileSync(a.prevLog, "utf8") : "";
-  const report = await hostReport({ host: a.host, raw: await probeHost(deps.run), prevLog, prev, feed: deps.feed, now: deps.now });
+  const prevLog = a.prevLog !== undefined && existsSync(a.prevLog) ? readFileSync(a.prevLog, "utf8") : "";
+  const name = deps.previousUpdater ?? DEFAULT_COMPAT.previousUpdater;
+  const report = await hostReport({ host: a.host, raw: await probeHost(deps.run), prevLog, prev, feed: deps.feed, now: deps.now, previousUpdater: name });
   writeFileSync(join(reports, `${report.date}.json`), JSON.stringify(report, null, 2) + "\n");
   writeFileSync(inv, JSON.stringify({ date: report.date, inventory: report.inventory }, null, 2) + "\n");
   const past = readdirSync(reports)
@@ -80,7 +83,7 @@ export async function hostMain(a: HostArgs, deps: { run: Runner; feed: AdvisoryF
     .map((f) => JSON.parse(readFileSync(join(reports, f), "utf8")) as HostReport)
     .filter((r) => r.compare)
     .map((r) => ({ date: r.date, agree: r.compare!.agree, baseline: r.compare!.upgraded.baseline }));
-  return { report, text: renderHost(report, weeklyStreak(past)) };
+  return { report, text: renderHost(report, weeklyStreak(past), name) };
 }
 
 export type HostCommand =
@@ -180,7 +183,7 @@ export async function ownerWaiterMain(c: Extract<HostCommand, { mode: "owner-wai
   );
 }
 
-/** A log file name may carry {date}: the run's local date as YYYYMMDD (one file per day, as the previous updater kept). */
+/** A log file name may carry {date}: the run's local date as YYYYMMDD (one file per day). */
 export function logPath(template: string, now: Date): string {
   const d = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
   return template.replaceAll("{date}", d);
@@ -198,6 +201,10 @@ export interface ApplyDeps {
   exec: Exec;
   fs: ApplyFs;
   now?: Date;
+  /** The previous updater's name the run header keeps (compat.ts). */
+  previousUpdater?: string;
+  /** Job runner commands when the config names none (compat.ts). */
+  jobRunners?: readonly string[];
   /** Each line as it is produced (default: stdout). */
   out?: (line: string) => void;
   signals?: SignalSource;
@@ -215,8 +222,8 @@ export interface ApplyDeps {
 }
 
 /**
- * The log file a command writes. Only a real run writes the dated file the shadow report and the
- * digest read; a dry run and a Gatekeeper one-off write a "dry-run-" / "gatekeeper-" file beside it,
+ * The log file a command writes. Only a real run writes the dated file the shadow report and a
+ * log reader read; a dry run and a Gatekeeper one-off write a "dry-run-" / "gatekeeper-" file beside it,
  * which neither reads.
  */
 export function logFileFor(c: Extract<HostCommand, { mode: "apply" | "gatekeeper" }>, file: string): string {
@@ -227,7 +234,7 @@ export function logFileFor(c: Extract<HostCommand, { mode: "apply" | "gatekeeper
 /**
  * Runs --apply or a Gatekeeper one-off. Each line goes out as it is made, appended to the log file
  * first, then stdout, so a run that hangs or is killed leaves its log. A real run that is stopped
- * by a signal or crashes ends with the previous updater's "=== ABORTED" line, as its exit trap did; a dry
+ * by a signal or crashes ends with an "=== ABORTED" line, as the previous updater's exit trap did; a dry
  * run or one-off with a "=== STOPPED" line, which no reader counts as an aborted run. Returns the
  * text and the exit code.
  */
@@ -270,7 +277,7 @@ export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatek
     out(l);
   };
   const real = c.mode === "apply" && !c.dryRun;
-  const label = c.mode === "apply" ? (c.dryRun ? "oupdate dry run" : "oupdate-host-update") : `oupdate --gatekeeper-${c.action}`;
+  const label = c.mode === "apply" ? (c.dryRun ? "oupdate dry run" : `oupdate-${deps.previousUpdater ?? DEFAULT_COMPAT.previousUpdater}`) : `oupdate --gatekeeper-${c.action}`;
   const stopped = (why: string) =>
     emit(real ? `=== ABORTED: ${label} on ${cfg.host} ${why} — this run did NOT complete ===` : `=== STOPPED: ${label} on ${cfg.host} ${why} — not a run, nothing more was done ===`, true);
   const signals = deps.signals ?? process;
@@ -309,7 +316,7 @@ export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatek
       return { text: lines.join("\n"), rc: await settle(g.rc) };
     }
     if (!c.dryRun) mkdirSync(cfg.stateDir, { recursive: true });
-    const r = await applyHost(cfg, deps.exec, deps.fs, { dryRun: c.dryRun, now, onLine: (l) => emit(l), isStopping: () => stopCode !== undefined, ownerWaiterArgv: deps.ownerWaiterArgv ?? ownerWaiterArgv(c.config) });
+    const r = await applyHost(cfg, deps.exec, deps.fs, { dryRun: c.dryRun, now, onLine: (l) => emit(l), isStopping: () => stopCode !== undefined, ownerWaiterArgv: deps.ownerWaiterArgv ?? ownerWaiterArgv(c.config), ...(deps.previousUpdater ? { previousUpdater: deps.previousUpdater } : {}), ...(deps.jobRunners ? { jobRunners: deps.jobRunners } : {}) });
     // The end-of-run notice is logged after the summary block: emitted by applyHost already.
     return { text: lines.join("\n"), rc: await settle(logBroken ? 1 : r.rc) };
   } catch (e) {

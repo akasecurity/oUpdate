@@ -1,4 +1,4 @@
-// The caller's own post-check (spec §5 caller rules; the broker spec): the full installed set after the job against the
+// The caller's own post-check: the full installed set after the job against the
 // one the review read bound. Every change must be an approved package moving to its reviewed version. Anything else is
 // an unapproved change: a dependency upgraded or added, a removal, a downgrade, an approved package at another version,
 // another instance or another OS. An approved package still at its old version did not install. This is detection,

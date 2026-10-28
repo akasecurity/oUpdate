@@ -1,4 +1,4 @@
-// Ported from the previous updater's chunked-review cases (test/port/02, section 2a).
+// Ported from the previous updater's chunked-review cases.
 import { describe, expect, test } from "bun:test";
 import { chunkedReview, splitDiff, type Caps } from "../../src/apply/chunked.ts";
 import type { Reviewer } from "../../src/review.ts";

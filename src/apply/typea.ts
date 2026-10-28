@@ -1,5 +1,5 @@
 // Type A (official taps): a deterministic version policy, ported from the previous updater's
-// su_type_a_review. A security-sensitive package is held on a major-version increase, or when its
+// Type A review. A security-sensitive package is held on a major-version increase, or when its
 // row in `brew outdated --verbose` cannot be read; everything else is approved. Names compare
 // literally; the sensitive list matches the last path segment without its @version suffix.
 

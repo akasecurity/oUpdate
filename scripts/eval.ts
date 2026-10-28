@@ -8,15 +8,15 @@
 //               Checks 1 and 2 score the core set; their counts come from acceptance/cases.json and
 //               controls.json (acceptance/sets.ts). With `extended: true` in the config the run also
 //               covers the extended set, printed as one informational line that is not a check.
-//   3 switched  every host runs oupdate and has the previous updater disabled
-//   4 cutover   per host, one dry-run shadow report shows oupdate holds what the previous updater holds
-//   5 landing   the yaml advisory update landed through the train, oupdate/review=success,
+//   3 replaced  every host runs oupdate and has the previous updater disabled
+//   4 agreement per host, one dry-run shadow report shows oupdate holds what the previous updater holds
+//   5 landing   the yaml advisory update landed through the release pipeline, oupdate/review=success,
 //               rollback tested
 //   6 open      scripts/oss-scan.ts finds nothing in the git-tracked files
 //
 // usage: bun scripts/eval.ts [--config FILE] [--only 1,2,...]
 // Config: --config, else $OUPDATE_EVAL_CONFIG, else ~/.config/oupdate/eval.json. See
-// scripts/eval.config.example.json. The config holds local values, so it stays outside the repo.
+// scripts/eval.config.example.json. The config holds your host values, so it stays outside the repo.
 // Checks 3-5 read files only; they never SSH to a host. For a remote host, point its `root` at a
 // directory that holds that host's files (a mount or a collected copy); an unreadable root is "not run".
 // Check 6 also requires, per the goal, that checks 1 and 2 pass on a clean sample config; pass
@@ -29,6 +29,8 @@ import { validateReviewerSpec } from "../src/adapters/reviewer/spec.ts";
 import { expandEnv } from "../src/env.ts";
 import type { HostReport } from "../src/host/report.ts";
 import { scanTracked } from "./oss-scan.ts";
+import { renameKeys } from "../src/targets/compat.ts";
+import { loadRegistry } from "../src/targets/registry.ts";
 
 export { expandEnv };
 import { loadSets, setCounts } from "../acceptance/sets.ts";
@@ -165,8 +167,8 @@ export function runAcceptance(cfg: EvalConfig): { c1: CheckResult; c2: CheckResu
 
 const at = (root: string, p: string) => join(root, p);
 
-export function checkSwitched(hosts: HostCfg[] | undefined): CheckResult {
-  const base = { n: 3, name: "switched" };
+export function checkReplaced(hosts: HostCfg[] | undefined): CheckResult {
+  const base = { n: 3, name: "replaced" };
   if (!hosts?.length) return { ...base, status: "not run", detail: "no hosts list in config" };
   const bad: string[] = [];
   const unread: string[] = [];
@@ -176,11 +178,11 @@ export function checkSwitched(hosts: HostCfg[] | undefined): CheckResult {
       continue;
     }
     const on = existsSync(at(h.root, h.oupdatePlist));
-    const su = existsSync(at(h.root, h.previousUpdaterPlist)) && !existsSync(at(h.root, `${h.previousUpdaterPlist}.disabled`));
-    if (!on || su) bad.push(`${h.name}${!on ? " no oupdate" : ""}${su ? " the previous updater still on" : ""}`);
+    const old = existsSync(at(h.root, h.previousUpdaterPlist)) && !existsSync(at(h.root, `${h.previousUpdaterPlist}.disabled`));
+    if (!on || old) bad.push(`${h.name}${!on ? " no oupdate" : ""}${old ? " the previous updater still on" : ""}`);
   }
   const ok = hosts.length - bad.length - unread.length;
-  const detail = `${ok} of ${hosts.length} hosts switched${bad.length ? `; not switched: ${bad.join(", ")}` : ""}${unread.length ? `; not readable: ${unread.join(", ")}` : ""}`;
+  const detail = `${ok} of ${hosts.length} hosts replaced${bad.length ? `; not replaced: ${bad.join(", ")}` : ""}${unread.length ? `; not readable: ${unread.join(", ")}` : ""}`;
   return { ...base, status: unread.length ? "not run" : bad.length ? "fail" : "pass", detail };
 }
 
@@ -191,9 +193,9 @@ export function latestReport(stateDir: string): HostReport | undefined {
   return f ? (JSON.parse(readFileSync(join(dir, f), "utf8")) as HostReport) : undefined;
 }
 
-/** Cutover: the host's dry-run report shows nothing the previous updater held that oupdate does not (waivers named per host). */
-export function checkCutover(hosts: HostCfg[] | undefined): CheckResult {
-  const base = { n: 4, name: "cutover" };
+/** Agreement: the host's dry-run report shows nothing the previous updater held that oupdate does not (waivers named per host). */
+export function checkAgreement(hosts: HostCfg[] | undefined): CheckResult {
+  const base = { n: 4, name: "agreement" };
   if (!hosts?.length) return { ...base, status: "not run", detail: "no hosts list in config" };
   const bad: string[] = [];
   const none: string[] = [];
@@ -204,7 +206,7 @@ export function checkCutover(hosts: HostCfg[] | undefined): CheckResult {
       continue;
     }
     const waived = new Set((h.waive ?? []).map((w) => w.name));
-    const diff = [...r.compare.held.onlyInventory, ...r.compare.held.onlySecureUpdate].filter((n) => !waived.has(n));
+    const diff = [...r.compare.held.onlyInventory, ...r.compare.held.onlyPrevious].filter((n) => !waived.has(n));
     if (diff.length) bad.push(`${h.name} (${diff.join(" ")})`);
   }
   const ok = hosts.length - bad.length - none.length;
@@ -238,8 +240,9 @@ export function checkOpenSource(sample: CheckResult[] | undefined, denyFile = pr
 
 // ---- main -----------------------------------------------------------------
 
-export function loadConfig(path: string): EvalConfig {
-  return JSON.parse(expandEnv(readFileSync(path, "utf8"))) as EvalConfig;
+/** keys: older key names, old to current (targets/compat.ts), renamed before the config is read. */
+export function loadConfig(path: string, keys: Record<string, string> = {}): EvalConfig {
+  return renameKeys(JSON.parse(expandEnv(readFileSync(path, "utf8"))), keys) as EvalConfig;
 }
 
 /** info: lines printed after the checks (the extended set), never counted in the score. */
@@ -256,9 +259,10 @@ if (import.meta.main) {
   const only = argv.includes("--only") ? new Set(flag("--only")!.split(",").map(Number)) : undefined;
   const want = (n: number) => !only || only.has(n);
   const missing = (n: number, name: string, detail: string): CheckResult => ({ n, name, status: "not run", detail });
+  const keys = (await loadRegistry()).compat.configKeys ?? {};
   let cfg: EvalConfig | undefined;
   try {
-    cfg = loadConfig(path);
+    cfg = loadConfig(path, keys);
   } catch (e) {
     console.error(`eval: cannot read config ${path}: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -268,11 +272,11 @@ if (import.meta.main) {
   const nocfg = "no readable config";
   if (want(1)) results.push(ab?.c1 ?? missing(1, "attacks", nocfg));
   if (want(2)) results.push(ab?.c2 ?? missing(2, "controls", nocfg));
-  if (want(3)) results.push(cfg ? checkSwitched(cfg.hosts) : missing(3, "switched", nocfg));
-  if (want(4)) results.push(cfg ? checkCutover(cfg.hosts) : missing(4, "cutover", nocfg));
+  if (want(3)) results.push(cfg ? checkReplaced(cfg.hosts) : missing(3, "replaced", nocfg));
+  if (want(4)) results.push(cfg ? checkAgreement(cfg.hosts) : missing(4, "agreement", nocfg));
   if (want(5)) results.push(cfg ? checkLanding(cfg.landing) : missing(5, "landing", nocfg));
   if (want(6)) {
-    const sample = cfg?.sampleConfig && existsSync(cfg.sampleConfig) ? runAcceptance(loadConfig(cfg.sampleConfig)) : undefined;
+    const sample = cfg?.sampleConfig && existsSync(cfg.sampleConfig) ? runAcceptance(loadConfig(cfg.sampleConfig, keys)) : undefined;
     results.push(checkOpenSource(sample ? [sample.c1, sample.c2] : undefined));
   }
   const { text, score } = render(results, ab?.extended ? [ab.extended] : []);

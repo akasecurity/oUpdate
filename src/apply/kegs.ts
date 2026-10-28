@@ -1,6 +1,6 @@
 // After the brew upgrades: kegs left unlinked, broken linkage, and processes still running from a
-// keg brew deleted. Ported from the previous updater's su_relink_upgraded, su_linkage_check,
-// su_lsof_maps, su_keg_holders and su_stale_keg_check.
+// keg brew deleted. Ported from the previous updater's relink, linkage, lsof map,
+// keg holder and stale-keg checks.
 //
 // Stale kegs: one lsof pass finds every process mapping a file under the Cellar whose keg
 // directory is gone. A deferred service (config; its restart waits for an idle window) is handed
@@ -159,6 +159,8 @@ export interface KegOptions {
   labelRestart?: LabelRestart;
   /** A label not in labelRestart: "kickstart" (absent too) restarts it, "report" only names it in the note. */
   staleKegUnlisted?: "kickstart" | "report";
+  /** Job runner commands whose detached jobs are named, never restarted (config.ts jobRunners). */
+  jobRunners?: readonly string[];
   /** stderr of a detached owner command. */
   detachedLog?: string;
   /** Labels the restart step already handed to their owner command this run (label → command name). */
@@ -185,14 +187,15 @@ export interface KegOptions {
 
 /**
  * How a package's stale holders were handled, in the order the STALE KEG note names them. Counted
- * per launchd target, or per pid for runner jobs and orphans.
+ * per launchd target, or per pid for job runner jobs and orphans.
  */
 const CATEGORIES = ["restarted", "waiting", "busy", "failed", "jobs", "orphans", "left", "reported"] as const;
 type Category = (typeof CATEGORIES)[number];
 
-/** `--job <id>` of an `<runner> run` command line ("?" without one), or undefined when it is not one. */
-export function runnerJob(command: string): string | undefined {
-  if (!/(^|[\s/])jobrunner(\s|\/)/.test(command) || !/\srun(\s|$)/.test(command)) return undefined;
+/** `--job <id>` of a `<runner> run` command line for one of `runners` ("?" without one), or undefined when it is not one. */
+export function runnerJob(command: string, runners: readonly string[]): string | undefined {
+  const named = runners.some((r) => new RegExp(`(^|[\\s/])${r.replace(/[.]/g, "\\.")}(\\s|\\/)`).test(command));
+  if (!named || !/\srun(\s|$)/.test(command)) return undefined;
   return command.match(/\s--job\s+(\S+)/)?.[1] ?? "?";
 }
 
@@ -476,7 +479,7 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
       try {
         if (!env.spawnDetached || !o.detachedLog) throw new Error("no detached spawn here");
         // Not waited for: the next run's stale-keg check shows whether it worked. Until a run finds
-        // the package gone, its note keeps the word the digest counts.
+        // the package gone, its note keeps the word a status reader counts.
         await env.spawnDetached([...policy, label], o.detachedLog);
         log.push(`    handed ${label} to ${by}`);
         return ownerHanded(by, label);
@@ -577,7 +580,7 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
       }
       // No launchd job of its own: a job runner's detached job (live work, it ends on its own)
       // is named, never restarted, not by a plist name either.
-      const job = runnerJob(cmd);
+      const job = runnerJob(cmd, o.jobRunners ?? []);
       if (job !== undefined) {
         log.push(`    runner job ${job} (pid ${h.pid}) — not restarted, it ends on its own`);
         add(stale, h.pkg);

@@ -1,17 +1,17 @@
 // The apply run end to end against a scripted host (test/apply/host-fixture.ts). Ported from
-// the previous updater's brew-phase cases (test/port/03, 04, 06, 07 and 12b): which formulae reach the
+// the previous updater's brew-phase cases: which formulae reach the
 // upgrade, how taps are classified, the summary's notes, the cask phase's Gatekeeper order, the
 // stuck state, the restart list and the phase order. New here: timeouts, the dry run's no-write
 // promise and the summary read back by the host shadow parser.
 import { describe, expect, test } from "bun:test";
 import type { AppNet } from "../../src/apply/appbundle.ts";
 import { applyHost, type GkOps } from "../../src/apply/run.ts";
-import { parseSuSummary } from "../../src/host/prev-log.ts";
+import { parsePrevSummary } from "../../src/host/prev-log.ts";
 import { fakeHost, fakeTypeB, testConfig, type HostScript } from "./host-fixture.ts";
 import { scripted } from "./helpers.ts";
 
 const T = "\t";
-// As the previous updater's brewMocks: a core formula, a third-party tap formula, a third-party tap cask.
+// As the previous updater's brew mocks: a core formula, a third-party tap formula, a third-party tap cask.
 const BREW: HostScript = {
   formulas: "good-a wm",
   verbose: ["good-a (1.0) < 1.1", "example/wm/wm (0.1.0) < 0.2.0 [pinned at 0.1.0]", "example/tf/tfapp (1.5) < 1.6"].join("\n"),
@@ -371,7 +371,7 @@ describe("the run: failures, timeouts and the summary", () => {
       pinFiles: [{ repo: "example-repo", path: "/repos.test/example-repo/pins.json", text: '{"brew":{"duckdb":"1"}}' }],
       npmOutdated: JSON.stringify({ tool: { current: "1.0.0", latest: "1.1.0" } }),
     }, { tb: fakeTypeB(1) });
-    const s = parseSuSummary(r.text, "hosta")!;
+    const s = parsePrevSummary(r.text, "hosta")!;
     expect(s).not.toBeNull();
     expect(s.date).toBe("2026-10-22");
     expect(s.brew.upgraded).toEqual(["good-a"]);
@@ -404,11 +404,11 @@ describe("slice 7 review", () => {
   test("5: timeouts round-trip through the shadow parser as failures", async () => {
     // Mutant caught: "FAILED (timeout: …)" text, which parseBrew/parseNpm never read as a failure.
     const r = await run({ ...BREW, formulas: "good-a", timeout: ["brew update", "npm outdated"] });
-    const s = parseSuSummary(r.text, "hosta")!;
+    const s = parsePrevSummary(r.text, "hosta")!;
     expect(s.brew.failed).toEqual(["timeout:brew-update"]);
     expect(s.npm.failed).toEqual(["timeout:npm-outdated"]);
     const u = await run({ ...BREW, formulas: "good-a", timeout: ["brew upgrade good-a"] });
-    expect(parseSuSummary(u.text, "hosta")!.brew.failed).toEqual(["good-a"]);
+    expect(parsePrevSummary(u.text, "hosta")!.brew.failed).toEqual(["good-a"]);
   });
 
   test("6: a Type A timeout part-way keeps what was done: summary, casks, relink/restart and cleanup still run", async () => {
@@ -437,15 +437,15 @@ describe("slice 7 review", () => {
     const r = await run({}, { cfg: { notify: ["send-notice"] } });
     expect(r.summary).toContain("  mas:  not checked — the App Store phase is not in oupdate");
     expect(r.npm).toMatch(/; claude-code: not configured$/);
-    expect(parseSuSummary(r.text, "hosta")!.npm.claudeCode).toBeUndefined();
+    expect(parsePrevSummary(r.text, "hosta")!.npm.claudeCode).toBeUndefined();
     expect(r.log.at(-1)).toBe("[notify] 📋 hosta host-update done (oupdate)");
     expect(r.calls.filter((c) => c.startsWith("send-notice 📋 hosta host-update done (oupdate)"))).toHaveLength(1);
     const d = await run({}, { dryRun: true, cfg: { notify: ["send-notice"] } });
     expect(d.calls.some((c) => c.startsWith("send-notice"))).toBe(false);
   });
 
-  test("9: no notify command configured is said once in the log and on the brew line (a line the digest keeps)", async () => {
-    // Mutant caught (re-review 6): a separate "  notify:" summary line, which the digest's brew|npm|mas filter drops.
+  test("9: no notify command configured is said once in the log and on the brew line (a line a log reader keeps)", async () => {
+    // Mutant caught (re-review 6): a separate "  notify:" summary line, which a log reader's brew|npm|mas filter drops.
     const r = await run({});
     expect(r.log.filter((l) => l.startsWith("notify: not configured"))).toHaveLength(1);
     expect(r.brew).toBe("  brew: nothing to update; notify: not configured — notices were logged only");
@@ -495,7 +495,7 @@ describe("slice 7 re-review", () => {
     expect(r.npm).toMatch(/^ {2}npm: {2}FAILED — two; upgraded: one; not completed — still pending: two; /);
     expect(r.log).toContain("Pending npm upgrades:");
     expect(r.log.some((l) => l.startsWith("┌─ review npm"))).toBe(true);
-    const s = parseSuSummary(r.text, "hosta")!;
+    const s = parsePrevSummary(r.text, "hosta")!;
     expect(s.npm.upgraded).toEqual(["one"]);
     expect(s.npm.failed).toEqual(["two"]);
   });
@@ -626,7 +626,7 @@ describe("slice 7 follow-up", () => {
   });
 });
 
-describe("Claude Code native update in the npm phase (port 12c, claude_step)", () => {
+describe("Claude Code native update in the npm phase (port 12c)", () => {
   const CC = "/opt.test/claude-native/bin/claude";
   const ccCalls = (calls: string[]) => calls.filter((c) => c.startsWith(CC));
   const cc = (script: HostScript = {}, o: Parameters<typeof run>[1] = {}) => run({ executables: [CC], ...script }, { ...o, cfg: { claudeCode: CC, ...o.cfg } });
@@ -639,7 +639,7 @@ describe("Claude Code native update in the npm phase (port 12c, claude_step)", (
     const at = r.log.indexOf("--- claude code (native) ---");
     expect(at).toBeGreaterThan(r.log.findIndex((l) => l.startsWith("--- npm")));
     expect(r.log.slice(at + 1, at + 3)).toEqual(["  Checking for updates", "  Successfully updated from 1.0.0 to 2.0.0"]);
-    expect(parseSuSummary(r.text, "hosta")!.npm).toEqual({ upgraded: [], flagged: false, failed: [], claudeCode: "2.0.0" });
+    expect(parsePrevSummary(r.text, "hosta")!.npm).toEqual({ upgraded: [], flagged: false, failed: [], claudeCode: "2.0.0" });
     expect(r.rc).toBe(0);
   });
 
@@ -647,7 +647,7 @@ describe("Claude Code native update in the npm phase (port 12c, claude_step)", (
     // Mutants caught: rc ignored (reported as the version), the version left out, parseNpm reading FAILED as fine.
     const r = await cc({ rc: { [`${CC} update`]: 1 }, claudeVersion: "1.0.0" });
     expect(r.npm).toBe("  npm:  nothing to update; claude-code: FAILED (rc=1, on 1.0.0)");
-    const s = parseSuSummary(r.text, "hosta")!;
+    const s = parsePrevSummary(r.text, "hosta")!;
     expect(s.npm.claudeCode).toBe("1.0.0");
     expect(s.npm.claudeCodeFailed).toBe(true);
     expect(r.rc).toBe(1);
@@ -659,7 +659,7 @@ describe("Claude Code native update in the npm phase (port 12c, claude_step)", (
     expect(r.npm).toBe("  npm:  nothing to update; claude-code: FAILED (rc=1, on unknown)");
     expect(r.summary).toContain("  mas:  not checked — the App Store phase is not in oupdate");
     expect(r.calls.some((c) => c.startsWith("send-notice 📋"))).toBe(true);
-    const s = parseSuSummary(r.text, "hosta")!;
+    const s = parsePrevSummary(r.text, "hosta")!;
     expect(s.npm.claudeCodeFailed).toBe(true);
     expect(s.npm.claudeCode).toBeUndefined();
   });
@@ -682,7 +682,7 @@ describe("Claude Code native update in the npm phase (port 12c, claude_step)", (
     const line = npmLine(res.summary);
     expect(line).toBe("  npm:  FAILED — timeout:claude-update; nothing to update; claude-code: FAILED (timeout, on 1.0.0)");
     expect(res.log).toContain(`  TIMEOUT after 777 ms: ${CC} update — killed; npm phase FAILED (timeout:claude-update)`);
-    const s = parseSuSummary([...res.log, ...res.summary].join("\n"), "hosta")!;
+    const s = parsePrevSummary([...res.log, ...res.summary].join("\n"), "hosta")!;
     expect(s.npm.failed).toEqual(["timeout:claude-update"]);
     expect(s.npm.claudeCodeFailed).toBe(true);
     expect(s.npm.claudeCode).toBe("1.0.0");
@@ -702,7 +702,7 @@ describe("Claude Code native update in the npm phase (port 12c, claude_step)", (
     expect(ccCalls(r.calls)).toEqual([]);
     expect(r.calls.some((c) => c.includes("claude"))).toBe(false);
     expect(r.npm).toBe("  npm:  nothing to update; claude-code: not configured");
-    expect(parseSuSummary(r.text, "hosta")!.npm.claudeCode).toBeUndefined();
+    expect(parsePrevSummary(r.text, "hosta")!.npm.claudeCode).toBeUndefined();
   });
 
   test("configured but not executable: skipped silently, as the bash, no claude-code part", async () => {

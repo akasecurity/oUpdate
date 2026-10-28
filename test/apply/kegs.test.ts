@@ -1,4 +1,4 @@
-// Ported from the previous updater's stale-keg, linkage and relink cases (test/port/05). The label
+// Ported from the previous updater's stale-keg, linkage and relink cases. The label
 // resolution and restart paths had no source tests; the "restart" block below is new.
 import { describe, expect, test } from "bun:test";
 import { killLive, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
@@ -6,7 +6,7 @@ import { caskRunning, kegHolders, linkageCheck, lsofMaps, relinkUpgraded, staleK
 import type { QueuedOwner } from "../../src/apply/owner-waiter.ts";
 
 const CELLAR = "/brew/Cellar";
-// the status reader's trouble words: a note that must alarm has to contain one of them.
+// A status reader's trouble words: a note that must alarm has to contain one of them.
 const TROUBLE_RE = /flag|block|cve|error|fail|abort|no status|stuck|stale|divergent/i;
 const lsofLine = (pid: string, path: string) => `python ${pid} u txt REG 1,4 100 200 ${path}`;
 
@@ -144,30 +144,30 @@ describe("staleKegCheck: restart", () => {
     lsof: [stale(pkg), fresh(pkg)], dirs: [`${CELLAR}/${pkg}/1.1`], plists, ps: { "20": { comm: pkg, command: pkg, ppid: "1" } }, ...extra,
   });
   test("a daemon with one matching label is kickstarted, and the re-scan confirms it", async () => {
-    const { env, calls } = fakeEnv(base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }));
+    const { env, calls } = fakeEnv(base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }));
     const v = await staleKegCheck(env, opts().o);
-    expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.tailscale");
-    expect(v.note).toBe("restarted onto new keg: tailscale");
+    expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.redis");
+    expect(v.note).toBe("restarted onto new keg: redis");
   });
   test("the restart helper is used for the packages it allows", async () => {
-    const { env, calls } = fakeEnv({ ...base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
-    const v = await staleKegCheck(env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["tailscale"] } }).o);
-    expect(calls).toContain("sudo -n /usr/local/sbin/restart-helper tailscale");
+    const { env, calls } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
+    const v = await staleKegCheck(env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] } }).o);
+    expect(calls).toContain("sudo -n /usr/local/sbin/restart-helper redis");
     expect(calls.some((c) => c.includes("launchctl kickstart"))).toBe(false);
-    expect(v.log).toContain("    restarted system/sh.brew.tailscale (via restart-helper)");
+    expect(v.log).toContain("    restarted system/sh.brew.redis (via restart-helper)");
   });
   test("the restart helper is never asked for a package it does not allow", async () => {
-    const { env, calls } = fakeEnv({ ...base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
+    const { env, calls } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
     await staleKegCheck(env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["other"] } }).o);
     expect(calls.some((c) => c.includes("restart-helper"))).toBe(false);
-    expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.tailscale");
+    expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.redis");
   });
   test("a restart helper that fails falls back to the kickstart", async () => {
-    const { env, calls } = fakeEnv({ ...base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }), files: ["/usr/local/sbin/restart-helper"], rc: { "sudo -n /usr/local/sbin/restart-helper tailscale": 1 } });
-    const v = await staleKegCheck(env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["tailscale"] } }).o);
-    expect(calls).toContain("sudo -n /usr/local/sbin/restart-helper tailscale");
-    expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.tailscale");
-    expect(v.note).toBe("restarted onto new keg: tailscale");
+    const { env, calls } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"], rc: { "sudo -n /usr/local/sbin/restart-helper redis": 1 } });
+    const v = await staleKegCheck(env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] } }).o);
+    expect(calls).toContain("sudo -n /usr/local/sbin/restart-helper redis");
+    expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.redis");
+    expect(v.note).toBe("restarted onto new keg: redis");
   });
   test("a label is the package as its whole last dotted part, never a name that contains it", async () => {
     const f = base("list", { "/Library/LaunchDaemons": ["com.x.other.plist", "com.x.list-server.plist", "com.x.playlist.plist", "com.x.list.plist"] });
@@ -189,30 +189,30 @@ describe("staleKegCheck: restart", () => {
     expect(v.note).toMatch(TROUBLE_RE);
   });
   test("an exact label that launchd does not run this pid under is reported, not restarted", async () => {
-    const f = base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }, { lsof: [stale("tailscale")], out: shown("system/sh.brew.tailscale", "77") });
+    const f = base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }, { lsof: [stale("redis")], out: shown("system/sh.brew.redis", "77") });
     const { env, calls } = fakeEnv(f);
     const v = await staleKegCheck(env, opts().o);
     expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
-    expect(v.log).toContain("    sh.brew.tailscale matched by plist name, but launchd does not run pid 20 under it — reported as an orphan");
+    expect(v.log).toContain("    sh.brew.redis matched by plist name, but launchd does not run pid 20 under it — reported as an orphan");
     expect(v.note).toMatch(TROUBLE_RE);
   });
   test("an exact label running this pid, but the pid's executable is outside the keg: reported, not restarted", async () => {
-    // pid 20 runs another program and only maps a library from the deleted tailscale keg.
-    const lsof = [lsofLine("20", "/opt/other/bin/daemon"), lsofLine("20", `${CELLAR}/tailscale/1.0_old/lib/libx.dylib`)].join("\n");
-    const f = base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }, { lsof: [lsof], out: shown("system/sh.brew.tailscale") });
+    // pid 20 runs another program and only maps a library from the deleted redis keg.
+    const lsof = [lsofLine("20", "/opt/other/bin/daemon"), lsofLine("20", `${CELLAR}/redis/1.0_old/lib/libx.dylib`)].join("\n");
+    const f = base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }, { lsof: [lsof], out: shown("system/sh.brew.redis") });
     const { env, calls } = fakeEnv(f);
     const v = await staleKegCheck(env, opts().o);
     expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
-    expect(v.log).toContain("    sh.brew.tailscale matched by plist name, but pid 20 runs /opt/other/bin/daemon, not a file of 1.0_old — reported as an orphan");
+    expect(v.log).toContain("    sh.brew.redis matched by plist name, but pid 20 runs /opt/other/bin/daemon, not a file of 1.0_old — reported as an orphan");
   });
   test("a kickstart that fails leaves an operator one-liner, an alarm and a notice", async () => {
-    const { env } = fakeEnv({ ...base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }), lsof: [stale("tailscale")], rc: { "sudo -n launchctl kickstart -k system/sh.brew.tailscale": 1 } });
+    const { env } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), lsof: [stale("redis")], rc: { "sudo -n launchctl kickstart -k system/sh.brew.redis": 1 } });
     const { o, notices } = opts();
     const v = await staleKegCheck(env, o);
-    expect(v.log).toContain("    cannot restart unattended — run: sudo launchctl kickstart -k system/sh.brew.tailscale");
-    expect(v.note).toBe("STALE KEG: tailscale still running from a deleted keg");
+    expect(v.log).toContain("    cannot restart unattended — run: sudo launchctl kickstart -k system/sh.brew.redis");
+    expect(v.note).toBe("STALE KEG: redis still running from a deleted keg");
     expect(v.note).toMatch(TROUBLE_RE);
-    expect(notices[0]).toContain("Needs an operator: tailscale(system/sh.brew.tailscale)");
+    expect(notices[0]).toContain("Needs an operator: redis(system/sh.brew.redis)");
   });
   test("a user agent is kickstarted in the gui domain", async () => {
     const { env, calls } = fakeEnv(base("tool", { "/home.test/Library/LaunchAgents": ["homebrew.mxcl.tool.plist"] }));
@@ -248,22 +248,22 @@ describe("staleKegCheck: restart", () => {
     expect(notices[0]).toContain("svc(no label found)");
   });
   test("dry-run says what it would kickstart and runs nothing", async () => {
-    const { env, calls } = fakeEnv(base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }));
+    const { env, calls } = fakeEnv(base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }));
     const v = await staleKegCheck(env, opts({ dryRun: true }).o);
-    expect(v.log).toContain("    dry-run: would kickstart system/sh.brew.tailscale");
+    expect(v.log).toContain("    dry-run: would kickstart system/sh.brew.redis");
     expect(calls.some((c) => c.includes("kickstart") || c.startsWith("sudo"))).toBe(false);
     expect(v.note).toBe("");
   });
   test("an lsof failure on the re-scan is reported", async () => {
-    const { env } = fakeEnv({ ...base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }), lsof: [stale("tailscale"), 1] });
+    const { env } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), lsof: [stale("redis"), 1] });
     expect((await staleKegCheck(env, opts().o)).note).toBe("STALE-KEG CHECK FAILED: lsof unusable on re-scan (/usr/sbin/lsof)");
   });
   test("still-stale packages are counted toward stuck, and the stuck entries ride on the note", async () => {
-    const { env } = fakeEnv({ ...base("tailscale", { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }), lsof: [stale("tailscale")], rc: { "sudo -n launchctl kickstart -k system/sh.brew.tailscale": 1 } });
+    const { env } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), lsof: [stale("redis")], rc: { "sudo -n launchctl kickstart -k system/sh.brew.redis": 1 } });
     const seen: string[][] = [];
-    const v = await staleKegCheck(env, opts({ trackStuck: (s) => (seen.push(s), ["tailscale(3 runs, since 2026-10-20)"]) }).o);
-    expect(seen).toEqual([["tailscale"]]);
-    expect(v.note).toBe("STALE KEG: tailscale still running from a deleted keg [tailscale(3 runs, since 2026-10-20) ]");
+    const v = await staleKegCheck(env, opts({ trackStuck: (s) => (seen.push(s), ["redis(3 runs, since 2026-10-20)"]) }).o);
+    expect(seen).toEqual([["redis"]]);
+    expect(v.note).toBe("STALE KEG: redis still running from a deleted keg [redis(3 runs, since 2026-10-20) ]");
   });
 });
 
@@ -462,14 +462,14 @@ describe("staleKegCheck: the label from launchd, by pid", () => {
     expect(tracked).toEqual([["bun"]]);
   });
   test("a grandchild of a job (a shell in a session under a daemon) is logged only, never counted (label review 3 M1)", async () => {
-    // Mutant caught: any launchd ancestor counted (bun(child of sh.brew.tailscale) alarmed every run).
+    // Mutant caught: any launchd ancestor counted (bun(child of sh.brew.redis) alarmed every run).
     const { env, calls } = fakeEnv(base({
       lsof: [stale()], ps: { "20": { comm: "bun", command: "bun repl", ppid: "800" }, "800": { ppid: "700" }, "700": { ppid: "1" } },
-      out: { [PRINT]: print(["700", "sh.brew.tailscale"]) },
+      out: { [PRINT]: print(["700", "sh.brew.redis"]) },
     }));
     const { o, notices } = opts();
     const v = await staleKegCheck(env, o);
-    expect(v.log).toContain("    child of sh.brew.tailscale via pid 700 — not counted");
+    expect(v.log).toContain("    child of sh.brew.redis via pid 700 — not counted");
     expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
     expect(v.note).toBe("");
     expect(notices).toEqual([]);
@@ -536,7 +536,7 @@ describe("staleKegCheck: the label from launchd, by pid", () => {
       plists: { "/Library/LaunchDaemons": ["sh.brew.node.plist"] },
     }));
     const v = await staleKegCheck(env, opts().o);
-    // the kickstart that did nothing is counted, the package still alarms.
+    // The kickstart that did nothing is counted, the package still alarms.
     expect(v.note).toBe("STALE KEG: node(restarted 1) still running from a deleted keg");
   });
   test("a deferred service is handed off before any launchctl query", async () => {
@@ -807,18 +807,18 @@ describe("staleKegCheck: the label from launchd, by pid", () => {
   });
 });
 
-// owners restarted at an idle moment, runner jobs and orphans named, every outcome counted.
-describe("staleKegCheck: stale owners, runner jobs and orphans", () => {
+// Owners restarted at an idle moment, job runner jobs and orphans named, every outcome counted.
+describe("staleKegCheck: stale owners, job runner jobs and orphans", () => {
   const GUI = "launchctl print gui/501";
   const PRINT = "launchctl print system";
   const rows = (domain: string, ...rs: [string, string][]) => [`${domain} = {`, "\tservices = {", ...rs.map(([pid, label]) => `\t\t${pid.padStart(8)}      - \t${label}`), "\t}", "}"].join("\n") + "\n";
   const stale = (pid: string) => lsofLine(pid, `${CELLAR}/bun/1.0_old/bin/bun`);
   const KEG = `${CELLAR}/bun/1.0_old`;
   const OWNERS = [{ match: "org.example.serv*", probe: ["/opt/svc.test/idle"], health: "http://127.0.0.1:8080/health" }];
-  const ohJob = (id: string) => `/brew/Cellar/bun/1.0_old/bin/bun /home.test/.jobrunner/app/src/jobrunner/cli.ts run --notify --job ${id} --agent agent-x --label w --message done`;
+  const ohJob = (id: string) => `/brew/Cellar/bun/1.0_old/bin/bun /home.test/.jobrunner/app/src/jobrunner/cli.ts run --notify --job ${id} --label w --message done`;
   const queueOpts = (over: Partial<KegOptions> = {}) => {
     const queued: QueuedOwner[][] = [];
-    const r = opts({ staleOwners: OWNERS, queueOwners: async (q) => (queued.push(q), "owner restart waiter started (pid 4242) for org.example.serving"), ...over });
+    const r = opts({ jobRunners: ["jobrunner"], staleOwners: OWNERS, queueOwners: async (q) => (queued.push(q), "owner restart waiter started (pid 4242) for org.example.serving"), ...over });
     return { ...r, queued };
   };
 
@@ -893,14 +893,14 @@ describe("staleKegCheck: stale owners, runner jobs and orphans", () => {
     expect(v.note).toContain("owner restart waiter FAILED to start (EAGAIN)");
   });
 
-  test("runner jobs on the old keg are named with their ids and pids, never restarted, not by a plist name either", async () => {
-    // A ppid-1 bun with no launchd label is a job runner's detached job: restarting it kills live work.
+  test("job runner jobs on the old keg are named with their ids and pids, never restarted, not by a plist name either", async () => {
+    // A ppid-1 bun with no launchd label is a `jobrunner run` job: restarting it kills live work.
     const lsof = [stale("20"), stale("22")].join("\n");
     const { env, calls } = fakeEnv({
       lsof: [lsof], ps: { "20": { comm: "bun", command: ohJob("job-a-1"), ppid: "1" }, "22": { comm: "bun", command: ohJob("job-b-2"), ppid: "1" } },
       out: { [GUI]: rows("gui/501"), [PRINT]: rows("system") }, plists: { "/Library/LaunchDaemons": ["sh.brew.bun.plist"] },
     });
-    const { o, notices } = opts();
+    const { o, notices } = opts({ jobRunners: ["jobrunner"] });
     const v = await staleKegCheck(env, o);
     expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
     expect(v.log).toContain("    runner job job-a-1 (pid 20) — not restarted, it ends on its own");
@@ -994,13 +994,13 @@ describe("staleKegCheck: deferred and unresolved", () => {
   });
   test("an empty deferred entry never matches", async () => {
     const { env, calls } = fakeEnv({
-      lsof: [lsofLine("20", `${CELLAR}/tailscale/1.0_old/bin/tailscale`), lsofLine("21", `${CELLAR}/tailscale/1.1/bin/tailscale`)],
-      dirs: [`${CELLAR}/tailscale/1.1`], plists: { "/Library/LaunchDaemons": ["sh.brew.tailscale.plist"] }, ps: { "20": { comm: "tailscaled", ppid: "1" } },
+      lsof: [lsofLine("20", `${CELLAR}/redis/1.0_old/bin/redis`), lsofLine("21", `${CELLAR}/redis/1.1/bin/redis`)],
+      dirs: [`${CELLAR}/redis/1.1`], plists: { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }, ps: { "20": { comm: "redis-server", ppid: "1" } },
     });
     const { o, handoffs } = opts({ deferred: [""] });
     await staleKegCheck(env, o);
     expect(handoffs).toEqual([]);
-    expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.tailscale");
+    expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.redis");
   });
 });
 
@@ -1063,7 +1063,7 @@ describe("relinkUpgraded", () => {
     const { env } = fakeEnv({ dirs: [LINKED], out: { "brew info --json=v2 openssl@3": kegOnly(["openssl@3"]) } });
     expect((await relinkUpgraded(env, ["openssl@3"], { brew: "brew" })).note).toBe("");
   });
-  test("a failed relink is reported with a word the digest counts as trouble", async () => {
+  test("a failed relink is reported with a word a status reader counts as trouble", async () => {
     const { env } = fakeEnv({ dirs: [LINKED], rc: { "brew link model-svc": 1, "brew unlink model-svc": 1 }, out: { "brew info --json=v2 model-svc": kegOnly([]) } });
     const v = await relinkUpgraded(env, ["model-svc"], { brew: "brew" });
     expect(v.note).toBe("UNLINKED KEG: brew link failed for model-svc");

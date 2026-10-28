@@ -1,4 +1,4 @@
-// First-seen dates for the cooldown hold (spec §5: the review "holds for cooldown"). Neither the OS Config inventory nor
+// First-seen dates for the cooldown hold. Neither the OS Config inventory nor
 // the security index carries a publish time per package, so the leg counts the cooldown from the first real run that saw
 // a VM's candidate at that version. The dates are kept in the leg's `seenTo` JSON file: {vm: {<name>: {version,
 // first}}}. Cooldown is caller policy: the broker sees no publish dates. Only a missing file

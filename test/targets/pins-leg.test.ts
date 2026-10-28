@@ -1,5 +1,5 @@
 // The leg end to end over fakes: read at the base commit, discover, cooldown, artifact and diff review,
-// branch and proposal on APPROVE only, and a summary line the digest reads right.
+// branch and proposal on APPROVE only, and a summary line a status reader reads right.
 import { describe, expect, test } from "bun:test";
 import type { OciSource } from "../../src/adapters/oci/registry.ts";
 import type { ReviewResult } from "../../src/review.ts";
@@ -12,7 +12,7 @@ import { branchName } from "../../src/targets/pins/propose.ts";
 import type { NpmSource } from "../../src/targets/pins/npm.ts";
 import type { SnapshotSource } from "../../src/targets/pins/oci.ts";
 import type { OpenReach } from "../../src/targets/reach.ts";
-import { DIGEST_TROUBLE } from "../../src/targets/summary.ts";
+import { TROUBLE_WORDS } from "../../src/targets/summary.ts";
 import { scripted } from "../apply/helpers.ts";
 import { fakeExec, gitArgs, gitRule, memFs, type Call } from "./fakes.ts";
 
@@ -131,7 +131,7 @@ const CLI_TEXT = PINS.replace("CLI_VERSION=1.2.3", "CLI_VERSION=1.2.4").replace(
 const CLI_BRANCH = branchName("oupdate/", "img/pins.env", CLI_TEXT);
 const CLI_ASK = `/asks/images-${CLI_BRANCH.replaceAll("/", "-")}.txt`;
 /** The proposal a past run wrote for the branch: its Commit line is the APPROVE record of that tip. */
-const ASK = (commit = OID("1")) => `oupdate proposal: images\n\nBranch:   ${CLI_BRANCH}\nCommit:   ${commit} on origin/main ${BASE}\n`;
+const ASK = (commit = OID("1")) => `oupdate pin proposal: images\n\nBranch:   ${CLI_BRANCH}\nCommit:   ${commit} on origin/main ${BASE}\n`;
 const VERIFY = ["rev-list", "merge-base", "diff-tree", "show"];
 
 describe("pin-bump leg", () => {
@@ -142,7 +142,7 @@ describe("pin-bump leg", () => {
     expect(s.prompts).toHaveLength(0);
     expect(s.verbs()).toEqual(["show"]);
     expect(r.lines).toContain("not checked: LATER (no source yet)");
-    expect(DIGEST_TROUBLE.test(r.summary)).toBe(false);
+    expect(TROUBLE_WORDS.test(r.summary)).toBe(false);
   });
 
   test("an npm bump past cooldown: artifact review, diff review, branch and proposal", async () => {
@@ -150,7 +150,7 @@ describe("pin-bump leg", () => {
     const r = await s.run();
     expect(r.trouble).toBe(false);
     expect(r.summary).toMatch(/^pins proposed oupdate\/pins-[0-9a-f]{12} \(cli 1\.2\.3→1\.2\.4\); not checked: 1 pin \(see log\)$/);
-    expect(DIGEST_TROUBLE.test(r.summary)).toBe(false);
+    expect(TROUBLE_WORDS.test(r.summary)).toBe(false);
     expect(s.npmReviews).toEqual(["@scope/cli 1.2.3 1.2.4"]);
     expect(s.prompts[0]).toContain(`+CLI_INTEGRITY=${SRI("N")}`);
     const hash = s.calls.find((c) => gitArgs(c)[0] === "hash-object")!;
@@ -182,7 +182,7 @@ describe("pin-bump leg", () => {
     expect(s.prompts).toHaveLength(1);
     expect(s.verbs()).toEqual(["show", "show-ref"]);
     expect([...s.files.keys()]).toEqual([]);
-    expect(DIGEST_TROUBLE.test(r.summary)).toBe(false);
+    expect(TROUBLE_WORDS.test(r.summary)).toBe(false);
   });
 
   test("a fresh release is held for cooldown, with no review", async () => {
@@ -192,7 +192,7 @@ describe("pin-bump leg", () => {
     expect(r.trouble).toBe(false);
     expect(s.npmReviews).toHaveLength(0);
     expect(s.prompts).toHaveLength(0);
-    expect(DIGEST_TROUBLE.test(r.summary)).toBe(false);
+    expect(TROUBLE_WORDS.test(r.summary)).toBe(false);
   });
 
   test("a FLAG on the pins diff is trouble and writes nothing", async () => {
@@ -259,7 +259,7 @@ describe("pin-bump leg", () => {
     expect(r.summary).toMatch(/^pins already proposed oupdate\/pins-[0-9a-f]{12} \(cli 1\.2\.3→1\.2\.4\)/);
     expect(s.prompts).toHaveLength(0);
     expect(s.verbs()).toEqual(["show", "show-ref", ...VERIFY]);
-    expect(DIGEST_TROUBLE.test(r.summary)).toBe(false);
+    expect(TROUBLE_WORDS.test(r.summary)).toBe(false);
   });
 
   test("a newer value in a propose:false group is reported, not proposed, not trouble", async () => {
@@ -267,7 +267,7 @@ describe("pin-bump leg", () => {
     const r = await s.run();
     expect(r).toMatchObject({ summary: "pins nothing to propose; newer, not proposed: tool 2.1.0 (coupled); not checked: 1 pin (see log)", trouble: false });
     expect(s.prompts).toHaveLength(0);
-    expect(DIGEST_TROUBLE.test(r.summary)).toBe(false);
+    expect(TROUBLE_WORDS.test(r.summary)).toBe(false);
   });
 
   test("a pins file that cannot be read or parsed is not checked, with trouble", async () => {
@@ -312,7 +312,7 @@ describe("pin-bump leg", () => {
       const r = await s.run();
       expect(r.trouble).toBe(true);
       expect(r.summary).toStartWith(`pins error: branch ${CLI_BRANCH} exists but tip ${OID("1").slice(0, 12)} ${why}; not pushed`);
-      expect(DIGEST_TROUBLE.test(r.summary)).toBe(true);
+      expect(TROUBLE_WORDS.test(r.summary)).toBe(true);
       expect(s.verbs()).not.toContain("push");
       expect(s.npmReviews).toHaveLength(0);
     });

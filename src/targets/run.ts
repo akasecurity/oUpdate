@@ -1,6 +1,6 @@
 // `oupdate targets --apply`: for each due target, open its reach, run its legs, join the leg results
 // into one summary line and publish it as the target's status tsv. A reach or leg that is not built,
-// or that fails, is "not checked" or "error" with trouble, never a silent skip (spec §7); a target with
+// or that fails, is "not checked" or "error" with trouble, never a silent skip; a target with
 // `parityTo` appends the night's parity facts on every real run. A dry run
 // publishes nothing and writes dry-run-targets.log. The Mac host apply (host --apply) is separate.
 
@@ -12,11 +12,13 @@ import type { TargetsConfig } from "./config.ts";
 import type { Clock } from "./gce/job.ts";
 import { osPackagesLeg } from "./gce/leg.ts";
 import { newLatch, type PatchLatch } from "./gce/patch.ts";
-import type { NasReviewers } from "./nas/review.ts";
-import { isDue, isNasLeg, type Leg, type LegResult, type ParityFacts, type Target, type TargetResult } from "./model.ts";
-import { runNasLeg, type NasLegDeps } from "./nas/leg.ts";
+import { isOpenBroker } from "./broker/broker.ts";
+import { composeLeg } from "./compose/compose.ts";
+import type { ReviewerPair } from "./compose/review.ts";
+import { isDue, isPluginLeg, type Leg, type LegResult, type ParityFacts, type Target, type TargetResult } from "./model.ts";
 import type { PinBumpLeg } from "./pins/config.ts";
 import { openReach, type OpenReach } from "./reach.ts";
+import { EMPTY_REGISTRY, type Registry } from "./registry.ts";
 import { joinLegs, oneLine, stamp, statusTsv } from "./summary.ts";
 
 export interface TargetFs {
@@ -66,10 +68,12 @@ export interface TargetDeps {
   rev: string;
   /** The pin-bump leg (pins/leg.ts pinBumpRunner in production). */
   pinBump: LegRunner<PinBumpLeg>;
-  /** The NAS legs' two reviewers and release source; absent: those legs report "not checked". */
-  nas?: NasLegDeps;
+  /** The two reviewers of the docker-compose leg and of plugin legs; absent: those legs report "not checked". */
+  reviewers?: ReviewerPair;
+  /** The loaded target plugins (registry.ts); none when absent. */
+  registry?: Registry;
   /** The os-packages leg's two reviewers and clock (its job and inventory waits); absent: that leg reports "not checked". */
-  gce?: { reviewers: NasReviewers; clock: Clock };
+  gce?: { reviewers: ReviewerPair; clock: Clock };
   timeoutMs?: number;
 }
 
@@ -84,10 +88,18 @@ export interface RunOptions {
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 async function runLeg(leg: Leg, ctx: LegContext, deps: TargetDeps, latch: PatchLatch): Promise<LegResult> {
+  const reg = deps.registry ?? EMPTY_REGISTRY;
+  if (isPluginLeg(leg)) {
+    const k = reg.legs.get(leg.kind);
+    if (!k) return { lines: [], summary: `not checked — leg ${leg.kind} has no plugin loaded`, trouble: true };
+    if (!deps.reviewers) return { lines: [], summary: `not checked — leg ${leg.kind} has no reviewers wired`, trouble: true };
+    return k.run(leg, ctx, { reviewers: deps.reviewers });
+  }
   if (leg.kind === "pin-bump") return deps.pinBump(leg, ctx);
-  if (isNasLeg(leg)) {
-    if (!deps.nas) return Promise.resolve({ lines: [], summary: `not checked — leg ${leg.kind} has no reviewers or release source wired`, trouble: true });
-    return runNasLeg(leg, ctx, deps.nas);
+  if (leg.kind === "docker-compose") {
+    if (!deps.reviewers) return { lines: [], summary: "not checked — leg docker-compose has no reviewers wired", trouble: true };
+    if (!isOpenBroker(ctx.reach)) return { lines: [], summary: `not checked — leg docker-compose over reach ${ctx.reach.kind} not built yet`, trouble: true };
+    return composeLeg(leg, ctx, ctx.reach, deps.reviewers, reg.containerBaseline);
   }
   if (leg.kind === "os-packages") {
     if (!deps.gce) return Promise.resolve({ lines: [], summary: "not checked — leg os-packages has no reviewers or clock wired", trouble: true });
@@ -107,7 +119,7 @@ async function runLeg(leg: Leg, ctx: LegContext, deps: TargetDeps, latch: PatchL
 
 async function runTarget(t: Target, deps: TargetDeps, opts: RunOptions, latch: PatchLatch): Promise<TargetResult> {
   const lines: string[] = [`=== ${t.id} (${t.os}, reach ${t.reach.kind}) ===`];
-  const h = await openReach(t.reach, deps.exec, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const h = await openReach(t.reach, deps.exec, deps.timeoutMs ?? DEFAULT_TIMEOUT_MS, deps.registry ?? EMPTY_REGISTRY);
   const legs: { kind: string; result: LegResult }[] = [];
   if (!h.ok) legs.push({ kind: "reach", result: { lines: [], summary: `not checked — ${h.why}`, trouble: true } });
   else

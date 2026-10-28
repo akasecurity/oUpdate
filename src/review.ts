@@ -2148,7 +2148,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
               : { layer: "reviewer", verdict: "stop", detail: `${overPriority}; ${input.reviewer.name} APPROVE on the signal files (${chunks.length} part(s)), ${note}; needs a human` },
           );
         else if (scope === "priority" && overFull && !flagged.length)
-          // an unread file can carry the attack (xrpl 4.2.1 landed this way), so this APPROVE holds for a human.
+          // An unread file can carry the attack (xrpl 4.2.1 landed this way), so this APPROVE holds for a human.
           layers.push({ layer: "reviewer", verdict: "stop", detail: `${overFull}; ${input.reviewer.name} APPROVE on the priority files (${chunks.length} part(s))${note}; needs a human` });
         else if (badLinks.length && !flagged.length)
           layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: link target of ${badLinks.join(", ")} missing, outside the package, a directory, another link or binary; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });

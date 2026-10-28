@@ -1,5 +1,5 @@
-// Gatekeeper for cask upgrades, ported from the previous updater's su_gk_* functions and
-// su_cask_gatekeeper_check. A cask upgrade leaves its new binaries quarantined, so the first run
+// Gatekeeper for cask upgrades, ported from the previous updater's Gatekeeper
+// functions and cask check. A cask upgrade leaves its new binaries quarantined, so the first run
 // from a login session waits on a GUI prompt. The release removes that quarantine only when three
 // gates pass for every file: the previous version's linked binaries were approved (an
 // unquarantined file counts as approved, as Homebrew treats it), the new file is signed by the

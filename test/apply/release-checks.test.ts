@@ -22,8 +22,8 @@ async function decide(e: ReleaseEnv, rc: ReleaseCheck, p: PendingCheck & { to: s
   return d;
 }
 
-const CHECK: ReleaseCheck = { formula: "example/tap/splash", command: ["/opt/gate.test/check"], retries: 1, timeoutSec: 900 };
-const P: PendingCheck & { to: string } = { formula: "splash", full: "example/tap/splash", rack: "/brew/Cellar/splash", from: "1.2.0", to: "1.3.0", beforeRan: false, at: "2026-10-26 04:00" };
+const CHECK: ReleaseCheck = { formula: "example/tap/gadget", command: ["/opt/gate.test/check"], retries: 1, timeoutSec: 900 };
+const P: PendingCheck & { to: string } = { formula: "gadget", full: "example/tap/gadget", rack: "/brew/Cellar/gadget", from: "1.2.0", to: "1.3.0", beforeRan: false, at: "2026-10-26 04:00" };
 
 interface Script {
   /** Check exits, in order, per GATE_VERSION. */
@@ -56,18 +56,18 @@ function env(s: Script = {}) {
       if (next === "timeout") return { rc: 124, out: "", err: "", timedOut: true };
       return { rc: next, out: `score ${v} attempt\nfinal score 0.${next}\n`, err: "" };
     }
-    if (line === "/usr/bin/readlink /brew/opt/splash") return linked ? { rc: 0, out: `../Cellar/splash/${linked}\n`, err: "" } : { rc: 1, out: "", err: "" };
+    if (line === "/usr/bin/readlink /brew/opt/gadget") return linked ? { rc: 0, out: `../Cellar/gadget/${linked}\n`, err: "" } : { rc: 1, out: "", err: "" };
     if (argv[0] === "brew") {
       const rest = argv.slice(1).join(" ");
       if (rest === "--prefix") return { rc: 0, out: "/brew\n", err: "" };
-      if (rest.startsWith("info --json=v2")) return { rc: 0, out: JSON.stringify({ formulae: [{ full_name: "example/tap/splash", linked_keg: linked || null, installed: [...kegs].sort().map((version) => ({ version })), versions: { stable: "1.3.0" }, revision: 0 }] }), err: "" };
+      if (rest.startsWith("info --json=v2")) return { rc: 0, out: JSON.stringify({ formulae: [{ full_name: "example/tap/gadget", linked_keg: linked || null, installed: [...kegs].sort().map((version) => ({ version })), versions: { stable: "1.3.0" }, revision: 0 }] }), err: "" };
       if (rest === "trust --formula --json=v1") return { rc: 0, out: JSON.stringify(s.trusted ?? []), err: "" };
-      if (rest === "uninstall example/tap/splash") {
+      if (rest === "uninstall example/tap/gadget") {
         kegs.delete(linked);
         linked = "";
         return { rc: 0, out: "", err: "" };
       }
-      if (rest === "link example/tap/splash") {
+      if (rest === "link example/tap/gadget") {
         linked = [...kegs].sort().at(-1) ?? "";
         return { rc: 0, out: "", err: "" };
       }
@@ -75,7 +75,7 @@ function env(s: Script = {}) {
     }
     return { rc: 99, out: "", err: `UNEXPECTED ${line}` };
   };
-  const dirs = new Set(s.dirs ?? ["/brew/Cellar/splash/1.2.0", "/brew/Cellar/splash/1.3.0"]);
+  const dirs = new Set(s.dirs ?? ["/brew/Cellar/gadget/1.2.0", "/brew/Cellar/gadget/1.3.0"]);
   const e: ReleaseEnv = {
     exec, brew: "brew", stateDir: "/state.test", host: "host-a", logFile: "/log.test",
     readFile: async (p) => files.get(p),
@@ -95,7 +95,7 @@ function env(s: Script = {}) {
   return { e, calls, envs, files, notices, restarts, restartOwner, linked: () => linked };
 }
 
-const HOLD = holdPath("/state.test", "splash");
+const HOLD = holdPath("/state.test", "gadget");
 /** A gate that lets every attempt run. */
 const OPEN = async () => ({ kind: "ok" as const, note: "" });
 
@@ -149,7 +149,7 @@ describe("decide", () => {
     const h = env();
     const st: { after?: "run" | "skip" } = {};
     const d = await decide(h.e, CHECK, P, h.restartOwner, st);
-    expect(d).toEqual({ note: "splash 1.3.0 PASS" });
+    expect(d).toEqual({ note: "gadget 1.3.0 PASS" });
     expect(st.after).toBe("run");
     expect(h.calls.some((c) => c.includes("uninstall"))).toBe(false);
   });
@@ -158,7 +158,7 @@ describe("decide", () => {
     const st: { after?: "run" | "skip" } = {};
     const d = await decide(h.e, CHECK, P, h.restartOwner, st);
     expect(d.failed).toBeUndefined();
-    expect(d.note).toBe("splash 1.3.0 check could not run (rc 2), kept");
+    expect(d.note).toBe("gadget 1.3.0 check could not run (rc 2), kept");
     expect(h.notices[0]).toContain("could not run (rc 2)");
     expect(st.after).toBe("run");
     expect(h.calls.some((c) => c.includes("uninstall"))).toBe(false);
@@ -168,58 +168,58 @@ describe("decide", () => {
     const h = env({ check: { "1.3.0": [1, 1], "1.2.0": [0] } });
     const st: { after?: "run" | "skip" } = {};
     const d = await decide(h.e, CHECK, P, h.restartOwner, st);
-    expect(h.calls.filter((c) => c.startsWith("brew uninstall") || c.startsWith("brew link"))).toEqual(["brew uninstall example/tap/splash", "brew link example/tap/splash"]);
+    expect(h.calls.filter((c) => c.startsWith("brew uninstall") || c.startsWith("brew link"))).toEqual(["brew uninstall example/tap/gadget", "brew link example/tap/gadget"]);
     expect(h.linked()).toBe("1.2.0");
-    expect(h.restarts).toEqual(["/brew/Cellar/splash/1.3.0"]);
-    expect(JSON.parse(h.files.get(HOLD)!)).toEqual({ formula: "splash", version: "1.3.0", from: "1.2.0", at: "2026-10-26 04:00" });
+    expect(h.restarts).toEqual(["/brew/Cellar/gadget/1.3.0"]);
+    expect(JSON.parse(h.files.get(HOLD)!)).toEqual({ formula: "gadget", version: "1.3.0", from: "1.2.0", at: "2026-10-26 04:00" });
     expect(h.envs.filter((x) => x?.GATE_VERSION).map((x) => x!.GATE_VERSION)).toEqual(["1.3.0", "1.3.0", "1.2.0"]);
-    expect(d).toEqual({ note: "splash 1.3.0 FAIL, rolled back to 1.2.0 (held, 1.2.0 PASS)", failed: "release-check:splash" });
+    expect(d).toEqual({ note: "gadget 1.3.0 FAIL, rolled back to 1.2.0 (held, 1.2.0 PASS)", failed: "release-check:gadget" });
     expect(st.after).toBe("run");
-    expect(h.notices[0]).toContain("release check FAILED: splash 1.3.0 — rolled back to 1.2.0");
+    expect(h.notices[0]).toContain("release check FAILED: gadget 1.3.0 — rolled back to 1.2.0");
     expect(h.notices[0]).toContain("final score 0.1");
   });
   test("a formula trusted before the uninstall is trusted again", async () => {
-    const h = env({ check: { "1.3.0": [1, 1] }, trusted: ["example/tap/splash"] });
+    const h = env({ check: { "1.3.0": [1, 1] }, trusted: ["example/tap/gadget"] });
     await decide(h.e, CHECK, P, h.restartOwner, {});
-    expect(h.calls).toContain("brew trust --formula example/tap/splash");
+    expect(h.calls).toContain("brew trust --formula example/tap/gadget");
   });
   test("restored version fails too: after is not run, loud notice", async () => {
     const h = env({ check: { "1.3.0": [1, 1], "1.2.0": [1, 1] } });
     const st: { after?: "run" | "skip" } = {};
     const d = await decide(h.e, CHECK, P, h.restartOwner, st);
     expect(st.after).toBe("skip");
-    expect(d.note).toBe("splash 1.3.0 FAIL, rolled back to 1.2.0 (held), 1.2.0 FAIL, after not run");
+    expect(d.note).toBe("gadget 1.3.0 FAIL, rolled back to 1.2.0 (held), 1.2.0 FAIL, after not run");
     expect(h.notices[0]).toContain("🚨");
     expect(h.notices[0]).toContain("FAILED too");
     expect(h.files.has(HOLD)).toBe(true);
   });
   test("previous keg missing: no rollback, the new version stays (held), after not run, loud notice", async () => {
-    const h = env({ check: { "1.3.0": [1, 1] }, dirs: ["/brew/Cellar/splash/1.3.0"] });
+    const h = env({ check: { "1.3.0": [1, 1] }, dirs: ["/brew/Cellar/gadget/1.3.0"] });
     const st: { after?: "run" | "skip" } = {};
     const d = await decide(h.e, CHECK, P, h.restartOwner, st);
     expect(h.calls.some((c) => c.includes("uninstall") || c.startsWith("brew link"))).toBe(false);
     expect(h.files.has(HOLD)).toBe(true);
     expect(h.restarts).toEqual([]);
     expect(st.after).toBe("skip");
-    expect(d.failed).toBe("release-check:splash");
+    expect(d.failed).toBe("release-check:gadget");
     expect(h.notices[0]).toContain("rollback impossible");
-    expect(h.notices[0]).toContain("previous keg /brew/Cellar/splash/1.2.0 is missing");
+    expect(h.notices[0]).toContain("previous keg /brew/Cellar/gadget/1.2.0 is missing");
   });
   test("a record whose new version is the previous one (to === from): the only keg is never uninstalled, rollback impossible, after not run", async () => {
-    const h = env({ check: { "1.2.0": [1, 1] }, linked: "1.2.0", kegs: ["1.2.0"], dirs: ["/brew/Cellar/splash/1.2.0"] });
+    const h = env({ check: { "1.2.0": [1, 1] }, linked: "1.2.0", kegs: ["1.2.0"], dirs: ["/brew/Cellar/gadget/1.2.0"] });
     const st: { after?: "run" | "skip" } = {};
     const d = await decide(h.e, CHECK, { ...P, to: "1.2.0" }, h.restartOwner, st);
     expect(h.calls.some((c) => c.includes("uninstall") || c.startsWith("brew link"))).toBe(false);
     expect(h.linked()).toBe("1.2.0");
     expect(h.restarts).toEqual([]);
     expect(st.after).toBe("skip");
-    expect(d.failed).toBe("release-check:splash");
+    expect(d.failed).toBe("release-check:gadget");
     expect(d.note).toContain("rollback impossible");
     expect(h.notices[0]).toContain("rollback impossible");
     expect(h.notices[0]).toContain("the only keg is never uninstalled");
   });
   test("a failed uninstall: nothing removed, the failed version held, after not run", async () => {
-    const h = env({ check: { "1.3.0": [1, 1] }, rc: { "brew uninstall example/tap/splash": 1 } });
+    const h = env({ check: { "1.3.0": [1, 1] }, rc: { "brew uninstall example/tap/gadget": 1 } });
     const st: { after?: "run" | "skip" } = {};
     const d = await decide(h.e, CHECK, P, h.restartOwner, st);
     expect(st.after).toBe("skip");
@@ -240,18 +240,18 @@ describe("decide", () => {
 describe("rollback: review round 3 (3b26f7e)", () => {
   test("2: a rollback killed after the uninstall, before the link: recovery links and trusts again (the opt link is missing, the sole installed version is not taken for it)", async () => {
     // The killed run removed 1.3.0; nothing is linked; only 1.2.0 is installed. It had recorded the trust.
-    const h = env({ check: { "1.2.0": [0] }, dirs: ["/brew/Cellar/splash/1.2.0"], linked: "", kegs: ["1.2.0"], trusted: [] });
+    const h = env({ check: { "1.2.0": [0] }, dirs: ["/brew/Cellar/gadget/1.2.0"], linked: "", kegs: ["1.2.0"], trusted: [] });
     const rec = { ...P, ownerRestarted: true, verdict: "fail" as const, after: "skip" as const, trusted: true };
     const d = await resume(h.e, CHECK, rec, { save: async () => {}, restartOwner: async () => ({ kind: "ok", note: "" }), scan: async () => [], stopping: () => false });
-    expect(h.calls).toContain("brew link example/tap/splash");
-    expect(h.calls).toContain("brew trust --formula example/tap/splash");
+    expect(h.calls).toContain("brew link example/tap/gadget");
+    expect(h.calls).toContain("brew trust --formula example/tap/gadget");
     expect(h.calls.some((c) => c.startsWith("brew uninstall"))).toBe(false);
     expect(h.linked()).toBe("1.2.0");
     expect(rec.rolledBack).toBe(true);
-    expect(d.note).toBe("splash 1.3.0 FAIL, rolled back to 1.2.0 (held, 1.2.0 PASS)");
+    expect(d.note).toBe("gadget 1.3.0 FAIL, rolled back to 1.2.0 (held, 1.2.0 PASS)");
   });
   test("2: the same, but the link fails on recovery: rollback incomplete, after not run", async () => {
-    const h = env({ check: { "1.2.0": [0] }, dirs: ["/brew/Cellar/splash/1.2.0"], linked: "", kegs: ["1.2.0"], rc: { "brew link example/tap/splash": 1 } });
+    const h = env({ check: { "1.2.0": [0] }, dirs: ["/brew/Cellar/gadget/1.2.0"], linked: "", kegs: ["1.2.0"], rc: { "brew link example/tap/gadget": 1 } });
     const rec = { ...P, ownerRestarted: true, verdict: "fail" as const, after: "skip" as const, trusted: false };
     const d = await resume(h.e, CHECK, rec, { save: async () => {}, restartOwner: async () => ({ kind: "ok", note: "" }), scan: async () => [], stopping: () => false });
     expect(rec.rolledBack).toBeUndefined();
@@ -260,7 +260,7 @@ describe("rollback: review round 3 (3b26f7e)", () => {
     expect(h.envs.filter((x) => x?.GATE_VERSION === "1.2.0")).toEqual([]);
   });
   test("2: the trust state is saved on the record before the uninstall", async () => {
-    const h = env({ check: { "1.3.0": [1, 1] }, trusted: ["example/tap/splash"] });
+    const h = env({ check: { "1.3.0": [1, 1] }, trusted: ["example/tap/gadget"] });
     const rec = { ...P, ownerRestarted: true };
     const saved: boolean[] = [];
     await resume(h.e, CHECK, rec, {
@@ -270,12 +270,12 @@ describe("rollback: review round 3 (3b26f7e)", () => {
     expect(saved).toContain(true);
   });
   test("5: a failing re-trust is a failed rollback: held, the restored version not checked, after not run", async () => {
-    const h = env({ check: { "1.3.0": [1, 1], "1.2.0": [0] }, trusted: ["example/tap/splash"], rc: { "brew trust --formula example/tap/splash": 1 } });
+    const h = env({ check: { "1.3.0": [1, 1], "1.2.0": [0] }, trusted: ["example/tap/gadget"], rc: { "brew trust --formula example/tap/gadget": 1 } });
     const st: { after?: "run" | "skip" } = {};
     const d = await decide(h.e, CHECK, P, h.restartOwner, st);
     expect(st.after).toBe("skip");
     expect(d.note).toContain("rollback incomplete");
-    expect(d.failed).toBe("release-check:splash");
+    expect(d.failed).toBe("release-check:gadget");
     expect(h.files.has(HOLD)).toBe(true);
     expect(h.envs.filter((x) => x?.GATE_VERSION === "1.2.0")).toEqual([]);
   });
@@ -302,14 +302,14 @@ describe("review round 4 (85dd0da)", () => {
   test("5: the trust state the record carries from before the upgrade is used, not read again", async () => {
     const h = env({ check: { "1.3.0": [1, 1] }, rc: { "brew trust --formula --json=v1": 1 } });
     await decide(h.e, CHECK, { ...P, trusted: true }, h.restartOwner, {});
-    expect(h.calls).toContain("brew uninstall example/tap/splash");
-    expect(h.calls).toContain("brew trust --formula example/tap/splash");
+    expect(h.calls).toContain("brew uninstall example/tap/gadget");
+    expect(h.calls).toContain("brew trust --formula example/tap/gadget");
     expect(h.linked()).toBe("1.2.0");
   });
 });
 
 describe("the pre-check gate: a fresh scan in front of every check, whatever the record's restart flags say", () => {
-  const OLDKEG = "/brew/Cellar/splash/1.1.0";
+  const OLDKEG = "/brew/Cellar/gadget/1.1.0";
   /** resume with scripted scans (each answer in turn, the last repeating) and restarts recorded by phase. */
   const gated = async (h: ReturnType<typeof env>, rec: PendingCheck & { to: string }, scans: ({ pid: string; keg: string }[] | undefined)[]) => {
     const phases: string[] = [];
@@ -334,9 +334,9 @@ describe("the pre-check gate: a fresh scan in front of every check, whatever the
     const rec = { ...P, ownerRestarted: true };
     const g = await gated(h, rec, [[{ pid: "77", keg: OLDKEG }], []]);
     expect(g.phases).toEqual(["new"]);
-    expect(g.expects).toEqual(["/brew/Cellar/splash/1.3.0", "/brew/Cellar/splash/1.3.0"]);
+    expect(g.expects).toEqual(["/brew/Cellar/gadget/1.3.0", "/brew/Cellar/gadget/1.3.0"]);
     expect(rec.verdict).toBe("pass");
-    expect(h.e.log).toContain(`  release check splash: pid 77 maps ${OLDKEG} before the check — its owners are restarted first`);
+    expect(h.e.log).toContain(`  release check gadget: pid 77 maps ${OLDKEG} before the check — its owners are restarted first`);
   });
   test("the process still there after that restart: no check, a wait", async () => {
     const h = env();
@@ -352,31 +352,31 @@ describe("the pre-check gate: a fresh scan in front of every check, whatever the
     const rec = { ...P, ownerRestarted: true };
     const g = await gated(h, rec, [undefined]);
     expect(g.phases).toEqual([]);
-    expect(g.d).toMatchObject({ wait: true, waitWhy: "the splash processes could not be read before the check" });
+    expect(g.d).toMatchObject({ wait: true, waitWhy: "the gadget processes could not be read before the check" });
     expect(h.envs.some((x) => x?.GATE_VERSION)).toBe(false);
   });
   test("restarted in this run and a process left: a wait without a second restart", async () => {
     const h = env();
     const rec = { ...P };
-    const g = await gated(h, rec, [[{ pid: "78", keg: "/brew/Cellar/splash/1.2.0" }]]);
+    const g = await gated(h, rec, [[{ pid: "78", keg: "/brew/Cellar/gadget/1.2.0" }]]);
     expect(g.phases).toEqual(["new"]);
     expect(g.d).toMatchObject({ wait: true });
     expect(rec.ownerRestarted).toBe(true);
   });
   test("a stopped run persisted the restored restart, the owner respawned on an older retained keg since: restarted onto the restored version and scanned again before the restored check", async () => {
     // Rolled back already: only 1.2.0 (and the older 1.1.0) installed, 1.2.0 linked.
-    const h = env({ check: { "1.2.0": [0] }, linked: "1.2.0", kegs: ["1.1.0", "1.2.0"], dirs: ["/brew/Cellar/splash/1.1.0", "/brew/Cellar/splash/1.2.0"] });
+    const h = env({ check: { "1.2.0": [0] }, linked: "1.2.0", kegs: ["1.1.0", "1.2.0"], dirs: ["/brew/Cellar/gadget/1.1.0", "/brew/Cellar/gadget/1.2.0"] });
     const rec = { ...P, ownerRestarted: true, verdict: "fail" as const, after: "skip" as const, trusted: false, rolledBack: true, restoredOwnerRestarted: true };
     const g = await gated(h, rec, [[{ pid: "99", keg: OLDKEG }], []]);
     expect(g.phases).toEqual(["restored"]);
-    expect(g.expects).toEqual(["/brew/Cellar/splash/1.2.0", "/brew/Cellar/splash/1.2.0"]);
+    expect(g.expects).toEqual(["/brew/Cellar/gadget/1.2.0", "/brew/Cellar/gadget/1.2.0"]);
     expect(rec.restoredVerdict).toBe("pass");
   });
   test("the owner respawned on the previous keg between the candidate's attempts: the retry's gate finds it, no second restart in the run, no retry, no verdict (the FAIL before it does not count), a wait", async () => {
     const h = env({ check: { "1.3.0": [1, 0] } });
     const rec = { ...P };
     const saved: Partial<PendingCheck>[] = [];
-    const scans: KegProcs[] = [[], [{ pid: "80", keg: "/brew/Cellar/splash/1.2.0" }]];
+    const scans: KegProcs[] = [[], [{ pid: "80", keg: "/brew/Cellar/gadget/1.2.0" }]];
     let n = 0;
     const phases: string[] = [];
     const d = await resume(h.e, CHECK, rec, {
@@ -385,7 +385,7 @@ describe("the pre-check gate: a fresh scan in front of every check, whatever the
       scan: async () => scans[Math.min(n++, scans.length - 1)],
       stopping: () => false,
     });
-    expect(d).toMatchObject({ wait: true, waitWhy: "pid 80 still maps /brew/Cellar/splash/1.2.0 after its owners restarted" });
+    expect(d).toMatchObject({ wait: true, waitWhy: "pid 80 still maps /brew/Cellar/gadget/1.2.0 after its owners restarted" });
     expect(phases).toEqual(["new"]);
     expect(h.calls.filter((c) => c === "/opt/gate.test/check")).toHaveLength(1);
     expect(rec.verdict).toBeUndefined();
@@ -397,7 +397,7 @@ describe("the pre-check gate: a fresh scan in front of every check, whatever the
   test("an earlier run restarted the owners: a respawn between the attempts is restarted once by the retry's gate, then the retry runs", async () => {
     const h = env({ check: { "1.3.0": [1, 0] } });
     const rec = { ...P, ownerRestarted: true };
-    const g = await gated(h, rec, [[], [{ pid: "80", keg: "/brew/Cellar/splash/1.2.0" }], []]);
+    const g = await gated(h, rec, [[], [{ pid: "80", keg: "/brew/Cellar/gadget/1.2.0" }], []]);
     expect(g.phases).toEqual(["new"]);
     expect(rec.verdict).toBe("pass");
     expect(h.calls.filter((c) => c === "/opt/gate.test/check")).toHaveLength(2);
@@ -409,16 +409,16 @@ describe("the pre-check gate: a fresh scan in front of every check, whatever the
     const d = await resume(h.e, CHECK, rec, {
       save: async () => {},
       restartOwner: async () => ({ kind: "failed", note: "kickstart rc 5" }),
-      scan: async () => (n++ === 0 ? [] : [{ pid: "80", keg: "/brew/Cellar/splash/1.2.0" }]),
+      scan: async () => (n++ === 0 ? [] : [{ pid: "80", keg: "/brew/Cellar/gadget/1.2.0" }]),
       stopping: () => false,
     });
-    expect(d).toMatchObject({ note: "splash 1.3.0 not checked, owner restart failed", failed: "release-check:splash" });
+    expect(d).toMatchObject({ note: "gadget 1.3.0 not checked, owner restart failed", failed: "release-check:gadget" });
     expect(rec.verdict).toBeUndefined();
     expect(rec.after).toBe("run");
     expect(h.calls.filter((c) => c === "/opt/gate.test/check")).toHaveLength(1);
   });
   test("the owner respawned on an older retained keg between the restored version's attempts: no retry, no restored verdict, the record waits (after stays skipped)", async () => {
-    const h = env({ check: { "1.2.0": [1, 0] }, linked: "1.2.0", kegs: ["1.1.0", "1.2.0"], dirs: ["/brew/Cellar/splash/1.1.0", "/brew/Cellar/splash/1.2.0"] });
+    const h = env({ check: { "1.2.0": [1, 0] }, linked: "1.2.0", kegs: ["1.1.0", "1.2.0"], dirs: ["/brew/Cellar/gadget/1.1.0", "/brew/Cellar/gadget/1.2.0"] });
     const rec = { ...P, ownerRestarted: true, verdict: "fail" as const, after: "skip" as const, trusted: false, rolledBack: true };
     const g = await gated(h, rec, [[], [{ pid: "99", keg: OLDKEG }]]);
     expect(g.phases).toEqual(["restored"]);
@@ -429,7 +429,7 @@ describe("the pre-check gate: a fresh scan in front of every check, whatever the
     expect(rec.ended).toBeUndefined();
   });
   test("the same, the restored owners restarted by an earlier run: the retry's gate restarts them once, the retry passes", async () => {
-    const h = env({ check: { "1.2.0": [1, 0] }, linked: "1.2.0", kegs: ["1.1.0", "1.2.0"], dirs: ["/brew/Cellar/splash/1.1.0", "/brew/Cellar/splash/1.2.0"] });
+    const h = env({ check: { "1.2.0": [1, 0] }, linked: "1.2.0", kegs: ["1.1.0", "1.2.0"], dirs: ["/brew/Cellar/gadget/1.1.0", "/brew/Cellar/gadget/1.2.0"] });
     const rec = { ...P, ownerRestarted: true, verdict: "fail" as const, after: "skip" as "run" | "skip", trusted: false, rolledBack: true, restoredOwnerRestarted: true };
     const g = await gated(h, rec, [[], [{ pid: "99", keg: OLDKEG }], []]);
     expect(g.phases).toEqual(["restored"]);
@@ -437,7 +437,7 @@ describe("the pre-check gate: a fresh scan in front of every check, whatever the
     expect(rec.after).toBe("run");
   });
   test("the same, the process still there: the restored version is not checked, the record waits (after stays skipped)", async () => {
-    const h = env({ check: { "1.2.0": [0] }, linked: "1.2.0", kegs: ["1.1.0", "1.2.0"], dirs: ["/brew/Cellar/splash/1.1.0", "/brew/Cellar/splash/1.2.0"] });
+    const h = env({ check: { "1.2.0": [0] }, linked: "1.2.0", kegs: ["1.1.0", "1.2.0"], dirs: ["/brew/Cellar/gadget/1.1.0", "/brew/Cellar/gadget/1.2.0"] });
     const rec = { ...P, ownerRestarted: true, verdict: "fail" as const, after: "skip" as const, trusted: false, rolledBack: true, restoredOwnerRestarted: true };
     const g = await gated(h, rec, [[{ pid: "99", keg: OLDKEG }]]);
     expect(g.d).toMatchObject({ wait: true });

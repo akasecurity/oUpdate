@@ -1,4 +1,4 @@
-// Ported from the previous updater's tap-approval cases (test/port/03): the approved-taps loader,
+// Ported from the previous updater's tap-approval cases: the approved-taps loader,
 // literal tap matching and the "old→new" versions of `brew outdated --verbose`.
 import { describe, expect, test } from "bun:test";
 import { loadApprovedTaps, outdatedVersions, tapIn } from "../../src/apply/taps.ts";

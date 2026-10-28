@@ -12,7 +12,7 @@
           "kind": "pin-bump",
           "pinsPath": "sandbox/base/pins.env",
           "branchPrefix": "oupdate/",
-          "proposalDir": "/srv/oupdate/train-asks",
+          "proposalDir": "/srv/oupdate/proposals",
           "push": false,
           "cooldownDays": 2,
           "groups": [
@@ -23,27 +23,27 @@
           "kind": "pin-bump",
           "pinsPath": "sandbox/base/host-pins.env",
           "branchPrefix": "oupdate/",
-          "proposalDir": "/srv/oupdate/train-asks",
+          "proposalDir": "/srv/oupdate/proposals",
           "push": false,
           "cooldownDays": 2,
           "groups": [
             {
               "source": "github-release",
-              "name": "lima",
-              "repo": "lima-vm/lima",
+              "name": "vmtool",
+              "repo": "example/vmtool",
               "tag": "v{v}",
-              "versionKey": "LIMA_VERSION",
-              "assets": { "LIMA_SHA256": "lima-{v}-Darwin-arm64.tar.gz" },
-              "assetKeys": { "LIMA_ASSET": "lima-{v}-Darwin-arm64.tar.gz" }
+              "versionKey": "VMTOOL_VERSION",
+              "assets": { "VMTOOL_SHA256": "vmtool-{v}-Darwin-arm64.tar.gz" },
+              "assetKeys": { "VMTOOL_ASSET": "vmtool-{v}-Darwin-arm64.tar.gz" }
             },
             {
               "source": "github-release",
-              "name": "colima",
-              "repo": "abiosoft/colima",
+              "name": "ctrtool",
+              "repo": "example/ctrtool",
               "tag": "v{v}",
-              "versionKey": "COLIMA_VERSION",
-              "assets": { "COLIMA_SHA256": "colima-Darwin-arm64" },
-              "assetKeys": { "COLIMA_ASSET": "colima-Darwin-arm64" }
+              "versionKey": "CTRTOOL_VERSION",
+              "assets": { "CTRTOOL_SHA256": "ctrtool-Darwin-arm64" },
+              "assetKeys": { "CTRTOOL_ASSET": "ctrtool-Darwin-arm64" }
             },
             {
               "source": "docker-static",

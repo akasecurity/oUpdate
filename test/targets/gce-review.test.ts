@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { pkgKey } from "../../src/targets/gce/answer.ts";
 import { aptPrompt, aptRules, packageLine, reviewApt } from "../../src/targets/gce/review.ts";
 import { inv } from "./fake-gce.ts";
-import { fakeReviewer } from "./fake-nas.ts";
+import { fakeReviewer } from "./fake-broker.ts";
 
 const NOW = new Date("2026-10-26T03:00:00Z");
 const DAYS_AGO = (d: number) => new Date(NOW.getTime() - d * 86_400_000);
@@ -45,15 +45,15 @@ describe("aptPrompt and reviewApt", () => {
     expect(p).not.toContain("the candidate is newer");
   });
 
-  test("both models must approve; a primary FLAG never asks the second model", async () => {
-    const primary = fakeReviewer("first-model", "APPROVE");
-    const secondary = fakeReviewer("secondary-model", "FLAG\n1. openssl changes upstream");
-    expect(await reviewApt({ primary: primary.reviewer, secondary: secondary.reviewer }, "p")).toMatchObject({ primary: "APPROVE", secondary: "FLAG", approved: false });
+  test("both models must approve; a first FLAG never asks the second model", async () => {
+    const first = fakeReviewer("first-model", "APPROVE");
+    const second = fakeReviewer("second-model", "FLAG\n1. openssl changes upstream");
+    expect(await reviewApt({ first: first.reviewer, second: second.reviewer }, "p")).toMatchObject({ first: "APPROVE", second: "FLAG", approved: false });
     const flag = fakeReviewer("first-model", "FLAG\nno");
-    const unused = fakeReviewer("secondary-model", "APPROVE");
-    expect(await reviewApt({ primary: flag.reviewer, secondary: unused.reviewer }, "p")).toMatchObject({ primary: "FLAG", secondary: "not asked", approved: false });
+    const unused = fakeReviewer("second-model", "APPROVE");
+    expect(await reviewApt({ first: flag.reviewer, second: unused.reviewer }, "p")).toMatchObject({ first: "FLAG", second: "not asked", approved: false });
     expect(unused.prompts).toHaveLength(0);
-    const ok = await reviewApt({ primary: fakeReviewer("r", "APPROVE").reviewer, secondary: fakeReviewer("o", "APPROVE").reviewer }, "p");
+    const ok = await reviewApt({ first: fakeReviewer("r", "APPROVE").reviewer, second: fakeReviewer("o", "APPROVE").reviewer }, "p");
     expect(ok.approved).toBe(true);
   });
 });
