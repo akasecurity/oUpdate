@@ -14,6 +14,7 @@ import type { LegRunner, TargetFs } from "../run.ts";
 import { groupKeys, type NpmGroup, type PinBumpLeg, type PinGroup } from "./config.ts";
 import type { Discovery } from "./discovery.ts";
 import { parsePins, pinValues, pinsDiff, renderPins, setPins, type PinsFile } from "./file.ts";
+import { discoverDocker, type DockerIndexSource } from "./docker.ts";
 import { discoverGithub, type GithubSource } from "./github.ts";
 import { discoverNpm, npmSpec, type NpmSource } from "./npm.ts";
 import { discoverOci, type SnapshotSource } from "./oci.ts";
@@ -25,6 +26,7 @@ export interface PinSources {
   github: GithubSource;
   oci: OciSource;
   snapshot: SnapshotSource;
+  docker: DockerIndexSource;
 }
 
 /**
@@ -73,6 +75,7 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 function discover(g: PinGroup, cur: Map<string, string>, s: PinSources): Promise<Discovery> {
   if (g.source === "npm") return discoverNpm(g, cur, s.npm);
   if (g.source === "github-release") return discoverGithub(g, cur, s.github);
+  if (g.source === "docker-static") return discoverDocker(g, cur, s.docker);
   return discoverOci(g, cur, s.oci, s.snapshot);
 }
 
@@ -162,7 +165,7 @@ export function pinBumpRunner(deps: PinLegDeps): LegRunner<PinBumpLeg> {
       const next = setPins(file, Object.assign({}, ...accepted.map((a) => a.values)) as Record<string, string>);
       const text = renderPins(next);
       const changes = accepted.map((a) => a.change);
-      return { next, text, changes, list: changes.map((c) => `${c.group} ${c.from}→${c.to}`).join(", "), branch: branchName(leg.branchPrefix, text) };
+      return { next, text, changes, list: changes.map((c) => `${c.group} ${c.from}→${c.to}`).join(", "), branch: branchName(leg.branchPrefix, leg.pinsPath, text) };
     };
     const askFor = (branch: string) => join(leg.trainAskDir, `${ctx.target.id}-${branch.replaceAll("/", "-")}.txt`);
     /**

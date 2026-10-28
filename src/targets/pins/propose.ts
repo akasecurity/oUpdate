@@ -8,9 +8,9 @@ import type { Exec } from "../../apply/exec.ts";
 import { GIT_ENV } from "../reach.ts";
 import type { PinChange } from "./review.ts";
 
-/** `<prefix>pins-<12 hex of sha256(new file)>`: the same bump always gets the same name. */
-export function branchName(prefix: string, text: string): string {
-  return `${prefix}pins-${createHash("sha256").update(text).digest("hex").slice(0, 12)}`;
+/** `<prefix>pins-<12 hex of sha256(pinsPath, NUL, new file)>`: the same bump of the same file always gets the same name, and two pins files that hold the same text do not share a branch. */
+export function branchName(prefix: string, pinsPath: string, text: string): string {
+  return `${prefix}pins-${createHash("sha256").update(pinsPath).update("\0").update(text).digest("hex").slice(0, 12)}`;
 }
 
 export async function branchExists(exec: Exec, repo: string, branch: string, timeoutMs: number): Promise<boolean> {

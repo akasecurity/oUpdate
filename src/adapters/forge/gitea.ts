@@ -74,14 +74,37 @@ export function giteaForge(deps: GiteaDeps): Forge {
       return r.text();
     },
     async changedFiles(repo, pr) {
+      // X-Total-Count is the number of file records. A short list, or a paged list with no header, is incomplete:
+      // reviewing it would miss a file the gate cannot see. A rename's previous path is not its own record.
       const out: string[] = [];
+      let listed = 0;
+      let total: number | undefined;
+      let paged = false;
       for (let page = 1; ; page++) {
-        const batch = await json<{ filename: string; previous_filename?: string }[]>("GET", `/repos/${enc(repo)}/pulls/${pr}/files?limit=50&page=${page}`);
+        const path = `/repos/${enc(repo)}/pulls/${pr}/files?limit=50&page=${page}`;
+        const r = await call("GET", path);
+        if (!r.ok) throw new Error(`forge GET ${path.split("?")[0]}: ${r.status}`);
+        const raw = r.headers.get("x-total-count");
+        if (raw !== null && raw.trim() !== "") {
+          const n = Number(raw.trim());
+          if (!Number.isInteger(n) || n < 0) throw new Error(`PR #${pr} file list has a bad X-Total-Count`);
+          if (total !== undefined && total !== n) throw new Error(`PR #${pr} file list X-Total-Count changed from ${total} to ${n}`);
+          total = n;
+        }
+        const batch = (await r.json()) as { filename: string; previous_filename?: string }[];
+        if (!Array.isArray(batch)) throw new Error(`PR #${pr} file list is not a list`);
         for (const f of batch) {
+          listed++;
           out.push(f.filename);
           if (f.previous_filename) out.push(f.previous_filename);
         }
-        if (batch.length < 50) return out;
+        if (total !== undefined && listed > total) throw new Error(`PR #${pr} file list has ${listed} files, X-Total-Count is ${total}`);
+        if (batch.length < 50) {
+          if (paged && total === undefined) throw new Error(`PR #${pr} file list has no X-Total-Count`);
+          if (total !== undefined && listed !== total) throw new Error(`PR #${pr} file list has ${listed} files, X-Total-Count is ${total}`);
+          return out;
+        }
+        paged = true;
       }
     },
     async statusOf(repo, sha, context) {

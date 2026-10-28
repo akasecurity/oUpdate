@@ -26,6 +26,7 @@ function deps(files: Record<string, string>) {
       github: { releases: async () => [] },
       oci: { index: async () => { throw new Error("unused"); } },
       snapshot: { exists: async () => false },
+      docker: { listing: async () => { throw new Error("unused"); } },
     },
     makeReviewer: (s) => (specs.push(s.name), { name: s.name, review: async () => "APPROVE\nfine" }),
     releases: { latest: async () => "7.1.4" },

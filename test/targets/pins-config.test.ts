@@ -72,10 +72,36 @@ describe("parsePinBumpLeg", () => {
     expect(() => P({ groups: [{ ...g[1], assets: {} }] })).toThrow("leg.groups[0].assets must name at least one pinned asset hash");
   });
 
+  test("assetKeys are mapped and must be asset name templates", () => {
+    const g = LEG().groups;
+    const gh = { ...g[1], assetKeys: { TOOL_ASSET: "tool_{v}_linux_amd64.tar.gz" } };
+    const l = P({ groups: [g[0], gh, g[2]] });
+    expect(groupKeys(l.groups[1]!)).toEqual(["TOOL_VERSION", "TOOL_SHA256_X64", "TOOL_ASSET"]);
+    expect(() => P({ groups: [{ ...g[1], assetKeys: { TOOL_ASSET: "tool {v}.tgz" } }] })).toThrow('leg.groups[0].assetKeys["TOOL_ASSET"] is not valid');
+    expect(() => P({ groups: [{ ...g[1], assetKeys: { TOOL_SHA256_X64: "tool_{v}_linux_amd64.tar.gz" } }] })).toThrow("leg: TOOL_SHA256_X64 is named by group tool and group tool");
+    expect(() => P({ groups: [{ ...g[1], assetKeys: { "not-a-key": "tool_{v}.tgz" } }] })).toThrow("leg.groups[0].assetKeys: key");
+  });
+
+  test("an asset name must be a template this group already hashes", () => {
+    const g = LEG().groups;
+    const paired = { ...g[1], assets: { TOOL_SHA256_X64: "tool_{v}_linux_amd64.tar.gz", COLIMA_SHA256: "colima-Darwin-arm64" }, assetKeys: { COLIMA_ASSET: "colima-Darwin-arm64" } };
+    expect(P({ groups: [paired] }).groups[0]).toMatchObject({ assetKeys: { COLIMA_ASSET: "colima-Darwin-arm64" } });
+    expect(() => P({ groups: [{ ...g[1], assetKeys: { LIMA_ASSET: "lima-{v}-Darwin-arm64.tar.gz" } }] })).toThrow('leg.groups[0].assetKeys["LIMA_ASSET"] must name an asset hashed in assets');
+  });
+
+  test("docker-static owns its three pins and never proposes", () => {
+    const g = { source: "docker-static", name: "docker-cli", versionKey: "DOCKER_CLI_VERSION", assetKey: "DOCKER_CLI_ASSET", shaKey: "DOCKER_CLI_SHA256", note: "no upstream sums" };
+    const l = P({ groups: [g] });
+    expect(l.groups[0]).toMatchObject({ source: "docker-static", propose: false, note: "no upstream sums" });
+    expect(groupKeys(l.groups[0]!)).toEqual(["DOCKER_CLI_VERSION", "DOCKER_CLI_ASSET", "DOCKER_CLI_SHA256"]);
+    expect(() => P({ groups: [{ ...g, propose: true }] })).toThrow("leg.groups[0]: docker-static never proposes (no upstream sums)");
+    expect(() => P({ groups: [g, { ...g, name: "docker-cli-2", versionKey: "OTHER_VERSION" }] })).toThrow("leg: DOCKER_CLI_ASSET is named by group docker-cli and group docker-cli-2");
+  });
+
   test("only docker-hub is read so far, and the source must be known", () => {
     const g = LEG().groups;
     expect(() => P({ groups: [{ ...g[2], registry: "quay" }] })).toThrow('leg.groups[0].registry must be "docker-hub"');
-    expect(() => P({ groups: [{ source: "pypi", name: "x" }] })).toThrow("leg.groups[0].source must be npm, github-release or oci-index");
+    expect(() => P({ groups: [{ source: "pypi", name: "x" }] })).toThrow("leg.groups[0].source must be npm, github-release, oci-index or docker-static");
   });
 
   test("groups must be non-empty and keys must be PIN_KEY shaped", () => {

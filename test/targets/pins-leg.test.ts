@@ -4,7 +4,8 @@ import { describe, expect, test } from "bun:test";
 import type { OciSource } from "../../src/adapters/oci/registry.ts";
 import type { ReviewResult } from "../../src/review.ts";
 import type { Target } from "../../src/targets/model.ts";
-import type { PinBumpLeg } from "../../src/targets/pins/config.ts";
+import type { PinBumpLeg, PinGroup } from "../../src/targets/pins/config.ts";
+import type { DockerIndexSource } from "../../src/targets/pins/docker.ts";
 import type { DatedRelease, GithubSource } from "../../src/targets/pins/github.ts";
 import { pinBumpRunner, type NpmPayload, type PinLegDeps } from "../../src/targets/pins/leg.ts";
 import { branchName } from "../../src/targets/pins/propose.ts";
@@ -58,12 +59,15 @@ interface Opts {
   onlyPlatform?: boolean;
   /** A per-package artifact review answer, ahead of npmReview. */
   npmReviewFor?: Record<string, ReviewResult | Error>;
+  /** Another pins file in the same repo, same prefix. */
+  pinsPath?: string;
 }
 
 function setup(o: Opts = {}) {
   const pins = o.pins ?? (o.platform ? `${PINS}CLI_PLAT_X64=${SRI("P")}\n` : PINS);
+  const pinsPath = o.pinsPath ?? LEG.pinsPath;
   const { exec, calls } = fakeExec([
-    gitRule(["show", `${BASE}:img/pins.env`], { rc: o.showRc ?? 0, out: o.showRc ? "" : pins, err: o.showRc ? "fatal: path not in tree" : "" }),
+    gitRule(["show", `${BASE}:${pinsPath}`], { rc: o.showRc ?? 0, out: o.showRc ? "" : pins, err: o.showRc ? "fatal: path not in tree" : "" }),
     gitRule(["show-ref"], { rc: o.exists ? 0 : 1 }),
     gitRule(["ls-tree"], { out: `100644 blob ${OID("d")}\timg/pins.env\n` }),
     gitRule(["hash-object"], { out: OID("e") }),
@@ -89,13 +93,14 @@ function setup(o: Opts = {}) {
   const github: GithubSource = { releases: async () => [rel] };
   const oci: OciSource = { index: async () => ({ digest: IMG, images: [], created: new Date(OLD_PUB) }) };
   const snapshot: SnapshotSource = { exists: async () => true };
+  const docker: DockerIndexSource = { listing: async () => { throw new Error("no docker group in this leg"); } };
   const rev = scripted(o.answers ?? ["APPROVE\nno attack indicators found"]);
   const npmReviews: string[] = [];
   const payloads: NpmPayload[] = [];
   const landed = (name: string, from: string, to: string): ReviewResult => ({ eco: "npm", name, from, to, decision: "land", layers: [] });
   const { fs, files } = memFs();
   const deps: PinLegDeps = {
-    sources: { npm, github, oci, snapshot },
+    sources: { npm, github, oci, snapshot, docker },
     reviewer: rev.r,
     reviewNpm: async (p) => {
       const { name, from, to } = p;
@@ -109,10 +114,11 @@ function setup(o: Opts = {}) {
   };
   const plat = { CLI_PLAT_X64: "@scope/cli-linux-x64@{v}" };
   const base0 = o.platform
-    ? { ...LEG, fixed: o.onlyPlatform ? [...LEG.fixed, "CLI_INTEGRITY"] : LEG.fixed, groups: LEG.groups.map((g) => (g.source === "npm" ? { ...g, integrity: o.onlyPlatform ? plat : { ...g.integrity, ...plat } } : g)) }
+    ? { ...LEG, fixed: o.onlyPlatform ? [...LEG.fixed, "CLI_INTEGRITY"] : LEG.fixed, groups: LEG.groups.map((g): PinGroup => (g.source === "npm" ? { ...g, integrity: o.onlyPlatform ? plat : { ...g.integrity, ...plat } } : g)) }
     : LEG;
-  const base = o.toolPropose === false ? { ...base0, groups: base0.groups.map((g) => (g.name === "tool" ? { ...g, propose: false, note: "coupled" } : g)) } : base0;
-  const leg = o.push ? { ...base, push: true } : base;
+  const base = o.toolPropose === false ? { ...base0, groups: base0.groups.map((g): PinGroup => (g.source === "github-release" && g.name === "tool" ? { ...g, propose: false, note: "coupled" } : g)) } : base0;
+  const leg0 = o.push ? { ...base, push: true } : base;
+  const leg = pinsPath === leg0.pinsPath ? leg0 : { ...leg0, pinsPath };
   const reach: OpenReach = { kind: "git", exec, repo: "/repo", remote: "origin", base: "main", baseSha: BASE };
   const run = () => pinBumpRunner(deps)(leg, { target: TARGET, reach, dryRun: o.dryRun ?? false, now: NOW });
   const verbs = () => calls.map((c: Call) => gitArgs(c)[0]);
@@ -122,7 +128,7 @@ function setup(o: Opts = {}) {
 
 // The train ask path of the cli 1.2.3 -> 1.2.4 bump (the branch name hashes the new file).
 const CLI_TEXT = PINS.replace("CLI_VERSION=1.2.3", "CLI_VERSION=1.2.4").replace(`CLI_INTEGRITY=${SRI("A")}`, `CLI_INTEGRITY=${SRI("N")}`);
-const CLI_BRANCH = branchName("oupdate/", CLI_TEXT);
+const CLI_BRANCH = branchName("oupdate/", "img/pins.env", CLI_TEXT);
 const CLI_ASK = `/asks/lane-images-${CLI_BRANCH.replaceAll("/", "-")}.txt`;
 /** The train ask a past run wrote for the branch: its Commit line is the APPROVE record of that tip. */
 const ASK = (commit = OID("1")) => `oupdate train ask: lane-images\n\nBranch:   ${CLI_BRANCH}\nCommit:   ${commit} on origin/main ${BASE}\n`;
@@ -155,6 +161,18 @@ describe("pin-bump leg", () => {
     expect(ask).toContain(`Branch:   ${branch}`);
     expect(ask).toContain("  cli: 1.2.3 -> 1.2.4");
     expect(s.verbs()).not.toContain("push");
+  });
+
+  test("two legs with one prefix and identical pins text do not share a branch", async () => {
+    const pins = "sandbox/base/pins.env";
+    const host = "sandbox/base/host-pins.env";
+    const a = await setup({ npmLatest: "1.2.4", pinsPath: pins }).run();
+    const b = await setup({ npmLatest: "1.2.4", pinsPath: host }).run();
+    expect(a.trouble).toBe(false);
+    expect(b.trouble).toBe(false);
+    expect(a.summary).toContain(branchName("oupdate/", pins, CLI_TEXT));
+    expect(b.summary).toContain(branchName("oupdate/", host, CLI_TEXT));
+    expect(branchName("oupdate/", pins, CLI_TEXT)).not.toBe(branchName("oupdate/", host, CLI_TEXT));
   });
 
   test("a dry run reviews but writes no object, branch or train ask", async () => {

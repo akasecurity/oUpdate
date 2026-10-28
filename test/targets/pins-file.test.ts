@@ -1,4 +1,7 @@
 // The pins.env model: byte-for-byte round trip, only values ever change, and a value can never add a line or a shell expansion.
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import { parsePins, pinValues, pinsDiff, renderPins, setPins, SAFE_VALUE } from "../../src/targets/pins/file.ts";
 
@@ -54,5 +57,20 @@ describe("pins file", () => {
     const f = parsePins(TEXT);
     expect(pinsDiff(f, setPins(f, { TOOL_VERSION: "1.2.4" }))).toBe("@@ line 6 @@\n-TOOL_VERSION=1.2.3\n+TOOL_VERSION=1.2.4");
     expect(pinsDiff(f, f)).toBe("");
+  });
+
+  test("reads host-pins.env: comments stay comments, KEY=value lines are the pins", () => {
+    const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures/host-pins.env"), "utf8");
+    const f = parsePins(text);
+    expect(renderPins(f)).toBe(text);
+    const v = pinValues(f);
+    expect([...v.keys()]).toEqual(["LIMA_VERSION", "LIMA_ASSET", "LIMA_SHA256", "COLIMA_VERSION", "COLIMA_ASSET", "COLIMA_SHA256", "DOCKER_CLI_VERSION", "DOCKER_CLI_ASSET", "DOCKER_CLI_SHA256"]);
+    expect(v.get("LIMA_VERSION")).toBe("2.2.1");
+    expect(v.get("LIMA_ASSET")).toBe("lima-2.2.1-Darwin-arm64.tar.gz");
+    expect(v.get("COLIMA_ASSET")).toBe("colima-Darwin-arm64");
+    expect(v.get("DOCKER_CLI_VERSION")).toBe("29.9.2");
+    expect(v.get("DOCKER_CLI_ASSET")).toBe("docker-29.9.2.tgz");
+    expect(f.lines.filter((l) => l.kind === "text" && l.text.startsWith("#")).length).toBeGreaterThan(0);
+    expect(f.lines.some((l) => l.kind === "pin" && l.key === "LIMA_VERSION" && l.value === "2.2.1")).toBe(true);
   });
 });

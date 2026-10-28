@@ -30,6 +30,7 @@ import { realTargetFs } from "./targets/run.ts";
 import { realUnraidReleases } from "./targets/nas/os.ts";
 import { parityMain, parseParityCommand } from "./targets/parity-cli.ts";
 import { fetchVerified, realNpmSource } from "./targets/pins/npm.ts";
+import { realDockerSource } from "./targets/pins/docker.ts";
 import { realGithubSource } from "./targets/pins/github.ts";
 import { realSnapshotSource } from "./targets/pins/oci.ts";
 import { dockerHubSource, parseImageRef, registrySource, type ImageRef } from "./adapters/oci/registry.ts";
@@ -345,20 +346,24 @@ export interface ImageArgs {
   new: ImageRef;
   platform: string;
   now: Date;
+  /** Read the layer contents; `--no-layers` turns it off. */
+  layers: boolean;
   reviewer?: ReviewerSpec;
   secondReviewer?: ReviewerSpec;
   json?: string;
 }
 
-const IMAGE_USAGE = "usage: oupdate image <old-ref> <new-ref> [--platform linux/amd64] [--reviewer JSON] [--second-reviewer JSON] [--now ISO] [--json FILE]";
+const IMAGE_USAGE = "usage: oupdate image <old-ref> <new-ref> [--platform linux/amd64] [--no-layers] [--reviewer JSON] [--second-reviewer JSON] [--now ISO] [--json FILE]";
 const IMAGE_FLAGS = new Set(["--platform", "--reviewer", "--second-reviewer", "--now", "--json"]);
 
 export function parseImageArgs(argv: string[]): ImageArgs {
   const pos: string[] = [];
   const flags = new Map<string, string>();
+  let layers = true;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (IMAGE_FLAGS.has(a)) {
+    if (a === "--no-layers") layers = false;
+    else if (IMAGE_FLAGS.has(a)) {
       const v = argv[++i];
       if (v === undefined) throw new Error(`${a} needs a value`);
       flags.set(a, v);
@@ -371,7 +376,7 @@ export function parseImageArgs(argv: string[]): ImageArgs {
   if (old.registry !== now.registry || old.repository !== now.repository) throw new Error(`the two refs must name the same repository: ${old.registry}/${old.repository} and ${now.registry}/${now.repository}`);
   const platform = flags.get("--platform") ?? "linux/amd64";
   if (!/^[a-z0-9]+\/[a-z0-9_]+(\/[a-z0-9]+)?$/.test(platform)) throw new Error(`--platform must be os/arch[/variant], got ${platform}`);
-  const out: ImageArgs = { old, new: now, platform, now: flags.has("--now") ? date("--now", flags.get("--now")!) : new Date() };
+  const out: ImageArgs = { old, new: now, platform, layers, now: flags.has("--now") ? date("--now", flags.get("--now")!) : new Date() };
   if (flags.has("--reviewer")) out.reviewer = parseReviewerSpec(flags.get("--reviewer")!);
   if (flags.has("--second-reviewer")) out.secondReviewer = parseReviewerSpec(flags.get("--second-reviewer")!);
   if (flags.has("--json")) out.json = flags.get("--json")!;
@@ -433,7 +438,7 @@ async function targetsCli(argv: string[]): Promise<number> {
     now: new Date(),
     rev: await appRev(realExec, join(import.meta.dir, "..")),
     tmpDir: tmpdir(),
-    sources: { npm: realNpmSource(), github: realGithubSource, oci: dockerHubSource(), snapshot: realSnapshotSource },
+    sources: { npm: realNpmSource(), github: realGithubSource, oci: dockerHubSource(), snapshot: realSnapshotSource, docker: realDockerSource },
     makeReviewer,
     releases: realUnraidReleases(),
     reviewNpm: (spec) => (p) =>

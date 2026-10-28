@@ -1,7 +1,8 @@
 // Tools pinned to a GitHub release and the sha256 of release assets the build downloads. The version is
 // the newest non-draft, non-prerelease release whose tag fits the group's template; each hash is the
 // asset's published `digest` (the same field the app-bundle phase trusts), and an asset must sit on the
-// project's own release download path.
+// project's own release download path. `assetKeys` are rewritten to that asset's file name at the new
+// version, so a pin like LIMA_ASSET stays in step with the version and the hash.
 
 import { newer, realAppNet, type GhRelease } from "../../apply/appbundle.ts";
 import type { GithubGroup } from "./config.ts";
@@ -63,6 +64,15 @@ export async function discoverGithub(g: GithubGroup, cur: Map<string, string>, s
       if (!m) return err(`${name} has no published sha256 digest`);
       values[key] = m[1]!;
       evidence.push(`${key}: ${name} sha256 ${m[1]} (${a.browser_download_url})`);
+    }
+    for (const [key, template] of Object.entries(g.assetKeys ?? {})) {
+      const name = template.replaceAll("{v}", v);
+      const hits = rel.assets.filter((a) => a.name === name);
+      if (hits.length !== 1) return err(`${rel.tag_name} has ${hits.length} assets named ${name}`);
+      const a = hits[0]!;
+      if (!a.browser_download_url.startsWith(prefix)) return err(`${name} is not on ${g.repo}'s release path`);
+      values[key] = name;
+      evidence.push(`${key}: ${name} (${a.browser_download_url})`);
     }
     return { state: "newer", group: g.name, from, to: v, publishedAt, values, evidence, propose: g.propose, ...(g.note ? { note: g.note } : {}) };
   } catch (e) {

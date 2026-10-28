@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { parsePnpmLock } from "../src/lockfile/pnpmlock.ts";
 import { parseLock } from "../src/lockfile/index.ts";
+import { diffLocks } from "../src/lockdiff.ts";
 
 const fixture = (f: string) => Bun.file(join(import.meta.dir, "fixtures/locks", f)).text();
 const SRI = (c: string) => `sha512-${c.repeat(86)}==`;
@@ -72,6 +73,23 @@ describe("parsePnpmLock v9", () => {
 
   test("a tarball from another registry is named by host", () => {
     expect(find("@corp/ui")).toMatchObject({ version: "3.1.0", registry: "npm.corp.example" });
+  });
+
+  test("v9 snapshots are the installed instances; a snapshot with no packages entry throws", () => {
+    const sri = SRI("A");
+    const lock = (snaps: string) => `lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages:\n  foo@1.0.0:\n    resolution: {integrity: ${sri}}\n  bar@2.0.0:\n    resolution: {integrity: ${SRI("B")}}\nsnapshots:\n${snaps}`;
+    const both = lock("  foo@1.0.0(bar@2.0.0): {}\n  foo@1.0.0(bar@3.0.0): {}\n  bar@2.0.0: {}\n");
+    const foos = parsePnpmLock(both).filter((p) => p.name === "foo");
+    expect(foos).toEqual([{ name: "foo", version: "1.0.0", integrity: sri, digest: sri }]);
+    const old = parsePnpmLock(lock("  foo@1.0.0(bar@2.0.0): {}\n  bar@2.0.0: {}\n"));
+    const neu = parsePnpmLock(lock("  foo@1.0.0(bar@3.0.0): {}\n  bar@2.0.0: {}\n"));
+    expect(diffLocks(old, neu)).toEqual([]);
+    expect(() => parsePnpmLock(lock("  missing@9.9.9: {}\n"))).toThrow(/cannot read snapshot missing@9\.9\.9: no packages entry/);
+    const patched = `lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages:\n  foo@1.0.0(patch_hash=abc):\n    resolution: {integrity: ${sri}}\nsnapshots:\n  foo@1.0.0(patch_hash=abc)(bar@2.0.0): {}\n`;
+    expect(parsePnpmLock(patched)).toEqual([{ name: "foo", version: "1.0.0", integrity: sri, digest: sri }]);
+    expect(() => parsePnpmLock(patched.replace("packages:\n  foo@1.0.0(patch_hash=abc):", "packages:\n  foo@1.0.0:"))).toThrow(/patch_hash=abc/);
+    const v6 = `lockfileVersion: '6.0'\npackages:\n  /foo@1.0.0(bar@2.0.0):\n    resolution: {integrity: ${sri}}\n`;
+    expect(parsePnpmLock(v6)).toEqual([{ name: "foo", version: "1.0.0", integrity: sri, digest: sri }]);
   });
 });
 

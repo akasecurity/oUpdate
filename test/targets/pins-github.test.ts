@@ -58,6 +58,20 @@ describe("github pins", () => {
     expect(await discoverGithub(G, CUR, src([bad]))).toEqual({ state: "error", group: "tool", why: "tool-linux-aarch64.zip has no published sha256 digest" });
   });
 
+  test("assetKeys rewrites the versioned file name and refuses a missing or off-repo asset", async () => {
+    const g: GithubGroup = { ...G, assetKeys: { TOOL_ASSET: "tool_{v}_linux_amd64.tar.gz", TOOL_ARM_NAME: "tool-linux-aarch64.zip" } };
+    const d = await discoverGithub(g, CUR, src([rel("tool-v1.4.3")]));
+    if (d.state !== "newer") throw new Error("not newer");
+    expect(d.values.TOOL_ASSET).toBe("tool_1.4.3_linux_amd64.tar.gz");
+    expect(d.values.TOOL_ARM_NAME).toBe("tool-linux-aarch64.zip");
+    expect(d.values.TOOL_SHA256_X64).toBe(H("b"));
+    const missing = { ...G, assetKeys: { TOOL_ASSET: "missing-{v}.tar.gz" } };
+    expect(await discoverGithub(missing, CUR, src([rel("tool-v1.4.3")]))).toEqual({ state: "error", group: "tool", why: "tool-v1.4.3 has 0 assets named missing-1.4.3.tar.gz" });
+    const elsewhere = { ...G, assetKeys: { TOOL_EXTRA: "tool-extra-{v}.zip" } };
+    const off = rel("tool-v1.4.3", { assets: [...rel("tool-v1.4.3").assets, asset("tool-extra-1.4.3.zip", `sha256:${H("c")}`, "https://downloads.example.com/tool-extra-1.4.3.zip")] });
+    expect(await discoverGithub(elsewhere, CUR, src([off]))).toEqual({ state: "error", group: "tool", why: "tool-extra-1.4.3.zip is not on example/tool's release path" });
+  });
+
   test("propose false and the note carry through; a source failure is an error", async () => {
     const d = await discoverGithub({ ...G, propose: false, note: "coupled" }, CUR, src([rel("tool-v1.4.3")]));
     expect(d).toMatchObject({ state: "newer", propose: false, note: "coupled" });

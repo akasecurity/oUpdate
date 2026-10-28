@@ -59,7 +59,7 @@ export interface PrepassResult {
 
 const NPM_INSTALL_SCRIPTS = ["preinstall", "install", "postinstall", "prepare"];
 
-const SOFT_PATTERNS: { kind: string; re: RegExp }[] = [
+export const SOFT_PATTERNS: { kind: string; re: RegExp }[] = [
   { kind: "encoded-blob", re: /[A-Za-z0-9+/=_-]{400,}/ },
   { kind: "dynamic-exec", re: /\b(exec|eval)\s*\(\s*(base64|codecs|zlib|marshal|atob|Buffer\.from|bytes\.fromhex|__import__)/ },
   { kind: "dynamic-exec", re: /\bnew\s+Function\s*\(/ },
