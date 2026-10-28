@@ -2302,6 +2302,9 @@ describe("newly reached files", () => {
 
   // Two typescript trees are about 23MB each and the diff cannot yield. A busy host
   // ran past the 5s default, and that timeout killed the semver tar read.
+  // The committed typescript tars keep all 132 paths. Unchanged files are one shared
+  // comment line. lib/typescript.js, lib/_tsc.js and lib/typescript.d.ts keep the changed
+  // lines and two lines of context. package.json and lib/lib.esnext.float16.d.ts are whole.
   test("typescript and semver updates stay near their old part counts", async () => {
     const loadTree = (root: string): FileMap => {
       const out: FileMap = new Map();
@@ -2327,15 +2330,15 @@ describe("newly reached files", () => {
       }
     };
     const cache = join(homedir(), ".bun", "install", "cache");
-    const tsOld = join(cache, "typescript@5.9.2@@@1");
-    const tsNew = join(cache, "typescript@5.9.3@@@1");
-    expect(chunkDiff(loadTree(tsOld), loadTree(tsNew), 60_000).length).toBe(1);
+    const fixture = (name: string) => readArtifact(join(import.meta.dir, "fixtures", name));
     // Both cache dirs, or the committed tar of that same pair when one side was never installed.
+    const tsA = join(cache, "typescript@5.9.2@@@1");
+    const tsB = join(cache, "typescript@5.9.3@@@1");
+    const [tsOld, tsNew] = isDir(tsA) && isDir(tsB) ? [loadTree(tsA), loadTree(tsB)] : [await fixture("typescript-5.9.2.tar"), await fixture("typescript-5.9.3.tar")];
+    expect(chunkDiff(tsOld, tsNew, 60_000).length).toBe(1);
     const svA = join(cache, "semver@7.8.1@@@1");
     const svB = join(cache, "semver@7.8.5@@@1");
-    const [svOld, svNew] = isDir(svA) && isDir(svB)
-      ? [loadTree(svA), loadTree(svB)]
-      : [await readArtifact(join(import.meta.dir, "fixtures", "semver-7.8.1.tar")), await readArtifact(join(import.meta.dir, "fixtures", "semver-7.8.5.tar"))];
+    const [svOld, svNew] = isDir(svA) && isDir(svB) ? [loadTree(svA), loadTree(svB)] : [await fixture("semver-7.8.1.tar"), await fixture("semver-7.8.5.tar")];
     expect(chunkDiff(svOld, svNew, 60_000).length).toBe(1);
   }, 60_000);
 });
