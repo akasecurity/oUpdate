@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { reviewUpdate, parseVerdict, chunkDiff, classifyOutcome, rankPriorityPaths, type LayerName } from "../src/review.ts";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { reviewUpdate, parseVerdict, chunkDiff, classifyOutcome, rankPriorityPaths, lastResolveCalls, type LayerName } from "../src/review.ts";
 import type { Registry } from "../src/adapters/ecosystem/types.ts";
 import type { AdvisoryFeed, Advisory } from "../src/adapters/advisory/osv.ts";
 import { markLink, markLabeled, type FileMap } from "../src/prepass.ts";
-import { mergeArtifactPair } from "../src/artifact.ts";
+import { mergeArtifactPair, readArtifact } from "../src/artifact.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const files = (o: Record<string, string>): FileMap => new Map(Object.entries(o).map(([k, v]) => [k, enc(v)]));
@@ -474,6 +477,31 @@ describe("entry and hook files", () => {
     expect(text).toContain("steal_compat()");
   });
 
+  test("a new require of an unchanged file shows that file whole", async () => {
+    for (const code of ["require('./lib/old.js')", "import './lib/old.js'", "import x from './lib/old.js'", "import('./lib/old.js')", "new Worker('./lib/old.js')", "importScripts('./lib/old.js')"]) {
+      const { text } = await run({
+        old: files({ "package.json": pj({ version: "1.0.0", main: "index.js" }), "index.js": "a()", "lib/old.js": "steal_old()" }),
+        new: files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": code, "lib/old.js": "steal_old()" }),
+      });
+      expect(text).toContain("=== lib/old.js (now loaded by changed code, unchanged) ===");
+      expect(text).toContain("steal_old()");
+    }
+  });
+
+  test("a require the old release already had does not add the unchanged file", async () => {
+    const held = await run({
+      old: files({ "package.json": pj({ version: "1.0.0", main: "index.js" }), "index.js": "require('./lib/old.js')\na()", "lib/old.js": "steal_old()" }),
+      new: files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./lib/old.js')\nb()", "lib/old.js": "steal_old()" }),
+    });
+    expect(held.text).not.toContain("steal_old()");
+    expect(held.text).not.toContain("now loaded by changed code");
+    const quoted = await run({
+      old: files({ "package.json": pj({ version: "1.0.0", main: "index.js" }), "index.js": "a()", "lib/old.js": "steal_old()" }),
+      new: files({ "package.json": pj({ version: "1.0.0", main: "index.js" }), "index.js": "const s = \"require('./lib/old.js')\"", "lib/old.js": "steal_old()" }),
+    });
+    expect(quoted.text).not.toContain("steal_old()");
+  });
+
   test("a bundled dependency's package.json names entries relative to its own dir", async () => {
     const { text } = await run({
       old: files({ "package.json": pj({ version: "1.0.0" }), "node_modules/dep/package.json": pj({ main: "x.md" }), "node_modules/dep/x.md": "a" }),
@@ -916,6 +944,1385 @@ describe("scan layer", () => {
   });
 });
 
+
+// Codex read 1 of gap 4: the handwritten scanner missed real loads, and a package-wide set diff hid them.
+describe("newly reached files", () => {
+  const pj = (o: object = {}) => JSON.stringify({ name: "lib", version: "1.0.0", ...o });
+  const run = async (old: FileMap, now: FileMap, over: Partial<Parameters<typeof reviewUpdate>[0]> = {}) => {
+    const prompts: string[] = [];
+    const r = await reviewUpdate(base({
+      eco: "npm",
+      loadArtifacts: async () => ({ old, new: now }),
+      reviewer: { name: "fake", review: async (p) => (prompts.push(p), "APPROVE\nno attack indicators found") },
+      ...over,
+    }));
+    return { r, text: prompts.join(""), rev: r.layers.find((l) => l.layer === "reviewer")! };
+  };
+  const pair = (code: string, extra: Record<string, string> = {}) => ({
+    old: files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "payload.js": "steal_payload()\n", ...extra }),
+    new: files({ "package.json": pj({ main: "index.js", version: "1.0.1" }), "index.js": code, "payload.js": "steal_payload()\n", ...extra }),
+  });
+
+  test("a parser-rejected file is still shown whole", async () => {
+    const { text } = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "function (\nsteal_syntax()\n" }),
+    );
+    expect(text).toContain("steal_syntax()");
+  });
+
+  test("comments, regexes, templates, escapes, concatenation, re-exports and Worker URLs reach the unchanged file", async () => {
+    const codes = [
+      "require/*comment*/('./payload.js')",
+      "require(/*comment*/'./payload.js')",
+      "const r = /\"/; require('./payload.js'); // \"",
+      "`${require('./payload.js')}`",
+      "require('./pay\\x6coad.js')",
+      "require('./pay' + 'load.js')",
+      "export { x } from './payload.js'",
+      "new Worker(new URL('./payload.js', import.meta.url))",
+      `import { ${Array.from({ length: 200 }, (_, i) => `a${i}`).join(", ")} } from './payload.js'`,
+    ];
+    for (const code of codes) {
+      const { text } = await run(...Object.values(pair(code)) as [FileMap, FileMap]);
+      expect(text).toContain("=== payload.js (now loaded by changed code, unchanged) ===");
+      expect(text).toContain("steal_payload()");
+    }
+  });
+
+  test("a specifier that exists only in a comment is not a load", async () => {
+    const { text } = await run(...Object.values(pair("import x /* from './payload.js' */ from 'external'")) as [FileMap, FileMap]);
+    expect(text).not.toContain("steal_payload()");
+  });
+
+  test("extensionless, directory index, directory main, self-reference, imports, worker URLs and backslashes resolve inside the artifact", async () => {
+    const cases: { code: string; files: Record<string, string>; marker?: string; absent?: string[]; also?: string }[] = [
+      { code: "require('./payload')", files: { "payload.js": "steal_ext()\n" }, marker: "steal_ext()" },
+      {
+        code: "require('./dir')",
+        files: { "dir/index.js": "steal_index()\n", "dir/lib.js": "steal_main()\n", "dir/package.json": JSON.stringify({ main: "./lib.js" }) },
+        marker: "steal_index()",
+        also: "steal_main()",
+      },
+      {
+        code: "require('./dir')",
+        files: { "dir/lib.js": "steal_main()\n", "dir/package.json": JSON.stringify({ main: "./lib.js" }) },
+        marker: "steal_main()",
+      },
+      // An exact subpath is not an entry. Node runs it only when something requires it, and a decoy
+      // under node_modules must not win. A directory target is not its index.
+      {
+        code: "require('lib/payload')",
+        files: { "payload.js": "steal_export()\n", "node_modules/lib/payload.js": "steal_decoy()\n" },
+        marker: "steal_export()",
+        absent: ["steal_decoy()"],
+      },
+      {
+        code: "require('lib/nest')",
+        files: { "nest/index.js": "steal_export_index()\n", "node_modules/lib/nest.js": "steal_nest_decoy()\n" },
+        absent: ["steal_export_index()", "steal_nest_decoy()"],
+      },
+      {
+        code: "require('#payload')",
+        files: { "payload.js": "steal_import()\n" },
+        marker: "steal_import()",
+      },
+      {
+        code: "require('#nest')",
+        files: { "nest/index.js": "steal_import_index()\n" },
+        absent: ["steal_import_index()"],
+      },
+      { code: "new Worker('payload.js')", files: { "payload.js": "steal_worker()\n" }, marker: "steal_worker()" },
+      { code: "importScripts('lib/payload.js')", files: { "lib/payload.js": "steal_scripts()\n" }, marker: "steal_scripts()" },
+      { code: "require('.\\\\payload.js')", files: { "payload.js": "steal_win()\n" }, marker: "steal_win()" },
+    ];
+    for (const c of cases) {
+      const meta = c.code.startsWith("require('lib")
+        ? pj({ main: "index.js", exports: { "./payload": "./payload.js", "./nest": "./nest" } })
+        : c.code.startsWith("require('#")
+          ? pj({ main: "index.js", imports: { "#payload": "./payload.js", "#nest": "./nest" } })
+          : pj({ main: "index.js" });
+      const { text } = await run(
+        files({ "package.json": meta, "index.js": "a()\n", ...c.files }),
+        files({ "package.json": meta.replace('"1.0.0"', '"1.0.1"'), "index.js": c.code, ...c.files }),
+      );
+      if (c.marker) expect(text).toContain(c.marker);
+      if (c.also) expect(text).toContain(c.also);
+      for (const a of c.absent ?? []) expect(text).not.toContain(a);
+    }
+  });
+
+  test("an old require in an unchanged file does not cover a new one, and a new import walks through it", async () => {
+    const dormant = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "dormant.js": "require('./payload.js')\n", "payload.js": "steal_dormant()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./payload.js')\n", "dormant.js": "require('./payload.js')\n", "payload.js": "steal_dormant()\n" }),
+    );
+    expect(dormant.text).toContain("=== payload.js (now loaded by changed code, unchanged) ===");
+    expect(dormant.text).toContain("steal_dormant()");
+    const stage = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "stage.js": "require('./payload.js')\n", "payload.js": "steal_stage()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./stage.js')\n", "stage.js": "require('./payload.js')\n", "payload.js": "steal_stage()\n" }),
+    );
+    expect(stage.text).toContain("=== stage.js (now loaded by changed code, unchanged) ===");
+    expect(stage.text).toContain("=== payload.js (now loaded by changed code, unchanged) ===");
+    expect(stage.text).toContain("steal_stage()");
+  });
+
+  test("a newly reached unchanged symlink shows its target and counts it in the budget", async () => {
+    const link = markLink(enc("payload.js"));
+    const shown = await run(
+      new Map([["package.json", enc(pj({ main: "index.js" }))], ["index.js", enc("a()\n")], ["stage.js", link], ["payload.js", enc("steal_link_target()\n")]]),
+      new Map([["package.json", enc(pj({ version: "1.0.1", main: "index.js" }))], ["index.js", enc("require('./stage.js')\n")], ["stage.js", link], ["payload.js", enc("steal_link_target()\n")]]),
+    );
+    expect(shown.text).toContain("=== payload.js (target of link stage.js) ===");
+    expect(shown.text).toContain("steal_link_target()");
+    expect(shown.r.decision).toBe("land");
+    const big = "steal_link_budget()\n" + "y".repeat(20_000);
+    const held = await run(
+      new Map([["package.json", enc(pj({ main: "index.js" }))], ["index.js", enc("a()\n")], ["stage.js", link], ["payload.js", enc(big)]]),
+      new Map([["package.json", enc(pj({ version: "1.0.1", main: "index.js" }))], ["index.js", enc("require('./stage.js')\n")], ["stage.js", link], ["payload.js", enc(big)]]),
+      { chunkChars: 1000, maxParts: 1 },
+    );
+    expect(held.r.decision).toBe("hold");
+    expect(held.rev.detail).toMatch(/too large for model review|not model-reviewable/);
+  });
+
+  test("an unchanged require in a merged artifact is not a new load", async () => {
+    const payload = "steal_folded_payload()\n" + "z".repeat(12_000);
+    const pack = (name: string, index: string, meta: string) => new Map<string, Uint8Array>([
+      ["package.json", enc(JSON.stringify({ name, version: "1.0.0", main: "index.js" }))],
+      ["index.js", enc(index)],
+      ["payload.js", enc(payload)],
+      ["meta.txt", enc(meta)],
+    ]);
+    const into = { old: new Map() as FileMap, new: new Map() as FileMap };
+    const first = pack("a", "require('./keep.js')\n", "a\n");
+    first.set("keep.js", enc("keep()\n"));
+    mergeArtifactPair(into, "first", first, first);
+    mergeArtifactPair(into, "second", pack("b", "require('./payload.js');\na()\n", "old\n"), pack("b", "require('./payload.js');\nb()\n", "new\n"));
+    expect(into.new.has("second/index.js")).toBe(true);
+    expect(into.new.has("payload.js")).toBe(true);
+    expect(into.new.has("second/payload.js")).toBe(false);
+    const { r, text } = await run(into.old, into.new, { chunkChars: 800, maxParts: 1 });
+    expect(text).not.toContain("steal_folded_payload()");
+    expect(r.decision).toBe("land");
+  });
+
+  test("repeated requires stay a handful of lookups and the next diff reuses them", () => {
+    const old = files({ "package.json": pj({}), "index.js": "a()\n", "target.js": "steal_target()\n" });
+    const now = files({ "package.json": pj({}), "index.js": "require('./target.js');\n".repeat(16_000), "target.js": "steal_target()\n" });
+    const before = lastResolveCalls();
+    const text = chunkDiff(old, now, 8000).join("");
+    const mid = lastResolveCalls();
+    expect(mid - before).toBeLessThan(32);
+    expect(text).toContain("steal_target()");
+    chunkDiff(old, now, 8000);
+    expect(lastResolveCalls()).toBe(mid);
+  });
+
+  // Codex read 2: Node runs a legacy HTML comment that Bun's parser rejects, so the quoted load produced no edge.
+  test("a file the parser rejects still shows the file its quotes name, and the review holds", async () => {
+    const code = "x=1\n--> c\nrequire('./evil')";
+    const rejected = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "evil.js": "steal_html()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": code, "evil.js": "steal_html()\n" }),
+    );
+    expect(rejected.text).toContain("steal_html()");
+    expect(rejected.r.decision).toBe("hold");
+    expect(rejected.rev.detail).toMatch(/not model-reviewable: parser rejected index\.js/);
+    const walked = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "stage.js": code, "evil.js": "steal_walk_html()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./stage.js')\n", "stage.js": code, "evil.js": "steal_walk_html()\n" }),
+    );
+    expect(walked.text).toContain("=== stage.js (now loaded by changed code, unchanged) ===");
+    expect(walked.text).toContain("steal_walk_html()");
+    expect(walked.r.decision).toBe("hold");
+    expect(walked.rev.detail).toMatch(/not model-reviewable: parser rejected stage\.js/);
+    const dormant = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "bad.js": code }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "b()\n", "bad.js": code }),
+    );
+    expect(dormant.text).not.toContain("--> c");
+    expect(dormant.r.decision).toBe("land");
+  });
+
+  test("an extensionless specifier shows every file a runtime might load", async () => {
+    for (const ext of [".tsx", ".ts", ".jsx", ".mts", ".cts", ".node", ".js", ".mjs", ".cjs", ".json"]) {
+      const name = `payload${ext}`;
+      const { text } = await run(
+        files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", [name]: `steal_${ext}()\n` }),
+        files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./payload')\n", [name]: `steal_${ext}()\n` }),
+      );
+      expect(text).toContain(`steal_${ext}()`);
+    }
+    const both = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "x.js": "harmless_js()\n", "x.ts": "steal_beside()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./x')\n", "x.js": "harmless_js()\n", "x.ts": "steal_beside()\n" }),
+    );
+    expect(both.text).toContain("harmless_js()");
+    expect(both.text).toContain("steal_beside()");
+    const jsSpec = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "x.js": "harmless_exact()\n", "x.ts": "steal_from_js_spec()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./x.js')\n", "x.js": "harmless_exact()\n", "x.ts": "steal_from_js_spec()\n" }),
+    );
+    expect(jsSpec.text).toContain("harmless_exact()");
+    expect(jsSpec.text).toContain("steal_from_js_spec()");
+    const onlyTs = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "x.ts": "steal_ts_only()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./x.js')\n", "x.ts": "steal_ts_only()\n" }),
+    );
+    expect(onlyTs.text).toContain("steal_ts_only()");
+    const indexTs = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "dir/index.ts": "steal_index_ts()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./dir')\n", "dir/index.ts": "steal_index_ts()\n" }),
+    );
+    expect(indexTs.text).toContain("steal_index_ts()");
+  });
+
+  test("a file an old entry already reached is not shown again", async () => {
+    const n = 8;
+    const util = `${Array.from({ length: n }, (_, i) => `require('./m${i}.js')`).join("\n")}\nsteal_util()\n`;
+    const mods = Object.fromEntries(Array.from({ length: n }, (_, i) => [`m${i}.js`, `steal_m${i}()\n`]));
+    const { text, r } = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "require('./util.js')\n", "a.js": "a()\n", "util.js": util, "fresh.js": "steal_fresh()\n", ...mods }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./util.js')\n", "a.js": "require('./util.js')\nrequire('./fresh.js')\n", "util.js": util, "fresh.js": "steal_fresh()\n", ...mods }),
+    );
+    expect(text).not.toContain("steal_util()");
+    expect(text).not.toContain("util.js (now loaded");
+    expect(text).toContain("=== fresh.js (now loaded by changed code, unchanged) ===");
+    expect(text).toContain("steal_fresh()");
+    for (let i = 0; i < n; i++) expect(text).not.toContain(`steal_m${i}()`);
+    expect(r.decision).toBe("land");
+  });
+
+  test("require.resolve is a load, and a browser condition resolves past an exact path", async () => {
+    const resolved = await run(...Object.values(pair("require.resolve('./payload.js')")) as [FileMap, FileMap]);
+    expect(resolved.text).toContain("steal_payload()");
+    const joined = await run(...Object.values(pair("require.resolve('./pay' + 'load.js')")) as [FileMap, FileMap]);
+    expect(joined.text).toContain("steal_payload()");
+    const comment = await run(...Object.values(pair("// require.resolve('./payload.js')\nrequire('node:fs')")) as [FileMap, FileMap]);
+    expect(comment.text).not.toContain("steal_payload()");
+    // A quoted path is a load whatever call it sits in, including a member that is not require.resolve.
+    const member = await run(...Object.values(pair("foo.require.resolve('./payload.js')")) as [FileMap, FileMap]);
+    expect(member.text).toContain("steal_payload()");
+    // browser is not a condition Node applies, so require('lib/dir') exports nothing and the
+    // directory index is not invented. types is not a load either.
+    const meta = pj({ main: "index.js", exports: { "./payload": { browser: "./payload.js", types: "./skip.d.ts" }, "./dir": { browser: "./dir" } } });
+    const { text } = await run(
+      files({ "package.json": meta, "index.js": "a()\n", "payload.js": "steal_browser()\n", "skip.d.ts": "steal_types()\n", "dir/index.js": "steal_browser_index()\n" }),
+      files({ "package.json": meta.replace('"1.0.0"', '"1.0.1"'), "index.js": "require('lib/dir')\n", "payload.js": "steal_browser()\n", "skip.d.ts": "steal_types()\n", "dir/index.js": "steal_browser_index()\n" }),
+    );
+    expect(text).not.toContain("steal_browser_index()");
+    expect(text).not.toContain("steal_browser()");
+    expect(text).not.toContain("steal_types()");
+  });
+
+  test("a gained link whose target was added or changed is shown once", async () => {
+    const link = markLink(enc("payload.js"));
+    const changed = await run(
+      new Map([["package.json", enc(pj({ main: "index.js" }))], ["index.js", enc("a()\n")], ["stage.js", link], ["payload.js", enc("old()\n")]]),
+      new Map([["package.json", enc(pj({ version: "1.0.1", main: "index.js" }))], ["index.js", enc("require('./stage.js')\n")], ["stage.js", link], ["payload.js", enc("steal_once()\n")]]),
+    );
+    expect(changed.text.split("steal_once()").length - 1).toBe(1);
+    expect(changed.text).toContain("=== payload.js (changed) ===");
+    expect(changed.text).not.toContain("target of link stage.js");
+    const added = await run(
+      new Map([["package.json", enc(pj({ main: "index.js" }))], ["index.js", enc("a()\n")], ["stage.js", link]]),
+      new Map([["package.json", enc(pj({ version: "1.0.1", main: "index.js" }))], ["index.js", enc("require('./stage.js')\n")], ["stage.js", link], ["payload.js", enc("steal_added_once()\n")]]),
+    );
+    expect(added.text.split("steal_added_once()").length - 1).toBe(1);
+    expect(added.text).toContain("=== payload.js (added) ===");
+    expect(added.text).not.toContain("target of link stage.js");
+  });
+
+  // Codex read 3: an extensionless bin target and a node shebang are JavaScript, including when the parser rejects them.
+  test("an extensionless bin script and a node shebang are parsed as javascript", async () => {
+    const meta = pj({ bin: { x: "bin/cli" } });
+    const shown = await run(
+      files({ "package.json": meta, "bin/cli": "#!/usr/bin/env node\na()\n", "lib/d.js": "steal_bin()\n" }),
+      files({ "package.json": meta.replace('"1.0.0"', '"1.0.1"'), "bin/cli": "#!/usr/bin/env node\nrequire('../lib/d.js')\n", "lib/d.js": "steal_bin()\n" }),
+    );
+    expect(shown.text).toContain("=== lib/d.js (now loaded by changed code, unchanged) ===");
+    expect(shown.text).toContain("steal_bin()");
+    const bare = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "tools/run": "#!/usr/bin/env node\na()\n", "tools/d.js": "steal_shebang()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "a()\n", "tools/run": "#!/usr/bin/env node\nrequire('./d.js')\n", "tools/d.js": "steal_shebang()\n" }),
+    );
+    expect(bare.text).toContain("steal_shebang()");
+    const held = await run(
+      files({ "package.json": meta, "bin/cli": "#!/usr/bin/env node\na()\n" }),
+      files({ "package.json": meta.replace('"1.0.0"', '"1.0.1"'), "bin/cli": "#!/usr/bin/env node\nfunction (\nsteal_bin_syntax()\n" }),
+    );
+    expect(held.text).toContain("steal_bin_syntax()");
+    expect(held.r.decision).toBe("hold");
+    expect(held.rev.detail).toMatch(/not model-reviewable: parser rejected bin\/cli/);
+  });
+
+  test("deleting the file a specifier resolved to shows the dormant file that now resolves", async () => {
+    const dropped = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "require('./a')\n", "a.js": "harmless()\n", "a/index.js": "steal_now_index()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require('./a')\n", "a/index.js": "steal_now_index()\n" }),
+    );
+    expect(dropped.text).toContain("=== a/index.js (now loaded by changed code, unchanged) ===");
+    expect(dropped.text).toContain("steal_now_index()");
+    const addedMain = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "require('./dir')\n", "dir/index.js": "harmless_index()\n", "dir/hidden.js": "steal_added_main()\n" }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require('./dir')\n",
+        "dir/index.js": "harmless_index()\n",
+        "dir/hidden.js": "steal_added_main()\n",
+        "dir/package.json": JSON.stringify({ main: "./hidden.js" }),
+      }),
+    );
+    expect(addedMain.text).toContain("steal_added_main()");
+  });
+
+  test("a nested manifest or a rejected quote was not already loaded", async () => {
+    const script = await run(
+      files({
+        "package.json": pj({ main: "index.js", scripts: { postinstall: "echo p.js" } }),
+        "index.js": "a()\n",
+        "p.js": "require('./payload.js')\nsteal_p()\n",
+        "payload.js": "steal_postinstall_payload()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js", scripts: { postinstall: "echo p.js" } }),
+        "index.js": "require('./p.js')\n",
+        "p.js": "require('./payload.js')\nsteal_p()\n",
+        "payload.js": "steal_postinstall_payload()\n",
+      }),
+    );
+    // An install hook ran once at install. It is not an old load, so the new require of p.js is shown.
+    expect(script.text).toContain("steal_p()");
+    expect(script.text).toContain("steal_postinstall_payload()");
+    const nested = await run(
+      files({
+        "package.json": pj({ main: "index.js" }),
+        "index.js": "a()\n",
+        "lib/package.json": JSON.stringify({ main: "d.js" }),
+        "lib/d.js": "require('./payload.js')\n",
+        "lib/payload.js": "steal_nested_payload()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require('./lib/d.js')\n",
+        "lib/package.json": JSON.stringify({ main: "d.js" }),
+        "lib/d.js": "require('./payload.js')\n",
+        "lib/payload.js": "steal_nested_payload()\n",
+      }),
+    );
+    expect(nested.text).toContain("=== lib/d.js (now loaded by changed code, unchanged) ===");
+    expect(nested.text).toContain("steal_nested_payload()");
+    const quoted = await run(
+      files({
+        "package.json": pj({ main: "index.js" }),
+        "index.js": "function (\nrequire('./decoy.js')\n",
+        "decoy.js": "require('./payload.js')\n",
+        "payload.js": "steal_rejected_old()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require('./decoy.js')\n",
+        "decoy.js": "require('./payload.js')\n",
+        "payload.js": "steal_rejected_old()\n",
+      }),
+    );
+    expect(quoted.text).toContain("=== decoy.js (now loaded by changed code, unchanged) ===");
+    expect(quoted.text).toContain("steal_rejected_old()");
+  });
+
+  test("a quoted path in a dynamic load reaches the unchanged code file", async () => {
+    for (const code of [
+      "require(__dirname + '/w.js')",
+      "require(path.join(__dirname, 'w.js'))",
+      "child_process.fork(__dirname + '/w.js')",
+      "new SharedWorker('./w.js')",
+    ]) {
+      const { text } = await run(
+        files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "w.js": "steal_dynamic()\n" }),
+        files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": code + "\n", "w.js": "steal_dynamic()\n" }),
+      );
+      expect(text).toContain("=== w.js (now loaded by changed code, unchanged) ===");
+      expect(text).toContain("steal_dynamic()");
+    }
+  });
+
+  test("deleting a file a script or a computed require loaded shows the dormant file", async () => {
+    const script = await run(
+      files({
+        "package.json": pj({ main: "index.js", scripts: { postinstall: "node setup.js" } }),
+        "index.js": "a()\n",
+        "setup.js": "require('./a')\n",
+        "a.js": "harmless()\n",
+        "a/index.js": "steal_script_index()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js", scripts: { postinstall: "node setup.js" } }),
+        "index.js": "a()\n",
+        "setup.js": "require('./a')\n",
+        "a/index.js": "steal_script_index()\n",
+      }),
+    );
+    expect(script.text).toContain("=== a/index.js (now loaded by changed code, unchanged) ===");
+    expect(script.text).toContain("steal_script_index()");
+    const computed = await run(
+      files({
+        "package.json": pj({ main: "index.js" }),
+        "index.js": "require(path.join(__dirname, 'lib', 'x.js'))\n",
+        "lib/x.js": "require('./a')\n",
+        "lib/a.js": "harmless()\n",
+        "lib/a/index.js": "steal_computed_index()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require(path.join(__dirname, 'lib', 'x.js'))\n",
+        "lib/x.js": "require('./a')\n",
+        "lib/a/index.js": "steal_computed_index()\n",
+      }),
+    );
+    expect(computed.text).toContain("=== lib/a/index.js (now loaded by changed code, unchanged) ===");
+    expect(computed.text).toContain("steal_computed_index()");
+  });
+
+  test("a bare name resolves to a bundled dependency in the same artifact", async () => {
+    const bundled = await run(
+      files({
+        "package.json": pj({ main: "index.js" }),
+        "index.js": "a()\n",
+        "node_modules/evil/index.js": "steal_bundled()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require('evil')\n",
+        "node_modules/evil/index.js": "steal_bundled()\n",
+      }),
+    );
+    expect(bundled.text).toContain("=== node_modules/evil/index.js (now loaded by changed code, unchanged) ===");
+    expect(bundled.text).toContain("steal_bundled()");
+    const exported = await run(
+      files({
+        "package.json": pj({ main: "index.js" }),
+        "index.js": "a()\n",
+        "node_modules/evil/package.json": JSON.stringify({ name: "evil", exports: { ".": "./hidden.js" } }),
+        "node_modules/evil/index.js": "harmless_index()\n",
+        "node_modules/evil/hidden.js": "steal_bundled_export()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require('evil')\n",
+        "node_modules/evil/package.json": JSON.stringify({ name: "evil", exports: { ".": "./hidden.js" } }),
+        "node_modules/evil/index.js": "harmless_index()\n",
+        "node_modules/evil/hidden.js": "steal_bundled_export()\n",
+      }),
+    );
+    expect(exported.text).toContain("steal_bundled_export()");
+  });
+
+  test("any quoted path in changed code reaches an unchanged text file", async () => {
+    const codes = [
+      "child_process.spawn(__dirname + '/w.js')",
+      "child_process.execFile(__dirname + '/w.js')",
+      "child_process.execFileSync(__dirname + '/w.js')",
+      "child_process.exec(__dirname + '/w.js')",
+      "const r = require; r('./w.js')",
+      "createRequire(import.meta.url)('./w.js')",
+      "eval(readFileSync(__dirname + '/w.js'))",
+      "const r = require; r('./' + 'w.js')",
+    ];
+    for (const code of codes) {
+      const { text } = await run(
+        files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "w.js": "steal_any()\n" }),
+        files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": code + "\n", "w.js": "steal_any()\n" }),
+      );
+      expect(text).toContain("=== w.js (now loaded by changed code, unchanged) ===");
+      expect(text).toContain("steal_any()");
+    }
+    const txt = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "p.txt": "steal_txt()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "require(path.join(__dirname, 'p.txt'))\n", "p.txt": "steal_txt()\n" }),
+    );
+    expect(txt.text).toContain("=== p.txt (now loaded by changed code, unchanged) ===");
+    expect(txt.text).toContain("steal_txt()");
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
+    const image = await run(
+      new Map([["package.json", enc(pj({ main: "index.js" }))], ["index.js", enc("a()\n")], ["logo.png", png]]),
+      new Map([["package.json", enc(pj({ version: "1.0.1", main: "index.js" }))], ["index.js", enc("require(path.join(__dirname, 'logo.png'))\n")], ["logo.png", png]]),
+    );
+    expect(image.text).not.toContain("logo.png (now loaded");
+  });
+
+  test("a quote the old file already had, a dot, a directory index, or a doc name is not a new load", async () => {
+    const noise = "const libs = ['lib.dom.d.ts', 'LICENSE', 'README', 'README.md']\nlog('debug')\n";
+    const kept = await run(
+      files({
+        "package.json": pj({ main: "index.js" }),
+        "index.js": `${noise}const same = 'old.js'\na()\n`,
+        "lib.dom.d.ts": "type T = 1\n",
+        "LICENSE": "mit\n",
+        "README": "docs\n",
+        "README.md": "docs\n",
+        "debug.js": "steal_debug()\n",
+        "old.js": "steal_same_quote()\n",
+        "payload.js": "steal_new_quote()\n",
+        "classes/semver.js": "identifier.split('.')\n",
+        "classes/index.js": "steal_dot_index()\n",
+        "dir/index.js": "steal_dir_index()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": `${noise}const same = 'old.js'\nconst p = 'payload.js'\nconst d = './dir'\nb()\n`,
+        "lib.dom.d.ts": "type T = 1\n",
+        "LICENSE": "mit\n",
+        "README": "docs\n",
+        "README.md": "docs\n",
+        "debug.js": "steal_debug()\n",
+        "old.js": "steal_same_quote()\n",
+        "payload.js": "steal_new_quote()\n",
+        "classes/semver.js": "identifier.split('.')\nb()\n",
+        "classes/index.js": "steal_dot_index()\n",
+        "dir/index.js": "steal_dir_index()\n",
+      }),
+    );
+    expect(kept.text).toContain("steal_new_quote()");
+    expect(kept.text).not.toContain("steal_same_quote()");
+    expect(kept.text).not.toContain("steal_debug()");
+    expect(kept.text).not.toContain("steal_dot_index()");
+    expect(kept.text).not.toContain("steal_dir_index()");
+    expect(kept.text).not.toContain("lib.dom.d.ts (now loaded");
+    expect(kept.text).not.toContain("LICENSE (now loaded");
+    expect(kept.text).not.toContain("README (now loaded");
+    const named = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "dir/index.js": "steal_named_index()\n", "notes.d.ts": "type N = 1\n", "README.md": "docs\n" }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "readFileSync('./dir/index.js')\nreadFileSync('notes.d.ts')\nreadFileSync('README.md')\n",
+        "dir/index.js": "steal_named_index()\n",
+        "notes.d.ts": "type N = 1\n",
+        "README.md": "docs\n",
+      }),
+    );
+    expect(named.text).toContain("steal_named_index()");
+    expect(named.text).toContain("=== notes.d.ts (now loaded by changed code, unchanged) ===");
+    expect(named.text).toContain("=== README.md (now loaded by changed code, unchanged) ===");
+  });
+
+  test("joined path pieces, a command string, and a template tail name the file", async () => {
+    for (const code of [
+      "require(path.join(__dirname, 'lib', 'd.js'))",
+      "require(path.resolve(__dirname, 'lib', 'd'))",
+      "execSync('node lib/d.js')",
+      "require(`${__dirname}/lib/d.js`)",
+    ]) {
+      const { text } = await run(
+        files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "lib/d.js": "steal_joined()\n" }),
+        files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": code + "\n", "lib/d.js": "steal_joined()\n" }),
+      );
+      expect(text).toContain("=== lib/d.js (now loaded by changed code, unchanged) ===");
+      expect(text).toContain("steal_joined()");
+    }
+  });
+
+  test("a changed shell or python file quotes a path, and an old quote there is not new", async () => {
+    const { text } = await run(
+      files({
+        "package.json": pj({ main: "index.js" }),
+        "index.js": "a()\n",
+        "setup.py": "open('stay.js')\n",
+        "run.sh": "echo ok\n",
+        "stay.js": "steal_stay()\n",
+        "payload.js": "steal_py()\n",
+        "other.js": "steal_sh()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "a()\n",
+        "setup.py": "open('stay.js')\nopen('payload.js')\n",
+        "run.sh": "echo 'other.js'\n",
+        "stay.js": "steal_stay()\n",
+        "payload.js": "steal_py()\n",
+        "other.js": "steal_sh()\n",
+      }),
+    );
+    expect(text).toContain("steal_py()");
+    expect(text).toContain("steal_sh()");
+    expect(text).not.toContain("steal_stay()");
+  });
+
+  test("a missing main falls back to index and an own name also loads its bundled copy", async () => {
+    const fallback = await run(
+      files({
+        "package.json": pj({ main: "index.js" }),
+        "index.js": "a()\n",
+        "node_modules/gone/package.json": JSON.stringify({ name: "gone", main: "gone.js" }),
+        "node_modules/gone/index.js": "steal_fallback_index()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require('gone')\n",
+        "node_modules/gone/package.json": JSON.stringify({ name: "gone", main: "gone.js" }),
+        "node_modules/gone/index.js": "steal_fallback_index()\n",
+      }),
+    );
+    expect(fallback.text).toContain("=== node_modules/gone/index.js (now loaded by changed code, unchanged) ===");
+    expect(fallback.text).toContain("steal_fallback_index()");
+    const own = await run(
+      files({
+        "package.json": pj({ main: "app.js" }),
+        "index.js": "a()\n",
+        "app.js": "steal_own_main()\n",
+        "node_modules/lib/index.js": "steal_own_bundled()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "app.js" }),
+        "index.js": "require('lib')\n",
+        "app.js": "steal_own_main()\n",
+        "node_modules/lib/index.js": "steal_own_bundled()\n",
+      }),
+    );
+    expect(own.text).not.toContain("steal_own_main()");
+    expect(own.text).toContain("steal_own_bundled()");
+  });
+
+  test("a gained native binary holds the update", async () => {
+    const bin = new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0]);
+    const meta = enc(pj({ main: "index.js" }));
+    const bumped = enc(pj({ version: "1.0.1", main: "index.js" }));
+    const seeded = await run(
+      new Map([["package.json", meta], ["index.js", enc("require('./a')\n")], ["a.js", enc("harmless()\n")], ["a.node", bin]]),
+      new Map([["package.json", bumped], ["index.js", enc("require('./a')\n")], ["a.node", bin]]),
+    );
+    expect(seeded.r.decision).toBe("hold");
+    expect(seeded.rev.detail).toMatch(/not model-reviewable: binary file\(s\) a\.node/);
+    const opened = await run(
+      new Map([["package.json", meta], ["index.js", enc("a()\n")], ["a.node", bin]]),
+      new Map([["package.json", bumped], ["index.js", enc("process.dlopen(__dirname + '/a.node')\n")], ["a.node", bin]]),
+    );
+    expect(opened.r.decision).toBe("hold");
+    expect(opened.rev.detail).toMatch(/not model-reviewable: binary file\(s\) a\.node/);
+  });
+
+  test("an unchanged file the parser rejects is not gained on a version bump", async () => {
+    const bad = "function (\nrequire('./payload.js')\n";
+    const { text, r } = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "bad.js": bad, "payload.js": "steal_false_gain()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "a()\n", "bad.js": bad, "payload.js": "steal_false_gain()\n" }),
+    );
+    expect(text).not.toContain("steal_false_gain()");
+    expect(r.decision).toBe("land");
+  });
+
+  test("a changed declaration file is not a parser rejection", async () => {
+    const dts = "export const VERSION: string;\n";
+    for (const name of ["types.d.ts", "types.d.mts", "types.d.cts"]) {
+      const { rev, r } = await run(
+        files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", [name]: dts }),
+        files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": "a()\n", [name]: `${dts}export const EXTRA: string;\n` }),
+      );
+      expect(rev.detail).not.toMatch(/parser rejected/);
+      expect(r.decision).toBe("land");
+    }
+  });
+
+  test("a load of a directory names its index", async () => {
+    for (const code of ["require(path.join(__dirname, 'lib', 'evil'))", "path.join(__dirname, 'lib/evil')"]) {
+      const { text } = await run(
+        files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "lib/evil/index.js": "steal_evil_index()\n" }),
+        files({ "package.json": pj({ version: "1.0.1", main: "index.js" }), "index.js": `${code}\n`, "lib/evil/index.js": "steal_evil_index()\n" }),
+      );
+      expect(text).toContain("=== lib/evil/index.js (now loaded by changed code, unchanged) ===");
+      expect(text).toContain("steal_evil_index()");
+    }
+  });
+
+  test("a package.json main resolves past an exact path", async () => {
+    const fileMain = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "lib/evil.js": "steal_main_file()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "lib/evil" }), "index.js": "a()\n", "lib/evil.js": "steal_main_file()\n" }),
+    );
+    expect(fileMain.text).toContain("=== lib/evil.js (now loaded by package.json, unchanged) ===");
+    expect(fileMain.text).toContain("steal_main_file()");
+    const dirMain = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "lib/evil/index.js": "steal_main_index()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", main: "lib/evil" }), "index.js": "a()\n", "lib/evil/index.js": "steal_main_index()\n" }),
+    );
+    expect(dirMain.text).toContain("=== lib/evil/index.js (now loaded by package.json, unchanged) ===");
+    expect(dirMain.text).toContain("steal_main_index()");
+    const removed = await run(
+      files({ "package.json": pj({ main: "lib/old.js" }), "lib/old.js": "a()\n", "index.js": "steal_removed_main()\n" }),
+      files({ "package.json": pj({ version: "1.0.1" }), "lib/old.js": "a()\n", "index.js": "steal_removed_main()\n" }),
+    );
+    expect(removed.text).toContain("=== index.js (now loaded by package.json, unchanged) ===");
+    expect(removed.text).toContain("steal_removed_main()");
+  });
+
+  test("a browser field, a module field, a deno condition, and directories.bin are not already run", async () => {
+    const cases: { meta: Record<string, unknown>; code: string; files: Record<string, string>; marker: string }[] = [
+      { meta: { main: "index.js", browser: "./b.js" }, code: "require('./b.js')", files: { "b.js": "steal_browser_field()\n" }, marker: "steal_browser_field()" },
+      { meta: { main: "index.js", module: "./m.mjs" }, code: "require('./m.mjs')", files: { "m.mjs": "steal_module()\n" }, marker: "steal_module()" },
+      {
+        meta: { exports: { ".": { deno: "./d.js", default: "./index.js" } } },
+        code: "require('./d.js')",
+        files: { "d.js": "steal_deno()\n" },
+        marker: "steal_deno()",
+      },
+      {
+        meta: { main: "index.js", bin: { t: "cli.js" }, directories: { bin: "tools" } },
+        code: "require('./tools/x.js')",
+        files: { "cli.js": "c()\n", "tools/x.js": "steal_dirbin()\n" },
+        marker: "steal_dirbin()",
+      },
+    ];
+    for (const c of cases) {
+      const meta = pj(c.meta);
+      const { text, r } = await run(
+        files({ "package.json": meta, "index.js": "a()\n", ...c.files }),
+        files({ "package.json": meta.replace('"1.0.0"', '"1.0.1"'), "index.js": `${c.code}\n`, ...c.files }),
+      );
+      expect(text).toContain(c.marker);
+      expect(r.decision).toBe("land");
+    }
+  });
+
+  test("a loaded declaration file is parsed, including a folded require", async () => {
+    const folded = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "evil.d.ts": "export const V: string;\n", "payload.js": "steal_folded_dts()\n" }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require('./evil.d.ts')\n",
+        "evil.d.ts": "const p = 'pay'; require('./' + p + 'load.js')\n",
+        "payload.js": "steal_folded_dts()\n",
+      }),
+    );
+    expect(folded.text).toContain("steal_folded_dts()");
+    expect(folded.r.decision).toBe("land");
+    const entry = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "evil.d.ts": "export const V: string;\n", "payload.js": "steal_entry_dts()\n" }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "evil.d.ts" }),
+        "index.js": "a()\n",
+        "evil.d.ts": "require('./payload.js')\n",
+        "payload.js": "steal_entry_dts()\n",
+      }),
+    );
+    expect(entry.text).toContain("steal_entry_dts()");
+    expect(entry.r.decision).toBe("land");
+  });
+
+  test("a dormant directory index or ts sibling is shown when new code requires it", async () => {
+    const dir = await run(
+      files({
+        "package.json": pj({ main: "index.js" }),
+        "index.js": "require('./dir')\n",
+        "dir/package.json": JSON.stringify({ main: "lib.js" }),
+        "dir/lib.js": "x()\n",
+        "dir/index.js": "steal_dormant_index()\n",
+      }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require('./dir')\nrequire('./dir/index.js')\n",
+        "dir/package.json": JSON.stringify({ main: "lib.js" }),
+        "dir/lib.js": "x()\n",
+        "dir/index.js": "steal_dormant_index()\n",
+      }),
+    );
+    expect(dir.text).toContain("steal_dormant_index()");
+    expect(dir.r.decision).toBe("land");
+    const sibling = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "require('./a.js')\n", "a.js": "x()\n", "a.ts": "steal_ts_sibling()\n" }),
+      files({
+        "package.json": pj({ version: "1.0.1", main: "index.js" }),
+        "index.js": "require('./a.js')\nrequire('./a.ts')\n",
+        "a.js": "x()\n",
+        "a.ts": "steal_ts_sibling()\n",
+      }),
+    );
+    expect(sibling.text).toContain("steal_ts_sibling()");
+    expect(sibling.r.decision).toBe("land");
+  });
+
+  test("main, a later condition, an export array, an unused import, and a wildcard are not already run", async () => {
+    const cases: { meta: Record<string, unknown>; code: string; files: Record<string, string>; marker: string }[] = [
+      // M. Node ignores main once exports is set.
+      { meta: { main: "legacy.js", exports: "./index.js" }, code: "require('./legacy.js')", files: { "legacy.js": "steal_m()\n" }, marker: "steal_m()" },
+      // L. The first matching condition wins. default does not also run.
+      {
+        meta: { exports: { ".": { node: "./index.js", default: "./b.js" } } },
+        code: "require('./b.js')",
+        files: { "b.js": "steal_l()\n" },
+        marker: "steal_l()",
+      },
+      // K. An array runs the first valid target. A later file is not also run.
+      {
+        meta: { exports: { ".": ["./index.js", "./b.js"] } },
+        code: "require('./b.js')",
+        files: { "b.js": "steal_k()\n" },
+        marker: "steal_k()",
+      },
+      // N. imports is not a root. The old release never required #evil.
+      {
+        meta: { main: "index.js", imports: { "#evil": "./evil.js" } },
+        code: "require('#evil')",
+        files: { "evil.js": "steal_n()\n" },
+        marker: "steal_n()",
+      },
+      // O. A wildcard names no file.
+      {
+        meta: { main: "index.js", exports: { ".": "./index.js", "./*": "./*" } },
+        code: "require('./test/fixture.js')",
+        files: { "test/fixture.js": "steal_o()\n" },
+        marker: "steal_o()",
+      },
+      // P. A null pattern seeds nothing, and neither does the wildcard beside it.
+      {
+        meta: { exports: { ".": "./index.js", "./*": "./*", "./internal/*": null } },
+        code: "require('./internal/x.js')",
+        files: { "internal/x.js": "steal_p()\n" },
+        marker: "steal_p()",
+      },
+    ];
+    for (const c of cases) {
+      const meta = pj(c.meta);
+      const { text, r } = await run(
+        files({ "package.json": meta, "index.js": "a()\n", ...c.files }),
+        files({ "package.json": meta.replace('"1.0.0"', '"1.0.1"'), "index.js": `${c.code}\n`, ...c.files }),
+      );
+      expect(text).toContain(c.marker);
+      expect(r.decision).toBe("land");
+    }
+  });
+
+  test("every other non-runtime package.json slot is not already run", async () => {
+    const shown: { meta: Record<string, unknown>; code: string; files: Record<string, string>; markers: string[]; absent?: string[] }[] = [
+      // R. main is still ignored when the exports target is a condition object.
+      {
+        meta: { main: "./b.js", exports: { ".": { default: "./index.js" } } },
+        code: "import('./b.js')",
+        files: { "b.js": "steal_r()\n" },
+        markers: ["steal_r()"],
+      },
+      // Q. A nested browser condition is not entered, so its import target did not run.
+      {
+        meta: { exports: { ".": { browser: { import: "./b.mjs" }, default: "./index.js" } } },
+        code: "require('./b.mjs')",
+        files: { "b.mjs": "steal_q()\n" },
+        markers: ["steal_q()"],
+      },
+      // T. types under a matched condition names a declaration, not a load.
+      {
+        meta: { exports: { ".": { node: { types: "./t.js", default: "./index.js" } } } },
+        code: "require('./t.js')",
+        files: { "t.js": "steal_t()\n" },
+        markers: ["steal_t()"],
+      },
+      // require() is judged against the require set. That target already ran. default did not.
+      {
+        meta: { exports: { import: "./esm.mjs", require: "./cjs.cjs", default: "./fallback.js" } },
+        code: "require('./cjs.cjs')\nrequire('./fallback.js')",
+        files: { "esm.mjs": "e()\n", "cjs.cjs": "steal_second()\n", "fallback.js": "steal_third()\n" },
+        markers: ["steal_third()"],
+        absent: ["steal_second()"],
+      },
+      // default is a match as soon as it is reached, so a later node target did not run.
+      {
+        meta: { exports: { default: "./index.js", node: "./node.js" } },
+        code: "require('./node.js')",
+        files: { "node.js": "steal_after_default()\n" },
+        markers: ["steal_after_default()"],
+      },
+      // A matched condition whose file is missing does not fall through to the next condition.
+      {
+        meta: { exports: { node: "./missing.js", default: "./b.js" } },
+        code: "require('./b.js')",
+        files: { "b.js": "steal_no_fallthrough()\n" },
+        markers: ["steal_no_fallthrough()"],
+      },
+      // exports set, even empty or with no "." key, ignores main.
+      {
+        meta: { main: "legacy.js", exports: {} },
+        code: "require('./legacy.js')",
+        files: { "legacy.js": "steal_empty_exports()\n" },
+        markers: ["steal_empty_exports()"],
+      },
+      {
+        meta: { main: "legacy.js", exports: { "./other": "./other.js" } },
+        code: "require('./legacy.js')",
+        files: { "legacy.js": "steal_main_beside()\n", "other.js": "o()\n" },
+        markers: ["steal_main_beside()"],
+      },
+      // Conditions Node does not apply, and string fields this walk does not read.
+      {
+        meta: {
+          main: "index.js",
+          types: "./types.js",
+          typings: "./typings.js",
+          unpkg: "./unpkg.js",
+          jsdelivr: "./jsdelivr.js",
+          "jsnext:main": "./jsnext.js",
+          man: "./man.js",
+          directories: { lib: "libdir" },
+          exports: {
+            ".": {
+              development: "./development.js",
+              production: "./production.js",
+              "react-native": "./rn.js",
+              bun: "./bun.js",
+              electron: "./electron.js",
+              worker: "./worker.js",
+              module: "./modulecond.js",
+              "node-addons": "./addon.js",
+              browser: "./browsercond.js",
+              deno: "./denocond.js",
+              node: "./index.js",
+            },
+          },
+        },
+        code: [
+          "require('./types.js')",
+          "require('./typings.js')",
+          "require('./unpkg.js')",
+          "require('./jsdelivr.js')",
+          "require('./jsnext.js')",
+          "require('./man.js')",
+          "require('./libdir/x.js')",
+          "require('./development.js')",
+          "require('./production.js')",
+          "require('./rn.js')",
+          "require('./bun.js')",
+          "require('./electron.js')",
+          "require('./worker.js')",
+          "require('./modulecond.js')",
+          "require('./addon.js')",
+          "require('./browsercond.js')",
+          "require('./denocond.js')",
+        ].join("\n"),
+        files: {
+          "types.js": "steal_types_field()\n",
+          "typings.js": "steal_typings_field()\n",
+          "unpkg.js": "steal_unpkg()\n",
+          "jsdelivr.js": "steal_jsdelivr()\n",
+          "jsnext.js": "steal_jsnext()\n",
+          "man.js": "steal_man()\n",
+          "libdir/x.js": "steal_dirlib()\n",
+          "development.js": "steal_development()\n",
+          "production.js": "steal_production()\n",
+          "rn.js": "steal_rn()\n",
+          "bun.js": "steal_bun_cond()\n",
+          "electron.js": "steal_electron()\n",
+          "worker.js": "steal_worker_cond()\n",
+          "modulecond.js": "steal_module_cond()\n",
+          "addon.js": "steal_node_addons()\n",
+          "browsercond.js": "steal_browser_cond()\n",
+          "denocond.js": "steal_deno_cond()\n",
+        },
+        markers: [
+          "steal_types_field()",
+          "steal_typings_field()",
+          "steal_unpkg()",
+          "steal_jsdelivr()",
+          "steal_jsnext()",
+          "steal_man()",
+          "steal_dirlib()",
+          "steal_development()",
+          "steal_production()",
+          "steal_rn()",
+          "steal_bun_cond()",
+          "steal_electron()",
+          "steal_worker_cond()",
+          "steal_module_cond()",
+          "steal_browser_cond()",
+          "steal_deno_cond()",
+        ],
+        // node-addons matches before node, so addon.js is the file Node already ran.
+        absent: ["steal_node_addons()"],
+      },
+      // An exact null subpath and a star target seed no file.
+      {
+        meta: { exports: { ".": "./index.js", "./hidden.js": null, "./all": "./*" } },
+        code: "require('./hidden.js')\nrequire('./test/fixture.js')",
+        files: { "hidden.js": "steal_exact_null()\n", "test/fixture.js": "steal_star_target()\n" },
+        markers: ["steal_exact_null()", "steal_star_target()"],
+      },
+
+      // A nested manifest is not a root load.
+      {
+        meta: { main: "index.js" },
+        code: "require('./lib/evil.js')",
+        files: { "lib/package.json": JSON.stringify({ main: "evil.js" }), "lib/evil.js": "steal_nested()\n" },
+        markers: ["steal_nested()"],
+      },
+      // default matches as soon as it is reached. null blocks, so a later node target did not run.
+      {
+        meta: { exports: { default: null, node: "./node.js" } },
+        code: "require('./node.js')",
+        files: { "node.js": "steal_default_null()\n" },
+        markers: ["steal_default_null()"],
+      },
+      // typesVersions is an editor map. It is not a file Node runs.
+      {
+        meta: { main: "index.js", typesVersions: { "*": { "*": ["./tv.js"] } } },
+        code: "require('./tv.js')",
+        files: { "tv.js": "steal_types_versions()\n" },
+        markers: ["steal_types_versions()"],
+      },
+      // directories.bin is not a directory Node runs, with or without bin.
+      {
+        meta: { main: "index.js", directories: { bin: "tools" } },
+        code: "require('./tools/x.js')",
+        files: { "tools/x.js": "steal_s()\n" },
+        markers: ["steal_s()"],
+      },
+      // A dormant exact subpath is not an entry. A later require of it is a new load.
+      {
+        meta: { main: "index.js", exports: { ".": "./index.js", "./extra": "./extra.js" } },
+        code: "require('./extra.js')",
+        files: { "extra.js": "steal_exact_sub()\n" },
+        markers: ["steal_exact_sub()"],
+      },
+      // An install hook is not an old load. A later require of that file is new.
+      {
+        meta: { main: "index.js", scripts: { postinstall: "node evil.js" } },
+        code: "require('./evil.js')",
+        files: { "evil.js": "steal_script()\n" },
+        markers: ["steal_script()"],
+      },
+      // A valid target that names a missing file does not fall through to the next array element.
+      {
+        meta: { exports: { ".": ["./missing.js", "./b.js"] } },
+        code: "require('./b.js')",
+        files: { "b.js": "steal_array_fall()\n" },
+        markers: ["steal_array_fall()"],
+      },
+    ];
+    for (const c of shown) {
+      const meta = pj(c.meta);
+      const { text, r } = await run(
+        files({ "package.json": meta, "index.js": "a()\n", ...c.files }),
+        files({ "package.json": meta.replace('"1.0.0"', '"1.0.1"'), "index.js": `${c.code}\n`, ...c.files }),
+      );
+      for (const marker of c.markers) expect(text).toContain(marker);
+      for (const marker of c.absent ?? []) expect(text).not.toContain(marker);
+      expect(r.decision).toBe("land");
+    }
+    const hidden: { meta: Record<string, unknown>; code: string; files: Record<string, string>; marker: string }[] = [
+      // The bin command is an entry, so the file it names already ran.
+      {
+        meta: { main: "index.js", bin: { t: "cli.js" } },
+        code: "require('./cli.js')",
+        files: { "cli.js": "steal_bin_ran()\n" },
+        marker: "steal_bin_ran()",
+      },
+      // null in an array is not a file. The next target that exists is the one that ran.
+      {
+        meta: { exports: { ".": [null, "./b.js"] } },
+        code: "require('./b.js')",
+        files: { "b.js": "steal_null_fall()\n" },
+        marker: "steal_null_fall()",
+      },
+    ];
+    for (const c of hidden) {
+      const meta = pj(c.meta);
+      const { text, r } = await run(
+        files({ "package.json": meta, "index.js": "a()\n", ...c.files }),
+        files({ "package.json": meta.replace('"1.0.0"', '"1.0.1"'), "index.js": `${c.code}\n`, ...c.files }),
+      );
+      expect(text).not.toContain(c.marker);
+      expect(r.decision).toBe("land");
+    }
+  });
+
+  // Node's resolver, probed against v26.12.1. A marker is shown when the old release's entry
+  // closure for that mode never reached the file. X stays hidden because bin is an entry.
+  // AJ stays hidden because the array's second element is the file require() loads.
+  // minifySyntax drops `if (0) new Worker(...)`, so that URL is not an old load.
+  test("node's package resolver is what an entry already ran", async () => {
+    const N = (o: object) => pj({ version: "1.0.1", ...o });
+    const req = "require('./evil.js')\n";
+    const shown: { name: string; old: Record<string, string>; now: Record<string, string>; marker: string }[] = [
+      { name: "W", old: { "package.json": pj({ exports: { ".": "./index.js", "./x": "./evil.js" } }), "index.js": "a()\n" }, now: { "package.json": N({ exports: { ".": "./index.js", "./x": "./evil.js" } }), "index.js": req }, marker: "steal_w" },
+      { name: "Y", old: { "package.json": pj({ exports: { ".": ["./gone.js", "./evil.js"] } }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_y" },
+      { name: "Z", old: { "package.json": pj({ exports: "evil.js" }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_z" },
+      { name: "Z2", old: { "package.json": pj({ exports: "/evil.js" }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_z2" },
+      { name: "Z3", old: { "package.json": pj({ exports: "./lib/../evil.js" }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_z3" },
+      { name: "Z4", old: { "package.json": pj({ exports: "./node_modules/x/evil.js" }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": "require('./node_modules/x/evil.js')\n" }, marker: "steal_z4" },
+      { name: "AA", old: { "package.json": pj({ exports: { "module-sync": "./index.mjs", default: "./evil.js" } }), "index.mjs": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req, "index.mjs": "a()\n" }, marker: "steal_aa" },
+      { name: "AB", old: { "package.json": pj({ exports: { require: "./evil.js", import: "./index.mjs" } }), "index.mjs": "a()\n" }, now: { "package.json": N({ exports: { import: "./index.mjs" } }), "index.mjs": "import './evil.js'\n" }, marker: "steal_ab" },
+      { name: "AC", old: { "package.json": pj({ exports: { ".": "./evil.js", import: "./index.js" } }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_ac" },
+      { name: "AD", old: { "package.json": pj({ exports: { node: { ".": "./evil.js" }, default: "./index.js" } }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_ad" },
+      { name: "AE", old: { "package.json": pj({ exports: { ".": "./index.js", "./lib/": "./lib/" } }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": "require('./lib/evil.js')\n" }, marker: "steal_ae" },
+      { name: "AF", old: { "package.json": pj({ main: "lib" }), "lib/index.js": "a()\n" }, now: { "package.json": N({ main: "lib" }), "lib/index.js": "require('../evil.js')\n" }, marker: "steal_af" },
+      { name: "AG", old: { "package.json": pj({ main: "evil.js", exports: {} }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_ag" },
+      { name: "AH", old: { "package.json": pj({ main: "evil.js", exports: null }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_ah" },
+      { name: "Afalse", old: { "package.json": pj({ main: "evil.js", exports: false }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_ai" },
+      { name: "AK", old: { "package.json": pj({ exports: { default: "./index.js", node: "./evil.js" } }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_ak" },
+      { name: "BA", old: { "package.json": pj({ main: "index.js", imports: { "#x": { browser: "./evil.js", default: "./ok.js" } } }), "index.js": "require('#x')\n", "ok.js": "ok()\n" }, now: { "package.json": N({ main: "index.js" }), "index.js": req, "ok.js": "ok()\n" }, marker: "steal_ba" },
+      { name: "BB", old: { "package.json": pj({ exports: { ".": "./index.js", "./x": { browser: "./evil.js", default: "./ok.js" } } }), "index.js": "require('lib/x')\n", "ok.js": "ok()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req, "ok.js": "ok()\n" }, marker: "steal_bb" },
+      { name: "BC", old: { "package.json": pj({ exports: { "node-addons": "./index.js", default: "./evil.js" } }), "index.js": "a()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req }, marker: "steal_bc" },
+    ];
+    const hidden: typeof shown = [
+      { name: "X", old: { "package.json": pj({ main: "index.js", bin: { h: "./evil.js" } }), "index.js": "a()\n" }, now: { "package.json": N({ main: "index.js", bin: { h: "./evil.js" } }), "index.js": req }, marker: "steal_x" },
+      { name: "AJ", old: { "package.json": pj({ exports: [{ worker: "./w.js" }, "./evil.js"] }), "index.js": "a()\n", "w.js": "w()\n" }, now: { "package.json": N({ exports: "./index.js" }), "index.js": req, "w.js": "w()\n" }, marker: "steal_aj" },
+    ];
+    const fileFor = (marker: string, name: string): Record<string, string> => {
+      const out: Record<string, string> = {};
+      const path = name === "Z4" ? "node_modules/x/evil.js" : name === "AE" ? "lib/evil.js" : "evil.js";
+      out[path] = `${marker}()\n`;
+      return out;
+    };
+    for (const c of shown) {
+      const extra = fileFor(c.marker, c.name);
+      const { text, r } = await run(files({ ...c.old, ...extra }), files({ ...c.now, ...extra }));
+      expect(`${c.name} ${text.includes(`${c.marker}()`) ? "shown" : "hidden"}`).toBe(`${c.name} shown`);
+      expect(r.decision).toBe("land");
+    }
+    for (const c of hidden) {
+      const extra = fileFor(c.marker, c.name);
+      const { text, r } = await run(files({ ...c.old, ...extra }), files({ ...c.now, ...extra }));
+      expect(`${c.name} ${text.includes(`${c.marker}()`) ? "shown" : "hidden"}`).toBe(`${c.name} hidden`);
+      expect(r.decision).toBe("land");
+    }
+    const worker = await run(
+      files({ "package.json": pj({ main: "index.js" }), "index.js": "if (0) new Worker(new URL('./w.js', import.meta.url))\n", "w.js": "steal_worker_h()\n" }),
+      files({ "package.json": N({ main: "index.js" }), "index.js": "if (0) new Worker(new URL('./w.js', import.meta.url))\nrequire('./w.js')\n", "w.js": "steal_worker_h()\n" }),
+    );
+    // minifySyntax drops `if (0) new Worker(...)`, so the old closure never records w.js.
+    // The new require is a new load. Dead-branch analysis stays as the static walk leaves it.
+    expect(worker.text).toContain("steal_worker_h()");
+    const native = new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0]);
+    const opened = await run(
+      new Map([["package.json", enc(pj({ main: "index.js" }))], ["index.js", enc("require('./a')\n")], ["a.js", enc("x()\n")], ["a.node", native]]),
+      new Map([["package.json", enc(N({ main: "index.js" }))], ["index.js", enc("require('./a')\nrequire('./a.node')\n")], ["a.js", enc("x()\n")], ["a.node", native]]),
+    );
+    expect(opened.text).toContain("a.node");
+    expect(opened.r.decision).toBe("hold");
+  });
+
+  // package.json is the only change. evil.js is byte-identical. It is shown when the new
+  // release's require or import closure reaches it and the old release's matching closure did not.
+  test("a manifest change reaches the file node now runs", async () => {
+    const N = (o: object) => pj({ version: "1.0.1", ...o });
+    const evil = "steal()\n";
+    const cases: { name: string; old: Record<string, string>; now: Record<string, string>; decision?: "land" | "hold" }[] = [
+      {
+        name: "H1",
+        old: { "package.json": pj({ exports: { ".": { browser: "./evil.js", default: "./index.js" } } }), "index.js": "a()\n", "evil.js": evil },
+        now: { "package.json": N({ exports: { ".": { browser: "./index.js", default: "./evil.js" } } }), "index.js": "a()\n", "evil.js": evil },
+      },
+      {
+        name: "H2",
+        old: { "package.json": pj({ main: "index.js", browser: "./evil.js", module: "./evil.js" }), "index.js": "a()\n", "evil.js": evil },
+        now: { "package.json": N({ main: "evil.js", browser: "./evil.js", module: "./evil.js" }), "index.js": "a()\n", "evil.js": evil },
+      },
+      {
+        name: "H3",
+        old: { "package.json": pj({ exports: { ".": "./index.js", "./x": "./evil.js" } }), "index.js": "a()\n", "evil.js": evil },
+        now: { "package.json": N({ exports: { ".": "./evil.js", "./x": "./evil.js" } }), "index.js": "a()\n", "evil.js": evil },
+      },
+      {
+        name: "H4",
+        old: { "package.json": pj({ exports: { ".": "./index.js", "./*": "./lib/*.js" } }), "index.js": "a()\n", "lib/evil.js": evil },
+        now: { "package.json": N({ exports: { ".": "./lib/evil.js", "./*": "./lib/*.js" } }), "index.js": "a()\n", "lib/evil.js": evil },
+      },
+      {
+        name: "H5",
+        old: { "package.json": pj({ exports: { ".": { import: "./evil.js", require: "./index.js" } } }), "index.js": "a()\n", "evil.js": evil },
+        now: { "package.json": N({ exports: { ".": { import: "./index.js", require: "./evil.js" } } }), "index.js": "a()\n", "evil.js": evil },
+      },
+      {
+        name: "H7",
+        old: { "package.json": pj({ exports: { ".": ["./index.js", "./evil.js"] } }), "index.js": "a()\n", "evil.js": evil },
+        now: { "package.json": N({ exports: "./evil.js" }), "index.js": "a()\n", "evil.js": evil },
+      },
+      {
+        name: "H8",
+        old: { "package.json": pj({ main: "index.js", browser: "./evil.js" }), "index.js": "a()\n", "evil.js": evil },
+        now: { "package.json": N({ main: "index.js", browser: "./evil.js", scripts: { postinstall: "node evil.js" } }), "index.js": "a()\n", "evil.js": evil },
+        decision: "hold",
+      },
+      {
+        name: "H9",
+        old: { "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "evil.js": "#!/usr/bin/env node\nsteal()\n" },
+        now: { "package.json": N({ main: "index.js", bin: { h: "./evil.js" } }), "index.js": "a()\n", "evil.js": "#!/usr/bin/env node\nsteal()\n" },
+      },
+      {
+        name: "H10",
+        old: { "package.json": pj({ main: "index.js" }), "index.js": "a()\n", "mid.js": "require('./evil.js')\n", "evil.js": evil },
+        now: { "package.json": N({ main: "mid.js" }), "index.js": "a()\n", "mid.js": "require('./evil.js')\n", "evil.js": evil },
+      },
+    ];
+    for (const c of cases) {
+      const { text, r } = await run(files(c.old), files(c.now));
+      expect(`${c.name} ${text.includes("steal()") ? "shown" : "hidden"}`).toBe(`${c.name} shown`);
+      // A new postinstall is a hard pre-pass signal. The file is still in the review.
+      expect(r.decision).toBe(c.decision ?? "land");
+      if (c.decision === "hold") expect(r.layers.find((l) => l.layer === "prepass")?.detail ?? "").toContain("install-script");
+    }
+  });
+
+  // Coverage stays the reach difference union the full-manifest fresh set. A retargeted export,
+  // module, or browser file is shown. An unchanged subpath is not. An old install hook is not an old load.
+  test("a retargeted surface entry or a new install hook is covered", async () => {
+    const N = (o: object) => pj({ version: "1.0.1", ...o });
+    const index = { "index.js": "a()\n" };
+    const cases: { name: string; old: Record<string, string>; now: Record<string, string>; marker: string; show: boolean; decision?: "land" | "hold" }[] = [
+      {
+        name: "P1",
+        old: { "package.json": pj({ exports: { ".": "./index.js", "./sub": "./a.js" } }), ...index, "a.js": "a()\n", "evil.js": "steal_p1()\n" },
+        now: { "package.json": N({ exports: { ".": "./index.js", "./sub": "./evil.js" } }), ...index, "a.js": "a()\n", "evil.js": "steal_p1()\n" },
+        marker: "steal_p1()",
+        show: true,
+      },
+      {
+        name: "P2",
+        old: { "package.json": pj({ exports: { ".": "./index.js", "./*": "./lib/*.js" } }), ...index, "lib/x.js": "a()\n", "dorm/x.js": "steal_p2()\n" },
+        now: { "package.json": N({ exports: { ".": "./index.js", "./*": "./dorm/*.js" } }), ...index, "lib/x.js": "a()\n", "dorm/x.js": "steal_p2()\n" },
+        marker: "steal_p2()",
+        show: true,
+      },
+      {
+        name: "P13",
+        old: { "package.json": pj({ exports: { ".": "./index.js", "./p": { node: "./a.js" } } }), ...index, "a.js": "a()\n", "evil.js": "steal_p13()\n" },
+        now: { "package.json": N({ exports: { ".": "./index.js", "./p": { node: "./evil.js" } } }), ...index, "a.js": "a()\n", "evil.js": "steal_p13()\n" },
+        marker: "steal_p13()",
+        show: true,
+      },
+      {
+        name: "P3",
+        old: { "package.json": pj({ main: "index.js", module: "index.mjs" }), ...index, "index.mjs": "a()\n", "evil.mjs": "steal_p3()\n" },
+        now: { "package.json": N({ main: "index.js", module: "evil.mjs" }), ...index, "index.mjs": "a()\n", "evil.mjs": "steal_p3()\n" },
+        marker: "steal_p3()",
+        show: true,
+      },
+      {
+        name: "P4",
+        old: { "package.json": pj({ main: "index.js", browser: "b.js" }), ...index, "b.js": "a()\n", "evil.js": "steal_p4()\n" },
+        now: { "package.json": N({ main: "index.js", browser: "evil.js" }), ...index, "b.js": "a()\n", "evil.js": "steal_p4()\n" },
+        marker: "steal_p4()",
+        show: true,
+      },
+      {
+        name: "P5",
+        old: { "package.json": pj({ main: "index.js" }), ...index, "hook.js": "steal_p5()\n" },
+        now: { "package.json": N({ main: "hook.js" }), ...index, "hook.js": "steal_p5()\n" },
+        marker: "steal_p5()",
+        show: true,
+      },
+      {
+        name: "P5b",
+        old: { "package.json": pj({ main: "index.js", scripts: { postinstall: "node hook.js" } }), ...index, "hook.js": "if(!process.env.npm_lifecycle_event){steal_p5b()}\n" },
+        now: { "package.json": N({ main: "index.js", scripts: { postinstall: "node hook.js" } }), "index.js": "require('./hook.js')\n", "hook.js": "if(!process.env.npm_lifecycle_event){steal_p5b()}\n" },
+        marker: "steal_p5b()",
+        show: true,
+      },
+      {
+        name: "P5c",
+        old: { "package.json": pj({ main: "index.js", scripts: { postinstall: "node hook.js" } }), ...index, "hook.js": "if(process.argv[2])require('./evil.js')\n", "evil.js": "steal_p5c()\n" },
+        now: { "package.json": N({ main: "index.js", scripts: { postinstall: "node hook.js" } }), "index.js": "require('./evil.js')\n", "hook.js": "if(process.argv[2])require('./evil.js')\n", "evil.js": "steal_p5c()\n" },
+        marker: "steal_p5c()",
+        show: true,
+      },
+      {
+        name: "P6",
+        old: { "package.json": pj({ main: "index.js", scripts: { postinstall: "npm run setup", setup: "node a.js" } }), ...index, "a.js": "a()\n", "evil.js": "steal_p6()\n" },
+        now: { "package.json": N({ main: "index.js", scripts: { postinstall: "npm run setup", setup: "node evil.js" } }), ...index, "a.js": "a()\n", "evil.js": "steal_p6()\n" },
+        marker: "steal_p6()",
+        show: true,
+        decision: "hold",
+      },
+      {
+        name: "P11",
+        old: { "package.json": pj({ main: "index.js" }), ...index, "evil.js": "steal_p11()\n" },
+        now: { "package.json": N({ main: "index.js", scripts: { postinstall: "node evil" } }), ...index, "evil.js": "steal_p11()\n" },
+        marker: "steal_p11()",
+        show: true,
+        decision: "hold",
+      },
+      {
+        name: "eval",
+        old: { "package.json": pj({ main: "index.js" }), ...index, "evil.js": "steal_hook_eval()\n" },
+        now: { "package.json": N({ main: "index.js", scripts: { postinstall: "node -e \"require('./evil.js')\"" } }), ...index, "evil.js": "steal_hook_eval()\n" },
+        marker: "steal_hook_eval()",
+        show: true,
+        decision: "hold",
+      },
+      {
+        name: "sh-c",
+        old: { "package.json": pj({ main: "index.js" }), ...index, "evil.js": "steal_hook_sh()\n" },
+        now: { "package.json": N({ main: "index.js", scripts: { postinstall: "sh -c \"node evil.js\"" } }), ...index, "evil.js": "steal_hook_sh()\n" },
+        marker: "steal_hook_sh()",
+        show: true,
+        decision: "hold",
+      },
+      {
+        name: "require-flag",
+        old: { "package.json": pj({ main: "index.js" }), ...index, "evil.js": "steal_hook_req()\n" },
+        now: { "package.json": N({ main: "index.js", scripts: { postinstall: "node --require=./evil.js" } }), ...index, "evil.js": "steal_hook_req()\n" },
+        marker: "steal_hook_req()",
+        show: true,
+        decision: "hold",
+      },
+      {
+        name: "same-subpath",
+        old: { "package.json": pj({ exports: { ".": "./index.js", "./extra": "./extra.js" } }), ...index, "extra.js": "steal_same_sub()\n" },
+        now: { "package.json": N({ exports: { ".": "./index.js", "./extra": "./extra.js" } }), ...index, "extra.js": "steal_same_sub()\n" },
+        marker: "steal_same_sub()",
+        show: false,
+      },
+      {
+        name: "same-browser",
+        old: { "package.json": pj({ main: "index.js", browser: "evil.js" }), ...index, "evil.js": "steal_same_browser()\n" },
+        now: { "package.json": N({ main: "index.js", browser: "evil.js" }), ...index, "evil.js": "steal_same_browser()\n" },
+        marker: "steal_same_browser()",
+        show: false,
+      },
+    ];
+    for (const c of cases) {
+      const { text, r } = await run(files(c.old), files(c.now));
+      expect(`${c.name} ${text.includes(c.marker) ? "shown" : "hidden"}`).toBe(`${c.name} ${c.show ? "shown" : "hidden"}`);
+      expect(r.decision).toBe(c.decision ?? "land");
+      if (c.decision === "hold") expect(r.layers.find((l) => l.layer === "prepass")?.detail ?? "").toContain("install-script");
+    }
+  });
+
+  // Two typescript trees are about 23MB each and the diff cannot yield. A busy host
+  // ran past the 5s default, and that timeout killed the semver tar read.
+  test("typescript and semver updates stay near their old part counts", async () => {
+    const loadTree = (root: string): FileMap => {
+      const out: FileMap = new Map();
+      const walk = (dir: string, rel: string) => {
+        for (const name of readdirSync(dir)) {
+          if (name === "node_modules" || name === ".git") continue;
+          const abs = join(dir, name);
+          const st = lstatSync(abs);
+          if (st.isSymbolicLink()) continue;
+          const next = rel ? `${rel}/${name}` : name;
+          if (st.isDirectory()) walk(abs, next);
+          else if (st.isFile()) out.set(next, new Uint8Array(readFileSync(abs)));
+        }
+      };
+      walk(root, "");
+      return out;
+    };
+    const isDir = (p: string) => {
+      try {
+        return lstatSync(p).isDirectory();
+      } catch {
+        return false;
+      }
+    };
+    const cache = join(homedir(), ".bun", "install", "cache");
+    const tsOld = join(cache, "typescript@5.9.2@@@1");
+    const tsNew = join(cache, "typescript@5.9.3@@@1");
+    expect(chunkDiff(loadTree(tsOld), loadTree(tsNew), 60_000).length).toBe(1);
+    // Both cache dirs, or the committed tar of that same pair when one side was never installed.
+    const svA = join(cache, "semver@7.8.1@@@1");
+    const svB = join(cache, "semver@7.8.5@@@1");
+    const [svOld, svNew] = isDir(svA) && isDir(svB)
+      ? [loadTree(svA), loadTree(svB)]
+      : [await readArtifact(join(import.meta.dir, "fixtures", "semver-7.8.1.tar")), await readArtifact(join(import.meta.dir, "fixtures", "semver-7.8.5.tar"))];
+    expect(chunkDiff(svOld, svNew, 60_000).length).toBe(1);
+  }, 60_000);
+});
 
 describe("classifyOutcome", () => {
   const r = (decision: "land" | "hold", layers: { layer: LayerName; verdict: "pass" | "stop" | "error" | "skipped"; detail: string }[]) => ({ eco: "npm" as const, name: "x", from: "1", to: "2", decision, layers });

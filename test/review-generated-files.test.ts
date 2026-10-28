@@ -85,6 +85,40 @@ describe("everything else is shown in full", () => {
     expect(withCode("const n = 'unrelated'")).not.toContain("marker_name");
   });
 
+  test("a literal concatenation or path.join of literals links the map", () => {
+    const marked = (code: string, map = "a.map") => full(base, files({ "package.json": pj({}), "index.js": code, [map]: mapOf("AAAA", { names: ["marker_name"] }) }));
+    expect(marked("fs.readFileSync(path.join(__dirname, 'a' + '.map'))")).toContain("marker_name");
+    expect(marked("fs.readFileSync(path.resolve(__dirname, 'pre' + 'fix.js.map'))", "prefix.js.map")).toContain("marker_name");
+    expect(marked("fs.readFileSync('x' + '.js.map')", "x.js.map")).toContain("marker_name");
+    expect(marked("fs.readFileSync(`x` + '.js.map')", "x.js.map")).toContain("marker_name");
+    expect(marked("fs.readFileSync(path.join(__dirname, name + '.js.map'))", "x.js.map")).not.toContain("marker_name");
+    // A constant template folds to one string. A template with a real expression does not.
+    expect(marked("fs.readFileSync(`x${''}.js.map`)", "x.js.map")).toContain("marker_name");
+    expect(marked("fs.readFileSync(`x${name}.js.map`)", "x.js.map")).not.toContain("marker_name");
+  });
+
+  test("bun folds literal concatenations before a map path is trusted", () => {
+    const t = new Bun.Transpiler({ loader: "js", inline: true, minifySyntax: true } as Bun.TranspilerOptions);
+    const out = (s: string) => t.transformSync(s);
+    expect(out("require('./pay' + 'load.js')")).toContain("payload.js");
+    expect(out("fs.readFileSync('pre' /*c*/ + 'fix.map')")).toContain("prefix.map");
+    expect(out("fs.readFileSync(('pre') + 'fix.map')")).toContain("prefix.map");
+    expect(out("fs.readFileSync('pre' + 'fix\\x2emap')")).toContain("prefix.map");
+  });
+
+  test("a map loaded by a folded literal path is shown whole", () => {
+    const body = (code: string) => full(base, files({ "package.json": pj({}), "index.js": code, "prefix.map": mapOf("AAAA", { sourcesContent: ["steal_folded_map()"] }) }));
+    for (const code of [
+      "const m = JSON.parse(fs.readFileSync('pre' /*comment*/ + 'fix.map')); (0, eval)(m['sources' + 'Content'][0]);",
+      "fs.readFileSync(('pre') + 'fix.map')",
+      "fs.readFileSync('pre' + 'fix\\x2emap')",
+    ]) {
+      const text = body(code);
+      expect(text).toContain("steal_folded_map()");
+      expect(text).not.toContain("[source map, strict v3 data");
+    }
+  });
+
   test("a .map named by package.json main is shown in full", () => {
     const text = full(files({ "package.json": pj({}) }), files({ "package.json": pj({ main: "m.js.map" }), "m.js.map": mapOf("AAAA", { names: ["marker_name"] }) }));
     expect(text).toContain("marker_name");

@@ -83,6 +83,23 @@ describe("prepass: npm", () => {
     const r = prepass("npm", files({ "package/package.json": pkg({}) }), files({ "package/package.json": pkg({ test: "bun test" }) }));
     expect(r.hard).toEqual([]);
   });
+
+  test("a followed install script is hard when the script it runs changes", () => {
+    const body = (setup: string) => pkg({ postinstall: "npm run setup", setup });
+    const r = prepass("npm", files({ "package/package.json": body("node a.js") }), files({ "package/package.json": body("node evil.js") }));
+    expect(r.hard.map((s) => s.kind)).toContain("install-script");
+  });
+
+  test("an unchanged followed install script is not flagged", () => {
+    const body = pkg({ postinstall: "npm run setup", setup: "node a.js" });
+    expect(prepass("npm", files({ "package/package.json": body }), files({ "package/package.json": body })).hard).toEqual([]);
+  });
+
+  test("run-s and a package field inside an install script are followed", () => {
+    const body = (bin: string) => JSON.stringify({ name: "x", config: { bin }, scripts: { postinstall: "run-s build", build: "node $npm_package_config_bin" } });
+    const r = prepass("npm", files({ "package/package.json": body("a.js") }), files({ "package/package.json": body("evil.js") }));
+    expect(r.hard.map((s) => s.kind)).toContain("install-script");
+  });
 });
 
 describe("prepass: content signals (soft)", () => {
