@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { openaiReviewer } from "../src/adapters/reviewer/openai.ts";
+import { validateReviewerSpec } from "../src/adapters/reviewer/spec.ts";
 import { reviewUpdate } from "../src/review.ts";
 
 const seen: { auth: string | null; nofb: string | null; body: any }[] = [];
@@ -46,7 +47,7 @@ describe("openaiReviewer", () => {
     }
   });
   test("falls through to the next base URL on an error status", async () => {
-    const r = openaiReviewer({ name: "local", baseUrls: [`${base}/down`, base], model: "m1" });
+    const r = openaiReviewer({ name: "local", baseUrls: [`${base}/down`, base], model: "m1", retryDelaysMs: [] });
     expect(await r.review("x")).toContain("APPROVE");
   });
 
@@ -56,7 +57,7 @@ describe("openaiReviewer", () => {
   });
 
   test("every base failing throws with each reason", async () => {
-    const r = openaiReviewer({ name: "local", baseUrls: [`${base}/down`], model: "m1" });
+    const r = openaiReviewer({ name: "local", baseUrls: [`${base}/down`], model: "m1", retryDelaysMs: [] });
     await expect(r.review("x")).rejects.toThrow(/503/);
   });
 
@@ -195,5 +196,74 @@ describe("openaiReviewer API key transport", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+});
+
+describe("openaiReviewer expectHeaders", () => {
+  const servers: ReturnType<typeof Bun.serve>[] = [];
+  afterAll(() => servers.forEach((s) => s.stop(true)));
+
+  // One 2xx chat answer. `served` is omitted when the response must carry no served-by header.
+  function serve(served: string | undefined, body: string) {
+    const hits = { n: 0 };
+    const s = Bun.serve({
+      port: 0,
+      fetch() {
+        hits.n++;
+        const headers: Record<string, string> = {};
+        if (served !== undefined) headers["x-served-by"] = served;
+        return Response.json({ choices: [{ message: { content: body } }] }, { headers });
+      },
+    });
+    servers.push(s);
+    return { hits, base: `http://127.0.0.1:${s.port}` };
+  }
+
+  test("a matching response header passes", async () => {
+    const { hits, base } = serve("local", "APPROVE\nserved locally");
+    const r = openaiReviewer({ name: "local", baseUrls: [base], model: "m", retryDelaysMs: [1, 1], expectHeaders: { "x-served-by": "local" } });
+    expect(await r.review("x")).toBe("APPROVE\nserved locally");
+    expect(hits.n).toBe(1);
+  });
+
+  test("a wrong header value is an error, the verdict is not used, and the next base is tried once", async () => {
+    const bad = serve("cloud", "APPROVE\nfrom cloud");
+    const good = serve("local", "FLAG\nfrom local");
+    const r = openaiReviewer({ name: "local", baseUrls: [bad.base, good.base], model: "m", retryDelaysMs: [1, 1], expectHeaders: { "x-served-by": "local" } });
+    expect(await r.review("x")).toBe("FLAG\nfrom local");
+    expect(bad.hits.n).toBe(1);
+  });
+
+  test("a wrong header with no further base errors and does not return that verdict", async () => {
+    const { hits, base } = serve("cloud", "APPROVE\nfrom cloud");
+    const r = openaiReviewer({ name: "local", baseUrls: [base], model: "m", retryDelaysMs: [1, 1], expectHeaders: { "x-served-by": "local" } });
+    await expect(r.review("x")).rejects.toThrow(/http:\/\/127\.0\.0\.1:\d+: answer x-served-by cloud, expected local/);
+    expect(hits.n).toBe(1);
+  });
+
+  test("a missing response header is an error", async () => {
+    const { hits, base } = serve(undefined, "APPROVE\nno header");
+    const r = openaiReviewer({ name: "local", baseUrls: [base], model: "m", retryDelaysMs: [], expectHeaders: { "x-served-by": "local" } });
+    await expect(r.review("x")).rejects.toThrow(/answer x-served-by missing, expected local/);
+    expect(hits.n).toBe(1);
+  });
+
+  test("the expected header name is compared case-insensitively", async () => {
+    const { base } = serve("local", "APPROVE\nserved locally");
+    const r = openaiReviewer({ name: "local", baseUrls: [base], model: "m", expectHeaders: { "X-Served-By": "local" } });
+    expect(await r.review("x")).toBe("APPROVE\nserved locally");
+  });
+});
+
+describe("openai reviewer expectHeaders spec", () => {
+  const spec = { type: "openai", name: "local", baseUrls: ["http://127.0.0.1:9/v1"], model: "m" };
+
+  test("expectHeaders, when present, is an object of string to string", () => {
+    expect(validateReviewerSpec({ ...spec, expectHeaders: { "x-served-by": "local" } })).toMatchObject({ expectHeaders: { "x-served-by": "local" } });
+    expect(validateReviewerSpec(spec).type).toBe("openai");
+    expect(() => validateReviewerSpec({ ...spec, expectHeaders: ["local"] })).toThrow(/expectHeaders/);
+    expect(() => validateReviewerSpec({ ...spec, expectHeaders: { "x-served-by": 1 } })).toThrow(/expectHeaders/);
+    expect(() => validateReviewerSpec({ ...spec, expectHeaders: "local" })).toThrow(/expectHeaders/);
+    expect(() => validateReviewerSpec({ ...spec, expectHeaders: null })).toThrow(/expectHeaders/);
   });
 });

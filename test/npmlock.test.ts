@@ -83,11 +83,13 @@ describe("parseNpmLock (lockfileVersion 2 and 3)", () => {
 
   // Adversarial read 0.2.3 final (Opus 1): an entry with no resolved and no integrity was read as bundled and
   // dropped, so a bump npm wrote that way reached no review while `npm ci` fetched it from the registry.
-  test("only an inBundle entry is skipped; one with no resolved or integrity is a default-registry package", () => {
+  test("only an inBundle entry is skipped; one with no resolved or integrity is read, marked unhashed, and never throws", () => {
     const lock = (e: object) => JSON.stringify({ lockfileVersion: 3, packages: { "": { name: "root" }, "node_modules/a": e, "node_modules/p": { version: "1.0.0", resolved: "https://registry.npmjs.org/p/-/p-1.0.0.tgz" }, "node_modules/p/node_modules/b": { version: "1.0.0", inBundle: true } } });
     const p = { name: "p", version: "1.0.0", source: "https://registry.npmjs.org/p/-/p-1.0.0.tgz" };
-    expect(parseNpmLock(lock({ version: "2.0.0" }))).toEqual([{ name: "a", version: "2.0.0" }, p]);
-    expect(parseNpmLock(lock({ name: "real", version: "2.0.0", dev: true }))).toEqual([{ name: "real", version: "2.0.0" }, p]);
+    expect(parseNpmLock(lock({ version: "2.0.0" }))).toEqual([{ name: "a", version: "2.0.0", unhashed: true }, p]);
+    expect(parseNpmLock(lock({ name: "real", version: "2.0.0", dev: true }))).toEqual([{ name: "real", version: "2.0.0", unhashed: true }, p]);
+    // An integrity or a resolved alone is something the install checks or fetches: not unhashed.
+    expect(parseNpmLock(lock({ version: "2.0.0", integrity: SRI("A") }))[0]!.unhashed).toBeUndefined();
   });
 
   // Adversarial read 0.2.3 r7 (Opus a): with the root's bundleDependencies, npm marks the top-level entry and its

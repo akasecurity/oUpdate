@@ -94,8 +94,9 @@ function linkEscapes(path: string, target: string): boolean {
   return false;
 }
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
+/** Same bytes and same type: a file and a symlink with equal bytes (the link target) are different entries. */
+export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length || isLink(a) !== isLink(b)) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
