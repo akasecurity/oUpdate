@@ -19,7 +19,7 @@ On 22 Oct 2026, Forever Security [reported](https://forever.security/blog/hijack
 
 - **One run**, 26 Oct 2026, four cases, one model call each, about 28 seconds in all. The review code is the one at public commit `064dc50`.
 - **Layers:** the deterministic pre-pass and a model reviewer. No advisory check, threat feed, cooldown or scanner, so no known-malicious list could help.
-- **Model:** a mid-size local open-weights mixture-of-experts model, quantized, served locally through an OpenAI-compatible endpoint. No cloud model was used.
+- **Model:** an open-weights model behind an OpenAI-compatible endpoint. No cloud model was used.
 - **Cases:** each package as an update (`function-color` 1.0.0 → 1.7.3, `function-flag` 4.0.0 → 1.7.3) and as a new package (nothing → 1.7.3), the way `oupdate gate` sees a package the old lockfile did not have. The tarballs were read in memory; nothing was unpacked to disk, installed or run.
 
 ## Results

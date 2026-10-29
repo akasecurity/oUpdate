@@ -7,3 +7,4 @@ replay-work*/
 replay-results/
 !test/fixtures/**/*.log
 .release/
+eval/*/results/

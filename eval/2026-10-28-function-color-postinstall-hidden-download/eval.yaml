@@ -1,0 +1,17 @@
+id: 2026-10-28-function-color-postinstall-hidden-download
+source_url: https://forever.security/blog/hijacking-ai-agents-via-downloads-folder/
+source_date: 2026-10-22
+target:
+  tool: oupdate
+  component: gate (src/gate.ts) with prepass (src/prepass.ts) via reviewUpdate (src/review.ts)
+kind: vulnerability
+goal: block
+policy: default   # deterministic layers only (prepass); no model reviewer, no scanner, cooldown and advisory off
+tool_version: 0.2.8
+cases: cases.ts
+runner: run.ts
+result:
+  attacks_blocked: 4
+  attacks_total: 4
+  false_positives: 0
+  look_alike_and_control_total: 5
