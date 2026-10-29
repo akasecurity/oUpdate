@@ -4,6 +4,7 @@
 // create check runs, and branch protection can require it like any check.
 
 import type { Forge, Pull, Status, StatusState } from "./types.ts";
+import { keySafeUrl } from "../reviewer/openai.ts";
 
 export interface GithubDeps {
   /** API base, e.g. https://ghe.example/api/v3. Default https://api.github.com. */
@@ -36,6 +37,7 @@ export function githubForge(deps: GithubDeps): Forge {
   const headers = { authorization: `Bearer ${deps.token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" };
 
   async function call(method: string, path: string, body?: unknown, accept?: string): Promise<Response> {
+    if (!keySafeUrl(base)) throw new Error("forge: the token is not sent over plain http to a non-loopback host (use https)");
     const h: Record<string, string> = { ...headers };
     if (accept) h.accept = accept;
     if (body !== undefined) h["content-type"] = "application/json";

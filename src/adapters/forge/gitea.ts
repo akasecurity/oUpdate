@@ -2,6 +2,7 @@
 // personal access token sent as `Authorization: token ...`.
 
 import type { Forge, Pull, Status, StatusState } from "./types.ts";
+import { keySafeUrl } from "../reviewer/openai.ts";
 
 export interface GiteaDeps {
   endpoint: string; // e.g. https://forge.example/api/v1
@@ -24,6 +25,7 @@ export function giteaForge(deps: GiteaDeps): Forge {
   const headers = { authorization: `token ${deps.token}`, accept: "application/json" };
 
   async function call(method: string, path: string, body?: unknown): Promise<Response> {
+    if (!keySafeUrl(base)) throw new Error("forge: the token is not sent over plain http to a non-loopback host (use https)");
     const init: RequestInit = { method, headers: body === undefined ? headers : { ...headers, "content-type": "application/json" } };
     if (body !== undefined) init.body = JSON.stringify(body);
     return f(base + path, init);

@@ -187,6 +187,23 @@ describe("openaiReviewer API key transport", () => {
     }
   });
 
+  test("configured headers (no key) are never sent to a plain http URL on a non-loopback host; loopback and https still get them", async () => {
+    const sent = spyFetch();
+    try {
+      const headers = { "x-api-key": "secret-h" };
+      const r = openaiReviewer({ name: "cloud", baseUrls: ["http://proxy.example:8080/v1"], model: "m1", headers });
+      await expect(r.review("x")).rejects.toThrow(/headers are not sent over plain http/);
+      expect(sent).toEqual([]);
+      for (const ok of ["https://api.example/v1", "http://127.0.0.1:8080/v1"]) {
+        const l = openaiReviewer({ name: "ok", baseUrls: [ok], model: "m1", headers });
+        expect(await l.review("x")).toContain("APPROVE");
+      }
+      expect(sent.length).toBe(2);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   test("keyless plain http to a non-loopback host still works (no credential to leak)", async () => {
     const sent = spyFetch();
     try {

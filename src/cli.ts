@@ -196,8 +196,9 @@ export async function lockedFilesCheck(registry: Registry, name: string, version
     const listed = new Set(files.map((x) => x.sha256?.toLowerCase()).filter(Boolean));
     for (const f of locked) {
       const m = /^sha256:([0-9a-f]{64})$/i.exec(f.hash ?? "");
-      if (!f.url || !m) throw new Error(`the lockfile's file ${f.url ?? "(no url)"} has no url or sha256 to check (${f.hash ?? "no hash"})`);
-      if (!listed.has(m[1]!.toLowerCase())) return { layer: "gate", verdict: "stop", detail: `the lockfile's file ${f.url} (${f.hash}) is not one PyPI lists for ${name} ${version}; a person checks it` };
+      const label = f.url ?? f.file;
+      if (!label || !m) throw new Error(`the lockfile's file ${label ?? "(no url)"} has no url or sha256 to check (${f.hash ?? "no hash"})`);
+      if (!listed.has(m[1]!.toLowerCase())) return { layer: "gate", verdict: "stop", detail: `the lockfile's file ${label} (${f.hash}) is not one PyPI lists for ${name} ${version}; a person checks it` };
     }
   } catch (e) {
     return { layer: "gate", verdict: "error", detail: `cannot check the lockfile's files against PyPI: ${e instanceof Error ? e.message : String(e)}` };

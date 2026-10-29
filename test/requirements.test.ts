@@ -59,6 +59,14 @@ describe("parseRequirements", () => {
     expect(parseRequirements(`idna==3.10 --hash=${h("b")} --hash=${h("a")}\n`)[0]!.digest).toBe(`${h("a")} ${h("b")}`);
   });
 
+  test("from PyPI, each --hash is carried as a file to match against PyPI's listing; a pin with none carries none", () => {
+    const h = (c: string) => `sha256:${c.repeat(64)}`;
+    const [a, b] = parseRequirements(`idna==3.10 --hash=${h("b")} --hash=${h("a")}\nsix==1.16.0\n`);
+    expect(a!.artifacts).toEqual([{ file: "requirements.txt", hash: h("b") }, { file: "requirements.txt", hash: h("a") }]);
+    expect(b!.artifacts).toBeUndefined();
+    expect(parseRequirements(`--index-url https://pypi.corp.example/simple\nidna==3.10 --hash=${h("a")}\n`)[0]!.artifacts).toBeUndefined();
+  });
+
   test("named only by --lock: requirements*.txt and *.lock.txt are pypi, but never auto-detected", () => {
     expect(parseLock("deploy/requirements.txt", text).eco).toBe("pypi");
     expect(lockKind("requirements-dev.txt").eco).toBe("pypi");

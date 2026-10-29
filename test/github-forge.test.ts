@@ -22,6 +22,18 @@ function fakeFetch(routes: Record<string, () => Response>, calls: Call[], base =
 
 const pull = (n: number) => ({ number: n, user: { login: "renovate[bot]" }, head: { ref: `renovate/p${n}`, sha: `h${n}`, repo: { full_name: "octo-org/app" } }, base: { ref: "main", sha: "b", repo: { full_name: "octo-org/app" } } });
 
+describe("githubForge plain http", () => {
+  test("the token is never sent to a plain http endpoint on a non-loopback host; loopback is allowed", async () => {
+    const calls: Call[] = [];
+    const bad = githubForge({ token: "t", login: "bot", endpoint: "http://forge.example/api/v3", fetch: fakeFetch({}, calls) });
+    await expect(bad.openPulls("o/r")).rejects.toThrow(/token is not sent over plain http/);
+    expect(calls).toEqual([]);
+    const ok = githubForge({ token: "t", login: "bot", endpoint: "http://127.0.0.1:3000/api/v3", fetch: fakeFetch({}, calls) });
+    await ok.openPulls("o/r").catch(() => {});
+    expect(calls.length).toBeGreaterThan(0);
+  });
+});
+
 describe("githubForge", () => {
   test("sends a bearer token with the GitHub JSON media type and API version, to api.github.com by default", async () => {
     const calls: Call[] = [];

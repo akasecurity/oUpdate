@@ -331,6 +331,29 @@ describe("the run: failures, timeouts and the summary", () => {
     expect(r.log.some((l) => l.startsWith("[notify] ⚠️ hosta Type A — holding 1 pkg(s)"))).toBe(true);
   });
 
+  test("a Type A formula installed at a version other than the reviewed one is flagged, not counted upgraded", async () => {
+    const r = await run({ formulas: "good-a", verbose: "good-a (1.0) < 1.1", formulaTaps: { "good-a": "homebrew/core" }, installedVersion: { "good-a": "1.2" } });
+    expect(r.log).toContain("  Type A: good-a installed 1.2, reviewed 1.1 — FLAGGED");
+    expect(r.log.some((l) => l.startsWith("[notify] ⚠️ hosta Type A FLAGGED"))).toBe(true);
+    expect(r.brew).toContain("FAILED: version:good-a");
+    expect(r.brew).not.toContain("upgraded: good-a");
+    expect(r.rc).toBe(1);
+  });
+
+  test("a Type A cask installed at a version other than the reviewed one is flagged, not counted upgraded", async () => {
+    const r = await run({ casks: "app", verbose: "app (1.0) != 1.1", caskTaps: { app: "homebrew/cask" }, installedVersion: { app: "1.0" } });
+    expect(r.log).toContain("  Type A: app installed 1.0, reviewed 1.1 — FLAGGED");
+    expect(r.brew).toContain("FAILED: version:app");
+    expect(r.brew).not.toContain("casks upgraded: app");
+  });
+
+  test("a Type A formula and cask at the reviewed version are counted upgraded", async () => {
+    const r = await run({ formulas: "good-a", casks: "app", verbose: "good-a (1.0) < 1.1\napp (1.0) != 1.1", formulaTaps: { "good-a": "homebrew/core" }, caskTaps: { app: "homebrew/cask" } });
+    expect(r.brew).toContain("upgraded: good-a");
+    expect(r.brew).toContain("casks upgraded: app");
+    expect(r.brew).not.toContain("version:");
+  });
+
   test("a timeout marks the brew phase failed and the run goes on: later steps, npm, summary, rc 1", async () => {
     const r = await run({ ...BREW, formulas: "good-a", timeout: ["brew upgrade good-a"] });
     expect(r.brew).toMatch(/^ {2}brew: FAILED: good-a; /);

@@ -508,7 +508,7 @@ describe("runGate", () => {
     const files = { "b:requirements.txt": REQ("6.0.1"), "h1:requirements.txt": REQ("6.0.2") };
     const seen: Change[] = [];
     await runGate({ forge: memForge(files, { h3: "failure" }), repo: "o/r", lockPaths: ["requirements.txt"], review: async (c) => (seen.push(c), result(c, "land")) });
-    expect(seen).toEqual([{ name: "pyyaml", from: "6.0.1", to: "6.0.2", eco: "pypi" }]);
+    expect(seen).toEqual([{ name: "pyyaml", from: "6.0.1", to: "6.0.2", eco: "pypi", toArtifacts: [{ file: "requirements.txt", hash: `sha256:${"a".repeat(64)}` }] }]);
     const auto = await runGate({ forge: memForge(files, { h3: "failure" }), repo: "o/r", review: async () => { throw new Error("not called"); } });
     expect(auto[0]!.state).toBe("failure");
   });

@@ -5,7 +5,7 @@
 // `===`, bare URLs and paths, and options it does not know. An --index-url (or -i) other than PyPI names every pin
 // by that host, wherever the option sits in the file, as pip applies it to the whole file; an --extra-index-url or
 // --find-links (-f) does the same, since pip may take any pin from there, and is part of each pin's source. The
-// `--hash` values are sha256, which the download check does not verify (it checks sha512 only).
+// `--hash` values of a PyPI pin are carried as its artifacts, for the review to match against the sha256s PyPI lists.
 
 import { collector, digestOf, pypiPrivateIndex } from "./pylock.ts";
 import { directKind, type LockedPackage } from "./types.ts";
@@ -29,7 +29,7 @@ export function parseRequirements(text: string): LockedPackage[] {
     .filter(Boolean);
   let index: string | undefined;
   const extras: string[] = [];
-  const pins: [string, string, string | undefined][] = [];
+  const pins: [string, string, string[]][] = [];
   const directs: [string | undefined, string][] = [];
   for (const line of lines) {
     if (line.startsWith("-")) {
@@ -51,13 +51,16 @@ export function parseRequirements(text: string): LockedPackage[] {
     const spec = line.replace(/\s--hash[=\s]\S+/g, "").split(";")[0]!.trim();
     const m = PIN.exec(spec);
     if (!m) throw unsupported(line);
-    pins.push([m[1]!, m[2]!, digestOf(hashes)]);
+    pins.push([m[1]!, m[2]!, hashes.map(String)]);
   }
   // Each extra location pip may take a pin from is private unless it is PyPI itself; the main index's host wins.
   const registry = pypiPrivateIndex(index) ?? extras.map(pypiPrivateIndex).find(Boolean);
   const source = [index, ...extras.sort()].filter(Boolean).join(" ") || undefined;
   const c = collector();
-  for (const [name, version, digest] of pins) c.add(name, version, registry, { source, digest });
+  for (const [name, version, hashes] of pins) {
+    const artifacts = registry ? undefined : hashes.map((hash) => ({ file: "requirements.txt", hash }));
+    c.add(name, version, registry, { source, digest: digestOf(hashes), artifacts });
+  }
   for (const [name, source] of directs) c.direct(name, undefined, directKind(source), source);
   return c.out;
 }
