@@ -7,7 +7,7 @@ target:
 kind: vulnerability
 goal: block
 policy: default   # deterministic layers only (prepass); no model reviewer, no scanner, cooldown and advisory off
-tool_version: 0.2.8
+tool_version: 0.2.10
 cases: cases.ts
 runner: run.ts
 result:
@@ -15,3 +15,7 @@ result:
   attacks_total: 4
   false_positives: 0
   look_alike_and_control_total: 5
+last_run:
+  date: 2026-10-29
+  tool_version: 0.2.10
+  commit: f1dc09b
