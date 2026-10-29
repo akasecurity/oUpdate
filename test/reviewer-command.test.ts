@@ -17,6 +17,28 @@ describe("commandReviewer", () => {
     expect(cwd).not.toBe(process.cwd());
   });
 
+  test("every run starts in the same directory", async () => {
+    const r = commandReviewer({ name: "pwd", argv: [process.execPath, "-e", "process.stdout.write(process.cwd())"] });
+    const a = await r.review("");
+    const b = await r.review("");
+    expect(a).toBe(b);
+  });
+
+  test("the shared directory is private and empty at first use", async () => {
+    const r = commandReviewer({ name: "pwd", argv: [process.execPath, "-e", "process.stdout.write(process.cwd())"] });
+    const dir = await r.review("");
+    const st = require("node:fs").lstatSync(dir);
+    expect(st.isDirectory()).toBe(true);
+    expect(st.mode & 0o077).toBe(0);
+    expect(st.uid).toBe(process.getuid!());
+  });
+
+  test("a file left by one run is gone before the next, and overlapping runs take turns", async () => {
+    const r = commandReviewer({ name: "w", argv: [process.execPath, "-e", "const fs=require('fs');const seen=fs.readdirSync('.').length;fs.writeFileSync('CLAUDE.md','x');await Bun.sleep(50);process.stdout.write(String(seen)+' '+fs.readdirSync('.').length)"] });
+    const outs = await Promise.all([r.review(""), r.review(""), r.review("")]);
+    expect(outs).toEqual(["0 1", "0 1", "0 1"]);
+  });
+
   test("a non-zero exit throws", async () => {
     const r = commandReviewer({ name: "fail", argv: [process.execPath, "-e", "process.exit(3)"] });
     await expect(r.review("x")).rejects.toThrow(/exit 3/);

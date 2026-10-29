@@ -11,7 +11,7 @@
 
 import { requestLine } from "../broker-client.ts";
 import type { LegResult, OsPackagesLeg } from "../model.ts";
-import type { ReviewerPair } from "../compose/review.ts";
+import type { ReviewerPair } from "../../review-pair.ts";
 import type { OpenGce } from "../reach.ts";
 import type { LegContext, TargetFs } from "../run.ts";
 import { decodeInventory, pkgKey, type Inventory } from "./answer.ts";

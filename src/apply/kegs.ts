@@ -15,7 +15,10 @@
 
 import { basename, dirname } from "node:path";
 import { isStopping, type Exec } from "./exec.ts";
+import { kegHolders, type Holder } from "./holders.ts";
 import { matchOwner, parsePrint, type QueuedOwner, type StaleOwner } from "./owner-waiter.ts";
+
+export { kegHolders, type Holder };
 
 export interface KegEnv {
   exec: Exec;
@@ -46,35 +49,6 @@ export type LabelRestart = Record<string, "skip" | "kickstart" | string[]>;
 interface Outcome {
   said: string;
   record: (pkg: string) => void;
-}
-
-export interface Holder {
-  pid: string;
-  pkg: string;
-  keg: string;
-}
-
-/** Every distinct (pid, package, keg dir) mapping a file under <cellar>/<pkg>/<keg>/… in lsof output. */
-export function kegHolders(lsofOut: string, cellar: string): Holder[] {
-  const c = `${cellar}/`;
-  const seen = new Set<string>();
-  const out: Holder[] = [];
-  for (const line of lsofOut.split("\n")) {
-    const f = line.trim().split(/\s+/);
-    const name = f.at(-1) ?? "";
-    if (!name.startsWith(c)) continue;
-    const [pkg, keg, ...rest] = name.slice(c.length).split("/");
-    if (!pkg || !keg || !rest.length) continue;
-    const h = { pid: f[1] ?? "", pkg, keg: `${c}${pkg}/${keg}` };
-    const k = `${h.pid}\t${h.pkg}\t${h.keg}`;
-    if (!seen.has(k)) {
-      seen.add(k);
-      out.push(h);
-    }
-  }
-  // pids in numeric order (as strings 12345 sorts before 9876), then package and keg.
-  const key = (h: Holder) => `${h.pkg}\t${h.keg}`;
-  return out.sort((a, b) => Number(a.pid) - Number(b.pid) || (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
 }
 
 /**
