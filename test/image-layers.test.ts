@@ -580,6 +580,8 @@ describe("dirChange", () => {
 });
 
 describe("round 10", () => {
+  // One layer pair per mandatory path. The suite runs bare `bun test` (5s default);
+  // package.json's script allows 30s. A busy build host crossed 5s.
   test("Y2: every exact mandatory path is shown when a link above it points into an omitted cache path", async () => {
     for (const p of EXACT_MANDATORY) {
       const segs = p.split("/");
@@ -592,7 +594,7 @@ describe("round 10", () => {
         expect(r.parts.join("\n"), `${p} behind a link at ${at}`).toContain("+NEW-CONTENT");
       }
     }
-  });
+  }, 30_000);
 
   test("Y3: an empty trust or startup directory removed behind an aliased parent holds with evidence", async () => {
     const old: LayerSpec = { "etc/pki/tls": { link: "/var/cache/apt/t" }, "var/cache/apt/t/certs": { dir: true }, "etc/s6-overlay": { link: "/var/cache/apt/s" }, "var/cache/apt/s/services.d": { dir: true } };

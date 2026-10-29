@@ -6,7 +6,8 @@
 import { benignBinary } from "./benign-binary.ts";
 import { cooldownVerdict } from "./cooldown.ts";
 import { shown } from "./ident.ts";
-import { prepass, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, expandNpmScripts, npmHookFileArgs, starMatch, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
+import { prepass, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, expandNpmScripts, npmHookFileArgs, starMatch, bindingRunsGyp, gypCommands, hookEnvPaths, STAR_PATTERN_MAX, STAR_KEY_MAX, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
+import { installView } from "./install-closure.ts";
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
 import { newFindings, type Finding } from "./adapters/scanner/types.ts";
@@ -208,7 +209,11 @@ export function entryPaths(files: FileMap, placed: FileMap = files, scope: { scr
         return;
       }
       // resolveIn already applied `.` and `..`. `*` then matches any path, including across `/`.
+      // A pattern past the cap, or a key past the cap, is left unmatched.
+      if (full.length > STAR_PATTERN_MAX) return;
+      let seen = 0;
       for (const r of members ?? keys) {
+        if (seen++ >= STAR_KEY_MAX) break;
         if (!starMatch(full, r)) continue;
         const k = at(r);
         if (k !== undefined) out.add(k);
@@ -261,17 +266,58 @@ export function entryPaths(files: FileMap, placed: FileMap = files, scope: { scr
       if (binDir !== undefined) for (const r of members ?? keys) if (r.startsWith(binDir ? `${binDir}/` : "")) out.add(at(r)!);
     }
     if (scriptsOn) {
-      // `npm run` / `run-script` / `run-s` and `$npm_package_*` are followed. An extensionless
-      // `node evil` resolves the same way a require does. The command word itself is not a file.
-      const addHook = (token: string) => {
+      // `npm run` / `run-script` / `rum` / `urn`, lifecycle aliases, `yarn|pnpm|bun run`, and
+      // `run-s` / `npm-run-all` are followed. An extensionless `node evil` resolves the same way
+      // a require does. The command word itself is not a file. A hook file that reads
+      // `process.env.npm_package_*` names another file from this release's manifest.
+      const seenEnv = new Set<string>();
+      const addHook = (token: string, depth = 0) => {
+        add(token);
+        const spec = token.startsWith(".") || token.includes("/") ? token : `./${token}`;
+        const hits = extOf(token) ? [] : resolveRelative(files, placed, p, dir, spec, 0, true);
+        for (const hit of hits) out.add(hit);
+        if (depth >= 4) return;
+        const found: string[] = [];
+        if (extOf(token)) {
+          const full = resolveIn(dir, spec);
+          if (full) {
+            const k = files.has(full) ? full : at(full);
+            if (k && files.has(k)) found.push(k);
+          }
+        } else found.push(...hits);
+        for (const k of found) {
+          if (seenEnv.has(k)) continue;
+          seenEnv.add(k);
+          const b = files.get(k);
+          if (!b || b.length > 1_000_000) continue;
+          for (const t of hookEnvPaths(dec.decode(b), pj)) addHook(t, depth + 1);
+        }
+      };
+      for (const body of Object.values(expandNpmScripts(pj, HOOK_SCRIPTS))) {
+        for (const t of npmHookFileArgs(body)) addHook(t);
+        for (const t of hookEnvPaths(body, pj)) addHook(t);
+      }
+    }
+    // node-gyp reads binding.gyp on every release that would rebuild, including the old one.
+    // Deleting the install script is what makes the new side the only one that runs the command.
+    const gypInner = dir ? `${dir}/binding.gyp` : "binding.gyp";
+    const gypAt = at(gypInner);
+    const gypBytes = gypAt ? files.get(gypAt) : undefined;
+    if (gypBytes && bindingRunsGyp(pj)) {
+      const addGyp = (token: string) => {
         add(token);
         if (extOf(token)) return;
         const spec = token.startsWith(".") ? token : `./${token}`;
         for (const hit of resolveRelative(files, placed, p, dir, spec, 0, true)) out.add(hit);
       };
-      for (const body of Object.values(expandNpmScripts(pj, HOOK_SCRIPTS))) for (const t of npmHookFileArgs(body)) addHook(t);
+      for (const cmd of gypCommands(dec.decode(gypBytes))) for (const t of npmHookFileArgs(cmd)) addGyp(t);
     }
   }
+  // The closed install view names files the script walker does not: node --run,
+  // npm t, a pre/post script, a config path, and a binding.gyp npm would see.
+  // Old roots keep scripts off, so a hook file stays on the new side only.
+  const inst = installView(files);
+  for (const f of scriptsOn ? inst.files : inst.gypFiles) out.add(f);
   return out;
 }
 

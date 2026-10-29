@@ -100,10 +100,10 @@ describe("readArtifact: links", () => {
     expect(r.hard.filter((s) => s.kind === "link-outside").map((s) => s.path).sort()).toEqual(["abs", "lib/out"]);
   });
 
-  test("a symlink inside the package is shown with its target as a soft signal", async () => {
+  test("a symlink inside the package holds and still shows its target", async () => {
     const m = normalizePaths(await readArtifact(packLinks("tl2", "tgz", { "package/package.json": "{}", "package/lib/real.js": "x" }, { "package/lib/alias.js": "real.js" })));
     const r = prepass("npm", new Map(), m);
-    expect(r.hard).toEqual([]);
+    expect(r.hard.map((s) => s.detail).join(" ")).toMatch(/symlink/);
     expect(r.soft.find((s) => s.path === "lib/alias.js")?.kind).toBe("symlink");
     expect(r.soft.find((s) => s.path === "lib/alias.js")?.detail).toContain("real.js");
   });

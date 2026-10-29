@@ -3,6 +3,7 @@ import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { reviewUpdate, parseVerdict, chunkDiff, classifyOutcome, rankPriorityPaths, lastResolveCalls, entryPaths, type LayerName } from "../src/review.ts";
+import { STAR_KEY_MAX, STAR_PATTERN_MAX } from "../src/prepass.ts";
 import type { Registry } from "../src/adapters/ecosystem/types.ts";
 import type { AdvisoryFeed, Advisory } from "../src/adapters/advisory/osv.ts";
 import { markLink, markLabeled, type FileMap } from "../src/prepass.ts";
@@ -1364,7 +1365,9 @@ describe("newly reached files", () => {
         "a/index.js": "steal_script_index()\n",
       }),
     );
-    expect(script.text).toContain("=== a/index.js (now loaded by changed code, unchanged) ===");
+    // postinstall runs setup.js, and require('./a') is followed. Deleting a.js
+    // resolves that to a/index.js, so the dormant file is a package entry.
+    expect(script.text).toContain("=== a/index.js (now loaded by package.json, unchanged) ===");
     expect(script.text).toContain("steal_script_index()");
     const computed = await run(
       files({
@@ -2262,6 +2265,38 @@ describe("newly reached files", () => {
         decision: "hold",
       },
       {
+        name: "gyp-delete-install",
+        old: { "package.json": pj({ main: "index.js", scripts: { install: "node safe.js" } }), ...index, "safe.js": "a()\n", "binding.gyp": "{ 'targets': [ { 'action': [ '<!(node evil.js)' ] } ] }\n", "evil.js": "steal_gyp()\n" },
+        now: { "package.json": N({ main: "index.js" }), ...index, "safe.js": "a()\n", "binding.gyp": "{ 'targets': [ { 'action': [ '<!(node evil.js)' ] } ] }\n", "evil.js": "steal_gyp()\n" },
+        marker: "steal_gyp()",
+        show: true,
+        decision: "hold",
+      },
+      {
+        name: "hook-env",
+        old: { "package.json": pj({ main: "index.js", config: { f: "./ok.js" }, scripts: { postinstall: "node hook.js" } }), ...index, "hook.js": "require(process.env.npm_package_config_f)\n", "ok.js": "a()\n", "evil.js": "steal_env()\n" },
+        now: { "package.json": N({ main: "index.js", config: { f: "./evil.js" }, scripts: { postinstall: "node hook.js" } }), ...index, "hook.js": "require(process.env.npm_package_config_f)\n", "ok.js": "a()\n", "evil.js": "steal_env()\n" },
+        marker: "steal_env()",
+        show: true,
+        decision: "hold",
+      },
+      {
+        name: "npm-prefix",
+        old: { "package.json": pj({ main: "index.js", scripts: { postinstall: "npm --prefix . run setup", setup: "node ok.js" } }), ...index, "ok.js": "a()\n", "evil.js": "steal_prefix()\n" },
+        now: { "package.json": N({ main: "index.js", scripts: { postinstall: "npm --prefix . run setup", setup: "node evil.js" } }), ...index, "ok.js": "a()\n", "evil.js": "steal_prefix()\n" },
+        marker: "steal_prefix()",
+        show: true,
+        decision: "hold",
+      },
+      {
+        name: "yarn-run",
+        old: { "package.json": pj({ main: "index.js", scripts: { postinstall: "yarn run setup", setup: "node ok.js" } }), ...index, "ok.js": "a()\n", "evil.js": "steal_yarn()\n" },
+        now: { "package.json": N({ main: "index.js", scripts: { postinstall: "yarn run setup", setup: "node evil.js" } }), ...index, "ok.js": "a()\n", "evil.js": "steal_yarn()\n" },
+        marker: "steal_yarn()",
+        show: true,
+        decision: "hold",
+      },
+      {
         name: "same-subpath",
         old: { "package.json": pj({ exports: { ".": "./index.js", "./extra": "./extra.js" } }), ...index, "extra.js": "steal_same_sub()\n" },
         now: { "package.json": N({ exports: { ".": "./index.js", "./extra": "./extra.js" } }), ...index, "extra.js": "steal_same_sub()\n" },
@@ -2298,6 +2333,29 @@ describe("newly reached files", () => {
     expect(entries.has("lib/x.js")).toBe(true);
     expect(entries.has("lib/nested/x.js")).toBe(true);
     expect([...entries].some((p) => p.endsWith("b") && !p.includes("."))).toBe(false);
+  });
+
+  test("a star pattern past the cap matches nothing and a short star still does", () => {
+    const huge = "*".repeat(STAR_PATTERN_MAX + 1);
+    const map: FileMap = new Map([
+      ["package.json", enc(JSON.stringify({ name: "lib", exports: { "./*": `./${huge}`, "./lib/*.js": "./lib/*.js" } }))],
+      ["lib/x.js", enc("ok\n")],
+      ["nested/x.js", enc("no\n")],
+    ]);
+    const entries = entryPaths(map);
+    expect(entries.has("lib/x.js")).toBe(true);
+    expect(entries.has("nested/x.js")).toBe(false);
+  });
+
+  test("a star walk stops after the key cap", () => {
+    const map: FileMap = new Map([["package.json", enc(JSON.stringify({ name: "lib", exports: { "./*": "./*" } }))]]);
+    for (let i = 0; i < STAR_KEY_MAX; i++) map.set(`k${i}.js`, enc("a\n"));
+    map.set("past.js", enc("b\n"));
+    const t = performance.now();
+    const entries = entryPaths(map);
+    expect(performance.now() - t).toBeLessThan(1000);
+    expect(entries.has("k0.js")).toBe(true);
+    expect(entries.has("past.js")).toBe(false);
   });
 
   // Two typescript trees are about 23MB each and the diff cannot yield. A busy host

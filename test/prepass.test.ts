@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { prepass, type FileMap } from "../src/prepass.ts";
+import { prepass, starMatch, STAR_PATTERN_MAX, type FileMap } from "../src/prepass.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const files = (o: Record<string, string>): FileMap => new Map(Object.entries(o).map(([k, v]) => [k, enc(v)]));
@@ -73,8 +73,8 @@ describe("prepass: npm", () => {
   test("an unchanged install script is not flagged", () => {
     const r = prepass(
       "npm",
-      files({ "package/package.json": pkg({ install: "node-gyp rebuild" }) }),
-      files({ "package/package.json": pkg({ install: "node-gyp rebuild" }) }),
+      files({ "package/package.json": pkg({ install: "node ok.js" }) }),
+      files({ "package/package.json": pkg({ install: "node ok.js" }) }),
     );
     expect(r.hard).toEqual([]);
   });
@@ -111,6 +111,92 @@ describe("prepass: npm", () => {
     const r = prepass("npm", files({ "package/package.json": old }), files({ "package/package.json": now }));
     expect(performance.now() - t).toBeLessThan(100);
     expect(r.hard.map((s) => s.kind)).toContain("install-script");
+  });
+
+  test("a star pattern past the cap matches nothing", () => {
+    expect(starMatch("*".repeat(STAR_PATTERN_MAX + 1), "aaaa")).toBe(false);
+    expect(starMatch("*", "a/b")).toBe(true);
+    expect(starMatch("*a".repeat(12), `${"a".repeat(20)}b`)).toBe(false);
+    expect(starMatch("*a".repeat(12), `${"a".repeat(20)}a`)).toBe(true);
+  });
+
+  test("a version bump with the same install hook is not flagged", () => {
+    const old = JSON.stringify({ name: "x", version: "1.0.0", scripts: { postinstall: "node hook.js" } });
+    const now = JSON.stringify({ name: "x", version: "1.0.1", scripts: { postinstall: "node hook.js" } });
+    expect(prepass("npm", files({ "package/package.json": old }), files({ "package/package.json": now })).hard).toEqual([]);
+  });
+
+  test("a script an install hook reaches through another runner is hard when it changes", () => {
+    const hooks = [
+      "yarn run setup",
+      "pnpm --silent run setup",
+      "bun run setup",
+      "npm rum setup",
+      "npm urn setup",
+      "npm --prefix . run setup",
+      "npm --silent run setup",
+      "npm-run-all setup",
+      "npm-run-all --max-parallel 1 setup",
+      "npm start",
+      "npm stop",
+      "npm restart",
+    ];
+    for (const hook of hooks) {
+      const life = hook.startsWith("npm start") ? "start" : hook.startsWith("npm stop") ? "stop" : hook.startsWith("npm restart") ? "restart" : "setup";
+      const scripts = { postinstall: hook, [life]: "node a.js" };
+      const next = { postinstall: hook, [life]: "node evil.js" };
+      const r = prepass("npm", files({ "package/package.json": pkg(scripts) }), files({ "package/package.json": pkg(next) }));
+      expect(r.hard.map((s) => s.kind), hook).toContain("install-script");
+    }
+    const oldTest = pkg({ postinstall: "npm test", test: "node a.js" });
+    const newTest = pkg({ postinstall: "npm test", test: "node evil.js" });
+    expect(prepass("npm", files({ "package/package.json": oldTest }), files({ "package/package.json": newTest })).hard.map((s) => s.kind)).toContain("install-script");
+  });
+
+  test("an unchanged script reached through another runner is not flagged", () => {
+    const body = pkg({ postinstall: "yarn --silent run setup", setup: "node a.js" });
+    expect(prepass("npm", files({ "package/package.json": body }), files({ "package/package.json": body })).hard).toEqual([]);
+  });
+
+  test("an unfollowed script change is not an install hold; the hook text is", () => {
+    const bare = pkg({ postinstall: "yarn setup", setup: "node evil.js" });
+    const bareOld = pkg({ postinstall: "yarn setup", setup: "node a.js" });
+    expect(prepass("npm", files({ "package/package.json": bareOld }), files({ "package/package.json": bare })).hard.filter((s) => s.kind === "install-script")).toEqual([]);
+    const hook = pkg({ postinstall: "yarn setup now", setup: "node a.js" });
+    expect(prepass("npm", files({ "package/package.json": bareOld }), files({ "package/package.json": hook })).hard.map((s) => s.kind)).toContain("install-script");
+  });
+
+  test("a test-script edit beside binding.gyp is not an install hold; a removed install, a gyp edit, or a config retarget is", () => {
+    const gyp = "{ 'targets': [ { 'action': [ '<!(node evil.js)' ] } ] }\n";
+    const same = "same\n";
+    const scripts = prepass(
+      "npm",
+      files({ "package/package.json": pkg({ test: "node a.js" }), "package/binding.gyp": gyp, "package/evil.js": same }),
+      files({ "package/package.json": pkg({ test: "node b.js" }), "package/binding.gyp": gyp, "package/evil.js": same }),
+    );
+    expect(scripts.hard.filter((s) => s.kind === "install-script")).toEqual([]);
+    const removed = prepass(
+      "npm",
+      files({ "package/package.json": pkg({ install: "node safe.js" }), "package/binding.gyp": gyp, "package/evil.js": same, "package/safe.js": "s\n" }),
+      files({ "package/package.json": pkg({}), "package/binding.gyp": gyp, "package/evil.js": same, "package/safe.js": "s\n" }),
+    );
+    expect(removed.hard.map((s) => s.kind)).toContain("install-script");
+    const gypOnly = prepass(
+      "npm",
+      files({ "package/package.json": pkg({}), "package/binding.gyp": gyp, "package/evil.js": same }),
+      files({ "package/package.json": pkg({}), "package/binding.gyp": `${gyp}\n`, "package/evil.js": same }),
+    );
+    expect(gypOnly.hard.map((s) => s.kind)).toContain("install-script");
+    const body = (f: string) => JSON.stringify({ name: "x", config: { f }, scripts: { postinstall: "node hook.js" } });
+    const hook = "require(process.env.npm_package_config_f)\n";
+    const cfg = prepass(
+      "npm",
+      files({ "package/package.json": body("./ok.js"), "package/hook.js": hook, "package/ok.js": same, "package/evil.js": same }),
+      files({ "package/package.json": body("./evil.js"), "package/hook.js": hook, "package/ok.js": same, "package/evil.js": same }),
+    );
+    expect(cfg.hard.map((s) => s.kind)).toContain("install-script");
+    const noHook = (f: string) => JSON.stringify({ name: "x", config: { f } });
+    expect(prepass("npm", files({ "package/package.json": noHook("a") }), files({ "package/package.json": noHook("b") })).hard).toEqual([]);
   });
 });
 
