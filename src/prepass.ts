@@ -2,8 +2,16 @@
 // Hard signals hold an update no matter what a model reviewer says; soft
 // signals are handed to the reviewer as pointers. It reads bytes only.
 
+import { installView } from "./install-closure.ts";
+
 export type FileMap = Map<string, Uint8Array>;
 export type Ecosystem = "npm" | "pypi";
+
+// These mean the install surface could not be computed. Any other install hold
+// is a form we compared and found unchanged, which is not a hold.
+export function surfaceCap(reason: string): boolean {
+  return /^(glob|pattern length|key count|unresolved: manifest|unresolved: path|unresolved: script depth|case-fold)/.test(reason);
+}
 
 // Symlink entries from readArtifact. Their bytes are the link target (what pip writes for a wheel's
 // symlink entry), and the mark is kept on the bytes so it survives path renames and copies.
@@ -16,6 +24,26 @@ export function markLink(bytes: Uint8Array): Uint8Array {
 
 export function isLink(bytes: Uint8Array): boolean {
   return LINKS.has(bytes);
+}
+
+// Tar member problems read from the archive listing, not the extracted tree.
+// npm skips link entries; bsdtar does not. The note survives path normalization.
+const TAR_NOTES = new WeakMap<FileMap, string[]>();
+
+export function markTarNotes(files: FileMap, notes: readonly string[]): void {
+  if (notes.length === 0) return;
+  const prev = TAR_NOTES.get(files) ?? [];
+  const seen = new Set(prev);
+  const next = [...prev];
+  for (const note of notes) if (!seen.has(note)) {
+    seen.add(note);
+    next.push(note);
+  }
+  TAR_NOTES.set(files, next);
+}
+
+export function tarNotes(files: FileMap): readonly string[] {
+  return TAR_NOTES.get(files) ?? [];
 }
 
 // Paths mergeArtifactPair placed, per merged map: the path inside the artifact (a `label/` prefix stripped), which
@@ -122,7 +150,7 @@ function addedLines(oldText: string | undefined, newText: string): string[] {
   return newText.split("\n").filter((l) => !before.has(l));
 }
 
-const HOOK_BINS = new Set(["node", "nodejs", "npm", "npx", "echo", "sh", "bash", "run", "run-s", "run-p", "run-script", "yarn", "pnpm", "bun"]);
+const HOOK_BINS = new Set(["node", "nodejs", "npm", "npx", "echo", "sh", "bash", "run", "run-s", "run-p", "run-script", "npm-run-all", "yarn", "pnpm", "bun"]);
 const HOOK_FILE_BINS = new Set(["node", "nodejs", "bun", "sh", "bash"]);
 
 function npmPackageEnv(pj: Record<string, unknown>): Map<string, string> {
@@ -220,9 +248,16 @@ function binName(token: string): string {
   return token.replace(/^.*\//, "").replace(/\.cmd$/i, "");
 }
 
+// A pattern or a key past these bounds is not matched. The matcher is linear, and a long
+// pattern against every key of a huge package is still the cost this cap exists to stop.
+export const STAR_PATTERN_MAX = 256;
+export const STAR_KEY_MAX = 4096;
+export const STAR_TEXT_MAX = 1024;
+
 // `*` is any run of characters, including empty and `/`. Every other character is literal.
 // Two pointers, no RegExp: a run of stars cannot backtrack exponentially over the text.
 export function starMatch(pattern: string, text: string): boolean {
+  if (pattern.length > STAR_PATTERN_MAX || text.length > STAR_TEXT_MAX) return false;
   let pi = 0;
   let ti = 0;
   let starP = -1;
@@ -248,6 +283,46 @@ export function starMatch(pattern: string, text: string): boolean {
   return pi === pattern.length;
 }
 
+const VALUE_FLAGS = new Set([
+  "--prefix", "-C", "--registry", "--userconfig", "--globalconfig", "--cache", "--tmp",
+  "--script-shell", "--workspace", "-w", "--omit", "--include", "--scope", "--user",
+  "--filter", "--dir", "--cwd", "--max-parallel", "--jobs", "-j", "--npm-path", "--config",
+]);
+const BOOL_FLAGS = new Set([
+  "--silent", "--quiet", "-s", "-q", "--if-present", "--ignore-scripts", "--no-color", "--color",
+  "--continue-on-error", "-c", "--print-label", "--print-name", "-l", "--parallel", "-p",
+  "--sequential", "--race", "--aggregate-output", "--serial", "--bun", "--frozen-lockfile",
+  "--prefer-offline", "--offline", "--recursive", "-r",
+]);
+const NPM_RUN = new Set(["run", "run-script", "rum", "urn"]);
+const NPM_LIFE = new Set(["test", "start", "stop", "restart"]);
+
+function flagName(token: string): string {
+  const eq = token.indexOf("=");
+  return eq > 0 ? token.slice(0, eq) : token;
+}
+
+// Flags before a subcommand. A value flag consumes the next word. A boolean flag does not,
+// so `npm --silent run setup` still sees `run`. An unknown flag consumes the next word only
+// when that word is not the subcommand (`npm --prefix . run setup`).
+function skipFlags(argv: string[], i: number, protect: ReadonlySet<string> | null): number {
+  while (i < argv.length) {
+    const a = argv[i]!;
+    if (a === "--") return -1;
+    if (!a.startsWith("-")) return i;
+    const name = flagName(a);
+    const inline = a.includes("=");
+    i++;
+    if (inline || BOOL_FLAGS.has(name)) continue;
+    const next = argv[i];
+    if (!next || next.startsWith("-")) continue;
+    // Before the subcommand, an unlisted flag still takes a value that is not itself the
+    // subcommand. After it, only a known value flag does, so the script name is left intact.
+    if (VALUE_FLAGS.has(name) || (protect !== null && !protect.has(next))) i++;
+  }
+  return i;
+}
+
 function referencedScripts(argv: string[], scripts: Record<string, unknown>): string[] {
   let i = 0;
   while (i < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i]!)) i++;
@@ -256,24 +331,48 @@ function referencedScripts(argv: string[], scripts: Record<string, unknown>): st
   const names: string[] = [];
   if (bin === "npm") {
     i++;
-    while (i < argv.length && argv[i]!.startsWith("-")) i++;
+    const subs = new Set<string>([...NPM_RUN, ...NPM_LIFE]);
+    i = skipFlags(argv, i, subs);
+    if (i < 0) return [];
     const sub = argv[i];
-    if (sub !== "run" && sub !== "run-script") return [];
+    if (sub && NPM_LIFE.has(sub)) return [sub];
+    if (!sub || !NPM_RUN.has(sub)) return [];
     i++;
-    while (i < argv.length && argv[i]!.startsWith("-")) i++;
+    i = skipFlags(argv, i, null);
+    if (i < 0) return [];
     const name = argv[i];
     if (name && !name.startsWith("-")) names.push(name);
     return names;
   }
-  if (bin === "run-s" || bin === "run-p") {
+  if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
+    i++;
+    i = skipFlags(argv, i, new Set(["run"]));
+    if (i < 0 || argv[i] !== "run") return [];
+    i++;
+    i = skipFlags(argv, i, null);
+    if (i < 0) return [];
+    const name = argv[i];
+    if (name && !name.startsWith("-")) names.push(name);
+    return names;
+  }
+  if (bin === "run-s" || bin === "run-p" || bin === "npm-run-all") {
     i++;
     const keys = Object.keys(scripts);
+    const pool = keys.length > STAR_KEY_MAX ? keys.slice(0, STAR_KEY_MAX) : keys;
     for (; i < argv.length; i++) {
       const a = argv[i]!;
       if (a === "--") break;
-      if (a.startsWith("-")) continue;
+      if (a.startsWith("-")) {
+        const name = flagName(a);
+        if (!a.includes("=") && VALUE_FLAGS.has(name)) {
+          const next = argv[i + 1];
+          if (next && !next.startsWith("-")) i++;
+        }
+        continue;
+      }
       if (a.includes("*")) {
-        for (const k of keys) if (starMatch(a, k)) names.push(k);
+        if (a.length > STAR_PATTERN_MAX) continue;
+        for (const k of pool) if (starMatch(a, k)) names.push(k);
       } else names.push(a);
     }
   }
@@ -302,7 +401,8 @@ function expandHookBody(raw: string, scripts: Record<string, unknown>, env: Map<
   return parts.join("\n");
 }
 
-// Install-hook text after `$npm_package_*` substitution, plus every `npm run` / `run-script` / `run-s` / `run-p` body it names.
+// Install-hook text after `$npm_package_*` substitution, plus every script body a runner names:
+// `npm run` / `run-script` / `rum` / `urn`, `npm test|start|stop|restart`, `yarn|pnpm|bun run`, and `run-s` / `run-p` / `npm-run-all`.
 export function expandNpmScripts(pj: Record<string, unknown>, names: readonly string[]): Record<string, string> {
   if (!pj || typeof pj !== "object" || Array.isArray(pj)) return {};
   const scripts = (pj.scripts ?? {}) as Record<string, unknown>;
@@ -393,6 +493,58 @@ export function npmHookFileArgs(body: string): string[] {
   return walk(body, 0);
 }
 
+// npm runs `node-gyp rebuild` when binding.gyp is on disk, gypfile is not false, and neither
+// install nor preinstall is set. A hook that itself runs node-gyp still reads the gyp file.
+export function bindingRunsGyp(pj: Record<string, unknown>): boolean {
+  if (pj.gypfile === false) return false;
+  const scripts = pj.scripts;
+  const s = scripts && typeof scripts === "object" && !Array.isArray(scripts) ? (scripts as Record<string, unknown>) : {};
+  const install = typeof s.install === "string" ? s.install : "";
+  const pre = typeof s.preinstall === "string" ? s.preinstall : "";
+  if (typeof s.install !== "string" && typeof s.preinstall !== "string") return true;
+  return /\bnode-gyp\b/.test(`${install}\n${pre}`);
+}
+
+// `<!(cmd)` and `<!@(cmd)` are the commands node-gyp runs while it reads binding.gyp.
+export function gypCommands(text: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "<" || text[i + 1] !== "!") continue;
+    let j = i + 2;
+    if (text[j] === "@") j++;
+    if (text[j] !== "(") continue;
+    j++;
+    let depth = 1;
+    const start = j;
+    for (; j < text.length && depth > 0; j++) {
+      if (text[j] === "(") depth++;
+      else if (text[j] === ")") depth--;
+    }
+    if (depth === 0) out.push(text.slice(start, j - 1));
+    i = j - 1;
+  }
+  return out;
+}
+
+function envPathValue(v: string): boolean {
+  if (!v || v.length > 240 || /\s/.test(v) || v.includes("://") || v.startsWith("/") || /^[A-Za-z]:[\\/]/.test(v)) return false;
+  if (v.startsWith("./") || v.startsWith("../") || v.includes("/")) return true;
+  return /\.(?:js|cjs|mjs|node|sh)$/i.test(v);
+}
+
+// A hook file that loads `process.env.npm_package_*` reads that value at install time.
+// Only a path-shaped value is a file. A version string is not.
+export function hookEnvPaths(text: string, pj: Record<string, unknown>): string[] {
+  const env = npmPackageEnv(pj);
+  const out: string[] = [];
+  const re = /process\.env(?:\.|\s*\[\s*["'])npm_package_([A-Za-z0-9_]+)/g;
+  for (const m of text.matchAll(re)) {
+    const v = env.get(`npm_package_${m[1]}`);
+    if (v && envPathValue(v)) out.push(v);
+  }
+  return out;
+}
+
 function npmInstallScripts(bytes: Uint8Array | undefined): Record<string, string> {
   if (!bytes) return {};
   try {
@@ -404,6 +556,109 @@ function npmInstallScripts(bytes: Uint8Array | undefined): Record<string, string
   }
 }
 
+function resolveMention(files: FileMap, token: string): string | undefined {
+  const rel = token.replace(/^\.\//, "");
+  if (!rel || rel.startsWith("/") || rel.split("/").includes("..")) return undefined;
+  const bases = rel.startsWith("package/") ? [rel] : [rel, `package/${rel}`];
+  for (const base of bases) {
+    if (files.has(base)) return base;
+    for (const ext of [".js", ".json", ".node", ".cjs", ".mjs"]) {
+      if (files.has(base + ext)) return base + ext;
+      if (files.has(`${base}/index${ext}`)) return `${base}/index${ext}`;
+    }
+  }
+  return undefined;
+}
+
+// require('./rel') and `node ./file.js` inside a hook, even when eval does not close them.
+function mentionFiles(files: FileMap, scripts: Record<string, string>): string[] {
+  const text = Object.values(scripts).join("\n");
+  const out: string[] = [];
+  for (const m of text.matchAll(/['"](\.[^'"]+)['"]/g)) {
+    const hit = resolveMention(files, m[1] ?? "");
+    if (hit) out.push(hit);
+  }
+  for (const m of text.matchAll(/(?:^|[\s;&|])node\s+(\.\/\S+|\S+\.(?:js|cjs|mjs))/g)) {
+    const hit = resolveMention(files, m[1] ?? "");
+    if (hit) out.push(hit);
+  }
+  return out;
+}
+
+function reachedFiles(files: FileMap, view: ReturnType<typeof installView>): Set<string> {
+  const found = new Set<string>(view.files);
+  for (const k of view.gypFiles) found.add(k);
+  if (view.gyp) found.add(view.gyp);
+  for (const k of mentionFiles(files, view.scripts)) found.add(k);
+  return found;
+}
+
+function bundledStamp(files: FileMap): string {
+  const lines: string[] = [];
+  for (const key of [...files.keys()].sort()) {
+    if (!key.split("/").includes("node_modules") || !key.endsWith("package.json")) continue;
+    try {
+      const v = JSON.parse(dec.decode(files.get(key))) as { scripts?: Record<string, unknown> };
+      const scripts = v.scripts ?? {};
+      lines.push(`${key} ${NPM_INSTALL_SCRIPTS.map((k) => `${k}=${typeof scripts[k] === "string" ? scripts[k] : ""}`).join(" ")}`);
+    } catch {
+      lines.push(`${key} <unparseable>`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function outsideKeys(files: FileMap): string[] {
+  const keys = [...files.keys()];
+  if (!keys.some((k) => k.startsWith("package/"))) return [];
+  return keys.filter((k) => !k.startsWith("package/"));
+}
+
+function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
+  const oldV = installView(oldFiles);
+  const newV = installView(newFiles);
+  const path = newV.manifest || oldV.manifest || "package.json";
+  const out: Signal[] = [];
+  const seen = new Set<string>();
+  const push = (detail: string) => {
+    if (seen.has(detail)) return;
+    seen.add(detail);
+    out.push({ kind: "install-script", path, detail: detail.slice(0, 200) });
+  };
+  for (const k of new Set([...Object.keys(oldV.scripts), ...Object.keys(newV.scripts)])) {
+    if (oldV.scripts[k] !== newV.scripts[k]) push(`script ${k}`);
+  }
+  const missN = new Set(newV.missing);
+  for (const p of oldV.missing) if (!missN.has(p)) push(`file ${p}`);
+  const missO = new Set(oldV.missing);
+  for (const p of newV.missing) if (!missO.has(p)) push(`file ${p}`);
+  // A retarget reaches a different key even when both files sit in both trees.
+  const oldReached = reachedFiles(oldFiles, oldV);
+  const newReached = reachedFiles(newFiles, newV);
+  for (const k of oldReached) if (!newReached.has(k)) push(`file ${k}`);
+  for (const k of newReached) if (!oldReached.has(k)) push(`file ${k}`);
+  for (const k of oldReached) {
+    if (!newReached.has(k)) continue;
+    const a = oldFiles.get(k);
+    const b = newFiles.get(k);
+    if (!a || !b || !bytesEqual(a, b)) push(`file ${k}`);
+  }
+  if (bundledStamp(oldFiles) !== bundledStamp(newFiles)) push("bundled");
+  for (const k of new Set([...outsideKeys(oldFiles), ...outsideKeys(newFiles)])) {
+    const a = oldFiles.get(k);
+    const b = newFiles.get(k);
+    if (!a || !b || !bytesEqual(a, b)) push(`file ${k}`);
+  }
+  if ((oldV.hook || newV.hook) && oldV.binStamp !== newV.binStamp) push("bin");
+  // The surface matched. A cap still holds, because the closure above is incomplete.
+  // A download, an eval, or an unresolved runner does not.
+  if (out.length === 0) {
+    const cap = newV.hold ?? oldV.hold;
+    if (cap && surfaceCap(cap)) push(cap);
+  }
+  return out;
+}
+
 const BUILD_INCLUDE_RE = /^\s*(data|data-files|data_files|include|force-include|shared-data|package-data|package_data)\s*=/;
 
 export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): PrepassResult {
@@ -412,6 +667,10 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
   const added: string[] = [];
   const removed: string[] = [];
   const changed: string[] = [];
+
+  for (const detail of new Set([...tarNotes(oldFiles), ...tarNotes(newFiles)])) {
+    hard.push({ kind: "tar-entry", path: detail.split(" ").slice(1).join(" ") || "archive", detail: detail.slice(0, 200) });
+  }
 
   for (const p of oldFiles.keys()) if (!newFiles.has(p)) removed.push(p);
   for (const [p, bytes] of newFiles) {
@@ -455,6 +714,7 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
         if (before[k] !== v) hard.push({ kind: "install-script", path: p, detail: `${k}: ${v.slice(0, 200)}` });
       }
     }
+    for (const signal of installClosureSignals(oldFiles, newFiles)) hard.push(signal);
   }
 
   for (const p of [...added, ...changed]) {

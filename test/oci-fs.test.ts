@@ -1,5 +1,6 @@
 // The merged filesystem of an image's layers: listing, whiteouts, opaque directories, lazy fetches and the limits.
 import { describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import { ImageTree, LayerError, LayerStore, LIMITS, MergedIndex, parseListing, sharedPrefix, type LayerListing } from "../src/oci-fs.ts";
 import { fakeLayers, withTmp } from "./oci-helpers.ts";
 
@@ -170,7 +171,18 @@ describe("ImageTree", () => {
 
   test("a bsdtar call past the time limit is stopped and refused", async () => {
     await withTmp(async (dir) => {
-      const { t } = tree(dir, ["base.tar"], { ...LIMITS, timeoutMs: 1 });
+      // A real tar often lists in under 1 ms, so the deadline never wins. A fifo cannot
+      // finish being read until a writer opens it, and nothing writes, so the deadline does.
+      const img = fakeLayers(["base.tar"]);
+      const fetch = img.fetchLayer.bind(img);
+      img.fetchLayer = async (l, dest) => {
+        await fetch(l, dest);
+        rmSync(dest);
+        const mk = Bun.spawnSync(["mkfifo", dest]);
+        if (mk.exitCode !== 0) throw new Error(mk.stderr.toString());
+      };
+      const store = new LayerStore(dir, { ...LIMITS, timeoutMs: 1 });
+      const t = new ImageTree(store, img.layers, img.fetchLayer);
       await expect(MergedIndex.build(t)).rejects.toThrow(/bsdtar did not list the layer within 1 ms/);
     });
   });
