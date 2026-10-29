@@ -1,5 +1,9 @@
 # function-color: a dependency that hides a download behind an install hook
 
+**Research:** "Hijacking AI agents via the Downloads folder", Forever Security, published 2026-10-22, <https://forever.security/blog/hijacking-ai-agents-via-downloads-folder/>
+
+Last run: 2026-10-29, oUpdate 0.2.10 (f1dc09b), 4 of 4 attacks blocked, 0 of 5 false positives
+
 - **Source:** Forever Security, ["Hijacking AI agents via the Downloads folder"](https://forever.security/blog/hijacking-ai-agents-via-downloads-folder/), 22 Oct 2026. Our earlier run of the real malicious releases is kept here as [malfex-function-color-2026-10-26.md](malfex-function-color-2026-10-26.md).
 - **Attack:** `function-color` has no payload of its own. It adds color getters to every string, and each one calls its dependency `function-flag`. `function-flag` 1.7.3 runs `example.js` on install, and a call at the far right of a line padded with hundreds of spaces makes a helper download a Windows executable and run it hidden.
 - **Goal:** `block` (kind: vulnerability). The tool must hold every attack case and land every look-alike, under the default policy.
@@ -26,7 +30,7 @@ All synthetic: package names follow the public write-up, hosts are reserved `.ex
 
 ## Results
 
-oUpdate 0.2.8, default policy, pre-pass layer (no model reviewer, so the result is the same every run).
+oUpdate 0.2.10, default policy, pre-pass layer (no model reviewer, so the result is the same every run).
 
 | Case | Pull request | Held at |
 |---|---|---|
