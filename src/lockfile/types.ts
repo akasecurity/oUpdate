@@ -11,7 +11,7 @@ export interface LockedPackage {
   source?: string;
   /** Every hash the lockfile records for it, as written (all algorithms, all files): a swap changes it. */
   digest?: string;
-  /** Each file the lockfile pins for it (uv.lock's sdist and wheels), with its URL and hash as written. */
+  /** Each file the lockfile pins for it (uv.lock's sdist and wheels, poetry.lock's and requirements.txt's files), with its URL and hash as written. */
   artifacts?: LockedFile[];
   /** Set for a registry package whose lockfile entry records neither where it is fetched from nor a hash: nothing says what the install checks. */
   unhashed?: boolean;
@@ -24,6 +24,8 @@ export type DirectKind = "git" | "url" | "file";
 /** One file a lockfile pins for a package: where the install fetches it and the hash it checks. */
 export interface LockedFile {
   url?: string;
+  /** The file's name when the lockfile gives no URL (poetry.lock, requirements.txt). */
+  file?: string;
   hash?: string;
 }
 

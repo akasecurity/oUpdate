@@ -10,7 +10,7 @@ import { caskRunning, lsofMaps, type KegEnv } from "./kegs.ts";
 import { asUser, brewView, findCheck, holdPath, holdState, pendingPath, runHook, savePending, trustState, type PendingCheck } from "./release-checks.ts";
 import { pinFilter } from "./pins.ts";
 import { loadApprovedTaps, outdatedVersions, tapIn } from "./taps.ts";
-import { typeAReview } from "./typea.ts";
+import { reviewedVersion, typeAReview, versionMismatch } from "./typea.ts";
 import type { TypeBRun } from "./typeb.ts";
 import { handoff } from "./waiter.ts";
 import { type GkOps, type RunCtx, words, uniq, last, named, holdRunningBun, PKG_NAME, DECLARED_DEPS } from "./run-ctx.ts";
@@ -238,6 +238,7 @@ export async function brewSection(rt: RunCtx) {
   const hide = brewHeld();
   const verbose = `${vq.out}${vq.err}`.split("\n").filter((l) => !named(hide, l.trim().split(/\s+/)[0] ?? "")).join("\n");
   log.push(verbose.trimEnd(), "");
+  b.verbose = verbose;
 
   // 3. Tap tiers. Type B is the config's list plus this host's approved taps.
   let typeBTaps = cfg.typeBTaps;
@@ -352,8 +353,8 @@ export async function brewSection(rt: RunCtx) {
         log.push(`Type A casks deferred until end of run: ${keptCasks.join(" ")}`);
       }
       for (const pkg of typeA) {
-        if ((await upgradeFormula(rt, pkg)) === 0) b.upgraded.push(pkg);
-        else await brewFailed(pkg);
+        if ((await upgradeFormula(rt, pkg)) !== 0) await brewFailed(pkg);
+        else if (await versionHeld(rt, pkg, reviewedVersion(pkg, verbose), (await brewView(rt.rcEnv.exec, cfg.brew, pkg))?.current)) b.upgraded.push(pkg);
       }
     }
   }
@@ -428,6 +429,18 @@ async function notWaiting(rt: RunCtx, names: string[], cask = false): Promise<st
     b.rcNotes.push(`${last(n)} waits for ${hit ? last(hit) : "its dependencies"}`);
   }
   return keep;
+}
+
+/** After a Type A upgrade: true when the installed version is the reviewed one; otherwise flagged, notified and counted failed. */
+async function versionHeld(rt: RunCtx, pkg: string, reviewed: string | undefined, installed: string | undefined): Promise<boolean> {
+  const why = versionMismatch(pkg, reviewed, installed);
+  if (!why) return true;
+  const { log, b, notify, host, cfg } = rt;
+  b.failed.push(`version:${pkg}`);
+  b.flagged = true;
+  log.push(`  Type A: ${why} — FLAGGED`);
+  await notify(`⚠️ <b>${host} Type A FLAGGED</b>\n${why}\nLog: ${cfg.logFile ?? "-"}`);
+  return false;
 }
 
 /** A formula upgrade; one with a release check records its previous keg first and runs its before. */
@@ -550,7 +563,14 @@ export async function casksSection(rt: RunCtx) {
       // The snapshot is taken before the upgrade replaces what it reads.
       const prior = await gk.snapshot(cask);
       if ((await x([cfg.brew, "upgrade", "--cask", "--greedy", cask], { env: installEnv })).rc === 0) {
-        b.casksUp.push(cask);
+        let got: unknown;
+        try {
+          got = (JSON.parse((await x([cfg.brew, "info", "--json=v2", "--cask", cask])).out) as { casks?: { installed?: unknown }[] }).casks?.[0]?.installed;
+        } catch {
+          got = undefined;
+        }
+        const ok = await versionHeld(rt, cask, reviewedVersion(cask, b.verbose), typeof got === "string" ? got : undefined);
+        if (ok) b.casksUp.push(cask);
         log.push(...(await gk.release(cask, prior)));
         const c = await gk.check(cask);
         log.push(...c.log);

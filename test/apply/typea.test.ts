@@ -1,7 +1,7 @@
 // Type A deterministic policy, ported from the previous updater's tests.
 import { describe, expect, test } from "bun:test";
 import { DEFAULTS } from "../../src/apply/config.ts";
-import { typeAReview } from "../../src/apply/typea.ts";
+import { reviewedVersion, typeAReview, versionMismatch } from "../../src/apply/typea.ts";
 
 describe("typeAReview", () => {
   for (const [name, versions, held] of [
@@ -30,5 +30,19 @@ describe("typeAReview", () => {
   });
   test("names with pattern characters compare literally", () => {
     expect(typeAReview(["no.e"], "node (1.0) < 2.0", ["no.e"]).held).toEqual(["no.e"]);
+  });
+});
+
+describe("reviewedVersion / versionMismatch", () => {
+  test("the reviewed version is the one the outdated row offered", () => {
+    expect(reviewedVersion("git", "git (2.4) < 2.5")).toBe("2.5");
+    expect(reviewedVersion("app", "app (1.0) != 1.1,42")).toBe("1.1,42");
+    expect(reviewedVersion("git", "other (1) < 2")).toBeUndefined();
+  });
+  test("equal versions match; a different or unreadable one is a mismatch", () => {
+    expect(versionMismatch("git", "2.5", "2.5")).toBeUndefined();
+    expect(versionMismatch("git", "2.5", "2.6")).toBe("git installed 2.6, reviewed 2.5");
+    expect(versionMismatch("git", "2.5", undefined)).toBe("git installed unknown, reviewed 2.5");
+    expect(versionMismatch("git", undefined, "2.5")).toBe("git installed 2.5, reviewed unknown");
   });
 });

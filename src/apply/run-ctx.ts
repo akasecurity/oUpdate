@@ -138,6 +138,8 @@ export function newBrewState(dryRun: boolean) {
     casksSudo: [] as string[],
     casksRunning: [] as string[],
     gkNotes: [] as string[],
+    /** `brew outdated --verbose`, as reviewed: the versions Type A approved. */
+    verbose: "",
     restarted: [] as string[],
     fetchHead: !dryRun,
     unknownNote: "",

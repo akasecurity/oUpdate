@@ -60,6 +60,11 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
             errors.push(`${base}: skipped, the ${cfg.apiKeyEnv} key is not sent over plain http to a non-loopback host (use https)`);
             continue;
           }
+          // Configured headers often carry a credential too (an api-key header), so they follow the same rule.
+          if (cfg.headers && Object.keys(cfg.headers).length && !keySafeUrl(url)) {
+            errors.push(`${base}: skipped, the configured headers are not sent over plain http to a non-loopback host (use https)`);
+            continue;
+          }
           // One deadline for this base, retries included; a fallback base gets its own.
           const signal = AbortSignal.timeout(cfg.timeoutMs ?? 900_000);
           const send = () => fetch(url, {

@@ -107,3 +107,22 @@ describe("uv.lock files", () => {
     expect(parseUvLock(lock("https://pypi.corp.example/simple", "https://pypi.corp.example/f/demo.whl"))[0]).toMatchObject({ registry: "pypi.corp.example", artifacts: expect.any(Array) });
   });
 });
+
+describe("poetry.lock files", () => {
+  const H = (c: string) => `sha256:${c.repeat(64)}`;
+  const lock = (files: string, source = "") => `[[package]]\nname = "Demo"\nversion = "1.0.1"\n${source}files = [${files}]\n`;
+
+  test("from PyPI, each locked file's name and hash are carried, for the review to match against PyPI's listing", () => {
+    expect(parsePoetryLock(lock(`{file = "demo-1.0.1.tar.gz", hash = "${H("a")}"}, {file = "demo-1.0.1-py3-none-any.whl"}`))[0]!.artifacts).toEqual([
+      { file: "demo-1.0.1.tar.gz", hash: H("a") },
+      { file: "demo-1.0.1-py3-none-any.whl" },
+    ]);
+  });
+
+  test("a private index's files are not matched against PyPI", () => {
+    const text = `[[package]]\nname = "Demo"\nversion = "1.0.1"\nfiles = [{file = "demo-1.0.1.tar.gz", hash = "${H("a")}"}]\n\n[package.source]\ntype = "legacy"\nurl = "https://pypi.corp.example/simple"\n`;
+    const pkg = parsePoetryLock(text)[0]!;
+    expect(pkg.registry).toBe("pypi.corp.example");
+    expect(pkg.artifacts).toBeUndefined();
+  });
+});

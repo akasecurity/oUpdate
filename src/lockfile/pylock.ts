@@ -4,7 +4,7 @@
 // the same tables; no source is PyPI, and git, directory, file and url sources are direct dependencies.
 // Names are PEP 503-normalized, so a diff pairs a version across a change in spelling.
 // The sha256 hashes these lockfiles carry are kept, with the index, as the package's source and digest, so a diff
-// sees a pinned version whose files changed. uv.lock also names each file's URL: those are carried as the package's
+// sees a pinned version whose files changed. uv.lock also names each file's URL, and poetry.lock each file's name: those are carried as the package's
 // artifacts, for the review to match each hash against the files PyPI lists for that version. A PyPI package with a
 // file off PyPI's file host is a url dependency: the install fetches that file, which no review of PyPI reads.
 
@@ -71,6 +71,7 @@ export function collector() {
 }
 
 interface PyFile {
+  file?: unknown;
   hash?: unknown;
   url?: unknown;
 }
@@ -143,7 +144,10 @@ export function parsePoetryLock(text: string): LockedPackage[] {
     }
     const files = p.files ?? (typeof p.name === "string" ? lock.metadata?.files?.[p.name] : undefined) ?? [];
     const url = typeof p.source?.url === "string" ? p.source.url : undefined;
-    c.add(p.name, p.version, pypiPrivateIndex(url), { source: url, digest: digestOf(files.map((f) => f?.hash)) });
+    const registry = pypiPrivateIndex(url);
+    // From PyPI, each file is carried for the review to match its hash against PyPI's listing; a file with no hash holds.
+    const artifacts = registry ? undefined : files.map((f) => ({ file: typeof f?.file === "string" ? f.file : "(unnamed file)", ...(typeof f?.hash === "string" ? { hash: f.hash } : {}) }));
+    c.add(p.name, p.version, registry, { source: url, digest: digestOf(files.map((f) => f?.hash)), artifacts });
   }
   return c.out;
 }

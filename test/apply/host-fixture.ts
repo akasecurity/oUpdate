@@ -12,6 +12,8 @@ import { outdatedVersions } from "../../src/apply/taps.ts";
 export interface HostScript {
   /** `brew outdated --formula`. */
   formulas?: string;
+  /** Installed version after an upgrade, by name; default is the version `verbose` offered. */
+  installedVersion?: Record<string, string>;
   /** `brew outdated --cask`; a cask upgraded this run is no longer listed. */
   casks?: string;
   verbose?: string;
@@ -48,6 +50,7 @@ export function fakeHost(s: HostScript = {}) {
   const upgraded = new Set<string>();
   const npmInstalled = new Map<string, string>();
   const lsof = [...(s.lsof ?? [])];
+  const installedOf = (n: string) => s.installedVersion?.[n] ?? outdatedVersions(n, s.verbose ?? "").split("→")[1]!;
   const exec: Exec = async (argv) => {
     const line = argv.join(" ");
     calls.push(line);
@@ -77,11 +80,11 @@ export function fakeHost(s: HostScript = {}) {
       if (rest.startsWith("info --json=v2 --cask ")) {
         const ks = a.slice(3);
         if (ks.length === 1 && (s.sudoCasks ?? []).includes(ks[0]!)) return ok(JSON.stringify({ casks: [{ token: ks[0], artifacts: [{ pkg: ["x.pkg"] }] }] }));
-        return ok(JSON.stringify({ casks: ks.filter((k) => s.caskTaps?.[k]).map((k) => ({ token: k, tap: s.caskTaps![k], artifacts: [{ app: ["X.app"] }] })) }));
+        return ok(JSON.stringify({ casks: ks.filter((k) => s.caskTaps?.[k]).map((k) => ({ token: k, tap: s.caskTaps![k], artifacts: [{ app: ["X.app"] }], ...(upgraded.has(k) ? { installed: installedOf(k) } : {}) })) }));
       }
       if (rest.startsWith("info --json=v2 ")) {
         const fs = a.slice(2);
-        return ok(JSON.stringify({ formulae: fs.filter((f) => s.formulaTaps?.[f]).map((f) => ({ name: f, tap: s.formulaTaps![f] })) }));
+        return ok(JSON.stringify({ formulae: fs.filter((f) => s.formulaTaps?.[f]).map((f) => ({ name: f, tap: s.formulaTaps![f], ...(upgraded.has(f) ? { installed: [{ version: installedOf(f) }] } : {}) })) }));
       }
       if (a[0] === "upgrade") {
         const what = a.slice(1).join(" ");

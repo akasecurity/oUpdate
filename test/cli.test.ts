@@ -286,6 +286,12 @@ describe("lockedFilesCheck", () => {
     expect(await lockedFilesCheck(registry(), "demo", "1.0.1", [f(`sha256:${sha("a")}`), f(`sha256:${sha("c")}`)])).toMatchObject({ layer: "gate", verdict: "stop", detail: expect.stringContaining(`sha256:${sha("c")}`) });
   });
 
+  test("a file named but not fetched by url (poetry.lock, requirements.txt) is checked by its sha256 alone", async () => {
+    expect(await lockedFilesCheck(registry(), "demo", "1.0.1", [{ file: "demo-1.0.1.tar.gz", hash: `sha256:${sha("a")}` }])).toBeUndefined();
+    expect(await lockedFilesCheck(registry(), "demo", "1.0.1", [{ file: "demo-1.0.1.tar.gz", hash: `sha256:${sha("c")}` }])).toMatchObject({ verdict: "stop", detail: expect.stringContaining("demo-1.0.1.tar.gz") });
+    expect(await lockedFilesCheck(registry(), "demo", "1.0.1", [{ file: "demo-1.0.1.tar.gz" }])).toMatchObject({ verdict: "error" });
+  });
+
   test("a file it cannot check (no hash, another algorithm, no url, no listing) is an error, which holds", async () => {
     for (const x of [{ url: "https://files.pythonhosted.org/p/x" }, f(`md5:${"a".repeat(32)}`), { hash: `sha256:${sha("a")}` }]) {
       expect(await lockedFilesCheck(registry(), "demo", "1.0.1", [x])).toMatchObject({ layer: "gate", verdict: "error" });
