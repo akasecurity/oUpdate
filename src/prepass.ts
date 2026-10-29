@@ -614,6 +614,281 @@ function outsideKeys(files: FileMap): string[] {
   return keys.filter((k) => !k.startsWith("package/"));
 }
 
+// Lowest version a range allows. `exclusive` means the version itself is not included (`>`).
+type Floor = { v: string; exclusive: boolean };
+const FLOOR_ZERO: Floor = { v: "0.0.0", exclusive: false };
+
+// "unread" when Bun cannot order the version. That spec holds instead of throwing.
+function floorLower(a: Floor, b: Floor): boolean | "unread" {
+  let c: number;
+  try {
+    c = Bun.semver.order(a.v, b.v);
+  } catch {
+    return "unread";
+  }
+  if (c < 0) return true;
+  if (c > 0) return false;
+  return !a.exclusive && b.exclusive;
+}
+
+// One comparator, or "upper" when it only caps the range. Wildcards expand to .0.
+function comparatorFloor(token: string): Floor | "upper" | "unread" {
+  const tok = token.replace(/\+[0-9A-Za-z.-]+$/, "");
+  const m = /^(>=|<=|>|<|=|\^|~)?v?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?(?:-([0-9A-Za-z.-]+))?$/.exec(tok);
+  if (!m) return "unread";
+  const op = m[1] ?? "";
+  if (op === "<" || op === "<=") return "upper";
+  const major = m[2] ?? "";
+  if (major === "*" || major === "x" || major === "X") return FLOOR_ZERO;
+  const wild = (p: string | undefined) => p == null || p === "x" || p === "X" || p === "*";
+  const minorWild = wild(m[3]);
+  const patchWild = wild(m[4]);
+  const minor = minorWild ? "0" : (m[3] ?? "0");
+  const patch = patchWild ? "0" : (m[4] ?? "0");
+  const pre = !minorWild && !patchWild && m[5] ? `-${m[5]}` : "";
+  return { v: `${major}.${minor}.${patch}${pre}`, exclusive: op === ">" };
+}
+
+// Floor of one alternative (comparators joined by spaces). No lower bound means 0.0.0.
+function floorOfAnd(raw: string): Floor | "unread" {
+  const s = raw.trim();
+  if (!s) return "unread";
+  const hy = /^([^\s]+)\s+-\s+([^\s]+)$/.exec(s);
+  if (hy) {
+    const left = comparatorFloor(hy[1] ?? "");
+    if (left === "upper" || left === "unread") return "unread";
+    return left;
+  }
+  const parts = s.split(/\s+/);
+  const comps: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i] ?? "";
+    if (/^(>=|<=|>|<|=)$/.test(p)) {
+      const nxt = parts[i + 1];
+      if (!nxt) return "unread";
+      comps.push(p + nxt);
+      i++;
+      continue;
+    }
+    comps.push(p);
+  }
+  let lower: Floor | undefined;
+  for (const c of comps) {
+    const one = comparatorFloor(c);
+    if (one === "unread") return "unread";
+    if (one === "upper") continue;
+    if (!lower) {
+      lower = one;
+      continue;
+    }
+    const cmp = floorLower(lower, one);
+    if (cmp === "unread") return "unread";
+    if (cmp) lower = one;
+  }
+  return lower ?? FLOOR_ZERO;
+}
+
+// Min floor across every `||` alternative. One unreadable alternative makes the whole spec unreadable.
+function floorOf(spec: string): Floor | "unread" {
+  const alts = spec.split("||").map((s) => s.trim()).filter((s) => s.length > 0);
+  if (alts.length === 0) return "unread";
+  let best: Floor | undefined;
+  for (const alt of alts) {
+    const f = floorOfAnd(alt);
+    if (f === "unread") return "unread";
+    if (!best) {
+      best = f;
+      continue;
+    }
+    const cmp = floorLower(f, best);
+    if (cmp === "unread") return "unread";
+    if (cmp) best = f;
+  }
+  return best ?? "unread";
+}
+
+// `npm:name@range` installs `name`. A bare `npm:name` is any version of that package.
+function parseAlias(spec: string): { name: string; range: string } | undefined {
+  const m = /^(@[^/\s]+\/[^@\s]+|[^@\s]+)(?:@(.*))?$/.exec(spec.slice(4).trim());
+  if (!m) return undefined;
+  const name = m[1];
+  if (!name || name === "." || name === "..") return undefined;
+  const range = (m[2] ?? "*").trim();
+  if (!range) return undefined;
+  return { name, range };
+}
+
+type FieldSpecs = { specs: Map<string, string>; unread: Set<string> };
+type DepFields = { peer: FieldSpecs; prod: FieldSpecs; optional: FieldSpecs; bad: string[] };
+
+function emptyField(): FieldSpecs {
+  return { specs: new Map(), unread: new Set() };
+}
+
+function emptyFields(): DepFields {
+  return { peer: emptyField(), prod: emptyField(), optional: emptyField(), bad: [] };
+}
+
+function addEdge(map: Map<string, string[]>, name: string, range: string) {
+  const list = map.get(name) ?? [];
+  list.push(range);
+  map.set(name, list);
+}
+
+// npm applies field precedence per edge key (the node_modules folder name):
+// optionalDependencies, else dependencies, else peerDependencies. An alias
+// under a different key is its own install. Aliases are resolved only after
+// that choice, then grouped by the package they install.
+function depFields(bytes: Uint8Array | undefined): DepFields {
+  const out = emptyFields();
+  if (!bytes) return out;
+  let pj: Record<string, unknown>;
+  try {
+    const v = JSON.parse(dec.decode(bytes)) as unknown;
+    if (!v || typeof v !== "object" || Array.isArray(v)) {
+      out.bad.push("<unparseable>");
+      return out;
+    }
+    pj = v as Record<string, unknown>;
+  } catch {
+    out.bad.push("<unparseable>");
+    return out;
+  }
+  const fields: [keyof Pick<DepFields, "peer" | "prod" | "optional">, string][] = [
+    ["peer", "peerDependencies"],
+    ["prod", "dependencies"],
+    ["optional", "optionalDependencies"],
+  ];
+  for (const [slot, field] of fields) {
+    const block = pj[field];
+    if (block == null) continue;
+    if (typeof block !== "object" || Array.isArray(block)) {
+      out.bad.push(field);
+      continue;
+    }
+    for (const [key, spec] of Object.entries(block as Record<string, unknown>)) {
+      if (typeof spec !== "string") {
+        out[slot].unread.add(key);
+        continue;
+      }
+      out[slot].specs.set(key, spec.trim());
+    }
+  }
+  return out;
+}
+
+function winningSpec(side: DepFields, key: string): string | "unread" | undefined {
+  for (const field of [side.optional, side.prod, side.peer]) {
+    if (field.unread.has(key)) return "unread";
+    const spec = field.specs.get(key);
+    if (spec !== undefined) return spec;
+  }
+  return undefined;
+}
+
+function edgeKeys(side: DepFields): string[] {
+  const keys = new Set<string>();
+  for (const field of [side.optional, side.prod, side.peer]) {
+    for (const key of field.specs.keys()) keys.add(key);
+    for (const key of field.unread) keys.add(key);
+  }
+  return [...keys];
+}
+
+// Winning spec per key, then one list of ranges per installed package.
+function installedRanges(side: DepFields): { ranges: Map<string, string[]>; bad: string[] } {
+  const bad = [...side.bad];
+  const ranges = new Map<string, string[]>();
+  for (const key of edgeKeys(side)) {
+    const spec = winningSpec(side, key);
+    if (spec === undefined) continue;
+    if (spec === "unread") {
+      bad.push(`${key} <unreadable>`);
+      continue;
+    }
+    if (/^npm:/i.test(spec)) {
+      const alias = parseAlias(spec);
+      if (!alias) {
+        bad.push(`${key} ${spec}`);
+        continue;
+      }
+      addEdge(ranges, alias.name, alias.range);
+      continue;
+    }
+    addEdge(ranges, key, spec);
+  }
+  return { ranges, bad };
+}
+
+function sameList(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const as = [...a].sort();
+  const bs = [...b].sort();
+  return as.every((v, i) => v === bs[i]);
+}
+
+// Floors of every spec in the winning field. A version Bun cannot order is unreadable.
+function floorSpan(ranges: string[]): { min: Floor; max: Floor } | "unread" {
+  let min: Floor | undefined;
+  let max: Floor | undefined;
+  for (const r of ranges) {
+    const f = floorOf(r);
+    if (f === "unread") return "unread";
+    if (!min || !max) {
+      min = f;
+      max = f;
+      continue;
+    }
+    const below = floorLower(f, min);
+    const above = floorLower(max, f);
+    if (below === "unread" || above === "unread") return "unread";
+    if (below) min = f;
+    if (above) max = f;
+  }
+  if (!min || !max) return "unread";
+  return { min, max };
+}
+
+// Each key keeps the spec from its winning field. Keys that install the same
+// package all stay in the list. A lower minimum or a lower maximum holds, so
+// dropping one of two copies holds. A changed spec whose floor cannot be read
+// holds too. A new name, a rise, and a removal do not.
+function dependencyDowngrades(oldFiles: FileMap, newFiles: FileMap): string[] {
+  const names: string[] = [];
+  const paths = [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter((p) => p.split("/").length <= 2 && basename(p) === "package.json" && !p.split("/").includes("node_modules"));
+  for (const p of paths) {
+    const before = installedRanges(depFields(oldFiles.get(p)));
+    const after = installedRanges(depFields(newFiles.get(p)));
+    if (!sameList(before.bad, after.bad)) names.push("unreadable");
+    for (const [name, next] of after.ranges) {
+      const prev = before.ranges.get(name);
+      if (!prev) continue;
+      if (sameList(prev, next)) continue;
+      const oldSpan = floorSpan(prev);
+      const newSpan = floorSpan(next);
+      if (oldSpan === "unread" || newSpan === "unread") {
+        names.push(name);
+        continue;
+      }
+      const dropMin = floorLower(newSpan.min, oldSpan.min);
+      const dropMax = floorLower(newSpan.max, oldSpan.max);
+      if (dropMin === "unread" || dropMax === "unread" || dropMin || dropMax) names.push(name);
+    }
+  }
+  return names;
+}
+
+function shrinkwrapChanged(oldFiles: FileMap, newFiles: FileMap): boolean {
+  const wrap = (p: string) => basename(p) === "npm-shrinkwrap.json" && !p.split("/").includes("node_modules");
+  for (const k of new Set([...oldFiles.keys(), ...newFiles.keys()])) {
+    if (!wrap(k)) continue;
+    const a = oldFiles.get(k);
+    const b = newFiles.get(k);
+    if (!a || !b || !bytesEqual(a, b)) return true;
+  }
+  return false;
+}
+
 function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   const oldV = installView(oldFiles);
   const newV = installView(newFiles);
@@ -650,6 +925,11 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
     if (!a || !b || !bytesEqual(a, b)) push(`file ${k}`);
   }
   if ((oldV.hook || newV.hook) && oldV.binStamp !== newV.binStamp) push("bin");
+  // A dependency floor that fell, or a spec we cannot read, changes which
+  // package's install scripts npm will run. An added or changed shrinkwrap
+  // pins those versions and is the same kind of change.
+  for (const name of dependencyDowngrades(oldFiles, newFiles)) push(`dependency ${name}`);
+  if (shrinkwrapChanged(oldFiles, newFiles)) push("shrinkwrap");
   // The surface matched. A cap still holds, because the closure above is incomplete.
   // A download, an eval, or an unresolved runner does not.
   if (out.length === 0) {
