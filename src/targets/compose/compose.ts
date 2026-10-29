@@ -13,7 +13,7 @@ import { decodeComposeState, decodeEvidence, type ComposeService, type ImageEvid
 import { brokerRead, brokerWrite, composeRequest, verdictReviewers, writeSummary, writeLine, type OpenBroker } from "../broker/broker.ts";
 import { layerDiffs, approvedAnswer, reviewDiff, structuralHits } from "./evidence.ts";
 import { composePrompt } from "./prompt.ts";
-import { reviewTwice, type ReviewerPair } from "./review.ts";
+import { reviewTwice, type ReviewerPair } from "../../review-pair.ts";
 
 async function evidence(reach: OpenBroker, verb: "image.evidence" | "image.candidate", slots: Record<string, string>, label: string, lines: string[]): Promise<ImageEvidence | undefined> {
   const r = await brokerRead(reach.broker, reach.exec, reach.session, verb, slots);

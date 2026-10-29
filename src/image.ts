@@ -16,7 +16,7 @@ import { LayerError, LayerStore, LIMITS, type Limits } from "./oci-fs.ts";
 import type { ImageEvidence } from "./targets/broker/answer.ts";
 import { layerDiffs, approvedAnswer, reviewDiff, structuralHits } from "./targets/compose/evidence.ts";
 import { composePrompt } from "./targets/compose/prompt.ts";
-import { reviewTwice, type ReviewerPair, type Opinion } from "./targets/compose/review.ts";
+import { reviewTwice, type ReviewerPair, type Opinion } from "./review-pair.ts";
 import { stamp } from "./targets/summary.ts";
 
 export interface ImageCheckArgs {

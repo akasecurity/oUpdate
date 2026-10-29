@@ -8,7 +8,7 @@
 import { cooldownVerdict } from "../../cooldown.ts";
 import { parseVerdict, VERDICT_CONTRACT } from "../../review.ts";
 import { untrusted } from "../compose/prompt.ts";
-import { reviewTwice, type ReviewerPair, type PairVerdict } from "../compose/review.ts";
+import { reviewTwice, type ReviewerPair, type PairVerdict } from "../../review-pair.ts";
 import { pkgKey, type Candidate, type Inventory } from "./answer.ts";
 import { MAX_NAMES } from "./verbs.ts";
 

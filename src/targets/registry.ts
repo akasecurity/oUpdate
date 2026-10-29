@@ -6,7 +6,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Exec } from "../apply/exec.ts";
 import type { Compat } from "./compat.ts";
-import type { ReviewerPair } from "./compose/review.ts";
+import type { ReviewerPair } from "../review-pair.ts";
 import type { LegResult, PluginLeg, PluginReach, Reach } from "./model.ts";
 import type { ReachHandle } from "./reach.ts";
 import type { LegContext } from "./run.ts";

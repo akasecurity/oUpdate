@@ -14,7 +14,7 @@ import { osPackagesLeg } from "./gce/leg.ts";
 import { newLatch, type PatchLatch } from "./gce/patch.ts";
 import { isOpenBroker } from "./broker/broker.ts";
 import { composeLeg } from "./compose/compose.ts";
-import type { ReviewerPair } from "./compose/review.ts";
+import type { ReviewerPair } from "../review-pair.ts";
 import { isDue, isPluginLeg, type Leg, type LegResult, type ParityFacts, type Target, type TargetResult } from "./model.ts";
 import type { PinBumpLeg } from "./pins/config.ts";
 import { openReach, type OpenReach } from "./reach.ts";

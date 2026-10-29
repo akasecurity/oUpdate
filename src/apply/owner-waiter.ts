@@ -30,7 +30,7 @@ import { closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import { dlopen, FFIType } from "bun:ffi";
 import { dirname, join } from "node:path";
 import type { Exec } from "./exec.ts";
-import { kegHolders } from "./kegs.ts";
+import { kegHolders } from "./holders.ts";
 
 export interface StaleOwner {
   /** A launchd label glob: `*` any run of characters, `?` one. */
