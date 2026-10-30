@@ -1,0 +1,62 @@
+{
+  "summary": {
+    "tool_version": "0.2.10",
+    "reviewer": "local reviewer",
+    "cutoff": "2026-04-15",
+    "repeats": 10,
+    "held_out": {
+      "k": 30,
+      "n": 30,
+      "lo": 0.8864829086095221,
+      "hi": 1
+    },
+    "earlier": {
+      "k": 0,
+      "n": 0,
+      "lo": 0,
+      "hi": 1
+    },
+    "false_holds": {
+      "k": 0,
+      "n": 0,
+      "lo": 0,
+      "hi": 1
+    }
+  },
+  "rows": [
+    {
+      "id": "keyv-style-preinstall-worm",
+      "disclosed": "2026-08-05",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "sec_per_review": 14.7,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "node-gyp-style-binding-gyp",
+      "disclosed": "2026-06-03",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "sec_per_review": 9.1,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "jscrambler-style-import-loader",
+      "disclosed": "2026-07-11",
+      "held_out": true,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "sec_per_review": 18.6,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    }
+  ],
+  "clean_rows": []
+}

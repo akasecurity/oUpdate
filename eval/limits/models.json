@@ -1,0 +1,4 @@
+{
+  "reviewer": { "label": "local reviewer", "cutoff": "2026-04-15", "cutoffBasis": "upper bound: the model's public release date; its card states no training cutoff" },
+  "repeats": 10
+}
