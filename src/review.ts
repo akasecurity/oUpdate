@@ -102,6 +102,17 @@ export function parseVerdict(text: string): "APPROVE" | "FLAG" {
   return "APPROVE";
 }
 
+/** The model's first reasoning line after its FLAG, one line and cut, so a hold says why (empty for a bare FLAG).
+ *  Model output can echo package bytes and the line reaches the terminal raw: controls, bidi and zero-width characters are dropped. */
+function flagReason(text: string): string {
+  const line = text.split("\n").slice(1)
+    .map((l) => l.replace(/\s+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "").trim())
+    .find(Boolean);
+  if (!line) return "";
+  const cps = [...line];
+  return `: ${cps.length > 240 ? `${cps.slice(0, 240).join("")}…` : line}`;
+}
+
 const dec = new TextDecoder("utf-8", { fatal: false });
 
 function isBinary(b: Uint8Array): boolean {
@@ -2206,7 +2217,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         else
           layers.push(
             flagged.length
-              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on part(s) ${parts} of ${chunks.length}${note}` }
+              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on part(s) ${parts} of ${chunks.length}${note}${flagReason(texts[flagged[0]![1]]!)}` }
               : { layer: "reviewer", verdict: "pass", detail: `${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}` },
           );
       } catch (e) {
