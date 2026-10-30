@@ -1,0 +1,17 @@
+{
+  "dependencies": {
+    "esbuild": {
+      "version": "0.28.2",
+      "path": "/g/lib/node_modules/esbuild",
+      "scripts": {
+        "postinstall": "node install.js"
+      },
+      "dependencies": {
+        "@esbuild/darwin-arm64": {
+          "version": "0.28.2",
+          "path": "/g/lib/node_modules/esbuild/node_modules/@esbuild/darwin-arm64"
+        }
+      }
+    }
+  }
+}

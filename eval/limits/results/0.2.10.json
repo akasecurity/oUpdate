@@ -1,0 +1,230 @@
+{
+  "summary": {
+    "tool_version": "0.2.10",
+    "reviewer": "local reviewer",
+    "cutoff": "2026-04-15",
+    "repeats": 10,
+    "held_out": {
+      "k": 40,
+      "n": 40,
+      "lo": 0.9123754607496077,
+      "hi": 1
+    },
+    "earlier": {
+      "k": 0,
+      "n": 0,
+      "lo": 0,
+      "hi": 1
+    },
+    "false_holds": {
+      "k": 2,
+      "n": 140,
+      "lo": 0.003926358459994089,
+      "hi": 0.05058916417045497
+    },
+    "policy_holds": {
+      "k": 10,
+      "n": 10,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    }
+  },
+  "rows": [
+    {
+      "id": "function-color-update",
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "sec_per_review": 33.3,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "function-color-install",
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "sec_per_review": 41.4,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "function-flag-install",
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "sec_per_review": 18,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "function-flag-update",
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "sec_per_review": 17.8,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    }
+  ],
+  "clean_rows": [
+    {
+      "id": "control-patch-update",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 14.7,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "lookalike-color-install",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 19.9,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "lookalike-color-dep-range-update",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 12.3,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "lookalike-banner-update",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 18.9,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "lookalike-prebuilt-update",
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "sec_per_review": 20.9,
+      "lo": 0.7224598312333834,
+      "hi": 1,
+      "policy_hold": true
+    },
+    {
+      "id": "clean-new-dependency",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 16.8,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "clean-husky-prepare",
+      "prepass_blocked": true,
+      "k": 2,
+      "n": 10,
+      "sec_per_review": 21.9,
+      "lo": 0.056680947980693314,
+      "hi": 0.5098431532792765,
+      "policy_hold": false
+    },
+    {
+      "id": "clean-native-gyp-build",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 16.5,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "clean-cli-bin-added",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 19.3,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "clean-funding-notice",
+      "prepass_blocked": true,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 20.7,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "clean-http-client-feature",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 15.6,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "clean-exports-map",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 11.5,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "clean-minified-dist",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 12.3,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "clean-dependency-major",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 15.3,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    },
+    {
+      "id": "clean-reads-env-config",
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "sec_per_review": 15,
+      "lo": 0,
+      "hi": 0.2775401687666166,
+      "policy_hold": false
+    }
+  ]
+}
