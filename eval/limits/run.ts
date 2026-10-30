@@ -67,6 +67,7 @@ async function held(c: Case, layers: "prepass" | "reviewer"): Promise<boolean> {
     }),
   });
   const ls = pr!.results.flatMap((r) => r.layers.filter((l) => l.layer === layers));
+  if (!ls.length) throw new Error(`${layers} layer produced no result on ${c.id}`);
   const bad = ls.find((l) => l.verdict === "error");
   if (bad) throw new Error(`${layers} layer error on ${c.id}: ${bad.detail}`);
   if (process.env.LIMITS_VERBOSE) for (const l of ls) if (l.verdict === "stop") console.error(`[${c.id}] ${l.layer}: ${String(l.detail).slice(0, 1500)}`);
@@ -107,10 +108,10 @@ const md = [
   `oupdate ${version}, ${models.reviewer.label}, training cutoff ${cutoff}, ${repeats} runs per case`, "",
   "| case | disclosed | held-out | pre-pass | reviewer k/N | 95% interval | s/review |", "|---|---|---|---|---|---|---|",
   ...rows.map((r) => `| ${r.id} | ${r.disclosed} | ${r.held_out ? "yes" : "no"} | ${r.prepass_blocked ? "blocked" : "passed"} | ${r.k}/${r.n} | ${pct(r.lo)}-${pct(r.hi)} | ${r.sec_per_review} |`),
-  "", line("held-out attacks", summary.held_out), line("earlier attacks", summary.earlier), "",
-  "| clean case | policy hold | pre-pass | false holds k/N | 95% interval | s/review |", "|---|---|---|---|---|---|",
+  "", ...(summary.held_out.n ? [line("held-out attacks", summary.held_out)] : []), ...(summary.earlier.n ? [line("earlier attacks", summary.earlier)] : []), "",
+  ...(cleanRows.length ? ["| clean case | policy hold | pre-pass | false holds k/N | 95% interval | s/review |", "|---|---|---|---|---|---|"] : []),
   ...cleanRows.map((r) => `| ${r.id} | ${r.policy_hold ? "yes" : "no"} | ${r.prepass_blocked ? "blocked" : "passed"} | ${r.k}/${r.n} | ${pct(r.lo)}-${pct(r.hi)} | ${r.sec_per_review} |`),
-  "", line("false holds (reviewer, policy holds excluded)", summary.false_holds), line("policy holds (install script downloads a binary)", summary.policy_holds), "",
+  ...(cleanRows.length ? ["", line("false holds (reviewer, policy holds excluded)", summary.false_holds), line("policy holds (install script downloads a binary)", summary.policy_holds)] : []), "",
 ].join("\n");
 writeFileSync(join(out, `${version}.md`), md);
 console.log(md);

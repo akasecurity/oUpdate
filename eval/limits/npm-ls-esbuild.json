@@ -1,0 +1,16 @@
+{
+  "name": "lib",
+  "dependencies": {
+    "esbuild": {
+      "version": "0.28.2",
+      "path": "/g/node_modules/esbuild",
+      "hasInstallScript": true,
+      "dependencies": {
+        "@esbuild/darwin-arm64": {
+          "version": "0.28.2",
+          "path": "/g/node_modules/@esbuild/darwin-arm64"
+        }
+      }
+    }
+  }
+}
