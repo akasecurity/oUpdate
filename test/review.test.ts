@@ -2414,3 +2414,28 @@ describe("classifyOutcome", () => {
     expect(classifyOutcome(r("land", [{ layer: "prepass", verdict: "pass", detail: "" }]))).toBe("passed");
   });
 });
+
+describe("a model FLAG hold names its reason", () => {
+  const reason = (text: string) => reviewUpdate(base({ reviewer: { name: "fake", review: async () => text } })).then((r) => r.layers.find((l) => l.layer === "reviewer")!.detail);
+
+  test("the first reasoning line follows the part count", async () => {
+    expect(await reason("FLAG\n\nThe install script newly downloads a binary and runs it.\nSecond line.")).toMatch(/^fake FLAG on part\(s\) 1 of 1.*: The install script newly downloads a binary and runs it\.$/);
+  });
+
+  test("a long reason is cut and whitespace collapsed", async () => {
+    const d = await reason(`FLAG\n${"word   ".repeat(100)}`);
+    expect(d).toContain(": word word");
+    expect(d.length).toBeLessThan(400);
+    expect(d).not.toMatch(/\s{2}/);
+  });
+
+  test("controls, bidi and zero-width characters in the model text are dropped", async () => {
+    const d = await reason("FLAG\nSends data \u001b]52;c;QUJD\u0007 to \u202eevil\u200b.com \u0085now");
+    expect(d).toContain(": Sends data ]52;c;QUJD to evil.com now");
+    expect(d).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/);
+  });
+
+  test("a bare FLAG keeps the old text", async () => {
+    expect(await reason("FLAG")).toMatch(/^fake FLAG on part\(s\) 1 of 1[^:]*$/);
+  });
+});
