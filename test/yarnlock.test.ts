@@ -89,7 +89,7 @@ describe("hostile yarn.lock", () => {
     expect(() => parseYarnLock(e("   checksum: abc\n"))).toThrow(/cannot read/);
     expect(() => parseYarnLock(e("  dependencies:\n    bar: ^1\n      deeper: x\n"))).toThrow(/cannot read/);
     expect(() => parseYarnLock(e("    stray: x\n"))).toThrow(/cannot read/);
-    expect(() => parseYarnLock(B('garbage:\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n'))).toThrow(/does not match/);
+    expect(() => parseYarnLock(B('garbage:\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n'))).toThrow(/cannot read/);
     expect(parseYarnLock(e("  dependencies:\n    bar: ^1\n  dependenciesMeta:\n    bar:\n      optional: true\n"))).toHaveLength(1);
   });
   test("a duplicate berry entry or field throws", () => {
