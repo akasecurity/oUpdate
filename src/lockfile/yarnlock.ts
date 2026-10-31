@@ -6,7 +6,9 @@
 // package-lock.json. A berry checksum is a hash of yarn's own archive, not of the registry tarball, so it is kept as
 // the digest (a swap changes it) and never as an integrity the download is checked against. Berry `workspace:` entries
 // are the project's own packages, and `patch:` entries re-apply a patch file from the repo onto an `npm:` entry that
-// is listed (and read) on its own; both are skipped. Anything unreadable throws, holding the PR.
+// is listed (and read) on its own; both are listed by resolution so a swap shows. An `npm:` resolution must match its
+// version, and its `::` locator parameters (such as `__archiveUrl`) are kept as the source. Anything unreadable, a
+// duplicate key or field, a non-string checksum or odd v1 indentation throws, holding the PR.
 
 import { sriHashes } from "../targets/pins/npm.ts";
 import {
@@ -61,7 +63,12 @@ function readV1(text: string): V1Entry[] {
     } else if (/^ {2}\S/.test(line)) {
       if (!cur) throw new Error(`cannot read yarn.lock line ${i + 1}`);
       const m = /^ {2}("[^"]*"|[^\s"]+)\s*(.*)$/.exec(line)!;
-      cur.fields.set(unquote(m[1]!), unquote(m[2]!));
+      const key = unquote(m[1]!);
+      if (cur.fields.has(key))
+        throw new Error(`duplicate yarn.lock field ${key} at line ${i + 1}`);
+      cur.fields.set(key, unquote(m[2]!));
+    } else if (!/^( {2})+\S/.test(line)) {
+      throw new Error(`cannot read yarn.lock indentation at line ${i + 1}`);
     }
   }
   return out;
@@ -158,7 +165,29 @@ function splitResolution(res: string): {
   };
 }
 
+/** Bun.YAML keeps the last of a duplicate key, hiding the earlier one: refuse a repeated entry or field. */
+function rejectBerryDuplicates(text: string) {
+  const entries = new Set<string>();
+  let fields = new Set<string>();
+  for (const [i, line] of text.split("\n").entries()) {
+    if (/^\S.*:\s*$/.test(line)) {
+      if (entries.has(line))
+        throw new Error(`duplicate yarn.lock entry at line ${i + 1}`);
+      entries.add(line);
+      fields = new Set();
+    } else {
+      const m = /^ {2}("[^"]*"|[^\s"]+):/.exec(line);
+      if (m) {
+        if (fields.has(m[1]!))
+          throw new Error(`duplicate yarn.lock field ${m[1]} at line ${i + 1}`);
+        fields.add(m[1]!);
+      }
+    }
+  }
+}
+
 function parseBerry(text: string): LockedPackage[] {
+  rejectBerryDuplicates(text);
   const lock = Bun.YAML.parse(text) as Record<string, unknown>;
   const out: LockedPackage[] = [];
   const seen = new Set<string>();
@@ -174,13 +203,25 @@ function parseBerry(text: string): LockedPackage[] {
         `cannot read yarn.lock entry ${JSON.stringify(key.slice(0, 100))}: no resolution`,
       );
     const { name, protocol, ref } = splitResolution(e.resolution);
-    if (protocol === "workspace" || protocol === "patch") continue;
-    const checksum = typeof e.checksum === "string" ? e.checksum : undefined;
+    if (e.checksum !== undefined && typeof e.checksum !== "string")
+      throw new Error(`cannot read yarn.lock entry ${name}: checksum`);
+    const checksum = e.checksum;
     let p: LockedPackage;
-    if (protocol === "npm") {
+    if (protocol === "workspace" || protocol === "patch") {
+      // Listed so a swap to or from one shows as a change; no `direct`, so on its own it holds nothing.
+      p = { name, version: e.resolution.slice(name.length + 1) };
+      p.source = p.version;
+      if (checksum) p.digest = checksum;
+    } else if (protocol === "npm") {
       if (typeof e.version !== "string")
         throw new Error(`cannot read yarn.lock entry ${name}: no version`);
+      const [locVersion, ...params] = ref.split("::");
+      if (locVersion !== e.version)
+        throw new Error(
+          `yarn.lock entry ${name}: version ${e.version} does not match its resolution ${locVersion}`,
+        );
       p = { name, version: e.version };
+      if (params.length) p.source = params.join("::");
       if (checksum) p.digest = checksum;
       else p.unhashed = true;
     } else {

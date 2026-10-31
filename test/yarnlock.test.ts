@@ -46,8 +46,9 @@ describe("parseYarnLock berry", () => {
     expect(find(berry, "real-pkg")).toMatchObject({ version: "2.0.1" });
     expect(find(berry, "no-sum")).toMatchObject({ unhashed: true });
   });
-  test("workspace and patch entries are the project's own and are skipped", () => {
-    expect(berry.map((p) => p.name).sort()).toEqual(["@babel/core", "gitdep", "localdep", "no-sum", "real-pkg", "yaml"]);
+  test("workspace and patch entries are listed by resolution, holding nothing on their own", () => {
+    expect(berry.map((p) => p.name).sort()).toEqual(["@babel/core", "gitdep", "localdep", "no-sum", "real-pkg", "root", "typescript", "web", "yaml"]);
+    expect(find(berry, "web")?.direct).toBeUndefined();
   });
   test("git and file sources are direct dependencies", () => {
     expect(find(berry, "gitdep")).toMatchObject({ direct: "git" });
@@ -59,6 +60,36 @@ describe("parseYarnLock berry", () => {
   });
   test("an entry with no resolution throws", () => {
     expect(() => parseYarnLock("__metadata:\n  version: 8\n\n\"a@npm:1\":\n  version: 1.0.0\n")).toThrow(/no resolution/);
+  });
+});
+
+describe("hostile yarn.lock", () => {
+  const B = (body: string) => `__metadata:\n  version: 8\n\n${body}`;
+  const npm = (loc: string, extra = "") => B(`"foo@npm:1.0.0":\n  version: 1.0.0\n  resolution: "${loc}"\n  checksum: abc\n${extra}`);
+  test("a berry archive URL change shows as a different package", () => {
+    const a = parseYarnLock(npm("foo@npm:1.0.0::__archiveUrl=https%3A%2F%2Fgood.test%2Fa.tgz"));
+    const b = parseYarnLock(npm("foo@npm:1.0.0::__archiveUrl=https%3A%2F%2Fevil.test%2Fa.tgz"));
+    expect(a[0]!.source).not.toBe(b[0]!.source);
+  });
+  test("a resolution that disagrees with the version throws", () => {
+    expect(() => parseYarnLock(npm("foo@npm:9.9.9"))).toThrow(/does not match/);
+  });
+  test("a patch resolution swap shows", () => {
+    const patch = (h: string) => B(`"foo@patch:foo@npm:1.0.0#./${h}.patch::version=1.0.0&hash=${h}":\n  version: 1.0.0\n  resolution: "foo@patch:foo@npm:1.0.0#./${h}.patch::version=1.0.0&hash=${h}"\n`);
+    expect(parseYarnLock(patch("aaaa"))[0]!.version).not.toBe(parseYarnLock(patch("bbbb"))[0]!.version);
+  });
+  test("a non-string checksum throws", () => {
+    expect(() => parseYarnLock(B(`"foo@npm:1.0.0":\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n  checksum: 111\n`))).toThrow(/checksum/);
+  });
+  test("a duplicate berry entry or field throws", () => {
+    const e = `"foo@npm:1.0.0":\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n  checksum: abc\n`;
+    expect(() => parseYarnLock(B(e + "\n" + e))).toThrow(/duplicate/);
+    expect(() => parseYarnLock(npm("foo@npm:1.0.0", "  checksum: def\n"))).toThrow(/duplicate/);
+  });
+  test("v1: a duplicate field or odd indentation throws", () => {
+    const h = "# yarn lockfile v1\n\nfoo@^1:\n  version \"1.0.0\"\n";
+    expect(() => parseYarnLock(h + '  resolved "https://a/x.tgz"\n  resolved "https://b/x.tgz"\n')).toThrow(/duplicate/);
+    expect(() => parseYarnLock(h + '   resolved "https://a/x.tgz"\n')).toThrow(/indentation/);
   });
 });
 
