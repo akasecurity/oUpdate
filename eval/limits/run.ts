@@ -17,15 +17,16 @@ import { CASES as FC_CASES, type Case, type Pkg } from "../2026-10-28-function-c
 import { wilson } from "./stats.ts";
 import { MORE_CLEAN } from "./clean-cases.ts";
 import { HELDOUT } from "./heldout-cases.ts";
+import { INSTALL_ATTACKS, INSTALL_CLEAN } from "./install-cases.ts";
 
 /** An attack with the date it became public. Add new write-ups here; never use them to tune prompts. */
 export interface LimitCase extends Case {
   disclosed: string;
 }
-export const CASES: LimitCase[] = FC_CASES.filter((c) => c.kind === "attack").map((c) => ({ ...c, disclosed: "2026-10-22" })).concat(HELDOUT);
+export const CASES: LimitCase[] = FC_CASES.filter((c) => c.kind === "attack").map((c) => ({ ...c, disclosed: "2026-10-22" })).concat(HELDOUT, INSTALL_ATTACKS);
 
 /** Clean cases (the control and the look-alikes the reviewer should let land): a hold here is a false hold. */
-export const CLEAN: Case[] = [...FC_CASES.filter((c) => c.expect === "land"), ...MORE_CLEAN];
+export const CLEAN: Case[] = [...FC_CASES.filter((c) => c.expect === "land"), ...MORE_CLEAN, ...INSTALL_CLEAN];
 
 /** A release whose install script downloads a binary is held by policy, with the reason in the hold text so the user can approve it. It is reported apart from false holds. */
 export const POLICY_HOLD = new Set(["lookalike-prebuilt-update"]);
