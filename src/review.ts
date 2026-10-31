@@ -177,6 +177,30 @@ function resolveIn(dir: string, rel: string): string | undefined {
   return stack.join("/");
 }
 
+// The files one manifest target names, from the manifest's own dir. A "*" pattern matches any path, including
+// across "/". resolveIn already applied "." and "..". A pattern past the cap, or a key past the cap, is left unmatched.
+function targetFiles(dir: string, rel: unknown, candidates: Iterable<string>, at: (r: string) => string | undefined): string[] {
+  const full = typeof rel === "string" && rel ? resolveIn(dir, rel) : undefined;
+  if (full === undefined) return [];
+  if (!full.includes("*")) {
+    const k = at(full);
+    return k === undefined ? [] : [k];
+  }
+  if (full.length > STAR_PATTERN_MAX) return [];
+  const out: string[] = [];
+  let seen = 0;
+  for (const r of candidates) {
+    if (seen++ >= STAR_KEY_MAX) break;
+    if (!starMatch(full, r)) continue;
+    const k = at(r);
+    if (k !== undefined) out.push(k);
+  }
+  return out;
+}
+
+// Manifest fields other than main, module, browser, bin and exports that a bundler or loader reads as an entry file.
+const LOADER_FIELDS = ["react-native", "svelte", "jsnext:main", "es2015", "esnext", "source"] as const;
+
 /**
  * The files the package.json files in `files` load or run. In a merged map a package.json resolves inside its own
  * artifact (by the placement `placed` records, which for an old map is its new map): a path names that artifact's
@@ -214,23 +238,7 @@ export function entryPaths(files: FileMap, placed: FileMap = files, scope: { scr
     if (!pj || typeof pj !== "object") continue;
     const add = (rel: unknown) => {
       if (!expand && typeof rel === "string" && rel.includes("*")) return;
-      const full = typeof rel === "string" && rel ? resolveIn(dir, rel) : undefined;
-      if (full === undefined) return;
-      if (!full.includes("*")) {
-        const k = at(full);
-        if (k !== undefined) out.add(k);
-        return;
-      }
-      // resolveIn already applied `.` and `..`. `*` then matches any path, including across `/`.
-      // A pattern past the cap, or a key past the cap, is left unmatched.
-      if (full.length > STAR_PATTERN_MAX) return;
-      let seen = 0;
-      for (const r of members ?? keys) {
-        if (seen++ >= STAR_KEY_MAX) break;
-        if (!starMatch(full, r)) continue;
-        const k = at(r);
-        if (k !== undefined) out.add(k);
-      }
+      for (const k of targetFiles(dir, rel, members ?? keys, at)) out.add(k);
     };
     const conditionName = (k: string) => !k.startsWith(".") && !k.startsWith("#") && !k.includes("*");
     const walk = (v: unknown, keysToo = false, conditions = false): void => {
@@ -255,7 +263,9 @@ export function entryPaths(files: FileMap, placed: FileMap = files, scope: { scr
     }
     if (!runtime || surface) {
       walk(pj.module);
-      walk(pj.browser, true);
+      // A browser map key names the file the map replaces, and a false value loads nothing. Only values are loads.
+      walk(pj.browser);
+      for (const field of LOADER_FIELDS) walk(pj[field]);
     }
     walk(pj.bin);
     if (runtime) {
@@ -331,6 +341,70 @@ export function entryPaths(files: FileMap, placed: FileMap = files, scope: { scr
   // Old roots keep scripts off, so a hook file stays on the new side only.
   const inst = installView(files);
   for (const f of scriptsOn ? inst.files : inst.gypFiles) out.add(f);
+  return out;
+}
+
+// One row per manifest, field, subpath and condition path: the target string as written and the files it resolves
+// to. A browser map is keyed by the file it replaces, so only its values are rows. A target that is not a string,
+// null or false, a manifest that does not parse, and an exports map with mixed keys cannot be read: the row names
+// every file under the manifest, so a change to it shows all of them.
+interface EntryRow { target: string; files: string[] }
+
+function entryTable(files: FileMap, placed: FileMap): Map<string, EntryRow> {
+  const table = new Map<string, EntryRow>();
+  const keys = [...files.keys()];
+  for (const [p, bytes] of files) {
+    if (p !== "package.json" && !p.endsWith("/package.json")) continue;
+    const members = artifactMembers(placed, p);
+    const at = (r: string) => (!members ? r : members.has(r) ? (artifactKey(placed, members, r) ?? r) : undefined);
+    const inner = members ? artifactPath(placed, p) : p;
+    const dir = inner.slice(0, -"package.json".length).replace(/\/$/, "");
+    const candidates = members ?? keys;
+    const everything = () => [...candidates].filter((r) => !dir || r.startsWith(`${dir}/`)).flatMap((r) => at(r) ?? []);
+    const unreadable = (key: string, target: string) => table.set(key, { target: `unreadable ${target}`, files: everything() });
+    let pj: unknown;
+    try {
+      pj = JSON.parse(dec.decode(bytes));
+    } catch {
+      unreadable(`${p}\0package.json`, "package.json");
+      continue;
+    }
+    if (!pj || typeof pj !== "object" || Array.isArray(pj)) {
+      unreadable(`${p}\0package.json`, "package.json");
+      continue;
+    }
+    const rows = (key: string, v: unknown, conditions: boolean): void => {
+      if (typeof v === "string") table.set(key, { target: v, files: targetFiles(dir, v, candidates, at) });
+      else if (v === null || v === false) table.set(key, { target: String(v), files: [] });
+      else if (Array.isArray(v)) v.forEach((x, i) => rows(`${key}[${i}]`, x, conditions));
+      else if (v && typeof v === "object") {
+        for (const [k, x] of Object.entries(v)) {
+          // A types condition names a declaration for an editor, not a file that loads.
+          if (conditions && (k === "types" || k === "typings") && !k.startsWith(".") && !k.startsWith("#")) continue;
+          rows(`${key}/${k}`, x, conditions);
+        }
+      } else unreadable(key, JSON.stringify(v) ?? typeof v);
+    };
+    const o = pj as Record<string, unknown>;
+    for (const field of ["main", "module", "browser", "bin", ...LOADER_FIELDS]) if (o[field] !== undefined) rows(`${p}\0${field}`, o[field], false);
+    if (o.exports !== undefined) {
+      const map = exportsMap(o.exports);
+      if (map) rows(`${p}\0exports`, map, true);
+      else unreadable(`${p}\0exports`, "exports");
+    }
+    if (o.imports !== undefined) rows(`${p}\0imports`, o.imports, true);
+  }
+  return table;
+}
+
+// The files a row names in the new release where the old release's row named other files, or no row at all.
+function retargeted(oldTable: Map<string, EntryRow>, newTable: Map<string, EntryRow>): Set<string> {
+  const out = new Set<string>();
+  for (const [key, row] of newTable) {
+    const prior = oldTable.get(key);
+    const same = prior && prior.target === row.target ? new Set(prior.files) : undefined;
+    for (const f of row.files) if (!same?.has(f)) out.add(f);
+  }
   return out;
 }
 
@@ -1557,6 +1631,12 @@ function newlyReached(oldFiles: FileMap, newFiles: FileMap): Set<string> {
   const oldSurface = surfaceOf(oldFiles);
   const newSurface = surfaceOf(newFiles);
   for (const p of newSurface) if (!oldSurface.has(p)) {
+    newRootsReq.add(p);
+    newRootsImp.add(p);
+  }
+  // A star export puts every file in both surfaces, so the set difference above sees no retarget. Each
+  // key and condition is compared by the file it resolves to as well.
+  for (const p of retargeted(entryTable(oldFiles, newFiles), entryTable(newFiles, newFiles))) {
     newRootsReq.add(p);
     newRootsImp.add(p);
   }
