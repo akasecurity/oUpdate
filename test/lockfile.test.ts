@@ -9,7 +9,7 @@ describe("parseLock", () => {
   });
 
   test("an unknown lockfile name throws instead of reading as no packages", () => {
-    expect(() => lockKind("yarn.lock")).toThrow(/unsupported lockfile yarn.lock/);
+    expect(() => lockKind("Cargo.lock")).toThrow(/unsupported lockfile Cargo.lock/);
     expect(() => parseLock("bun.lockb", "")).toThrow(/unsupported/);
   });
 });

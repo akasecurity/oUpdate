@@ -65,7 +65,7 @@ describe("parseGateArgs", () => {
   test("--lock repeats; a lockfile name oupdate cannot read is refused up front", () => {
     const base = ["--endpoint", "e", "--repo", "o/r", "--token-file", "t"];
     expect(parseGateArgs([...base, "--lock", "bun.lock", "--lock", "web/bun.lock"]).lockPaths).toEqual(["bun.lock", "web/bun.lock"]);
-    expect(() => parseGateArgs([...base, "--lock", "yarn.lock"])).toThrow(/unsupported lockfile yarn.lock/);
+    expect(() => parseGateArgs([...base, "--lock", "Cargo.lock"])).toThrow(/unsupported lockfile Cargo.lock/);
     expect(parseGateArgs([...base, "--lock", "uv.lock", "--lock", "api/requirements.txt"]).lockPaths).toEqual(["uv.lock", "api/requirements.txt"]);
   });
 

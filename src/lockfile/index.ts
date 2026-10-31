@@ -6,6 +6,7 @@ import { parseNpmLock } from "./npmlock.ts";
 import { parsePnpmLock } from "./pnpmlock.ts";
 import { parsePoetryLock, parseUvLock } from "./pylock.ts";
 import { parseRequirements } from "./requirements.ts";
+import { parseYarnLock, yarnMembers } from "./yarnlock.ts";
 import type { LockedPackage } from "./types.ts";
 
 export type { LockedPackage } from "./types.ts";
@@ -25,6 +26,7 @@ const KINDS: Record<string, LockKind> = {
   "package-lock.json": { eco: "npm", parse: parseNpmLock, members: npmMembers },
   "npm-shrinkwrap.json": { eco: "npm", parse: parseNpmLock, members: npmMembers },
   "pnpm-lock.yaml": { eco: "npm", parse: parsePnpmLock, members: (text) => keysOf((Bun.YAML.parse(text) as { importers?: unknown }).importers) },
+  "yarn.lock": { eco: "npm", parse: parseYarnLock, members: yarnMembers },
   "uv.lock": {
     eco: "pypi",
     parse: parseUvLock,

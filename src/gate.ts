@@ -268,6 +268,9 @@ function rootMatches(c: Cover, file: string, d: DepSpec): boolean | undefined {
       const dep = typeof raw === "string" ? { specifier: rec(imp.specifiers)[d.name], version: raw } : rec(raw);
       return String(dep.specifier) === d.spec && !/^(link|file):/.test(String(dep.version));
     }
+    // yarn v1 keeps no record of the project's own dependencies and berry keeps it per workspace entry, which the
+    // gate does not read: the lockfile's own diff has to bring the dependency in.
+    if (lock === "yarn.lock") return undefined;
     return false;
   }
   if (file === "pnpm-workspace.yaml") {

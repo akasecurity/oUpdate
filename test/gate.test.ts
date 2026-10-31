@@ -374,6 +374,19 @@ describe("runGate", () => {
     expect(forge.comments[1]).toContain("not from a registry (url https://registry.npmjs.org/evil/-/evil-6.6.6.tgz)");
   });
 
+  test("a yarn.lock bump (v1 and berry) reaches the review; a yarn bump to another package's tarball fails unreviewed", async () => {
+    const V1 = (v: string, url = `https://registry.yarnpkg.com/yaml/-/yaml-${v}.tgz`) => `# yarn lockfile v1\n\nyaml@^2.8.0:\n  version "${v}"\n  resolved "${url}"\n  integrity ${SRI("A")}\n`;
+    const BERRY = (v: string) => `__metadata:\n  version: 8\n\n"yaml@npm:^2.8.0":\n  version: ${v}\n  resolution: "yaml@npm:${v}"\n  checksum: 10c0/${v}\n`;
+    for (const [from, to] of [[V1("2.8.1"), V1("2.8.3")], [BERRY("2.8.1"), BERRY("2.8.3")]] as const) {
+      const seen: string[] = [];
+      const forge = memForge({ "b:yarn.lock": from, "h1:yarn.lock": to }, { h3: "failure" });
+      const out = await runGate({ forge, repo: "o/r", review: async (c) => { seen.push(`${c.name} ${c.from}->${c.to}`); return result(c, "land"); } });
+      expect([seen, out[0]!.state]).toEqual([["yaml 2.8.1->2.8.3"], "success"]);
+    }
+    const evil = memForge({ "b:yarn.lock": V1("2.8.1"), "h1:yarn.lock": V1("2.8.3", "https://registry.yarnpkg.com/other/-/other-9.9.9.tgz") }, { h3: "failure" });
+    expect((await runGate({ forge: evil, repo: "o/r", review: async () => { throw new Error("not called"); } }))[0]!.state).toBe("failure");
+  });
+
   // Adversarial read 0.2.3 r7 (Codex 2): a uv.lock bump whose wheel URL was attacker-hosted was reviewed as PyPI's
   // demo 1.0.1 and passed, the URL and hash dropped on the way to the review.
   test("a uv.lock bump whose files are not on PyPI's file host fails; an ordinary one reaches the review with its files", async () => {
@@ -557,7 +570,7 @@ describe("runGate", () => {
   });
 
   test("a PR changing a lockfile or manifest the gate cannot read fails (yarn, Cargo, Go, Ruby)", async () => {
-    for (const path of ["yarn.lock", "Cargo.lock", "Cargo.toml", "go.sum", "go.mod", "Gemfile.lock", "web/bun.lock", "requirements-dev.txt", ".npmrc"]) {
+    for (const path of ["Cargo.lock", "Cargo.toml", "go.sum", "go.mod", "Gemfile.lock", "web/bun.lock", "requirements-dev.txt", ".npmrc"]) {
       const forge = memForge({ [`b:${path}`]: "old", [`h1:${path}`]: "new" }, { h3: "failure" });
       const out = await runGate({ forge, repo: "o/r", review: async () => { throw new Error("not called"); } });
       expect([path, out[0]!.state]).toEqual([path, "failure"]);
