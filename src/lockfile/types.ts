@@ -13,6 +13,8 @@ export interface LockedPackage {
   digest?: string;
   /** Each file the lockfile pins for it (uv.lock's sdist and wheels, poetry.lock's and requirements.txt's files), with its URL and hash as written. */
   artifacts?: LockedFile[];
+  /** The dependency descriptors (ranges) the lockfile resolves to this entry, when it records them; a descriptor moved to another version is a change. */
+  descriptors?: string[];
   /** Set for a registry package whose lockfile entry records neither where it is fetched from nor a hash: nothing says what the install checks. */
   unhashed?: boolean;
   /** Set for a dependency that comes from no registry: a git repo, a URL or a local file or folder (`source`). */

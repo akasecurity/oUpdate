@@ -53,8 +53,18 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
   const oldFull = new Set(oldPkgs.map(full));
   const newKeys = new Set(newPkgs.map(key));
   const out: LockChange[] = [];
+  // Descriptor (range) -> the name@version it resolves to, in the old lockfile.
+  const oldTarget = new Map<string, string>();
+  for (const o of oldPkgs) for (const d of o.descriptors ?? []) oldTarget.set(d, key(o));
   for (const p of newPkgs) {
-    if (oldFull.has(full(p))) continue;
+    if (oldFull.has(full(p))) {
+      // Same package, but a descriptor that used to resolve elsewhere now resolves here.
+      const d = (p.descriptors ?? []).find((x) => oldTarget.has(x) && oldTarget.get(x) !== key(p));
+      if (d !== undefined) {
+        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: `${mask(d)} -> ${oldTarget.get(d)}`, to: `${mask(d)} -> ${key(p)}` } });
+      }
+      continue;
+    }
     if (oldKeys.has(key(p))) {
       // The same version from somewhere else, or with other bytes: name@version alone would call this unchanged.
       const was = oldPkgs.find((o) => key(o) === key(p))!;

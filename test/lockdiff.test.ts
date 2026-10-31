@@ -19,3 +19,22 @@ test("moving text between source and digest is a change", () => {
   expect(diffLocks(a, b)).toHaveLength(1);
 });
 
+test("a descriptor reassigned to another version is surfaced", () => {
+  const a = [
+    { name: "foo", version: "1.0.0", descriptors: ["foo@^1"] },
+    { name: "foo", version: "1.1.0", descriptors: ["foo@~1"] },
+  ];
+  const b = [
+    { name: "foo", version: "1.0.0", descriptors: ["foo@~1"] },
+    { name: "foo", version: "1.1.0", descriptors: ["foo@^1"] },
+  ];
+  const d = diffLocks(a, b);
+  expect(d.length).toBe(2);
+  expect(d.every((c) => c.swapped)).toBe(true);
+});
+
+test("a new descriptor or unchanged descriptors are not a change", () => {
+  const a = [{ name: "foo", version: "1.0.0", descriptors: ["foo@^1"] }];
+  expect(diffLocks(a, [{ name: "foo", version: "1.0.0", descriptors: ["foo@^1", "foo@~1"] }])).toEqual([]);
+  expect(diffLocks(a, a)).toEqual([]);
+});
