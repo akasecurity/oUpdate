@@ -38,7 +38,7 @@ function cmp(a: string, b: string): number {
   return 0;
 }
 
-const mask = (s: string) => s.replace(/\/\/[^/@\s]*@/, "//");
+const mask = (s: string) => s.replace(/\/\/[^/\s]*@/g, "//");
 
 /** Source (without any user:password in a URL) and hashes of a locked package, as one string to show. Never compared. */
 const where = (p: LockedPackage) => [p.source && mask(p.source), p.digest].filter(Boolean).join(" ");

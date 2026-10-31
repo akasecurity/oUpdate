@@ -51,3 +51,10 @@ test("a descriptor moved between same name@version entries from different origin
   const allEvil = [{ ...evil, descriptors: ["foo@^1", "foo@~1"] }, { ...good, descriptors: [] }];
   expect(diffLocks(before, allEvil).some((c) => c.swapped)).toBe(true);
 });
+
+test("credentials with an @ inside or a second URL in the source are fully masked", () => {
+  const a = [{ name: "foo", version: "1.0.0", source: "git+https://carol:p@ss1@example.test/foo.git#x", integrity: "sha1-AAAA" }];
+  const b = [{ name: "foo", version: "1.0.0", source: "git+https://dave:p@ss2@example.test/foo.git#x https://erin:three@mirror.test/foo", integrity: "sha1-AAAA" }];
+  const shown = JSON.stringify(diffLocks(a, b));
+  for (const s of ["carol", "dave", "erin", "ss1", "ss2", "three"]) expect(shown).not.toContain(s);
+});
