@@ -79,8 +79,18 @@ describe("hostile yarn.lock", () => {
     const patch = (h: string) => B(`"foo@patch:foo@npm:1.0.0#./${h}.patch::version=1.0.0&hash=${h}":\n  version: 1.0.0\n  resolution: "foo@patch:foo@npm:1.0.0#./${h}.patch::version=1.0.0&hash=${h}"\n`);
     expect(parseYarnLock(patch("aaaa"))[0]!.version).not.toBe(parseYarnLock(patch("bbbb"))[0]!.version);
   });
-  test("a non-string checksum throws", () => {
-    expect(() => parseYarnLock(B(`"foo@npm:1.0.0":\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n  checksum: 111\n`))).toThrow(/checksum/);
+  test("a flow or numeric-looking checksum is a string or throws, never dropped", () => {
+    expect(() => parseYarnLock(B(`"foo@npm:1.0.0":\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n  checksum: {hash: abc}\n`))).toThrow(/cannot read/);
+    expect(parseYarnLock(B(`"foo@npm:1.0.0":\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n  checksum: 111\n`))[0]!.digest).toBe("111");
+  });
+  test("an unknown field, odd indentation, a key that names another package, or a bad nest throws", () => {
+    const e = (x: string) => B(`"foo@npm:1.0.0":\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n${x}`);
+    expect(() => parseYarnLock(e("  surprise: yes\n"))).toThrow(/cannot read/);
+    expect(() => parseYarnLock(e("   checksum: abc\n"))).toThrow(/cannot read/);
+    expect(() => parseYarnLock(e("  dependencies:\n    bar: ^1\n      deeper: x\n"))).toThrow(/cannot read/);
+    expect(() => parseYarnLock(e("    stray: x\n"))).toThrow(/cannot read/);
+    expect(() => parseYarnLock(B('garbage:\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n'))).toThrow(/does not match/);
+    expect(parseYarnLock(e("  dependencies:\n    bar: ^1\n  dependenciesMeta:\n    bar:\n      optional: true\n"))).toHaveLength(1);
   });
   test("a duplicate berry entry or field throws", () => {
     const e = `"foo@npm:1.0.0":\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n  checksum: abc\n`;

@@ -164,9 +164,104 @@ function parseV1(text: string): LockedPackage[] {
 }
 
 interface BerryEntry {
-  version?: unknown;
-  resolution?: unknown;
-  checksum?: unknown;
+  descs: string[];
+  fields: Map<string, string>;
+}
+
+const BERRY_SCALARS = new Set([
+  "version",
+  "resolution",
+  "checksum",
+  "languageName",
+  "linkType",
+  "conditions",
+]);
+const BERRY_MAPS = new Set([
+  "dependencies",
+  "peerDependencies",
+  "dependenciesMeta",
+  "peerDependenciesMeta",
+  "bin",
+]);
+const BERRY_META = new Set(["version", "cacheKey"]);
+
+/**
+ * berry's lockfile is a small YAML subset, read strictly instead of by a general YAML parser (which would keep the
+ * last of a duplicate key and read past odd shapes): `key:` entries, two-space scalar fields from a known list, and
+ * known nested maps below them. Anything else (a duplicate key in any spelling, an unknown field, a flow value, odd
+ * indentation) throws, so the PR is held rather than read past.
+ */
+function readBerry(text: string): BerryEntry[] {
+  const out: BerryEntry[] = [];
+  const seenKeys = new Set<string>();
+  let cur: BerryEntry | undefined;
+  let meta = false;
+  let seenFields = new Set<string>();
+  let mapKeys: Set<string>[] = [];
+  let inMap = false;
+  const bad = (i: number): never => {
+    throw new Error(`cannot read yarn.lock line ${i + 1}`);
+  };
+  for (const [i, raw] of text.split("\n").entries()) {
+    const line = raw.replace(/\r$/, "");
+    if (!line.trim() || line.startsWith("#")) continue;
+    const indent = /^ */.exec(line)![0].length;
+    const body = line.slice(indent);
+    if (indent === 0) {
+      if (!body.endsWith(":")) bad(i);
+      const key = unquote(body.slice(0, -1));
+      if (seenKeys.has(key))
+        throw new Error(`duplicate yarn.lock entry at line ${i + 1}`);
+      seenKeys.add(key);
+      seenFields = new Set();
+      inMap = false;
+      mapKeys = [];
+      if (key === "__metadata") {
+        meta = true;
+        cur = undefined;
+      } else {
+        meta = false;
+        cur = { descs: key.split(/,\s*/), fields: new Map() };
+        out.push(cur);
+      }
+      continue;
+    }
+    const m = /^("[^"]*"|[^\s":]+):(?: +(.*))?$/.exec(body);
+    if (!m || (!cur && !meta) || indent % 2) return bad(i);
+    const k = unquote(m[1]!);
+    const v = m[2];
+    if (indent === 2) {
+      inMap = false;
+      mapKeys = [];
+      if (seenFields.has(k))
+        throw new Error(`duplicate yarn.lock field ${k} at line ${i + 1}`);
+      seenFields.add(k);
+      if (meta) {
+        if (!BERRY_META.has(k) || !v) bad(i);
+      } else if (BERRY_MAPS.has(k)) {
+        if (v) bad(i);
+        inMap = true;
+        mapKeys = [new Set()];
+        continue;
+      } else if (!BERRY_SCALARS.has(k) || !v) bad(i);
+      if (/^[{\[|>&*!'%@`]/.test(v!)) bad(i);
+      if (cur) cur.fields.set(k, unquote(v!));
+    } else {
+      // Below a nested map: names unique per level, no deeper than the known shapes (dependenciesMeta nests twice).
+      const depth = indent / 2 - 2;
+      if (!inMap || depth > 1 || depth > mapKeys.length - 1) bad(i);
+      mapKeys.length = depth + 1;
+      const set = mapKeys[depth]!;
+      if (set.has(k))
+        throw new Error(`duplicate yarn.lock field ${k} at line ${i + 1}`);
+      set.add(k);
+      if (!v) {
+        if (depth === 1) bad(i);
+        mapKeys[depth + 1] = new Set();
+      } else if (/^[{\[|>&*!%@`]/.test(v)) bad(i);
+    }
+  }
+  return out;
 }
 
 /** `name@protocol:ref` of a berry resolution: the name (scope-aware), the protocol and the rest. */
@@ -189,54 +284,28 @@ function splitResolution(res: string): {
   };
 }
 
-/** Bun.YAML keeps the last of a duplicate key, hiding the earlier one: refuse a repeated entry or field, in any spelling. */
-function rejectBerryDuplicates(text: string) {
-  const entries = new Set<string>();
-  let fields = new Set<string>();
-  for (const [i, raw] of text.split("\n").entries()) {
-    const line = raw.replace(/\r$/, "");
-    if (!line.trim() || line.startsWith("#")) continue;
-    if (!line.startsWith(" ")) {
-      if (!line.endsWith(":"))
-        throw new Error(`cannot read yarn.lock line ${i + 1}`);
-      const key = unquote(line.slice(0, -1));
-      if (entries.has(key))
-        throw new Error(`duplicate yarn.lock entry at line ${i + 1}`);
-      entries.add(key);
-      fields = new Set();
-    } else {
-      const m = /^ {2}("[^"]*"|[^\s":]+):/.exec(line);
-      if (m) {
-        const key = unquote(m[1]!);
-        if (fields.has(key))
-          throw new Error(`duplicate yarn.lock field ${key} at line ${i + 1}`);
-        fields.add(key);
-      } else if (/^ {2}\S/.test(line)) {
-        throw new Error(`cannot read yarn.lock line ${i + 1}`);
-      }
-    }
-  }
-}
-
 function parseBerry(text: string): LockedPackage[] {
-  rejectBerryDuplicates(text);
-  const lock = Bun.YAML.parse(text) as Record<string, unknown>;
   const out: LockedPackage[] = [];
   const seen = new Set<string>();
-  for (const [key, raw] of Object.entries(lock)) {
-    if (key === "__metadata") continue;
-    if (!raw || typeof raw !== "object")
-      throw new Error(
-        `cannot read yarn.lock entry ${JSON.stringify(key.slice(0, 100))}`,
-      );
-    const e = raw as BerryEntry;
-    if (typeof e.resolution !== "string")
+  for (const { descs, fields } of readBerry(text)) {
+    const key = descs.join(", ");
+    const resolution = fields.get("resolution");
+    if (resolution === undefined)
       throw new Error(
         `cannot read yarn.lock entry ${JSON.stringify(key.slice(0, 100))}: no resolution`,
       );
+    const e = {
+      resolution,
+      version: fields.get("version"),
+      checksum: fields.get("checksum"),
+    };
     const { name, protocol, ref } = splitResolution(e.resolution);
-    if (e.checksum !== undefined && typeof e.checksum !== "string")
-      throw new Error(`cannot read yarn.lock entry ${name}: checksum`);
+    // Every descriptor of the key names the package the resolution does: a key cannot hide another package.
+    for (const d of descs)
+      if (descriptorName(d) !== name)
+        throw new Error(
+          `yarn.lock entry ${JSON.stringify(key.slice(0, 100))}: key does not match its resolution`,
+        );
     const checksum = e.checksum;
     let p: LockedPackage;
     if (protocol === "workspace" || protocol === "patch") {
@@ -298,11 +367,11 @@ export function parseYarnLock(text: string): LockedPackage[] {
 /** Berry's `workspace:` entries are the project's own packages: their folders (v1 does not record workspaces). */
 export function yarnMembers(text: string): string[] {
   if (!isBerry(text)) return [];
-  const lock = Bun.YAML.parse(text) as Record<string, { resolution?: unknown }>;
   const out: string[] = [];
-  for (const [key, e] of Object.entries(lock)) {
-    if (key === "__metadata" || typeof e?.resolution !== "string") continue;
-    const { protocol, ref } = splitResolution(e.resolution);
+  for (const { fields } of readBerry(text)) {
+    const res = fields.get("resolution");
+    if (res === undefined) continue;
+    const { protocol, ref } = splitResolution(res);
     if (protocol === "workspace" && ref !== ".") out.push(ref);
   }
   return out;
