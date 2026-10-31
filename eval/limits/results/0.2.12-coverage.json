@@ -1,0 +1,86 @@
+{
+  "tool_version": "0.2.12",
+  "rows": [
+    {
+      "ecosystem": "bun",
+      "file": "bun.lock",
+      "status": "covered",
+      "parsed": true,
+      "prepass": true,
+      "reviewer": true,
+      "note": "gate state success, 1 package reviewed"
+    },
+    {
+      "ecosystem": "npm",
+      "file": "package-lock.json",
+      "status": "covered",
+      "parsed": true,
+      "prepass": true,
+      "reviewer": true,
+      "note": "gate state success, 1 package reviewed"
+    },
+    {
+      "ecosystem": "pnpm",
+      "file": "pnpm-lock.yaml",
+      "status": "covered",
+      "parsed": true,
+      "prepass": true,
+      "reviewer": true,
+      "note": "gate state success, 1 package reviewed"
+    },
+    {
+      "ecosystem": "uv",
+      "file": "uv.lock",
+      "status": "covered",
+      "parsed": true,
+      "prepass": true,
+      "reviewer": true,
+      "note": "gate state success, 1 package reviewed"
+    },
+    {
+      "ecosystem": "poetry",
+      "file": "poetry.lock",
+      "status": "covered",
+      "parsed": true,
+      "prepass": true,
+      "reviewer": true,
+      "note": "gate state success, 1 package reviewed"
+    },
+    {
+      "ecosystem": "requirements",
+      "file": "requirements.txt",
+      "status": "covered",
+      "parsed": true,
+      "prepass": true,
+      "reviewer": true,
+      "note": "gate state success, 1 package reviewed"
+    },
+    {
+      "ecosystem": "yarn",
+      "file": "yarn.lock",
+      "status": "not covered (measured)",
+      "parsed": false,
+      "prepass": false,
+      "reviewer": false,
+      "note": "gate state failure, 0 package reviewed"
+    },
+    {
+      "ecosystem": "apt",
+      "file": "-",
+      "status": "not covered (measured)",
+      "parsed": false,
+      "prepass": false,
+      "reviewer": false,
+      "note": "no adapter"
+    },
+    {
+      "ecosystem": "Mac App Store",
+      "file": "-",
+      "status": "not covered (measured)",
+      "parsed": false,
+      "prepass": false,
+      "reviewer": false,
+      "note": "no adapter"
+    }
+  ]
+}
