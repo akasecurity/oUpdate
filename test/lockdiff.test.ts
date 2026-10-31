@@ -38,3 +38,16 @@ test("a new descriptor or unchanged descriptors are not a change", () => {
   expect(diffLocks(a, [{ name: "foo", version: "1.0.0", descriptors: ["foo@^1", "foo@~1"] }])).toEqual([]);
   expect(diffLocks(a, a)).toEqual([]);
 });
+
+test("a descriptor moved between same name@version entries from different origins is surfaced", () => {
+  const good = { name: "foo", version: "1.0.0", source: "https://good.test/foo" };
+  const evil = { name: "foo", version: "1.0.0", source: "https://evil.test/foo" };
+  const before = [{ ...good, descriptors: ["foo@^1"] }, { ...evil, descriptors: ["foo@~1"] }];
+  const swapped = [{ ...good, descriptors: ["foo@~1"] }, { ...evil, descriptors: ["foo@^1"] }];
+  const d = diffLocks(before, swapped);
+  expect(d.length).toBe(2);
+  expect(d.every((c) => c.swapped)).toBe(true);
+  expect(JSON.stringify(d)).toContain("evil.test");
+  const allEvil = [{ ...evil, descriptors: ["foo@^1", "foo@~1"] }, { ...good, descriptors: [] }];
+  expect(diffLocks(before, allEvil).some((c) => c.swapped)).toBe(true);
+});

@@ -53,15 +53,16 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
   const oldFull = new Set(oldPkgs.map(full));
   const newKeys = new Set(newPkgs.map(key));
   const out: LockChange[] = [];
-  // Descriptor (range) -> the name@version it resolves to, in the old lockfile.
-  const oldTarget = new Map<string, string>();
-  for (const o of oldPkgs) for (const d of o.descriptors ?? []) oldTarget.set(d, key(o));
+  // Descriptor (range) -> the entry it resolves to in the old lockfile (version and origin).
+  const oldTarget = new Map<string, LockedPackage>();
+  for (const o of oldPkgs) for (const d of o.descriptors ?? []) oldTarget.set(d, o);
   for (const p of newPkgs) {
     if (oldFull.has(full(p))) {
       // Same package, but a descriptor that used to resolve elsewhere now resolves here.
-      const d = (p.descriptors ?? []).find((x) => oldTarget.has(x) && oldTarget.get(x) !== key(p));
+      const d = (p.descriptors ?? []).find((x) => oldTarget.has(x) && full(oldTarget.get(x)!) !== full(p));
       if (d !== undefined) {
-        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: `${mask(d)} -> ${oldTarget.get(d)}`, to: `${mask(d)} -> ${key(p)}` } });
+        const shown = (q: LockedPackage) => `${mask(d)} -> ${key(q)} ${where(q)}`.trimEnd();
+        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: shown(oldTarget.get(d)!), to: shown(p) } });
       }
       continue;
     }
