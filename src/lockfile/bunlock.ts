@@ -57,11 +57,60 @@ export function stripTrailingCommas(text: string): string {
   return out;
 }
 
+/** The packages key a dependency of the entry at `key` resolves to: nested under it, then under each parent, up to the top. */
+function resolveDep(packages: Record<string, unknown[]>, key: string, dep: string): string | undefined {
+  const parts = key.split("/");
+  // A package name is one segment, or two when scoped; the path to a parent is a run of whole names.
+  const bases: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i]!.startsWith("@")) i++;
+    bases.push(parts.slice(0, i + 1).join("/"));
+  }
+  for (const base of [...bases.reverse(), ""]) {
+    const cand = base ? `${base}/${dep}` : dep;
+    if (Object.hasOwn(packages, cand)) return cand;
+  }
+  return undefined;
+}
+
+const DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"];
+
+/** Every `name@range` a dependent (a package or a workspace) asks for lands on the entry it resolves to, once each. */
+function addDescriptors(lock: { packages?: Record<string, unknown[]>; workspaces?: Record<string, unknown> }, byKey: Map<string, LockedPackage>): void {
+  const packages = lock.packages ?? {};
+  const sets = new Map<LockedPackage, Set<string>>();
+  const record = (from: string, info: unknown, fields: string[]) => {
+    if (!info || typeof info !== "object") return;
+    for (const f of fields) {
+      const deps = (info as Record<string, unknown>)[f];
+      if (!deps || typeof deps !== "object") continue;
+      for (const [name, range] of Object.entries(deps as Record<string, unknown>)) {
+        const target = typeof range === "string" ? byKey.get(resolveDep(packages, from, name) ?? "") : undefined;
+        if (!target) continue;
+        const set = sets.get(target) ?? new Set<string>();
+        set.add(`${name}@${range}`);
+        sets.set(target, set);
+      }
+    }
+  };
+  for (const [key, entry] of Object.entries(packages)) record(key, entry[2], DEP_FIELDS);
+  for (const ws of Object.values(lock.workspaces ?? {})) record("", ws, [...DEP_FIELDS, "devDependencies"]);
+  for (const [p, set] of sets) p.descriptors = [...set].sort();
+}
+
 export function parseBunLock(text: string): LockedPackage[] {
-  const lock = JSON.parse(stripTrailingCommas(text)) as { packages?: Record<string, unknown[]> };
-  const seen = new Set<string>();
+  const lock = JSON.parse(stripTrailingCommas(text)) as { packages?: Record<string, unknown[]>; workspaces?: Record<string, unknown> };
   const out: LockedPackage[] = [];
-  for (const entry of Object.values(lock.packages ?? {})) {
+  const byKey = new Map<string, LockedPackage>();
+  const byDedup = new Map<string, LockedPackage>();
+  const add = (key: string, dedup: string, p: LockedPackage) => {
+    if (!byDedup.has(dedup)) {
+      byDedup.set(dedup, p);
+      out.push(p);
+    }
+    byKey.set(key, byDedup.get(dedup)!);
+  };
+  for (const [pkey, entry] of Object.entries(lock.packages ?? {})) {
     const spec = entry[0];
     if (typeof spec !== "string") continue;
     const at = spec.lastIndexOf("@");
@@ -73,10 +122,7 @@ export function parseBunLock(text: string): LockedPackage[] {
       const cut = spec.indexOf("@", 1);
       const source = spec.slice(cut + 1);
       if (cut <= 0 || source.startsWith("workspace:")) continue;
-      const k = `${spec.slice(0, cut)}@${source}`;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      out.push({ name: spec.slice(0, cut), version: source, source, direct: directKind(source.replace(/^link:/, "file:")) });
+      add(pkey, `${spec.slice(0, cut)}@${source}`, { name: spec.slice(0, cut), version: source, source, direct: directKind(source.replace(/^link:/, "file:")) });
       continue;
     }
     // A registry entry is [spec, registry, info, integrity].
@@ -95,9 +141,8 @@ export function parseBunLock(text: string): LockedPackage[] {
     if (typeof entry[1] === "string" && entry[1]) p.source = entry[1];
     if (typeof entry[3] === "string") p.digest = entry[3];
     const key = `${name}@${version} ${p.source ?? ""} ${p.digest ?? ""}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(p);
+    add(pkey, key, p);
   }
+  addDescriptors(lock, byKey);
   return out;
 }
