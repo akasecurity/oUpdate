@@ -38,22 +38,40 @@ function cmp(a: string, b: string): number {
   return 0;
 }
 
-/** Source (without any user:password in a URL) and hashes of a locked package, as one string to compare and show. */
-const where = (p: LockedPackage) => [p.source?.replace(/\/\/[^/@\s]*@/, "//"), p.digest].filter(Boolean).join(" ");
+const mask = (s: string) => s.replace(/\/\/[^/@\s]*@/, "//");
+
+/** Source (without any user:password in a URL) and hashes of a locked package, as one string to show. Never compared. */
+const where = (p: LockedPackage) => [p.source && mask(p.source), p.digest].filter(Boolean).join(" ");
+
+/** What the install fetches, compared as separate fields and with any credentials in the URL kept. */
+const origin = (p: LockedPackage) => JSON.stringify([p.source ?? null, p.digest ?? null]);
 
 export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): LockChange[] {
   const key = (p: LockedPackage) => `${p.name}@${p.version}`;
-  const full = (p: LockedPackage) => `${key(p)} ${where(p)}`;
+  const full = (p: LockedPackage) => JSON.stringify([key(p), origin(p)]);
   const oldKeys = new Set(oldPkgs.map(key));
   const oldFull = new Set(oldPkgs.map(full));
   const newKeys = new Set(newPkgs.map(key));
   const out: LockChange[] = [];
+  // Descriptor (range) -> the entry it resolves to in the old lockfile (version and origin).
+  const oldTarget = new Map<string, LockedPackage>();
+  for (const o of oldPkgs) for (const d of o.descriptors ?? []) oldTarget.set(d, o);
   for (const p of newPkgs) {
-    if (oldFull.has(full(p))) continue;
+    if (oldFull.has(full(p))) {
+      // Same package, but a descriptor that used to resolve elsewhere now resolves here.
+      const d = (p.descriptors ?? []).find((x) => oldTarget.has(x) && full(oldTarget.get(x)!) !== full(p));
+      if (d !== undefined) {
+        const shown = (q: LockedPackage) => `${mask(d)} -> ${key(q)} ${where(q)}`.trimEnd();
+        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: shown(oldTarget.get(d)!), to: shown(p) } });
+      }
+      continue;
+    }
     if (oldKeys.has(key(p))) {
       // The same version from somewhere else, or with other bytes: name@version alone would call this unchanged.
       const was = oldPkgs.find((o) => key(o) === key(p))!;
       const c: LockChange = { name: p.name, from: p.version, to: p.version, swapped: { from: where(was), to: where(p) } };
+      // Same shown text: say why they differ without showing credentials.
+      if (c.swapped!.from === c.swapped!.to) c.swapped!.to += " (differs only in URL credentials or field boundaries)";
       if (was.integrity) c.fromIntegrity = was.integrity;
       if (p.integrity) c.toIntegrity = p.integrity;
       if (p.artifacts) c.toArtifacts = p.artifacts;
