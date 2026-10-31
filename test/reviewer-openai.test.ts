@@ -24,6 +24,26 @@ const server = Bun.serve({
 afterAll(() => server.stop(true));
 const base = `http://127.0.0.1:${server.port}`;
 
+describe("openaiReviewer ready", () => {
+  const ready = (cfg: Partial<Parameters<typeof openaiReviewer>[0]> & { baseUrls: string[] }) => openaiReviewer({ name: "local", model: "m1", retryDelaysMs: [], ...cfg }).ready!();
+
+  test("an answering endpoint is reachable, and only an outage says otherwise", async () => {
+    expect(await ready({ baseUrls: [base] })).toBeUndefined();
+    expect(await ready({ baseUrls: [`${base}/down`] })).toBe(`reviewer local not reachable: ${base}/down: 503`);
+    expect(await ready({ baseUrls: ["http://127.0.0.1:9"] })).toContain("reviewer local not reachable: http://127.0.0.1:9:");
+  });
+
+  test("a 404, a wrong server and a base the headers may not go to are reachable: review() reports those as trouble", async () => {
+    expect(await ready({ baseUrls: [`${base}/missing`] })).toBeUndefined();
+    expect(await ready({ baseUrls: [base], expectHeaders: { "x-served-by": "router" } })).toBeUndefined();
+    expect(await ready({ baseUrls: ["http://router.example:4000"], headers: { "api-key": "k" } })).toBeUndefined();
+  });
+
+  test("a later base that answers makes it reachable only when no base is down", async () => {
+    expect(await ready({ baseUrls: [`${base}/down`, base] })).toBeUndefined();
+  });
+});
+
 describe("openaiReviewer", () => {
   test("posts the prompt as one user message with model, max_tokens and extra body", async () => {
     process.env.OUPDATE_TEST_KEY = "k-123";

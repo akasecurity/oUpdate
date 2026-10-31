@@ -135,6 +135,29 @@ describe("runTargets", () => {
     expect(results[0]!.lines).toContain("parity: recorded to /parity/host-a.jsonl");
   });
 
+  test("a reviewer that is not ready holds the compose leg, with no trouble and no evidence read", async () => {
+    const { exec, requests } = targetExec({ answers: ANSWERS });
+    const { fs } = memFs();
+    const down = { ...fakeReviewer("second-model", "APPROVE").reviewer, ready: async () => "reviewer second-model not ready: http://router: 503" };
+    const { results, rc } = await runTargets(cfg(BROKER_BOX), { exec, fs, rev: "r", pinBump: pinOk, reviewers: { first: reviewers().first, second: down }, registry: REG }, { dryRun: false, now: NOW });
+    expect(rc).toBe(0);
+    expect(results[0]).toMatchObject({ trouble: false, summary: "held — reviewer second-model not ready: http://router: 503; the review runs when the reviewer is up" });
+    expect(requests.map((q) => q.params.verb)).toEqual(["self"]);
+  });
+
+  test("a dry run does not ask the reviewers, and one run asks each pair once", async () => {
+    let asked = 0;
+    const counting = { ...fakeReviewer("second-model", "APPROVE").reviewer, ready: async () => (asked++, undefined) };
+    const pair = { first: reviewers().first, second: counting };
+    const run = (dryRun: boolean) => runTargets(cfg(BROKER_BOX, { ...BROKER_BOX, id: "host-c", summaryTo: "/status/host-c.tsv", parityTo: undefined }), { exec: targetExec({ answers: ANSWERS }).exec, fs: memFs().fs, rev: "r", pinBump: pinOk, reviewers: pair, registry: REG }, { dryRun, now: NOW });
+    await run(true);
+    expect(asked).toBe(0);
+    await run(false);
+    expect(asked).toBe(1);
+    await run(false);
+    expect(asked).toBe(2);
+  });
+
   test("a reach that fails still records an unchecked parity night", async () => {
     const { exec } = targetExec({});
     const { fs, files } = memFs();

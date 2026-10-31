@@ -46,9 +46,62 @@ export function keySafeUrl(url: string): boolean {
   return u.protocol !== "http:" || LOOPBACK.has(u.hostname) || /^127\.\d+\.\d+\.\d+$/.test(u.hostname);
 }
 
+// One tiny request per base, with the review's own cold-load retries. Only an outage holds a review: a refused connection, a
+// timeout, or a 502/503/504 that outlasts the retries. Anything that answers (a 2xx, a 4xx, a wrong server, a base the key or
+// headers may not be sent to) counts as reachable here, so review() runs and reports its own trouble.
+async function probeOutage(cfg: OpenAIReviewerConfig): Promise<string | undefined> {
+  const key = cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined;
+  const hasHeaders = !!cfg.headers && Object.keys(cfg.headers).length > 0;
+  const errors: string[] = [];
+  for (const base of cfg.baseUrls) {
+    let url: string;
+    try {
+      url = chatUrl(base);
+      if ((key || hasHeaders) && !keySafeUrl(url)) return undefined;
+    } catch {
+      return undefined;
+    }
+    const signal = AbortSignal.timeout(Math.min(cfg.timeoutMs ?? 900_000, 120_000));
+    let down: string | undefined;
+    for (const wait of [...(cfg.retryDelaysMs ?? COLD_LOAD_DELAYS_MS), undefined]) {
+      try {
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...cfg.headers, ...(key ? { authorization: `Bearer ${key}` } : {}) },
+          body: JSON.stringify({ model: cfg.model, max_tokens: 1, temperature: 0, messages: [{ role: "user", content: "ok" }] }),
+          signal,
+          timeout: false,
+          redirect: "manual",
+        } as RequestInit);
+        await r.body?.cancel().catch(() => {});
+        if (![502, 503, 504].includes(r.status)) return undefined;
+        down = String(r.status);
+        if (r.status !== 503) break;
+      } catch (e) {
+        const timedOut = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+        if (!refused(e) && !timedOut) return undefined;
+        down = e instanceof Error ? e.message : String(e);
+        if (!refused(e)) break;
+      }
+      if (wait === undefined) break;
+      try {
+        await new Promise<void>((res, rej) => {
+          const t = setTimeout(res, wait);
+          signal.addEventListener("abort", () => (clearTimeout(t), rej(signal.reason)), { once: true });
+        });
+      } catch {
+        break;
+      }
+    }
+    errors.push(`${base}: ${down ?? "no response"}`);
+  }
+  return `reviewer ${cfg.name} not reachable: ${errors.join("; ")}`;
+}
+
 export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
   return {
     name: cfg.name,
+    ready: () => probeOutage(cfg),
     async review(prompt) {
       const key = cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined;
       const errors: string[] = [];

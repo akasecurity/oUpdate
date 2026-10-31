@@ -25,6 +25,8 @@ export interface LayerVerdict {
 export interface Reviewer {
   name: string;
   review(prompt: string): Promise<string>;
+  /** A cheap check before a run: undefined when the reviewer can answer now, else why not. Absent: assumed ready. */
+  ready?(): Promise<string | undefined>;
 }
 
 /** A static rule scanner (e.g. GuardDog in a sandbox) run on each release; only findings new in the new release count. */
