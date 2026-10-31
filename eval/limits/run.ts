@@ -43,7 +43,7 @@ const registry: Registry = { latest: async () => undefined, publishedAt: async (
 const lock = (pkgs: Pkg[]) => JSON.stringify({ lockfileVersion: 1, packages: Object.fromEntries(pkgs.map((p) => [p.name, [`${p.name}@${p.version}`, "", {}]])) });
 
 /** One case as a pull request through the gate; true when the layer under test holds it. The reviewer layer needs the pre-pass output, so both run, but only the reviewer layer's own verdict is read: a pre-pass stop cannot stand in for the model. */
-async function held(c: Case, layers: "prepass" | "reviewer"): Promise<boolean> {
+async function heldOnce(c: Case, layers: "prepass" | "reviewer"): Promise<boolean> {
   const byKey = new Map([...c.base, ...c.head].map((p) => [`${p.name}@${p.version}`, p.files]));
   const files: Record<string, string> = { "b:bun.lock": lock(c.base), "h:bun.lock": lock(c.head) };
   const forge: Forge = {
@@ -72,6 +72,14 @@ async function held(c: Case, layers: "prepass" | "reviewer"): Promise<boolean> {
   if (bad) throw new Error(`${layers} layer error on ${c.id}: ${bad.detail}`);
   if (process.env.LIMITS_VERBOSE) for (const l of ls) if (l.verdict === "stop") console.error(`[${c.id}] ${l.layer}: ${String(l.detail).slice(0, 1500)}`);
   return ls.some((l) => l.verdict === "stop");
+}
+
+/** The router answers 502 now and then; a reviewer error is retried before it aborts the run, so one blip does not cost the whole run. */
+async function held(c: Case, layers: "prepass" | "reviewer"): Promise<boolean> {
+  for (let i = 1; ; i++) {
+    try { return await heldOnce(c, layers); }
+    catch (e) { if (i >= 4) throw e; console.error(`retry ${i} on ${c.id}: ${String(e).slice(0, 200)}`); await Bun.sleep(30_000 * i); }
+  }
 }
 
 const cutoff = models.reviewer.cutoff;
