@@ -87,22 +87,45 @@ export interface RunOptions {
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+// Why a reviewer pair cannot be reached right now (an outage only), asked once per pair per run: a leg that needs it is held, not failed.
+// The latch is made once per run, so keying the memo on it keeps the answer to one run.
+const readiness = new WeakMap<PatchLatch, Map<ReviewerPair, Promise<string | undefined>>>();
+async function reviewersHeld(pair: ReviewerPair, ctx: LegContext, latch: PatchLatch): Promise<string | undefined> {
+  // A dry run proposes and publishes nothing, so it makes no model request here either.
+  if (ctx.dryRun) return undefined;
+  let memo = readiness.get(latch);
+  if (!memo) readiness.set(latch, (memo = new Map()));
+  let p = memo.get(pair);
+  if (!p) {
+    p = Promise.all([pair.first, pair.second].map((r) => r?.ready?.().catch(() => undefined))).then((why) => why.find((w) => w !== undefined));
+    memo.set(pair, p);
+  }
+  return p;
+}
+const held = (why: string): LegResult => ({ lines: [why], summary: `held — ${why}; the review runs when the reviewer is up`, trouble: false });
+
 async function runLeg(leg: Leg, ctx: LegContext, deps: TargetDeps, latch: PatchLatch): Promise<LegResult> {
   const reg = deps.registry ?? EMPTY_REGISTRY;
   if (isPluginLeg(leg)) {
     const k = reg.legs.get(leg.kind);
     if (!k) return { lines: [], summary: `not checked — leg ${leg.kind} has no plugin loaded`, trouble: true };
     if (!deps.reviewers) return { lines: [], summary: `not checked — leg ${leg.kind} has no reviewers wired`, trouble: true };
+    const why = await reviewersHeld(deps.reviewers, ctx, latch);
+    if (why) return held(why);
     return k.run(leg, ctx, { reviewers: deps.reviewers });
   }
   if (leg.kind === "pin-bump") return deps.pinBump(leg, ctx);
   if (leg.kind === "docker-compose") {
     if (!deps.reviewers) return { lines: [], summary: "not checked — leg docker-compose has no reviewers wired", trouble: true };
     if (!isOpenBroker(ctx.reach)) return { lines: [], summary: `not checked — leg docker-compose over reach ${ctx.reach.kind} not built yet`, trouble: true };
+    const why = await reviewersHeld(deps.reviewers, ctx, latch);
+    if (why) return held(why);
     return composeLeg(leg, ctx, ctx.reach, deps.reviewers, reg.containerBaseline);
   }
   if (leg.kind === "os-packages") {
     if (!deps.gce) return Promise.resolve({ lines: [], summary: "not checked — leg os-packages has no reviewers or clock wired", trouble: true });
+    const why = await reviewersHeld(deps.gce.reviewers, ctx, latch);
+    if (why) return held(why);
     try {
       const r = await osPackagesLeg(leg, ctx, { ...deps.gce, fs: deps.fs, latch });
       // Any trouble the leg returns, not only what it latched itself, stops every later gce patch this run.
