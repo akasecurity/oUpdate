@@ -18,8 +18,16 @@ import {
   type LockedPackage,
 } from "./types.ts";
 
-const unquote = (s: string) =>
-  /^".*"$/.test(s) ? (JSON.parse(s) as string) : s;
+const unquote = (s: string) => {
+  if (!/^".*"$/.test(s)) return s;
+  try {
+    return JSON.parse(s) as string;
+  } catch {
+    throw new Error(
+      `cannot read yarn.lock value ${JSON.stringify(s.slice(0, 100))}`,
+    );
+  }
+};
 
 /** The package name of a descriptor `name@range`; an `npm:real@range` range names the real package. */
 function descriptorName(desc: string): string {
@@ -48,26 +56,42 @@ interface V1Entry {
 /** v1 is not YAML: `key value` lines (value optionally quoted) two spaces in, nested maps four spaces in (skipped). */
 function readV1(text: string): V1Entry[] {
   const out: V1Entry[] = [];
+  const seenDescs = new Set<string>();
   let cur: V1Entry | undefined;
+  let inBlock = false;
   for (const [i, raw] of text.split("\n").entries()) {
     const line = raw.replace(/\r$/, "");
     if (!line.trim() || line.startsWith("#")) continue;
     if (!line.startsWith(" ")) {
       if (!line.endsWith(":"))
         throw new Error(`cannot read yarn.lock line ${i + 1}`);
-      cur = {
-        descs: line.slice(0, -1).split(/,\s*/).map(unquote),
-        fields: new Map(),
-      };
+      const descs = (line.slice(0, -1).match(/"[^"]*"|[^,\s][^,]*/g) ?? []).map(
+        (d) => unquote(d.trim()),
+      );
+      if (!descs.length) throw new Error(`cannot read yarn.lock line ${i + 1}`);
+      if (new Set(descs.map(descriptorName)).size > 1)
+        throw new Error(
+          `yarn.lock line ${i + 1}: one entry names two packages`,
+        );
+      for (const d of descs) {
+        if (seenDescs.has(d))
+          throw new Error(`duplicate yarn.lock entry ${d} at line ${i + 1}`);
+        seenDescs.add(d);
+      }
+      cur = { descs, fields: new Map() };
       out.push(cur);
+      inBlock = false;
     } else if (/^ {2}\S/.test(line)) {
       if (!cur) throw new Error(`cannot read yarn.lock line ${i + 1}`);
-      const m = /^ {2}("[^"]*"|[^\s"]+)\s*(.*)$/.exec(line)!;
+      const m = /^ {2}("[^"]*"|[^\s"]+)\s*(.*)$/.exec(line);
+      if (!m) throw new Error(`cannot read yarn.lock line ${i + 1}`);
       const key = unquote(m[1]!);
       if (cur.fields.has(key))
         throw new Error(`duplicate yarn.lock field ${key} at line ${i + 1}`);
       cur.fields.set(key, unquote(m[2]!));
-    } else if (!/^( {2})+\S/.test(line)) {
+      // A nested map (`dependencies:`) has no value; only it may have deeper lines under it.
+      inBlock = !m[2];
+    } else if (!inBlock || !/^( {2})+\S/.test(line)) {
       throw new Error(`cannot read yarn.lock indentation at line ${i + 1}`);
     }
   }
@@ -165,22 +189,30 @@ function splitResolution(res: string): {
   };
 }
 
-/** Bun.YAML keeps the last of a duplicate key, hiding the earlier one: refuse a repeated entry or field. */
+/** Bun.YAML keeps the last of a duplicate key, hiding the earlier one: refuse a repeated entry or field, in any spelling. */
 function rejectBerryDuplicates(text: string) {
   const entries = new Set<string>();
   let fields = new Set<string>();
-  for (const [i, line] of text.split("\n").entries()) {
-    if (/^\S.*:\s*$/.test(line)) {
-      if (entries.has(line))
+  for (const [i, raw] of text.split("\n").entries()) {
+    const line = raw.replace(/\r$/, "");
+    if (!line.trim() || line.startsWith("#")) continue;
+    if (!line.startsWith(" ")) {
+      if (!line.endsWith(":"))
+        throw new Error(`cannot read yarn.lock line ${i + 1}`);
+      const key = unquote(line.slice(0, -1));
+      if (entries.has(key))
         throw new Error(`duplicate yarn.lock entry at line ${i + 1}`);
-      entries.add(line);
+      entries.add(key);
       fields = new Set();
     } else {
-      const m = /^ {2}("[^"]*"|[^\s"]+):/.exec(line);
+      const m = /^ {2}("[^"]*"|[^\s":]+):/.exec(line);
       if (m) {
-        if (fields.has(m[1]!))
-          throw new Error(`duplicate yarn.lock field ${m[1]} at line ${i + 1}`);
-        fields.add(m[1]!);
+        const key = unquote(m[1]!);
+        if (fields.has(key))
+          throw new Error(`duplicate yarn.lock field ${key} at line ${i + 1}`);
+        fields.add(key);
+      } else if (/^ {2}\S/.test(line)) {
+        throw new Error(`cannot read yarn.lock line ${i + 1}`);
       }
     }
   }
@@ -208,9 +240,10 @@ function parseBerry(text: string): LockedPackage[] {
     const checksum = e.checksum;
     let p: LockedPackage;
     if (protocol === "workspace" || protocol === "patch") {
-      // Listed so a swap to or from one shows as a change; no `direct`, so on its own it holds nothing.
+      // Listed so a swap to or from one shows as a change; a file source, so it is held for a look, never read as a registry version.
       p = { name, version: e.resolution.slice(name.length + 1) };
       p.source = p.version;
+      p.direct = "file";
       if (checksum) p.digest = checksum;
     } else if (protocol === "npm") {
       if (typeof e.version !== "string")
@@ -221,7 +254,11 @@ function parseBerry(text: string): LockedPackage[] {
           `yarn.lock entry ${name}: version ${e.version} does not match its resolution ${locVersion}`,
         );
       p = { name, version: e.version };
-      if (params.length) p.source = params.join("::");
+      // An archive override points the download elsewhere than the registry: reviewed as a url source, new or bumped too.
+      if (params.length) {
+        p.source = params.join("::");
+        p.direct = "url";
+      }
       if (checksum) p.digest = checksum;
       else p.unhashed = true;
     } else {

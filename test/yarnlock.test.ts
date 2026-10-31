@@ -46,9 +46,9 @@ describe("parseYarnLock berry", () => {
     expect(find(berry, "real-pkg")).toMatchObject({ version: "2.0.1" });
     expect(find(berry, "no-sum")).toMatchObject({ unhashed: true });
   });
-  test("workspace and patch entries are listed by resolution, holding nothing on their own", () => {
+  test("workspace and patch entries are listed by resolution as file sources", () => {
     expect(berry.map((p) => p.name).sort()).toEqual(["@babel/core", "gitdep", "localdep", "no-sum", "real-pkg", "root", "typescript", "web", "yaml"]);
-    expect(find(berry, "web")?.direct).toBeUndefined();
+    expect(find(berry, "web")).toMatchObject({ direct: "file", version: "workspace:packages/web" });
   });
   test("git and file sources are direct dependencies", () => {
     expect(find(berry, "gitdep")).toMatchObject({ direct: "git" });
@@ -70,6 +70,7 @@ describe("hostile yarn.lock", () => {
     const a = parseYarnLock(npm("foo@npm:1.0.0::__archiveUrl=https%3A%2F%2Fgood.test%2Fa.tgz"));
     const b = parseYarnLock(npm("foo@npm:1.0.0::__archiveUrl=https%3A%2F%2Fevil.test%2Fa.tgz"));
     expect(a[0]!.source).not.toBe(b[0]!.source);
+    expect(a[0]!.direct).toBe("url");
   });
   test("a resolution that disagrees with the version throws", () => {
     expect(() => parseYarnLock(npm("foo@npm:9.9.9"))).toThrow(/does not match/);
@@ -85,6 +86,26 @@ describe("hostile yarn.lock", () => {
     const e = `"foo@npm:1.0.0":\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n  checksum: abc\n`;
     expect(() => parseYarnLock(B(e + "\n" + e))).toThrow(/duplicate/);
     expect(() => parseYarnLock(npm("foo@npm:1.0.0", "  checksum: def\n"))).toThrow(/duplicate/);
+  });
+  test("a duplicate entry or field in another spelling throws", () => {
+    const body = (k: string) => `${k}:\n  version: 1.0.0\n  resolution: "foo@npm:1.0.0"\n  checksum: abc\n`;
+    expect(() => parseYarnLock(B(body("foo@npm:^1") + "\n" + body('"foo@npm:^1"')))).toThrow(/duplicate/);
+    expect(() => parseYarnLock(npm("foo@npm:1.0.0", '  "checksum": def\n'))).toThrow(/duplicate/);
+    expect(() => parseYarnLock(B('"foo@npm:^1": {version: 1.0.0}\n'))).toThrow(/cannot read/);
+  });
+  test("v1: deeper indentation outside a nested map, a repeated entry, mixed names, a lone quote throw", () => {
+    const h = "# yarn lockfile v1\n\n";
+    const e = 'foo@^1:\n  version "1.0.0"\n';
+    expect(() => parseYarnLock(h + e + '    resolved "https://evil.test/a.tgz"\n')).toThrow(/indentation/);
+    expect(() => parseYarnLock(h + '    garbage\n')).toThrow();
+    expect(() => parseYarnLock(h + e + "\n" + e)).toThrow(/duplicate/);
+    expect(() => parseYarnLock(h + 'foo@^1, bar@^1:\n  version "1.0.0"\n')).toThrow(/two packages/);
+    expect(() => parseYarnLock(h + e + '  "\n')).toThrow();
+    expect(parseYarnLock(h + e + '  dependencies:\n    bar "^1"\n')).toHaveLength(1);
+  });
+  test("v1: a quoted descriptor with a comma stays whole", () => {
+    const p = parseYarnLock('# yarn lockfile v1\n\n"foo@https://host/a,b.tgz":\n  version "1.0.0"\n  resolved "https://host/a,b.tgz"\n');
+    expect(p[0]).toMatchObject({ name: "foo", source: "https://host/a,b.tgz" });
   });
   test("v1: a duplicate field or odd indentation throws", () => {
     const h = "# yarn lockfile v1\n\nfoo@^1:\n  version \"1.0.0\"\n";
