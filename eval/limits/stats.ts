@@ -7,3 +7,8 @@ export function wilson(k: number, n: number, z = 1.96): { lo: number; hi: number
   const h = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d;
   return { lo: Math.max(0, c - h), hi: Math.min(1, c + h) };
 }
+
+export type Scope = "full" | "priority" | "signal" | "ranked";
+/** How much of the diff the reviewer read, from its hold text: a narrowed review names its scope; a landed or plainly held one read it all. */
+export const readScope = (detail: string): Scope => (/\branked part/.test(detail) ? "ranked" : /\bsignal (part|files)/.test(detail) ? "signal" : /\bpriority files/.test(detail) ? "priority" : "full");
+export const scopeNote = (counts: Record<string, number>) => Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(", ") || "full 0";
