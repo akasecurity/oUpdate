@@ -2,7 +2,7 @@
 // Hard signals hold an update no matter what a model reviewer says; soft
 // signals are handed to the reviewer as pointers. It reads bytes only.
 
-import { installView } from "./install-closure.ts";
+import { installView, otherInstallEntry, prepareInert } from "./install-closure.ts";
 
 export type FileMap = Map<string, Uint8Array>;
 export type Ecosystem = "npm" | "pypi";
@@ -900,7 +900,10 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
     seen.add(detail);
     out.push({ kind: "install-script", path, detail: detail.slice(0, 200) });
   };
+  const inert =
+    prepareInert(oldV.scripts, otherInstallEntry(oldFiles, oldV.manifest)) && prepareInert(newV.scripts, otherInstallEntry(newFiles, newV.manifest));
   for (const k of new Set([...Object.keys(oldV.scripts), ...Object.keys(newV.scripts)])) {
+    if (k === "prepare" && inert) continue;
     if (oldV.scripts[k] !== newV.scripts[k]) push(`script ${k}`);
   }
   const missN = new Set(newV.missing);
@@ -990,7 +993,9 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
     for (const p of pj) {
       const before = npmInstallScripts(oldFiles.get(p));
       const after = npmInstallScripts(newFiles.get(p));
+      const inert = prepareInert(after, otherInstallEntry(newFiles, p)) && prepareInert(before, otherInstallEntry(oldFiles, p));
       for (const [k, v] of Object.entries(after)) {
+        if (k === "prepare" && inert) continue;
         if (before[k] !== v) hard.push({ kind: "install-script", path: p, detail: `${k}: ${v.slice(0, 200)}` });
       }
     }
