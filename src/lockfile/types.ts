@@ -66,7 +66,8 @@ export function npmPrivateRegistry(url: unknown): string | undefined {
   try {
     host = new URL(url).host;
   } catch {
-    return url;
+    // Not a URL we can take a host from: it may carry credentials, so never return it raw.
+    return "(unparsable registry url)";
   }
   return NPM_DEFAULT_HOSTS.has(host) ? undefined : host;
 }
