@@ -126,7 +126,8 @@ function addImporterDescriptors(lock: Record<string, unknown>, out: LockedPackag
         const full = `${name}@${d.version}`;
         const at = peersIndexOf(full);
         const exact = same.filter((p) => keyOf.get(p) === (at === -1 ? full : full.slice(0, at)));
-        for (const p of same.length > 1 ? exact : same) {
+        // An importer version whose key was deduped into another entry matches none exactly: every match takes it.
+        for (const p of exact.length ? exact : same) {
           const set = sets.get(p) ?? new Set<string>();
           set.add(`${name}@${d.specifier}`);
           sets.set(p, set);

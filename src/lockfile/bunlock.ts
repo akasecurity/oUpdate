@@ -86,7 +86,7 @@ function addDescriptors(lock: { packages?: Record<string, unknown[]>; workspaces
       if (!deps || typeof deps !== "object") continue;
       for (const [name, range] of Object.entries(deps as Record<string, unknown>)) {
         if (typeof range !== "string") continue;
-        // A workspace's own nested copy (under its name or its path) wins over the root-hoisted one.
+        // A workspace's own nested copy (under its name) wins over the root-hoisted one.
         const nested = nests.map((n) => `${n}/${name}`).find((k) => Object.hasOwn(packages, k));
         const target = byKey.get(nested ?? resolveDep(packages, from, name) ?? "");
         if (!target) continue;
@@ -99,7 +99,8 @@ function addDescriptors(lock: { packages?: Record<string, unknown[]>; workspaces
   for (const [key, entry] of Object.entries(packages)) record(key, entry[2], DEP_FIELDS);
   for (const [path, ws] of Object.entries(lock.workspaces ?? {})) {
     const wsName = ws && typeof ws === "object" ? (ws as Record<string, unknown>).name : undefined;
-    const nests = [typeof wsName === "string" ? wsName : "", path].filter((n, i, a) => n && a.indexOf(n) === i);
+    // The root's dependencies are top-level; a workspace's nest under its package name, never its folder path.
+    const nests = path && typeof wsName === "string" && wsName ? [wsName] : [];
     record("", ws, [...DEP_FIELDS, "devDependencies"], nests);
   }
   for (const [p, set] of sets) p.descriptors = [...set].sort();

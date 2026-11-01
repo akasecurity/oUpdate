@@ -174,3 +174,27 @@ packages:
   const got = parsePnpmLock(lock).map((p) => [p.digest, p.descriptors]);
   expect(got).toEqual([[SRI("A"), undefined], [SRI("B"), ["foo@^1.0.0"]]]);
 });
+
+test("an importer version whose key was deduped into another entry still gets its descriptor", () => {
+  const lock = `lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: 1.0.0(patch_hash=abc)
+packages:
+  foo@1.0.0:
+    resolution: {integrity: ${SRI("A")}}
+  foo@1.0.0(patch_hash=abc):
+    resolution: {integrity: ${SRI("A")}}
+  foo@1.0.0(patch_hash=def):
+    resolution: {integrity: ${SRI("B")}}
+snapshots:
+  foo@1.0.0: {}
+  foo@1.0.0(patch_hash=abc): {}
+  foo@1.0.0(patch_hash=def): {}
+`;
+  const got = parsePnpmLock(lock).map((p) => p.descriptors);
+  expect(got.filter((d) => d?.includes("foo@^1.0.0")).length).toBeGreaterThan(0);
+});
