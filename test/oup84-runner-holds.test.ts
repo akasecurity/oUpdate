@@ -32,15 +32,15 @@ describe("unresolved package-manager runners hold", () => {
   });
 
   test("dlx fetches remote code and holds", () => {
-    for (const cmd of ["yarn dlx some-pkg", "pnpm dlx some-pkg", "bunx some-pkg"]) {
+    for (const cmd of ["yarn dlx some-pkg", "pnpm dlx some-pkg", "bunx some-pkg", "bun x some-pkg"]) {
       expect(hardFor({ postinstall: cmd }).length, cmd).toBeGreaterThan(0);
     }
     // Naming a local file does not make a remote fetch resolved.
-    expect(hardFor({ postinstall: "yarn dlx some-pkg ./assets/other.js" }).length).toBeGreaterThan(0);
+    for (const cmd of ["yarn dlx some-pkg ./assets/other.js", "bun x some-pkg ./assets/other.js"]) expect(hardFor({ postinstall: cmd }).length, cmd).toBeGreaterThan(0);
   });
 
   test("pnpm --filter holds when the script is in another package", () => {
-    for (const cmd of ["pnpm --filter other build", "pnpm -F other build", "pnpm --filter=other build"]) {
+    for (const cmd of ["pnpm --filter other build", "pnpm -F other build", "pnpm --filter=other build", "pnpm -Fother build"]) {
       expect(hardFor({ postinstall: cmd }).length, cmd).toBeGreaterThan(0);
     }
   });

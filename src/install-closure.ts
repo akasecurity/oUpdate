@@ -3217,7 +3217,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
     // `pnpm --filter <pkg> <script>` runs a script of another workspace package. That package's
     // scripts are not modeled here, so the whole package surface is reached.
-    if (bin === "pnpm" && /^(?:-F|--filter(?:=.*)?)$/.test(argv[i] ?? "")) {
+    if (bin === "pnpm" && /^(?:-F.*|--filter(?:=.*)?)$/.test(argv[i] ?? "")) {
       widenAll(ctx);
       return;
     }
@@ -3231,7 +3231,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
       if (!ctx.hold) fail(ctx, "unresolved: runner");
       if (sub?.word === undefined) return;
       // dlx fetches remote code, so no named file makes it resolved.
-      if (sub.word === "dlx") widenAll(ctx);
+      if (sub.word === "dlx" || (bin === "bun" && sub.word === "x")) widenAll(ctx);
       // A file (`bun ./x.ts`) is followed like node; exec widens when no file resolves.
       // Other builtins (install, add, ...) keep their old handling.
       else if (pathLikeWord(sub.word)) closeUnknownRunner(ctx, argv, sub.i);
