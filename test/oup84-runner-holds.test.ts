@@ -49,6 +49,8 @@ describe("unresolved package-manager runners hold", () => {
     expect(hardFor({ postinstall: "bun run ./assets/x.js" }).length).toBeGreaterThan(0);
     expect(hardFor({ postinstall: "bun run ./assets/other.js" })).toEqual([]);
     expect(hardFor({ postinstall: "bun run missing.ts" }).length).toBeGreaterThan(0);
+    // a script named exactly like the path wins and is followed
+    expect(hardFor({ postinstall: "bun run build.js", "build.js": "node assets/x.js" }).length).toBeGreaterThan(0);
   });
 
   test("pnpm --filter after other leading flags widens", () => {
@@ -58,7 +60,7 @@ describe("unresolved package-manager runners hold", () => {
   });
 
   test("a package runner with a local file argument still holds", () => {
-    for (const cmd of ["bunx some-pkg ./assets/other.js", "npx some-pkg ./assets/other.js", "npx -y some-pkg ./assets/other.js", "npx --package=pkg ./assets/other.js", "npx -p pkg ./assets/other.js", "bunx --package pkg ./assets/other.js", "bun x some-pkg ./assets/other.js", "npx @scope/pkg ./assets/other.js", "npx github:user/repo ./assets/other.js", "npx user/repo ./assets/other.js", "npx https://example.com/pkg.tgz ./assets/other.js", "npx --cache ./cache some-pkg ./assets/other.js", "npx --userconfig ./npmrc some-pkg ./assets/other.js"]) {
+    for (const cmd of ["bunx some-pkg ./assets/other.js", "npx some-pkg ./assets/other.js", "npx -y some-pkg ./assets/other.js", "npx --package=pkg ./assets/other.js", "npx -p pkg ./assets/other.js", "bunx --package pkg ./assets/other.js", "bun x some-pkg ./assets/other.js", "npx @scope/pkg ./assets/other.js", "npx github:user/repo ./assets/other.js", "npx user/repo ./assets/other.js", "npx https://example.com/pkg.tgz ./assets/other.js", "npx --cache ./cache some-pkg ./assets/other.js", "npx --userconfig ./npmrc some-pkg ./assets/other.js", "npx evil.js ./assets/other.js", "bunx evil.js ./assets/other.js"]) {
       expect(hardFor({ postinstall: cmd }).length, cmd).toBeGreaterThan(0);
     }
   });

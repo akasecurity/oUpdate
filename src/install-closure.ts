@@ -3154,11 +3154,11 @@ function wrappedScript(ctx: Ctx, argv: string[], i: number): string | undefined 
 }
 
 // The command word of a package runner is a local file only when it is written as one:
-// `./x.js`, `../x.js`, `/abs/x.js`, or a bare script file name. A leading flag (whose value
-// could be path-like), a scoped name, a `host:path` spec or a URL is a package, so it widens.
+// `./x.js`, `../x.js` or `/abs/x.js`. A bare name (`evil.js`) is a package to npx, and a leading
+// flag (whose value could be path-like), a scoped name, a `host:path` spec or a URL widens too.
 function localEntry(w: string): boolean {
   if (w.startsWith("./") || w.startsWith("../") || w.startsWith("/")) return true;
-  return !w.includes("/") && !w.includes(":") && !w.startsWith("-") && !w.startsWith("@") && pathLikeWord(w);
+  return false;
 }
 
 function dispatch(ctx: Ctx, cmd: string): void {
@@ -3256,8 +3256,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
       if (!ctx.hold) fail(ctx, "unresolved: script");
       return;
     }
-    // `bun run ./x.ts` runs that file, not a script of the same name.
-    if (bin === "bun" && pathLikeWord(name.word)) {
+    // `bun run ./x.ts` runs that file unless a script of exactly that name exists, which wins.
+    if (bin === "bun" && pathLikeWord(name.word) && typeof ctx.raw[name.word] !== "string") {
       closeUnknownRunner(ctx, argv, name.i);
       return;
     }
