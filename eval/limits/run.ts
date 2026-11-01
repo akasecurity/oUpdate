@@ -32,7 +32,7 @@ const GAP_IDS = new Set(GAP.map((c) => c.id));
 export const CLEAN: Case[] = [...FC_CASES.filter((c) => c.expect === "land"), ...MORE_CLEAN, ...INSTALL_CLEAN];
 
 /** Releases held by policy are reported apart from false holds: an install script that downloads a binary (held with the reason in the hold text so the user can approve it), and the pre-pass install-script hard signal on package.json, which holds the release; the reviewer still runs and its verdict is the one counted. */
-export const POLICY_HOLD = new Set(["lookalike-prebuilt-update", "clean-husky-prepare", "clean-funding-notice"]);
+export const POLICY_HOLD = new Set(["lookalike-prebuilt-update", "clean-funding-notice"]);
 
 const arg = (n: string) => { const i = process.argv.indexOf(`--${n}`); return i > 0 ? process.argv[i + 1] : undefined; };
 const here = dirname(new URL(import.meta.url).pathname);

@@ -18,6 +18,11 @@ export interface InstallView {
 }
 
 const INSTALL = ["preinstall", "install", "postinstall", "prepare"] as const;
+
+/** npm, pnpm, yarn and bun do not run `prepare` when they install a registry tarball (only for git and local dependencies, and at the root), so a change to it alone is no install-time signal. It stays one when another install script names it (`npm run prepare`), because that script runs it. The files it names are still read by the reviewer. */
+export function prepareInert(scripts: Record<string, unknown>): boolean {
+  return !["preinstall", "install", "postinstall"].some((k) => typeof scripts[k] === "string" && /\bprepare\b/.test(scripts[k] as string));
+}
 const PRIMARY_EXT = [".js", ".json", ".node", ".cjs", ".mjs", ".jsx", ".tsx", ".cts", ".mts", ".ts"];
 const BOOL_FLAGS = new Set(["--silent", "--quiet", "-s", "-q", "--if-present"]);
 const VALUE_FLAGS = new Set(["--loglevel", "--prefix", "-C", "--userconfig", "--max-parallel", "--jobs", "-j"]);
@@ -3556,11 +3561,12 @@ export function installView(files: FileMap): InstallView {
       return done();
     }
   }
-  for (const name of INSTALL) {
+  const ran = prepareInert(ctx.raw) ? INSTALL.filter((name) => name !== "prepare") : INSTALL;
+  for (const name of ran) {
     const raw = ctx.raw[name];
     if (typeof raw === "string") ctx.scripts[name] = raw;
   }
-  for (const name of INSTALL) {
+  for (const name of ran) {
     const raw = ctx.raw[name];
     if (typeof raw === "string" && raw.length > 0) runScript(ctx, name, false);
   }

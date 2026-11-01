@@ -307,11 +307,11 @@ describe("install closure", () => {
   });
 
   test("patch-package closes over the patch files it applies", () => {
-    const p = pj({ prepare: "patch-package" });
+    const p = pj({ postinstall: "patch-package" });
     const same = { "package.json": p, "patches/x+1.0.0.patch": "a\n" };
     expect(hard(same, { ...same, "README.md": "x" })).toEqual([]);
     held(same, { ...same, "patches/x+1.0.0.patch": "b\n" }, /file /);
-    const named = pj({ prepare: "patch-package left-pad" });
+    const named = pj({ postinstall: "patch-package left-pad" });
     expect(hard({ "package.json": named }, { "package.json": named })).toEqual([]);
   });
 
