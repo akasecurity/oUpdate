@@ -28,7 +28,9 @@ export function pypiPrivateIndex(url: unknown): string | undefined {
   try {
     host = new URL(url).host;
   } catch {
-    return url;
+    // A local path (--find-links ./wheels) is its own marker. Anything else that is not a URL we can take a host
+    // from (a scheme or userinfo) may carry credentials, so never return it raw.
+    return /@|^[a-z][a-z0-9+.-]*:|^\/\//i.test(url) ? "(unparsable index url)" : url;
   }
   return PYPI_DEFAULT_HOSTS.has(host) ? undefined : host;
 }
