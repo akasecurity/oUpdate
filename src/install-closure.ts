@@ -19,9 +19,9 @@ export interface InstallView {
 
 const INSTALL = ["preinstall", "install", "postinstall", "prepare"] as const;
 
-/** npm, pnpm, yarn and bun do not run `prepare` when they install a registry tarball (only for git and local dependencies, and at the root), so a change to it alone is no install-time signal. It stays one when another install script names it (`npm run prepare`), because that script runs it. The files it names are still read by the reviewer. */
+/** npm, pnpm, yarn and bun do not run `prepare` when they install a registry tarball (only for git and local dependencies, and at the root), so a change to it alone is no install-time signal. That holds only when nothing else can start it: any non-empty preinstall, install or postinstall keeps `prepare` a signal, because the script or a file it runs can call `npm run prepare` (or preprepare/postprepare) through indirection no static read resolves (a file that shells out, an escaped name, `$(...)`, eval). The files it names are still read by the reviewer. */
 export function prepareInert(scripts: Record<string, unknown>): boolean {
-  return !["preinstall", "install", "postinstall"].some((k) => typeof scripts[k] === "string" && /\bprepare\b/.test(scripts[k] as string));
+  return !["preinstall", "install", "postinstall"].some((k) => typeof scripts[k] === "string" && (scripts[k] as string).trim().length > 0);
 }
 const PRIMARY_EXT = [".js", ".json", ".node", ".cjs", ".mjs", ".jsx", ".tsx", ".cts", ".mts", ".ts"];
 const BOOL_FLAGS = new Set(["--silent", "--quiet", "-s", "-q", "--if-present"]);
