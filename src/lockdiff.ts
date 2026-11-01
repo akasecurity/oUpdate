@@ -38,7 +38,7 @@ function cmp(a: string, b: string): number {
   return 0;
 }
 
-const mask = (s: string) => s.replace(/\/\/[^/@\s]*@/, "//");
+const mask = (s: string) => s.replace(/\/\/[^/\s]*@/g, "//");
 
 /** Source (without any user:password in a URL) and hashes of a locked package, as one string to show. Never compared. */
 const where = (p: LockedPackage) => [p.source && mask(p.source), p.digest].filter(Boolean).join(" ");
@@ -95,5 +95,6 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
     if (p.direct) Object.assign(c, { direct: p.direct, source: p.source });
     out.push(c);
   }
-  return out;
+  // A direct dependency's version is its source URL: nothing leaves here with credentials in it.
+  return out.map((c) => ({ ...c, ...(c.from === null ? {} : { from: mask(c.from) }), to: mask(c.to), ...(c.source === undefined ? {} : { source: mask(c.source) }) }));
 }

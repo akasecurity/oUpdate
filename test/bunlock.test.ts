@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseBunLock } from "../src/lockfile/bunlock.ts";
+import { diffLocks } from "../src/lockdiff.ts";
 
 const LOCK = `{
   "lockfileVersion": 2,
@@ -86,5 +87,15 @@ describe("parseBunLock", () => {
     expect(pkgs.find((p) => p.name === "@corp/ui")).toMatchObject({ source: "https://npm.corp.example/", digest: "sha512-EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE==" });
     expect(pkgs.find((p) => p.name === "typescript")).toMatchObject({ digest: "sha1-qUPrMeIDqWcUgN6EdBPTCCs/AYs=" });
     expect(pkgs.find((p) => p.name === "typescript")?.source).toBeUndefined();
+  });
+
+  test("a direct entry with credentials in its URL reaches the diff without them", () => {
+    const lock = (url: string) => `{"packages":{"x":["x@${url}",{}],"y":["y@1.0.0","",{},"sha1-qUPrMeIDqWcUgN6EdBPTCCs/AYs="]}}`;
+    const old = parseBunLock(lock("git+https://example.test/x.git#a"));
+    const now = parseBunLock(lock("git+https://dave:tok2@example.test/x.git#b"));
+    const d = diffLocks(old, now);
+    expect(d).toHaveLength(1);
+    expect(d[0]!.direct).toBe("git");
+    expect(JSON.stringify(d)).not.toMatch(/tok2|dave/);
   });
 });

@@ -51,3 +51,28 @@ test("a descriptor moved between same name@version entries from different origin
   const allEvil = [{ ...evil, descriptors: ["foo@^1", "foo@~1"] }, { ...good, descriptors: [] }];
   expect(diffLocks(before, allEvil).some((c) => c.swapped)).toBe(true);
 });
+
+test("a direct git or url dependency's source, from and to never carry credentials", () => {
+  const src = "git+https://dave:tok2@example.test/foo.git#b";
+  const old = { name: "foo", version: "1.0.0", integrity: "sha1-AAAA" };
+  for (const direct of ["git", "url"] as const) {
+    const added = diffLocks([old], [{ name: "foo", version: src, source: src, direct }]);
+    expect(added).toHaveLength(1);
+    expect(added[0]!.source).toBe("git+https://example.test/foo.git#b");
+    expect(JSON.stringify(added)).not.toContain("tok2");
+    expect(JSON.stringify(added)).not.toContain("dave");
+    const swap = diffLocks([{ name: "foo", version: "1.0.0", source: "https://x.test/f" }], [{ name: "foo", version: "1.0.0", source: src, direct }]);
+    expect(swap).toHaveLength(1);
+    expect(swap[0]!.source).toBe("git+https://example.test/foo.git#b");
+    expect(JSON.stringify(swap)).not.toContain("tok2");
+    const moved = diffLocks([{ name: "foo", version: src, source: src, direct }], [{ name: "foo", version: "git+https://dave:tok3@example.test/foo.git#c", source: "git+https://dave:tok3@example.test/foo.git#c", direct }]);
+    expect(JSON.stringify(moved)).not.toMatch(/tok[23]|dave/);
+  }
+});
+
+test("credentials with an @ inside or a second URL in the source are fully masked", () => {
+  const a = [{ name: "foo", version: "1.0.0", source: "git+https://carol:p@ss1@example.test/foo.git#x", integrity: "sha1-AAAA" }];
+  const b = [{ name: "foo", version: "1.0.0", source: "git+https://dave:p@ss2@example.test/foo.git#x https://erin:three@mirror.test/foo", integrity: "sha1-AAAA" }];
+  const shown = JSON.stringify(diffLocks(a, b));
+  for (const s of ["carol", "dave", "erin", "ss1", "ss2", "three"]) expect(shown).not.toContain(s);
+});
