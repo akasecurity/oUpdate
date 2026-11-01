@@ -32,6 +32,7 @@ export function pypiPrivateIndex(url: unknown): string | undefined {
     // from (a scheme or userinfo) may carry credentials, so never return it raw.
     return /@|^[a-z][a-z0-9+.-]*:|^\/\//i.test(url) ? "(unparsable index url)" : url;
   }
+  if (!host) return "(local index)"; // file: and other hostless URLs are not PyPI
   return PYPI_DEFAULT_HOSTS.has(host) ? undefined : host;
 }
 

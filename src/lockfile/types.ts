@@ -69,5 +69,6 @@ export function npmPrivateRegistry(url: unknown): string | undefined {
     // Not a URL we can take a host from: it may carry credentials, so never return it raw.
     return "(unparsable registry url)";
   }
+  if (!host) return "(local registry)"; // file: and other hostless URLs are not the public registry
   return NPM_DEFAULT_HOSTS.has(host) ? undefined : host;
 }
