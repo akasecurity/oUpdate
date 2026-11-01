@@ -22,3 +22,14 @@ describe("prepareChangedInert", () => {
     expect(prepareChangedInert(bun("a"), bun("b"))).toBe(false);
   });
 });
+
+describe("prepareChangedInert guards", () => {
+  test("non-string prepare, a pre-pass hard signal, or a fold-cased manifest turns the note off", () => {
+    const obj = (p: object) => map({ "package.json": JSON.stringify({ name: "x", version: "1", scripts: { prepare: p } }) });
+    expect(prepareChangedInert(obj({}), obj({ a: 1 }))).toBe(false);
+    const a = map({ "package.json": pj({}) });
+    const b = map({ "package.json": pj({ prepare: "husky install" }) });
+    expect(prepareChangedInert(a, b)).toBe(true);
+    expect(prepareChangedInert(a, b, { hard: [{ kind: "install-script", path: "package.json", detail: "x" }], soft: [], added: [], changed: [], removed: [] } as never)).toBe(false);
+  });
+});

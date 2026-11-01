@@ -2110,12 +2110,12 @@ export const SCOPE_NOTE: Record<Scope, string> = {
   ranked: "\nThe full diff is over budget even as signal files, so these parts hold the top-ranked priority files only: hard pre-pass signals first, then scanner hits, install or startup files, manifests, new files and changed files with a soft signal. Everything else is left out.",
 };
 
-const PREPARE_NOTE = `\nThe prepare script differs between these releases, and nothing in the package starts it when it is installed from the registry (no preinstall, install or postinstall script, no binding.gyp, no bundled dependency with an install-time entry point), so a changed prepare is not by itself an install-time risk. Still FLAG for a concrete attack indicator in what it runs.`;
+const PREPARE_NOTE = `\nThe prepare script differs between these releases. A change to the prepare script alone is not a reason to FLAG; judge the rest of the diff as usual.`;
 
-function rootPkg(files: FileMap): { manifest: string; scripts: Record<string, unknown> } | undefined {
-  const manifest = files.has("package.json") ? "package.json" : [...files.keys()].find((k) => /^[^/]+\/package\.json$/.test(k));
-  const bytes = manifest ? files.get(manifest) : undefined;
-  if (!manifest || !bytes) return undefined;
+function manifestScripts(files: FileMap): { manifest: string; scripts: Record<string, unknown> } | undefined {
+  const manifest = installView(files).manifest;
+  const bytes = files.get(manifest);
+  if (!bytes) return undefined;
   try {
     const pj = JSON.parse(dec.decode(bytes)) as { scripts?: unknown };
     const scripts = pj && typeof pj.scripts === "object" && pj.scripts && !Array.isArray(pj.scripts) ? (pj.scripts as Record<string, unknown>) : {};
@@ -2125,11 +2125,13 @@ function rootPkg(files: FileMap): { manifest: string; scripts: Record<string, un
   }
 }
 
-/** True when prepare changed and is inert on both sides (the same rule the pre-pass uses to leave it unflagged). */
-export function prepareChangedInert(oldFiles: FileMap, newFiles: FileMap): boolean {
-  const a = rootPkg(oldFiles);
-  const b = rootPkg(newFiles);
-  if (!a || !b || a.scripts.prepare === b.scripts.prepare) return false;
+/** True when prepare is a string or absent on both sides, differss, and is inert on both sides (the pre-pass rule), and the pre-pass has no hard signal at all. */
+export function prepareChangedInert(oldFiles: FileMap, newFiles: FileMap, pre?: PrepassResult): boolean {
+  if (pre && pre.hard.length > 0) return false;
+  const a = manifestScripts(oldFiles);
+  const b = manifestScripts(newFiles);
+  const str = (v: unknown) => v === undefined || typeof v === "string";
+  if (!a || !b || !str(a.scripts.prepare) || !str(b.scripts.prepare) || a.scripts.prepare === b.scripts.prepare) return false;
   return prepareInert(a.scripts, otherInstallEntry(oldFiles, a.manifest)) && prepareInert(b.scripts, otherInstallEntry(newFiles, b.manifest));
 }
 
@@ -2292,7 +2294,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: 0 parts to review; ${pre.added.length + pre.changed.length + pre.removed.length} file(s) added, changed or removed${note}; needs a human` });
       else try {
         const texts: string[] = [];
-        for (let i = 0; i < chunks.length; i++) texts.push(await input.reviewer.review(reviewPrompt(input, pre, chunks[i]!, i, chunks.length, scope, prepareChangedInert(artifacts.old, artifacts.new) ? PREPARE_NOTE : "")));
+        for (let i = 0; i < chunks.length; i++) texts.push(await input.reviewer.review(reviewPrompt(input, pre, chunks[i]!, i, chunks.length, scope, prepareChangedInert(artifacts.old, artifacts.new, pre) ? PREPARE_NOTE : "")));
         result.reviewerText = texts;
         const flagged = texts.map((t, i) => [parseVerdict(t), i] as const).filter(([v]) => v === "FLAG");
         const parts = flagged.map(([, i]) => i + 1).join(",");
