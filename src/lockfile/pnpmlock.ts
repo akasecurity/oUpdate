@@ -110,7 +110,7 @@ function importerLocals(lock: Record<string, unknown>): LockedPackage[] {
  * `name@specifier` descriptors on the registry entry with that name and version (peer suffix stripped); a transitive
  * dependency's range is not in the lockfile, so those entries carry none. v5 wrote the version alone: no descriptors.
  */
-function addImporterDescriptors(lock: Record<string, unknown>, out: LockedPackage[], keyOf: Map<LockedPackage, string>): void {
+function addImporterDescriptors(lock: Record<string, unknown>, out: LockedPackage[], keyOf: Map<LockedPackage, Set<string>>): void {
   const rec = (o: unknown) => (o && typeof o === "object" ? (o as Record<string, unknown>) : {});
   const importers = lock.importers === undefined ? { ".": lock } : rec(lock.importers);
   const sets = new Map<LockedPackage, Set<string>>();
@@ -125,8 +125,8 @@ function addImporterDescriptors(lock: Record<string, unknown>, out: LockedPackag
         const same = out.filter((p) => p.name === name && p.version === version && !p.direct);
         const full = `${name}@${d.version}`;
         const at = peersIndexOf(full);
-        const exact = same.filter((p) => keyOf.get(p) === (at === -1 ? full : full.slice(0, at)));
-        // An importer version whose key was deduped into another entry matches none exactly: every match takes it.
+        const exact = same.filter((p) => keyOf.get(p)?.has(at === -1 ? full : full.slice(0, at)));
+        // No key names the importer version (an alias or an odd shape): every match takes it, as before.
         for (const p of exact.length ? exact : same) {
           const set = sets.get(p) ?? new Set<string>();
           set.add(`${name}@${d.specifier}`);
@@ -144,7 +144,8 @@ export function parsePnpmLock(text: string): LockedPackage[] {
   if (!Number.isFinite(v)) throw new Error("pnpm-lock.yaml has no lockfileVersion");
   const seen = new Set<string>();
   const out: LockedPackage[] = [];
-  const keyOf = new Map<LockedPackage, string>();
+  const keyOf = new Map<LockedPackage, Set<string>>();
+  const byK = new Map<string, LockedPackage>();
   for (const d of importerLocals(lock as Record<string, unknown>)) {
     const k = `${d.name}@${d.version} ${d.source}`;
     if (seen.has(k)) continue;
@@ -173,7 +174,7 @@ export function parsePnpmLock(text: string): LockedPackage[] {
     const p: LockedPackage = { ...id };
     const bare = key.replace(/^\//, "");
     const peerAt = peersIndexOf(bare);
-    keyOf.set(p, peerAt === -1 ? bare : bare.slice(0, peerAt));
+    const stripped = peerAt === -1 ? bare : bare.slice(0, peerAt);
     // No tarball and no integrity: nothing says what the install fetches or checks. The gate holds it for a person.
     if (res.tarball === undefined && !res.integrity) p.unhashed = true;
     if (direct) p.direct = direct;
@@ -189,8 +190,15 @@ export function parsePnpmLock(text: string): LockedPackage[] {
     if (typeof res.tarball === "string") p.source = res.tarball;
     if (typeof res.integrity === "string") p.digest = res.integrity;
     const k = `${id.name}@${id.version} ${p.source ?? ""} ${p.digest ?? ""}`;
-    if (seen.has(k)) continue;
+    if (seen.has(k)) {
+      // A key deduped into an earlier entry still names it, so an importer on that key finds it.
+      const kept = byK.get(k);
+      if (kept) keyOf.get(kept)?.add(stripped);
+      continue;
+    }
     seen.add(k);
+    byK.set(k, p);
+    keyOf.set(p, new Set([stripped]));
     out.push(p);
   }
   addImporterDescriptors(lock as Record<string, unknown>, out, keyOf);

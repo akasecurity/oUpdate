@@ -195,6 +195,6 @@ snapshots:
   foo@1.0.0(patch_hash=abc): {}
   foo@1.0.0(patch_hash=def): {}
 `;
-  const got = parsePnpmLock(lock).map((p) => p.descriptors);
-  expect(got.filter((d) => d?.includes("foo@^1.0.0")).length).toBeGreaterThan(0);
+  const got = parsePnpmLock(lock).map((p) => [p.digest, p.descriptors]);
+  expect(got).toEqual([[SRI("A"), ["foo@^1.0.0"]], [SRI("B"), undefined]]);
 });
