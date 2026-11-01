@@ -3120,6 +3120,39 @@ function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
   }
 }
 
+const RUNNER_BUILTINS = new Set(["exec", "x", "dlx", "create", "init", "add", "remove", "rm", "install", "i", "link", "up", "upgrade", "update", "pm", "patch", "set", "config", "node", "workspace", "workspaces", "rebuild", "unplug"]);
+
+// A shorthand word that looks like a file path (`bun payload.js`, `yarn ./x`) runs that file,
+// not a script of the same name, so it is never resolved as a script.
+function pathLikeWord(w: string): boolean {
+  return w.includes("/") || /\.(?:js|cjs|mjs|ts|tsx|jsx)$/.test(w);
+}
+
+// `npx yarn run setup` and `corepack pnpm test` resolve to a script of this package.
+// Returns that script name, or undefined when the wrapped command is anything else.
+function wrappedScript(ctx: Ctx, argv: string[], i: number): string | undefined {
+  const inner = argv[i];
+  if (inner === undefined || inner.startsWith("-")) return undefined;
+  const runner = binName(inner);
+  if (runner !== "npm" && runner !== "yarn" && runner !== "pnpm" && runner !== "bun") return undefined;
+  let j = i + 1;
+  while (j < argv.length && BOOL_FLAGS.has(argv[j]!)) j++;
+  const sub = argv[j];
+  if (sub === undefined || sub.startsWith("-")) return undefined;
+  const has = (n: string | undefined): n is string => n !== undefined && !n.startsWith("-") && typeof ctx.raw[n] === "string";
+  if (RUN_SUB.has(sub) || sub === "run-script") {
+    let k = j + 1;
+    while (k < argv.length && BOOL_FLAGS.has(argv[k]!)) k++;
+    return has(argv[k]) ? argv[k] : undefined;
+  }
+  if (runner === "npm") {
+    if (sub === "test" || sub === "t" || sub === "tst") return has("test") ? "test" : undefined;
+    return (sub === "start" || sub === "stop") && has(sub) ? sub : undefined;
+  }
+  if (RUNNER_BUILTINS.has(sub) || pathLikeWord(sub)) return undefined;
+  return has(sub) ? sub : undefined;
+}
+
 function dispatch(ctx: Ctx, cmd: string): void {
   if (ctx.hold) return;
   const argv = words(cmd);
@@ -3183,7 +3216,12 @@ function dispatch(ctx: Ctx, cmd: string): void {
   }
   if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
     const sub = readWord(ctx, argv, i);
-    if (!sub || sub.word !== "run") {
+    // `yarn setup` and `pnpm test` run the script of that name when one exists.
+    if (sub?.word && sub.word !== "run" && sub.word !== "run-script" && !pathLikeWord(sub.word) && typeof ctx.raw[sub.word] === "string") {
+      runScript(ctx, sub.word, false);
+      return;
+    }
+    if (!sub || (sub.word !== "run" && sub.word !== "run-script")) {
       if (!ctx.hold) fail(ctx, "unresolved: runner");
       return;
     }
@@ -3198,6 +3236,15 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (bin === "run-s" || bin === "run-p" || bin === "npm-run-all") {
     dispatchRuns(ctx, argv, i);
     return;
+  }
+  if (bin === "npx" || bin === "corepack") {
+    // Only a wrapped runner that names a script of this package re-dispatches to it.
+    // Every other form keeps the unknown-runner reach below.
+    const named = wrappedScript(ctx, argv, i);
+    if (named !== undefined) {
+      runScript(ctx, named, false);
+      return;
+    }
   }
   if (bin === "prebuild-install" || bin === "node-pre-gyp") {
     ctx.reachGyp = true;

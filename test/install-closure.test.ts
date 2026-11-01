@@ -45,9 +45,6 @@ describe("install closure", () => {
 
   test("an unresolved command does not hold when the closed bytes match", () => {
     const quiet: object[] = [
-      { postinstall: "yarn setup", setup: "node assets/x.bmp" },
-      { postinstall: "pnpm setup2", setup2: "node assets/x.bmp" },
-      { postinstall: "bun setup2", setup2: "node assets/x.bmp" },
       { postinstall: "sh -c 'npm run setup'", setup: "node assets/x.bmp" },
       { postinstall: "(npm run setup)", setup: "node assets/x.bmp" },
       { postinstall: "npm exec -- run-s setup", setup: "node assets/x.bmp" },
@@ -64,6 +61,9 @@ describe("install closure", () => {
       { postinstall: "cross-env A=1 npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "env npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "npx run-s setup", setup: "node assets/x.bmp" },
+      { postinstall: "yarn setup", setup: "node assets/x.bmp" },
+      { postinstall: "pnpm setup2", setup2: "node assets/x.bmp" },
+      { postinstall: "bun setup2", setup2: "node assets/x.bmp" },
     ];
     for (const scripts of widened) {
       const [oldF, newF] = same(scripts);

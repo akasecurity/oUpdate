@@ -295,7 +295,7 @@ const BOOL_FLAGS = new Set([
   "--prefer-offline", "--offline", "--recursive", "-r",
 ]);
 const NPM_RUN = new Set(["run", "run-script", "rum", "urn"]);
-const NPM_LIFE = new Set(["test", "start", "stop", "restart"]);
+const NPM_LIFE = new Set(["test", "t", "tst", "start", "stop", "restart"]);
 
 function flagName(token: string): string {
   const eq = token.indexOf("=");
@@ -335,7 +335,7 @@ function referencedScripts(argv: string[], scripts: Record<string, unknown>): st
     i = skipFlags(argv, i, subs);
     if (i < 0) return [];
     const sub = argv[i];
-    if (sub && NPM_LIFE.has(sub)) return [sub];
+    if (sub && NPM_LIFE.has(sub)) return [sub === "t" || sub === "tst" ? "test" : sub];
     if (!sub || !NPM_RUN.has(sub)) return [];
     i++;
     i = skipFlags(argv, i, null);
@@ -344,10 +344,17 @@ function referencedScripts(argv: string[], scripts: Record<string, unknown>): st
     if (name && !name.startsWith("-")) names.push(name);
     return names;
   }
+  if (bin === "npx" || bin === "corepack") {
+    i = skipFlags(argv, i + 1, null);
+    return i < 0 ? [] : referencedScripts(argv.slice(i), scripts);
+  }
   if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
     i++;
-    i = skipFlags(argv, i, new Set(["run"]));
-    if (i < 0 || argv[i] !== "run") return [];
+    // `yarn setup` and `pnpm test` run the script of that name when one exists.
+    i = skipFlags(argv, i, new Set(["run", "run-script", ...Object.keys(scripts)]));
+    if (i < 0) return [];
+    const sub = argv[i];
+    if (sub !== "run" && sub !== "run-script") return sub && !sub.startsWith("-") && typeof scripts[sub] === "string" ? [sub] : [];
     i++;
     i = skipFlags(argv, i, null);
     if (i < 0) return [];
@@ -591,6 +598,15 @@ function reachedFiles(files: FileMap, view: ReturnType<typeof installView>): Set
   if (view.gyp) found.add(view.gyp);
   for (const k of mentionFiles(files, view.scripts)) found.add(k);
   return found;
+}
+
+function configStamp(files: FileMap, manifest: string): string {
+  try {
+    const pj = JSON.parse(dec.decode(files.get(manifest))) as { config?: unknown };
+    return JSON.stringify(pj?.config ?? null);
+  } catch {
+    return "";
+  }
 }
 
 function bundledStamp(files: FileMap): string {
@@ -921,6 +937,10 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
     const b = newFiles.get(k);
     if (!a || !b || !bytesEqual(a, b)) push(`file ${k}`);
   }
+  // npm exposes the `config` block to every install hook as `npm_package_config_*`. A hook can
+  // read it in forms no text test resolves (a computed name, a shell default), so any change
+  // to the block holds whenever the package has an install hook at all.
+  if ((oldV.hook || newV.hook) && configStamp(oldFiles, oldV.manifest) !== configStamp(newFiles, newV.manifest)) push("config");
   if (bundledStamp(oldFiles) !== bundledStamp(newFiles)) push("bundled");
   for (const k of new Set([...outsideKeys(oldFiles), ...outsideKeys(newFiles)])) {
     const a = oldFiles.get(k);
