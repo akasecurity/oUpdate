@@ -115,3 +115,20 @@ test("each entry records the ranges its dependents ask for, nested copies includ
   const got = Object.fromEntries(parseBunLock(lock).map((p) => [`${p.name}@${p.version}`, p.descriptors]));
   expect(got).toEqual({ "a@1.2.0": ["a@^1.0.0"], "b@1.0.0": ["b@^1"], "@s/d@2.0.1": ["@s/d@~2.0.0"], "b@2.0.0": ["b@^2"] });
 });
+
+test("a workspace's dependencies resolve from the workspace's own nested copy before the root", () => {
+  const h = "sha512-" + Buffer.alloc(64, 1).toString("base64");
+  const lock = `{
+    "lockfileVersion": 1,
+    "workspaces": {
+      "": { "name": "r", "dependencies": { "dep": "^1.0.0" } },
+      "packages/a": { "name": "@x/a", "dependencies": { "dep": "^2.0.0" } },
+    },
+    "packages": {
+      "dep": ["dep@1.0.0", "", {}, "${h}"],
+      "@x/a/dep": ["dep@2.0.0", "", {}, "${h}"],
+    }
+  }`;
+  const got = Object.fromEntries(parseBunLock(lock).map((p) => [`${p.name}@${p.version}`, p.descriptors]));
+  expect(got).toEqual({ "dep@1.0.0": ["dep@^1.0.0"], "dep@2.0.0": ["dep@^2.0.0"] });
+});
