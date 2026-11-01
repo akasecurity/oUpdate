@@ -170,7 +170,9 @@ export function parsePnpmLock(text: string): LockedPackage[] {
       else registry = npmPrivateRegistry(res.tarball);
     }
     const p: LockedPackage = { ...id };
-    keyOf.set(p, key.replace(/^\//, ""));
+    const bare = key.replace(/^\//, "");
+    const peerAt = peersIndexOf(bare);
+    keyOf.set(p, peerAt === -1 ? bare : bare.slice(0, peerAt));
     // No tarball and no integrity: nothing says what the install fetches or checks. The gate holds it for a person.
     if (res.tarball === undefined && !res.integrity) p.unhashed = true;
     if (direct) p.direct = direct;

@@ -156,3 +156,21 @@ snapshots:
   const got = parsePnpmLock(lock).map((p) => [p.digest, p.descriptors]);
   expect(got).toEqual([[SRI("A"), undefined], [SRI("B"), ["foo@^1.0.0"]]]);
 });
+
+test("v6 patched package with peers keeps its descriptor on the patched entry", () => {
+  const lock = `lockfileVersion: '6.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: 1.0.0(patch_hash=abc)(react@18.0.0)
+packages:
+  /foo@1.0.0(react@18.0.0):
+    resolution: {integrity: ${SRI("A")}}
+  /foo@1.0.0(patch_hash=abc)(react@18.0.0):
+    resolution: {integrity: ${SRI("B")}}
+`;
+  const got = parsePnpmLock(lock).map((p) => [p.digest, p.descriptors]);
+  expect(got).toEqual([[SRI("A"), undefined], [SRI("B"), ["foo@^1.0.0"]]]);
+});
