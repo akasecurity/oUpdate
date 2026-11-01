@@ -84,3 +84,10 @@ test("one range resolved to two versions by different workspaces is not a change
   ];
   expect(diffLocks(a, a)).toEqual([]);
 });
+
+test("a range that loses one same-version origin to another is still a swap", () => {
+  const X = { name: "foo", version: "1.0.0", source: "https://registry.npmjs.org/foo/-/foo-1.0.0.tgz", digest: "sha512-AAA", descriptors: ["foo@^1.0.0"] };
+  const Y = { name: "foo", version: "1.0.0", source: "https://mirror.example/foo-1.0.0.tgz", digest: "sha512-BBB", descriptors: ["foo@^1.0.0"] };
+  expect(diffLocks([Y, X], [{ ...Y }]).length).toBe(1);
+  expect(diffLocks([Y, X], [{ ...Y }, { ...X }])).toEqual([]);
+});

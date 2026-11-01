@@ -57,13 +57,21 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
   // several when workspaces resolve it differently.
   const oldTarget = new Map<string, LockedPackage[]>();
   for (const o of oldPkgs) for (const d of o.descriptors ?? []) oldTarget.set(d, [...(oldTarget.get(d) ?? []), o]);
+  const newTargetFull = new Map<string, Set<string>>();
+  for (const n of newPkgs) for (const d of n.descriptors ?? []) newTargetFull.set(d, (newTargetFull.get(d) ?? new Set<string>()).add(full(n)));
   for (const p of newPkgs) {
     if (oldFull.has(full(p))) {
       // Same package, but a descriptor that used to resolve elsewhere now resolves here.
-      const d = (p.descriptors ?? []).find((x) => oldTarget.has(x) && !oldTarget.get(x)!.some((o) => full(o) === full(p)));
+      const d = (p.descriptors ?? []).find((x) => {
+        const olds = oldTarget.get(x);
+        if (!olds) return false;
+        if (!olds.some((o) => full(o) === full(p))) return true;
+        // The range also resolved to another origin of this same name@version that the new lock no longer gives it.
+        return olds.some((o) => key(o) === key(p) && full(o) !== full(p) && !newTargetFull.get(x)?.has(full(o)));
+      });
       if (d !== undefined) {
         const shown = (q: LockedPackage) => `${mask(d)} -> ${key(q)} ${where(q)}`.trimEnd();
-        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: shown(oldTarget.get(d)![0]!), to: shown(p) } });
+        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: shown(oldTarget.get(d)!.find((o) => full(o) !== full(p)) ?? oldTarget.get(d)![0]!), to: shown(p) } });
       }
       continue;
     }
