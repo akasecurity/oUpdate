@@ -609,14 +609,6 @@ function configStamp(files: FileMap, manifest: string): string {
   }
 }
 
-function readsPackageConfig(files: FileMap, view: ReturnType<typeof installView>): boolean {
-  if (Object.values(view.scripts).some((body) => body.includes("npm_package_config"))) return true;
-  return [...reachedFiles(files, view)].some((k) => {
-    const bytes = files.get(k);
-    return bytes !== undefined && dec.decode(bytes).includes("npm_package_config");
-  });
-}
-
 function bundledStamp(files: FileMap): string {
   const lines: string[] = [];
   for (const key of [...files.keys()].sort()) {
@@ -945,9 +937,10 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
     const b = newFiles.get(k);
     if (!a || !b || !bytesEqual(a, b)) push(`file ${k}`);
   }
-  // A hook that reads `npm_package_config_*` in any form sees a changed `config` block,
-  // including forms the closure does not resolve (a shell default, a computed name).
-  if (configStamp(oldFiles, oldV.manifest) !== configStamp(newFiles, newV.manifest) && (readsPackageConfig(oldFiles, oldV) || readsPackageConfig(newFiles, newV))) push("config");
+  // npm exposes the `config` block to every install hook as `npm_package_config_*`. A hook can
+  // read it in forms no text test resolves (a computed name, a shell default), so any change
+  // to the block holds whenever the package has an install hook at all.
+  if ((oldV.hook || newV.hook) && configStamp(oldFiles, oldV.manifest) !== configStamp(newFiles, newV.manifest)) push("config");
   if (bundledStamp(oldFiles) !== bundledStamp(newFiles)) push("bundled");
   for (const k of new Set([...outsideKeys(oldFiles), ...outsideKeys(newFiles)])) {
     const a = oldFiles.get(k);

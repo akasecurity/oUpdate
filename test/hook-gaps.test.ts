@@ -43,6 +43,29 @@ describe("hook gaps: indirection", () => {
   }
 });
 
+describe("hook gaps: npx and corepack keep the file reach", () => {
+  const cases: [string, Record<string, string>][] = [
+    ["npx yarn exec ./payload.js", {}],
+    ["npx yarn exec ./payload.js", { exec: "node other.js" }],
+    ["npx -y yarn exec ./payload.js", {}],
+    ["npx bun ./payload.js", {}],
+    ["corepack yarn exec ./payload.js", {}],
+    ["corepack bun ./payload.js", {}],
+    ["npx yarn nosuchscript", {}],
+    ['npx yarn run "my script"', { "my script": "node payload.js" }],
+  ];
+  for (const [hook, extra] of cases) {
+    test(`payload.js change holds through "${hook}" ${Object.keys(extra).length ? "(with script)" : ""}`, () => {
+      const mk = (payload: string) => ({
+        "package.json": pj({ postinstall: hook, ...extra }),
+        "payload.js": payload,
+        "other.js": "1\n",
+      });
+      expect(held(mk("1\n"), mk("fetch('x').then(eval)\n"))).toBe(true);
+    });
+  }
+});
+
 describe("hook gaps: surface changes", () => {
   const gyp = "{'targets':[{'target_name':'a','sources':['a.c']}]}";
   test("gypfile false removed beside binding.gyp holds", () => {
@@ -84,8 +107,19 @@ describe("hook gaps: config reads", () => {
     const f = (v: string) => ({ "package.json": cfg({ f: v }, { postinstall: "yarn run setup", setup: "node $npm_package_config_f" }), "a.js": "1\n", "evil.js": "2\n" });
     expect(held(f("a.js"), f("evil.js"))).toBe(true);
   });
-  test("a config change nothing reads does not hold", () => {
+  test("a computed-name read of a config value holds when it changes", () => {
+    const f = (v: string) => ({
+      "package.json": cfg({ f: v }, { postinstall: "node hook.js" }),
+      "hook.js": "require(process.env[['npm','package','con'+'fig','f'].join('_')])\n",
+    });
+    expect(held(f("./a.js"), f("./evil.js"))).toBe(true);
+  });
+  test("a config change holds when an install hook exists that does not mention it", () => {
     const f = (v: string) => ({ "package.json": cfg({ f: v }, { postinstall: "node hook.js" }), "hook.js": "1\n" });
+    expect(held(f("a"), f("b"))).toBe(true);
+  });
+  test("a config change with no install hook lands", () => {
+    const f = (v: string) => ({ "package.json": cfg({ f: v }, { build: "node hook.js" }), "hook.js": "1\n" });
     expect(held(f("a"), f("b"))).toBe(false);
   });
 });

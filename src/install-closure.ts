@@ -3120,6 +3120,33 @@ function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
   }
 }
 
+const RUNNER_BUILTINS = new Set(["exec", "x", "dlx", "create", "init", "add", "remove", "rm", "install", "i", "link", "up", "upgrade", "update", "pm", "patch", "set", "config"]);
+
+// `npx yarn run setup` and `corepack pnpm test` resolve to a script of this package.
+// Returns that script name, or undefined when the wrapped command is anything else.
+function wrappedScript(ctx: Ctx, argv: string[], i: number): string | undefined {
+  const inner = argv[i];
+  if (inner === undefined || inner.startsWith("-")) return undefined;
+  const runner = binName(inner);
+  if (runner !== "npm" && runner !== "yarn" && runner !== "pnpm" && runner !== "bun") return undefined;
+  let j = i + 1;
+  while (j < argv.length && BOOL_FLAGS.has(argv[j]!)) j++;
+  const sub = argv[j];
+  if (sub === undefined || sub.startsWith("-")) return undefined;
+  const has = (n: string | undefined): n is string => n !== undefined && !n.startsWith("-") && typeof ctx.raw[n] === "string";
+  if (RUN_SUB.has(sub) || sub === "run-script") {
+    let k = j + 1;
+    while (k < argv.length && BOOL_FLAGS.has(argv[k]!)) k++;
+    return has(argv[k]) ? argv[k] : undefined;
+  }
+  if (runner === "npm") {
+    if (sub === "test" || sub === "t" || sub === "tst") return has("test") ? "test" : undefined;
+    return (sub === "start" || sub === "stop") && has(sub) ? sub : undefined;
+  }
+  if (RUNNER_BUILTINS.has(sub)) return undefined;
+  return has(sub) ? sub : undefined;
+}
+
 function dispatch(ctx: Ctx, cmd: string): void {
   if (ctx.hold) return;
   const argv = words(cmd);
@@ -3204,9 +3231,14 @@ function dispatch(ctx: Ctx, cmd: string): void {
     dispatchRuns(ctx, argv, i);
     return;
   }
-  if ((bin === "npx" || bin === "corepack") && argv[i] !== undefined && !argv[i]!.startsWith("-") && ["npm", "yarn", "pnpm", "bun", "run-s", "run-p", "npm-run-all"].includes(binName(argv[i]!))) {
-    dispatch(ctx, argv.slice(i).join(" "));
-    return;
+  if (bin === "npx" || bin === "corepack") {
+    // Only a wrapped runner that names a script of this package re-dispatches to it.
+    // Every other form keeps the unknown-runner reach below.
+    const named = wrappedScript(ctx, argv, i);
+    if (named !== undefined) {
+      runScript(ctx, named, false);
+      return;
+    }
   }
   if (bin === "prebuild-install" || bin === "node-pre-gyp") {
     ctx.reachGyp = true;
