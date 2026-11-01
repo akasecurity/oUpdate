@@ -17,7 +17,44 @@ export interface InstallView {
   binStamp: string;
 }
 
+const LIFECYCLE = ["preinstall", "install", "postinstall"] as const;
+
+/** True when the tarball has an install-time entry point besides the root pre/install/postinstall scripts: a root binding.gyp or `gypfile: true` (an implicit node-gyp rebuild; yarn runs it even with `gypfile: false`), or anything under node_modules (bundled dependencies run their lifecycle scripts) with a lifecycle script or a binding.gyp. Any of them can run `npm run prepare` through indirection. */
+export function otherInstallEntry(files: FileMap, manifest: string): boolean {
+  const dir = manifest.includes("/") ? manifest.slice(0, manifest.lastIndexOf("/") + 1) : "";
+  const nested = `${dir}node_modules/`;
+  for (const [k, bytes] of files) {
+    if (!k.startsWith(dir)) continue;
+    const rel = k.slice(dir.length);
+    const base = rel.slice(rel.lastIndexOf("/") + 1).toLowerCase();
+    if (base === "binding.gyp" && (!rel.includes("/") || k.startsWith(nested))) return true;
+    if (base === "package.json" && k.startsWith(nested)) {
+      try {
+        const v = JSON.parse(new TextDecoder("utf-8", { fatal: false }).decode(bytes)) as { scripts?: unknown; gypfile?: unknown };
+        const sc = v && typeof v.scripts === "object" && v.scripts ? (v.scripts as Record<string, unknown>) : {};
+        if (v?.gypfile === true || LIFECYCLE.some((n) => typeof sc[n] === "string" && (sc[n] as string).trim().length > 0)) return true;
+      } catch {
+        return true;
+      }
+    } else if (base === "package.json" && !rel.includes("/")) {
+      try {
+        const v = JSON.parse(new TextDecoder("utf-8", { fatal: false }).decode(bytes)) as { gypfile?: unknown };
+        if (v?.gypfile === true) return true;
+      } catch {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 const INSTALL = ["preinstall", "install", "postinstall", "prepare"] as const;
+
+/** npm, pnpm, yarn and bun do not run `prepare` when they install a registry tarball (only for git and local dependencies, and at the root), so a change to it alone is no install-time signal. That holds only when nothing else can start it: any non-empty preinstall, install or postinstall keeps `prepare` a signal, because the script or a file it runs can call `npm run prepare` (or preprepare/postprepare) through indirection no static read resolves (a file that shells out, an escaped name, `$(...)`, eval). The files it names are still read by the reviewer. */
+export function prepareInert(scripts: Record<string, unknown>, otherEntry = false): boolean {
+  if (otherEntry) return false;
+  return !LIFECYCLE.some((k) => typeof scripts[k] === "string" && (scripts[k] as string).trim().length > 0);
+}
 const PRIMARY_EXT = [".js", ".json", ".node", ".cjs", ".mjs", ".jsx", ".tsx", ".cts", ".mts", ".ts"];
 const BOOL_FLAGS = new Set(["--silent", "--quiet", "-s", "-q", "--if-present"]);
 const VALUE_FLAGS = new Set(["--loglevel", "--prefix", "-C", "--userconfig", "--max-parallel", "--jobs", "-j"]);
@@ -3556,11 +3593,12 @@ export function installView(files: FileMap): InstallView {
       return done();
     }
   }
-  for (const name of INSTALL) {
+  const ran = prepareInert(ctx.raw, otherInstallEntry(files, manifest)) ? INSTALL.filter((name) => name !== "prepare") : INSTALL;
+  for (const name of ran) {
     const raw = ctx.raw[name];
     if (typeof raw === "string") ctx.scripts[name] = raw;
   }
-  for (const name of INSTALL) {
+  for (const name of ran) {
     const raw = ctx.raw[name];
     if (typeof raw === "string" && raw.length > 0) runScript(ctx, name, false);
   }
