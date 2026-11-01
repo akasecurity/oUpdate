@@ -355,6 +355,16 @@ describe("runGate", () => {
     expect((await runGate({ forge: npm, repo: "o/r", review: async () => { throw new Error("not called"); } }))[0]!.state).toBe("failure");
   });
 
+  test("a direct git dependency with credentials in its URL is held without printing them", async () => {
+    const BUN = (spec: string) => `{"lockfileVersion":1,"packages":{"foo":["foo@${spec}",{}]}}`;
+    const forge = memForge({ "b:bun.lock": BUN("git+https://example.test/foo.git#a"), "h1:bun.lock": BUN("git+https://dave:tok2@example.test/foo.git#b") }, { h3: "failure" });
+    const out = await runGate({ forge, repo: "o/r", review: async () => { throw new Error("not called"); } });
+    expect(out[0]!.state).toBe("failure");
+    expect(forge.comments[1]).toContain("not from a registry (git ");
+    expect(forge.comments[1]).not.toContain("tok2");
+    expect(forge.comments[1]).not.toContain("dave:");
+  });
+
   // Adversarial read 0.2.3 final (Codex 1): a bump whose resolved and sha1 integrity named another package's tarball
   // was reviewed as public ms@2.1.3 and passed, while the install fetched the other tarball.
   test("an npm bump whose resolved is not the registry's tarball for that version fails the PR unreviewed", async () => {

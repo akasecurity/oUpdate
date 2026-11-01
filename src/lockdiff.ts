@@ -95,5 +95,6 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
     if (p.direct) Object.assign(c, { direct: p.direct, source: p.source });
     out.push(c);
   }
-  return out;
+  // A direct dependency's version is its source URL: nothing leaves here with credentials in it.
+  return out.map((c) => ({ ...c, ...(c.from === null ? {} : { from: mask(c.from) }), to: mask(c.to), ...(c.source === undefined ? {} : { source: mask(c.source) }) }));
 }
