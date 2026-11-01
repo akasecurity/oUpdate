@@ -3153,6 +3153,14 @@ function wrappedScript(ctx: Ctx, argv: string[], i: number): string | undefined 
   return has(sub) ? sub : undefined;
 }
 
+// The command word of a package runner is a local file only when it is written as one:
+// `./x.js`, `../x.js` or `/abs/x.js`. A bare name (`evil.js`) is a package to npx, and a leading
+// flag (whose value could be path-like), a scoped name, a `host:path` spec or a URL widens too.
+function localEntry(w: string): boolean {
+  if (w.startsWith("./") || w.startsWith("../") || w.startsWith("/")) return true;
+  return false;
+}
+
 function dispatch(ctx: Ctx, cmd: string): void {
   if (ctx.hold) return;
   const argv = words(cmd);
@@ -3217,13 +3225,18 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
     // `pnpm --filter <pkg> <script>` runs a script of another workspace package. That package's
     // scripts are not modeled here, so the whole package surface is reached.
-    if (bin === "pnpm" && /^(?:-F.*|--filter(?:=.*)?)$/.test(argv[i] ?? "")) {
-      widenAll(ctx);
-      return;
+    if (bin === "pnpm") {
+      // Every argument before a bare `--` is checked: a flag value such as `-C sub` must not hide a later filter.
+      for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
+        if (/^(?:-F.*|--filter(?:=.*)?)$/.test(argv[j]!)) {
+          widenAll(ctx);
+          return;
+        }
+      }
     }
     const sub = readWord(ctx, argv, i);
     // `yarn setup` and `pnpm test` run the script of that name when one exists.
-    if (sub?.word && sub.word !== "run" && sub.word !== "run-script" && !pathLikeWord(sub.word) && typeof ctx.raw[sub.word] === "string") {
+    if (sub?.word && sub.word !== "run" && sub.word !== "run-script" && !pathLikeWord(sub.word) && !RUNNER_BUILTINS.has(sub.word) && typeof ctx.raw[sub.word] === "string") {
       runScript(ctx, sub.word, false);
       return;
     }
@@ -3241,6 +3254,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
     const name = readWord(ctx, argv, sub.i + 1);
     if (!name || !name.word) {
       if (!ctx.hold) fail(ctx, "unresolved: script");
+      return;
+    }
+    // `bun run ./x.ts` runs that file unless a script of exactly that name exists, which wins.
+    if (bin === "bun" && pathLikeWord(name.word) && typeof ctx.raw[name.word] !== "string") {
+      closeUnknownRunner(ctx, argv, name.i);
       return;
     }
     runScript(ctx, name.word, false);
@@ -3279,6 +3297,10 @@ function dispatch(ctx: Ctx, cmd: string): void {
   // prebuild-install and node-pre-gyp already returned. They download; they do not widen.
   // node already returned and keeps named files plus the require walk.
   closeUnknownRunner(ctx, argv, i);
+  // A package runner fetches or resolves a package, so a local file named among its
+  // arguments does not make the run resolved, as with dlx.
+  // `-p`/`--package` fetches a package onto PATH for the named file, so it always widens.
+  if ((bin === "bunx" || bin === "npx") && (argv.slice(i).some((a) => a === "-p" || a === "--package" || a.startsWith("--package=") || (a.startsWith("-p") && !a.startsWith("--") && a.length > 2)) || !localEntry(argv[i] ?? ""))) widenAll(ctx);
   fail(ctx, `unresolved: runner ${bin}`);
 }
 

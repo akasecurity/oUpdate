@@ -45,6 +45,40 @@ describe("unresolved package-manager runners hold", () => {
     }
   });
 
+  test("bun run <file> follows the file instead of looking up a script", () => {
+    expect(hardFor({ postinstall: "bun run ./assets/x.js" }).length).toBeGreaterThan(0);
+    expect(hardFor({ postinstall: "bun run ./assets/other.js" })).toEqual([]);
+    expect(hardFor({ postinstall: "bun run missing.ts" }).length).toBeGreaterThan(0);
+    // a script named exactly like the path wins and is followed
+    expect(hardFor({ postinstall: "bun run build.js", "build.js": "node assets/x.js" }).length).toBeGreaterThan(0);
+  });
+
+  test("pnpm --filter after other leading flags widens", () => {
+    for (const cmd of ["pnpm -r --filter other build", "pnpm --recursive -F other build", "pnpm -r --filter=other build", "pnpm --silent -Fother build", "pnpm -C sub --filter other build", "pnpm --dir sub -F other build", "pnpm --workspace-concurrency 1 --filter x build"]) {
+      expect(hardFor({ postinstall: cmd }).length, cmd).toBeGreaterThan(0);
+    }
+  });
+
+  test("a package runner with a local file argument still holds", () => {
+    for (const cmd of ["bunx some-pkg ./assets/other.js", "npx some-pkg ./assets/other.js", "npx -y some-pkg ./assets/other.js", "npx --package=pkg ./assets/other.js", "npx -p pkg ./assets/other.js", "bunx --package pkg ./assets/other.js", "bun x some-pkg ./assets/other.js", "npx @scope/pkg ./assets/other.js", "npx github:user/repo ./assets/other.js", "npx user/repo ./assets/other.js", "npx https://example.com/pkg.tgz ./assets/other.js", "npx --cache ./cache some-pkg ./assets/other.js", "npx --userconfig ./npmrc some-pkg ./assets/other.js", "npx evil.js ./assets/other.js", "bunx evil.js ./assets/other.js"]) {
+      expect(hardFor({ postinstall: cmd }).length, cmd).toBeGreaterThan(0);
+    }
+  });
+
+  test("a script named like a builtin does not shadow the builtin", () => {
+    // dlx and bun x fetch remote code and widen even when a same-named script exists.
+    for (const cmd of ["yarn dlx some-pkg", "pnpm dlx some-pkg", "bun x some-pkg"]) {
+      const name = cmd.split(" ")[1]!;
+      expect(hardFor({ postinstall: cmd, [name]: "node assets/other.js" }).length, cmd).toBeGreaterThan(0);
+    }
+    // exec names a file that resolves, so the same-named script must not run in its place.
+    for (const bin of ["yarn", "pnpm"]) {
+      expect(hardFor({ postinstall: `${bin} exec tool ./assets/other.js`, exec: "node assets/x.js" }), bin).toEqual([]);
+    }
+    // run <name> still runs the script of that name.
+    expect(hardFor({ postinstall: "yarn run dlx", dlx: "node assets/x.js" }).length).toBeGreaterThan(0);
+  });
+
   test("an unchanged tree stays quiet", () => {
     const p = pj({ postinstall: "yarn dlx some-pkg" });
     const f = { "package.json": p, [A]: "1" };
