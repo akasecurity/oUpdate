@@ -99,3 +99,19 @@ describe("parseBunLock", () => {
     expect(JSON.stringify(d)).not.toMatch(/tok2|dave/);
   });
 });
+
+test("each entry records the ranges its dependents ask for, nested copies included", () => {
+  const h = "sha512-" + Buffer.alloc(64, 1).toString("base64");
+  const lock = `{
+    "lockfileVersion": 1,
+    "workspaces": { "": { "name": "r", "dependencies": { "a": "^1.0.0" }, "devDependencies": { "@s/d": "~2.0.0" } } },
+    "packages": {
+      "a": ["a@1.2.0", "", { "dependencies": { "b": "^1" } }, "${h}"],
+      "b": ["b@1.0.0", "", {}, "${h}"],
+      "@s/d": ["@s/d@2.0.1", "", { "dependencies": { "b": "^2" } }, "${h}"],
+      "@s/d/b": ["b@2.0.0", "", {}, "${h}"],
+    }
+  }`;
+  const got = Object.fromEntries(parseBunLock(lock).map((p) => [`${p.name}@${p.version}`, p.descriptors]));
+  expect(got).toEqual({ "a@1.2.0": ["a@^1.0.0"], "b@1.0.0": ["b@^1"], "@s/d@2.0.1": ["@s/d@~2.0.0"], "b@2.0.0": ["b@^2"] });
+});

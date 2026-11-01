@@ -105,6 +105,33 @@ function importerLocals(lock: Record<string, unknown>): LockedPackage[] {
   return out;
 }
 
+/**
+ * pnpm records a range only where a project asks for it: an importer's `{ specifier, version }`. Those specifiers become
+ * `name@specifier` descriptors on the registry entry with that name and version (peer suffix stripped); a transitive
+ * dependency's range is not in the lockfile, so those entries carry none. v5 wrote the version alone: no descriptors.
+ */
+function addImporterDescriptors(lock: Record<string, unknown>, out: LockedPackage[]): void {
+  const rec = (o: unknown) => (o && typeof o === "object" ? (o as Record<string, unknown>) : {});
+  const importers = lock.importers === undefined ? { ".": lock } : rec(lock.importers);
+  const sets = new Map<LockedPackage, Set<string>>();
+  for (const imp of Object.values(importers)) {
+    for (const field of IMPORTER_FIELDS) {
+      for (const [name, dep] of Object.entries(rec(rec(imp)[field]))) {
+        const d = rec(dep);
+        if (typeof d.specifier !== "string" || typeof d.version !== "string") continue;
+        const version = d.version.replace(/\(.*$/, "");
+        for (const p of out) {
+          if (p.name !== name || p.version !== version || p.direct) continue;
+          const set = sets.get(p) ?? new Set<string>();
+          set.add(`${name}@${d.specifier}`);
+          sets.set(p, set);
+        }
+      }
+    }
+  }
+  for (const [p, set] of sets) p.descriptors = [...set].sort();
+}
+
 export function parsePnpmLock(text: string): LockedPackage[] {
   const lock = Bun.YAML.parse(text) as { lockfileVersion?: string | number; packages?: Record<string, Entry>; snapshots?: unknown };
   const v = Number.parseFloat(String(lock.lockfileVersion ?? ""));
@@ -156,5 +183,6 @@ export function parsePnpmLock(text: string): LockedPackage[] {
     seen.add(k);
     out.push(p);
   }
+  addImporterDescriptors(lock as Record<string, unknown>, out);
   return out;
 }

@@ -17,9 +17,45 @@ interface Entry {
   integrity?: string;
   link?: boolean;
   inBundle?: boolean;
+  dependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
 }
 
 const NM = "node_modules/";
+
+/** The node_modules key a dependency of the package at `key` resolves to: its own folder, then each parent's, up to the top. */
+function resolveDep(packages: Record<string, Entry>, key: string, dep: string): string | undefined {
+  let base = key;
+  for (;;) {
+    const cand = `${base ? `${base}/` : ""}${NM}${dep}`;
+    if (Object.hasOwn(packages, cand)) return cand;
+    if (!base) return undefined;
+    const at = base.lastIndexOf(NM);
+    base = at > 0 ? base.slice(0, at - 1) : "";
+  }
+}
+
+/** Every `name@range` a dependent asks for lands on the entry it resolves to (the same range from two dependents once). */
+function addDescriptors(packages: Record<string, Entry>, byKey: Map<string, LockedPackage>): void {
+  const sets = new Map<LockedPackage, Set<string>>();
+  for (const [key, e] of Object.entries(packages)) {
+    // Dev dependencies are installed for the root and for workspace folders only (no node_modules in the path).
+    const fields = key === "" || !key.includes(NM) ? [e.dependencies, e.optionalDependencies, e.peerDependencies, e.devDependencies] : [e.dependencies, e.optionalDependencies, e.peerDependencies];
+    for (const deps of fields) {
+      if (!deps || typeof deps !== "object") continue;
+      for (const [name, range] of Object.entries(deps)) {
+        const target = typeof range === "string" ? byKey.get(resolveDep(packages, key, name) ?? "") : undefined;
+        if (!target) continue;
+        const set = sets.get(target) ?? new Set<string>();
+        set.add(`${name}@${range}`);
+        sets.set(target, set);
+      }
+    }
+  }
+  for (const [p, set] of sets) p.descriptors = [...set].sort();
+}
 
 export function parseNpmLock(text: string): LockedPackage[] {
   const lock = JSON.parse(text) as { lockfileVersion?: number; packages?: Record<string, Entry> };
@@ -28,6 +64,8 @@ export function parseNpmLock(text: string): LockedPackage[] {
   }
   const seen = new Set<string>();
   const out: LockedPackage[] = [];
+  const byKey = new Map<string, LockedPackage>(); // lockfile key -> its entry, for the descriptors dependents record
+  const byDedup = new Map<string, LockedPackage>();
   for (const [key, e] of Object.entries(lock.packages)) {
     const at = key.lastIndexOf(NM);
     // Only a bundled copy is skipped: it ships inside its parent's tarball, which is reviewed. That is an inBundle
@@ -43,8 +81,13 @@ export function parseNpmLock(text: string): LockedPackage[] {
       const name = e.name ?? (at < 0 ? key : key.slice(at + NM.length));
       const version = at < 0 && typeof e.version === "string" ? e.version : source;
       const k = `${name}@${version} ${source}`;
-      if (!seen.has(k)) out.push({ name, version, source, direct: "file" });
+      if (!seen.has(k)) {
+        const p: LockedPackage = { name, version, source, direct: "file" };
+        out.push(p);
+        byDedup.set(k, p);
+      }
       seen.add(k);
+      byKey.set(key, byDedup.get(k)!);
       continue;
     }
     const name = e.name ?? key.slice(at + NM.length);
@@ -75,9 +118,15 @@ export function parseNpmLock(text: string): LockedPackage[] {
     if (typeof e.integrity === "string") p.digest = e.integrity;
     // One entry per name@version and source: a nested copy of a kept version from elsewhere is its own entry.
     const k = `${name}@${e.version} ${p.source ?? ""} ${p.digest ?? ""}`;
-    if (seen.has(k)) continue;
+    if (seen.has(k)) {
+      byKey.set(key, byDedup.get(k)!);
+      continue;
+    }
     seen.add(k);
     out.push(p);
+    byDedup.set(k, p);
+    byKey.set(key, p);
   }
+  addDescriptors(lock.packages, byKey);
   return out;
 }

@@ -127,3 +127,20 @@ describe("lockfile names", () => {
     expect(parseLock("sub/npm-shrinkwrap.json", text).pkgs.length).toBe(1);
   });
 });
+
+test("each entry records the ranges its dependents ask for, resolved the way node does", () => {
+  const h = "sha512-" + Buffer.alloc(64, 1).toString("base64");
+  const reg = (n: string, v: string) => ({ version: v, resolved: `https://registry.npmjs.org/${n}/-/${n}-${v}.tgz`, integrity: h });
+  const lock = {
+    lockfileVersion: 3,
+    packages: {
+      "": { dependencies: { a: "^1.0.0" }, devDependencies: { d: "~2.0.0" } },
+      "node_modules/a": { ...reg("a", "1.2.0"), dependencies: { b: "^1" } },
+      "node_modules/b": reg("b", "1.0.0"),
+      "node_modules/d": { ...reg("d", "2.0.1"), dependencies: { b: "^2" } },
+      "node_modules/d/node_modules/b": reg("b", "2.0.0"),
+    },
+  };
+  const got = Object.fromEntries(parseNpmLock(JSON.stringify(lock)).map((p) => [`${p.name}@${p.version}`, p.descriptors]));
+  expect(got).toEqual({ "a@1.2.0": ["a@^1.0.0"], "b@1.0.0": ["b@^1"], "d@2.0.1": ["d@~2.0.0"], "b@2.0.0": ["b@^2"] });
+});

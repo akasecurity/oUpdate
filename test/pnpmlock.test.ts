@@ -112,3 +112,26 @@ describe("older pnpm lockfiles", () => {
     expect(parseLock("pnpm-lock.yaml", await fixture("pnpm-lock-v6.yaml")).eco).toBe("npm");
   });
 });
+
+test("importer specifiers become descriptors on the entry they resolve to, peer suffix stripped", () => {
+  const lock = `lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: 1.2.0(bar@2.0.0)
+packages:
+  foo@1.2.0:
+    resolution: {integrity: ${SRI("A")}}
+  bar@2.0.0:
+    resolution: {integrity: ${SRI("B")}}
+snapshots:
+  foo@1.2.0(bar@2.0.0):
+    dependencies:
+      bar: 2.0.0
+  bar@2.0.0: {}
+`;
+  const got = Object.fromEntries(parsePnpmLock(lock).map((p) => [`${p.name}@${p.version}`, p.descriptors]));
+  expect(got).toEqual({ "foo@1.2.0": ["foo@^1.0.0"], "bar@2.0.0": undefined });
+});
