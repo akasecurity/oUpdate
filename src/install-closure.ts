@@ -3153,6 +3153,14 @@ function wrappedScript(ctx: Ctx, argv: string[], i: number): string | undefined 
   return has(sub) ? sub : undefined;
 }
 
+// The command word of a package runner is a local file only when it is written as one:
+// `./x.js`, `../x.js`, `/abs/x.js`, or a bare script file name. A leading flag (whose value
+// could be path-like), a scoped name, a `host:path` spec or a URL is a package, so it widens.
+function localEntry(w: string): boolean {
+  if (w.startsWith("./") || w.startsWith("../") || w.startsWith("/")) return true;
+  return !w.includes("/") && !w.includes(":") && !w.startsWith("-") && !w.startsWith("@") && pathLikeWord(w);
+}
+
 function dispatch(ctx: Ctx, cmd: string): void {
   if (ctx.hold) return;
   const argv = words(cmd);
@@ -3292,7 +3300,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
   // A package runner fetches or resolves a package, so a local file named among its
   // arguments does not make the run resolved, as with dlx.
   // `-p`/`--package` fetches a package onto PATH for the named file, so it always widens.
-  if ((bin === "bunx" || bin === "npx") && (argv.slice(i).some((a) => a === "-p" || a === "--package" || a.startsWith("--package=") || (a.startsWith("-p") && !a.startsWith("--") && a.length > 2)) || !pathLikeWord(argv.slice(i).find((a) => !a.startsWith("-")) ?? ""))) widenAll(ctx);
+  if ((bin === "bunx" || bin === "npx") && (argv.slice(i).some((a) => a === "-p" || a === "--package" || a.startsWith("--package=") || (a.startsWith("-p") && !a.startsWith("--") && a.length > 2)) || !localEntry(argv[i] ?? ""))) widenAll(ctx);
   fail(ctx, `unresolved: runner ${bin}`);
 }
 
