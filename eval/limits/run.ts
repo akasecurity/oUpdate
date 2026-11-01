@@ -31,7 +31,7 @@ const GAP_IDS = new Set(GAP.map((c) => c.id));
 /** Clean cases (the control and the look-alikes the reviewer should let land): a hold here is a false hold. */
 export const CLEAN: Case[] = [...FC_CASES.filter((c) => c.expect === "land"), ...MORE_CLEAN, ...INSTALL_CLEAN];
 
-/** Releases held by policy are reported apart from false holds: an install script that downloads a binary (held with the reason in the hold text so the user can approve it), and the pre-pass install-script hard signal on package.json, which stops a release before the reviewer reads it. */
+/** Releases held by policy are reported apart from false holds: an install script that downloads a binary (held with the reason in the hold text so the user can approve it), and the pre-pass install-script hard signal on package.json, which holds the release; the reviewer still runs and its verdict is the one counted. */
 export const POLICY_HOLD = new Set(["lookalike-prebuilt-update", "clean-husky-prepare", "clean-funding-notice"]);
 
 const arg = (n: string) => { const i = process.argv.indexOf(`--${n}`); return i > 0 ? process.argv[i + 1] : undefined; };
@@ -93,7 +93,7 @@ for (const c of CASES.filter((x) => !arg("only") || arg("only")!.split(",").incl
   const heldOut = c.disclosed > cutoff;
   const prepass = (await held(c, "prepass")).stop;
   let k = 0;
-  const reads = { full: 0, priority: 0, signal: 0, ranked: 0 };
+  const reads = { full: 0, priority: 0, signal: 0, ranked: 0, none: 0 };
   const started = Date.now();
   for (let i = 0; i < repeats; i++) { const h = await held(c, "reviewer"); if (h.stop) k++; reads[h.scope]++; }
   const secPerReview = Math.round((Date.now() - started) / repeats / 100) / 10;
@@ -103,7 +103,7 @@ const cleanRows = [];
 for (const c of CLEAN.filter((x) => !arg("only") || arg("only")!.split(",").includes(x.id))) {
   const prepass = (await held(c, "prepass")).stop;
   let k = 0;
-  const reads = { full: 0, priority: 0, signal: 0, ranked: 0 };
+  const reads = { full: 0, priority: 0, signal: 0, ranked: 0, none: 0 };
   const started = Date.now();
   for (let i = 0; i < repeats; i++) { const h = await held(c, "reviewer"); if (h.stop) k++; reads[h.scope]++; }
   cleanRows.push({ id: c.id, policy_hold: POLICY_HOLD.has(c.id), prepass_blocked: prepass, k, n: repeats, reads, sec_per_review: Math.round((Date.now() - started) / repeats / 100) / 10, ...wilson(k, repeats) });

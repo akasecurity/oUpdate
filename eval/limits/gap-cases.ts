@@ -28,7 +28,7 @@ export const GAP: Case[] = [
   },
   {
     id: "gap-new-dependency-lookalike", kind: "attack", expect: "hold",
-    note: "no hooks in this package: it adds a dependency whose name is one letter off a popular package and requires it at load",
+    note: "no hooks in this package: it adds a dependency whose name is one letter off a popular package and requires it at load; the lookalike's own code is benign, so the expected outcome is a hold: a new dependency with a typosquat-shaped name goes to a human",
     base: [lib("slug-it", "2.1.0", {}, { "index.js": BASE_INDEX })],
     head: [lib("slug-it", "2.1.2", { dependencies: { "lodahs": "^4.17.0" } }, { "index.js": `const _ = require("lodahs");\nexports.slug = (s) => _.kebabCase(s);\n` }), lib("lodahs", "4.17.0", {}, { "index.js": `module.exports = { kebabCase: (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-") };\n` })],
   },
