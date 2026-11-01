@@ -3218,7 +3218,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
     // `pnpm --filter <pkg> <script>` runs a script of another workspace package. That package's
     // scripts are not modeled here, so the whole package surface is reached.
     if (bin === "pnpm") {
-      for (let j = i; j < argv.length && argv[j]!.startsWith("-"); j++) {
+      // Every argument before a bare `--` is checked: a flag value such as `-C sub` must not hide a later filter.
+      for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
         if (/^(?:-F.*|--filter(?:=.*)?)$/.test(argv[j]!)) {
           widenAll(ctx);
           return;
@@ -3290,7 +3291,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
   closeUnknownRunner(ctx, argv, i);
   // A package runner fetches or resolves a package, so a local file named among its
   // arguments does not make the run resolved, as with dlx.
-  if ((bin === "bunx" || bin === "npx") && !pathLikeWord(argv.slice(i).find((a) => !a.startsWith("-")) ?? "")) widenAll(ctx);
+  // `-p`/`--package` fetches a package onto PATH for the named file, so it always widens.
+  if ((bin === "bunx" || bin === "npx") && (argv.slice(i).some((a) => a === "-p" || a === "--package" || a.startsWith("--package=") || (a.startsWith("-p") && !a.startsWith("--") && a.length > 2)) || !pathLikeWord(argv.slice(i).find((a) => !a.startsWith("-")) ?? ""))) widenAll(ctx);
   fail(ctx, `unresolved: runner ${bin}`);
 }
 

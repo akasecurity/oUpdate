@@ -52,13 +52,13 @@ describe("unresolved package-manager runners hold", () => {
   });
 
   test("pnpm --filter after other leading flags widens", () => {
-    for (const cmd of ["pnpm -r --filter other build", "pnpm --recursive -F other build", "pnpm -r --filter=other build", "pnpm --silent -Fother build"]) {
+    for (const cmd of ["pnpm -r --filter other build", "pnpm --recursive -F other build", "pnpm -r --filter=other build", "pnpm --silent -Fother build", "pnpm -C sub --filter other build", "pnpm --dir sub -F other build", "pnpm --workspace-concurrency 1 --filter x build"]) {
       expect(hardFor({ postinstall: cmd }).length, cmd).toBeGreaterThan(0);
     }
   });
 
   test("a package runner with a local file argument still holds", () => {
-    for (const cmd of ["bunx some-pkg ./assets/other.js", "npx some-pkg ./assets/other.js", "npx -y some-pkg ./assets/other.js"]) {
+    for (const cmd of ["bunx some-pkg ./assets/other.js", "npx some-pkg ./assets/other.js", "npx -y some-pkg ./assets/other.js", "npx --package=pkg ./assets/other.js", "npx -p pkg ./assets/other.js", "bunx --package pkg ./assets/other.js", "bun x some-pkg ./assets/other.js"]) {
       expect(hardFor({ postinstall: cmd }).length, cmd).toBeGreaterThan(0);
     }
   });
