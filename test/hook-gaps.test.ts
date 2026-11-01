@@ -53,6 +53,11 @@ describe("hook gaps: npx and corepack keep the file reach", () => {
     ["corepack bun ./payload.js", {}],
     ["npx yarn nosuchscript", {}],
     ['npx yarn run "my script"', { "my script": "node payload.js" }],
+    ["npx bun payload.js", { "payload.js": "echo hi" }],
+    ["corepack bun payload.js", { "payload.js": "echo hi" }],
+    ["npx yarn ./payload.js", { "./payload.js": "echo hi" }],
+    ["npx yarn node payload.js", { node: "echo hi" }],
+    ["npx yarn rebuild", { rebuild: "echo hi" }],
   ];
   for (const [hook, extra] of cases) {
     test(`payload.js change holds through "${hook}" ${Object.keys(extra).length ? "(with script)" : ""}`, () => {

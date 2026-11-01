@@ -3120,7 +3120,13 @@ function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
   }
 }
 
-const RUNNER_BUILTINS = new Set(["exec", "x", "dlx", "create", "init", "add", "remove", "rm", "install", "i", "link", "up", "upgrade", "update", "pm", "patch", "set", "config"]);
+const RUNNER_BUILTINS = new Set(["exec", "x", "dlx", "create", "init", "add", "remove", "rm", "install", "i", "link", "up", "upgrade", "update", "pm", "patch", "set", "config", "node", "workspace", "workspaces", "rebuild", "unplug"]);
+
+// A shorthand word that looks like a file path (`bun payload.js`, `yarn ./x`) runs that file,
+// not a script of the same name, so it is never resolved as a script.
+function pathLikeWord(w: string): boolean {
+  return w.includes("/") || /\.(?:js|cjs|mjs|ts|tsx|jsx)$/.test(w);
+}
 
 // `npx yarn run setup` and `corepack pnpm test` resolve to a script of this package.
 // Returns that script name, or undefined when the wrapped command is anything else.
@@ -3143,7 +3149,7 @@ function wrappedScript(ctx: Ctx, argv: string[], i: number): string | undefined 
     if (sub === "test" || sub === "t" || sub === "tst") return has("test") ? "test" : undefined;
     return (sub === "start" || sub === "stop") && has(sub) ? sub : undefined;
   }
-  if (RUNNER_BUILTINS.has(sub)) return undefined;
+  if (RUNNER_BUILTINS.has(sub) || pathLikeWord(sub)) return undefined;
   return has(sub) ? sub : undefined;
 }
 
@@ -3211,7 +3217,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
     const sub = readWord(ctx, argv, i);
     // `yarn setup` and `pnpm test` run the script of that name when one exists.
-    if (sub?.word && sub.word !== "run" && sub.word !== "run-script" && typeof ctx.raw[sub.word] === "string") {
+    if (sub?.word && sub.word !== "run" && sub.word !== "run-script" && !pathLikeWord(sub.word) && typeof ctx.raw[sub.word] === "string") {
       runScript(ctx, sub.word, false);
       return;
     }
