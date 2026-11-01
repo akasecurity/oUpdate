@@ -17,10 +17,19 @@ export interface InstallView {
   binStamp: string;
 }
 
+/** True when the package gets an implicit node-gyp install: a binding.gyp on disk or `gypfile: true`, and `gypfile` is not false. */
+export function gypInstalls(pj: Record<string, unknown>, hasBindingGyp: boolean): boolean {
+  if (pj.gypfile === false) return false;
+  return hasBindingGyp || pj.gypfile === true;
+}
+
 const INSTALL = ["preinstall", "install", "postinstall", "prepare"] as const;
 
 /** npm, pnpm, yarn and bun do not run `prepare` when they install a registry tarball (only for git and local dependencies, and at the root), so a change to it alone is no install-time signal. That holds only when nothing else can start it: any non-empty preinstall, install or postinstall keeps `prepare` a signal, because the script or a file it runs can call `npm run prepare` (or preprepare/postprepare) through indirection no static read resolves (a file that shells out, an escaped name, `$(...)`, eval). The files it names are still read by the reviewer. */
-export function prepareInert(scripts: Record<string, unknown>): boolean {
+export function prepareInert(scripts: Record<string, unknown>, implicitGyp = false): boolean {
+  const set = (k: string) => typeof scripts[k] === "string" && (scripts[k] as string).trim().length > 0;
+  // npm and pnpm run `node-gyp rebuild` as the install when binding.gyp exists (or gypfile is true) and install/preinstall are unset; a gyp action or `<!(...)` can run `npm run prepare`.
+  if (implicitGyp && !set("install") && !set("preinstall")) return false;
   return !["preinstall", "install", "postinstall"].some((k) => typeof scripts[k] === "string" && (scripts[k] as string).trim().length > 0);
 }
 const PRIMARY_EXT = [".js", ".json", ".node", ".cjs", ".mjs", ".jsx", ".tsx", ".cts", ".mts", ".ts"];
@@ -3561,7 +3570,7 @@ export function installView(files: FileMap): InstallView {
       return done();
     }
   }
-  const ran = prepareInert(ctx.raw) ? INSTALL.filter((name) => name !== "prepare") : INSTALL;
+  const ran = prepareInert(ctx.raw, gypInstalls(root, !!indexed.gyp)) ? INSTALL.filter((name) => name !== "prepare") : INSTALL;
   for (const name of ran) {
     const raw = ctx.raw[name];
     if (typeof raw === "string") ctx.scripts[name] = raw;
