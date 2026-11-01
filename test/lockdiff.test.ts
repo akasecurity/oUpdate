@@ -76,3 +76,11 @@ test("credentials with an @ inside or a second URL in the source are fully maske
   const shown = JSON.stringify(diffLocks(a, b));
   for (const s of ["carol", "dave", "erin", "ss1", "ss2", "three"]) expect(shown).not.toContain(s);
 });
+
+test("one range resolved to two versions by different workspaces is not a change against itself", () => {
+  const a = [
+    { name: "dep", version: "1.0.0", descriptors: ["dep@^1.0.0"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@^1.0.0"] },
+  ];
+  expect(diffLocks(a, a)).toEqual([]);
+});
