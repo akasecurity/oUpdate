@@ -158,9 +158,9 @@ describe("prepass: npm", () => {
     expect(prepass("npm", files({ "package/package.json": body }), files({ "package/package.json": body })).hard).toEqual([]);
   });
 
-  test("an unfollowed script change is not an install hold; the hook text is", () => {
-    const bare = pkg({ postinstall: "yarn setup", setup: "node evil.js" });
-    const bareOld = pkg({ postinstall: "yarn setup", setup: "node a.js" });
+  test("a script an install hook never runs is not an install hold; the hook text is", () => {
+    const bare = pkg({ postinstall: "node hook.js", setup: "node evil.js" });
+    const bareOld = pkg({ postinstall: "node hook.js", setup: "node a.js" });
     expect(prepass("npm", files({ "package/package.json": bareOld }), files({ "package/package.json": bare })).hard.filter((s) => s.kind === "install-script")).toEqual([]);
     const hook = pkg({ postinstall: "yarn setup now", setup: "node a.js" });
     expect(prepass("npm", files({ "package/package.json": bareOld }), files({ "package/package.json": hook })).hard.map((s) => s.kind)).toContain("install-script");

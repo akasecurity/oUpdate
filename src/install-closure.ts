@@ -3183,7 +3183,12 @@ function dispatch(ctx: Ctx, cmd: string): void {
   }
   if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
     const sub = readWord(ctx, argv, i);
-    if (!sub || sub.word !== "run") {
+    // `yarn setup` and `pnpm test` run the script of that name when one exists.
+    if (sub?.word && sub.word !== "run" && sub.word !== "run-script" && typeof ctx.raw[sub.word] === "string") {
+      runScript(ctx, sub.word, false);
+      return;
+    }
+    if (!sub || (sub.word !== "run" && sub.word !== "run-script")) {
       if (!ctx.hold) fail(ctx, "unresolved: runner");
       return;
     }
@@ -3197,6 +3202,10 @@ function dispatch(ctx: Ctx, cmd: string): void {
   }
   if (bin === "run-s" || bin === "run-p" || bin === "npm-run-all") {
     dispatchRuns(ctx, argv, i);
+    return;
+  }
+  if ((bin === "npx" || bin === "corepack") && argv[i] !== undefined && !argv[i]!.startsWith("-") && ["npm", "yarn", "pnpm", "bun", "run-s", "run-p", "npm-run-all"].includes(binName(argv[i]!))) {
+    dispatch(ctx, argv.slice(i).join(" "));
     return;
   }
   if (bin === "prebuild-install" || bin === "node-pre-gyp") {
