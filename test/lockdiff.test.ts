@@ -76,3 +76,52 @@ test("credentials with an @ inside or a second URL in the source are fully maske
   const shown = JSON.stringify(diffLocks(a, b));
   for (const s of ["carol", "dave", "erin", "ss1", "ss2", "three"]) expect(shown).not.toContain(s);
 });
+
+test("one range resolved to two versions by different workspaces is not a change against itself", () => {
+  const a = [
+    { name: "dep", version: "1.0.0", descriptors: ["dep@^1.0.0"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@^1.0.0"] },
+  ];
+  expect(diffLocks(a, a)).toEqual([]);
+});
+
+test("a range that loses one same-version origin to another is still a swap", () => {
+  const X = { name: "foo", version: "1.0.0", source: "https://registry.npmjs.org/foo/-/foo-1.0.0.tgz", digest: "sha512-AAA", descriptors: ["foo@^1.0.0"] };
+  const Y = { name: "foo", version: "1.0.0", source: "https://mirror.example/foo-1.0.0.tgz", digest: "sha512-BBB", descriptors: ["foo@^1.0.0"] };
+  expect(diffLocks([Y, X], [{ ...Y }]).length).toBe(1);
+  expect(diffLocks([Y, X], [{ ...Y }, { ...X }])).toEqual([]);
+});
+
+test("a range that stops resolving to one of its several versions is a swap", () => {
+  const a = [
+    { name: "dep", version: "1.0.0", descriptors: ["dep@^1"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@^1", "dep@~1.5"] },
+  ];
+  const b = [
+    { name: "dep", version: "1.0.0", descriptors: ["dep@^1"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@~1.5"] },
+  ];
+  expect(diffLocks(a, b).length).toBe(1);
+});
+
+test("the swap report names the origin the range dropped", () => {
+  const mk = (v: string, s: string) => ({ name: "foo", version: v, source: `https://h.example/${s}`, digest: `sha512-${s}`, descriptors: ["foo@^1"] });
+  const [Z, Y, X] = [mk("1.5.0", "Z"), mk("1.0.0", "Y"), mk("1.0.0", "X")];
+  const d = diffLocks([Z, Y, X], [Z, Y]);
+  expect(d.length).toBeGreaterThan(0);
+  expect(d.every((c) => c.swapped!.from.includes("/X"))).toBe(true);
+});
+
+test("bumping one copy of a range that resolves to two versions does not flag the untouched copy", () => {
+  const a = [
+    { name: "dep", version: "1.0.0", descriptors: ["dep@^1"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@^1"] },
+  ];
+  const b = [
+    { name: "dep", version: "1.6.0", descriptors: ["dep@^1"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@^1"] },
+  ];
+  const d = diffLocks(a, b);
+  expect(d.length).toBe(1);
+  expect(d[0]!.to).toBe("1.6.0");
+});

@@ -53,16 +53,28 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
   const oldFull = new Set(oldPkgs.map(full));
   const newKeys = new Set(newPkgs.map(key));
   const out: LockChange[] = [];
-  // Descriptor (range) -> the entry it resolves to in the old lockfile (version and origin).
-  const oldTarget = new Map<string, LockedPackage>();
-  for (const o of oldPkgs) for (const d of o.descriptors ?? []) oldTarget.set(d, o);
+  // Descriptor (range) -> the entries it resolves to in the old lockfile (version and origin); one range can land on
+  // several when workspaces resolve it differently.
+  const oldTarget = new Map<string, LockedPackage[]>();
+  for (const o of oldPkgs) for (const d of o.descriptors ?? []) oldTarget.set(d, [...(oldTarget.get(d) ?? []), o]);
+  const newTargetFull = new Map<string, Set<string>>();
+  for (const n of newPkgs) for (const d of n.descriptors ?? []) newTargetFull.set(d, (newTargetFull.get(d) ?? new Set<string>()).add(full(n)));
   for (const p of newPkgs) {
     if (oldFull.has(full(p))) {
-      // Same package, but a descriptor that used to resolve elsewhere now resolves here.
-      const d = (p.descriptors ?? []).find((x) => oldTarget.has(x) && full(oldTarget.get(x)!) !== full(p));
-      if (d !== undefined) {
+      // Same package, but a range that used to resolve elsewhere now resolves here, or no longer resolves to an entry it used to.
+      let was: LockedPackage | undefined;
+      const d = (p.descriptors ?? []).find((x) => {
+        const olds = oldTarget.get(x);
+        if (!olds) return false;
+        // A dropped entry is reported here only when the range's new entries were all in the old lock; a new one is
+        // reported on its own as a version update or an origin change.
+        const onlyOld = [...(newTargetFull.get(x) ?? [])].every((f) => oldFull.has(f));
+        was = (onlyOld ? olds.find((o) => !newTargetFull.get(x)?.has(full(o))) : undefined) ?? (olds.some((o) => full(o) === full(p)) ? undefined : olds[0]);
+        return was !== undefined;
+      });
+      if (d !== undefined && was !== undefined) {
         const shown = (q: LockedPackage) => `${mask(d)} -> ${key(q)} ${where(q)}`.trimEnd();
-        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: shown(oldTarget.get(d)!), to: shown(p) } });
+        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: shown(was), to: shown(p) } });
       }
       continue;
     }

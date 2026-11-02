@@ -135,3 +135,66 @@ snapshots:
   const got = Object.fromEntries(parsePnpmLock(lock).map((p) => [`${p.name}@${p.version}`, p.descriptors]));
   expect(got).toEqual({ "foo@1.2.0": ["foo@^1.0.0"], "bar@2.0.0": undefined });
 });
+
+test("same name@version from different origins keep separate descriptors", () => {
+  const lock = `lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: 1.0.0(patch_hash=abc)
+packages:
+  foo@1.0.0:
+    resolution: {integrity: ${SRI("A")}}
+  foo@1.0.0(patch_hash=abc):
+    resolution: {integrity: ${SRI("B")}}
+snapshots:
+  foo@1.0.0: {}
+  foo@1.0.0(patch_hash=abc): {}
+`;
+  const got = parsePnpmLock(lock).map((p) => [p.digest, p.descriptors]);
+  expect(got).toEqual([[SRI("A"), undefined], [SRI("B"), ["foo@^1.0.0"]]]);
+});
+
+test("v6 patched package with peers keeps its descriptor on the patched entry", () => {
+  const lock = `lockfileVersion: '6.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: 1.0.0(patch_hash=abc)(react@18.0.0)
+packages:
+  /foo@1.0.0(react@18.0.0):
+    resolution: {integrity: ${SRI("A")}}
+  /foo@1.0.0(patch_hash=abc)(react@18.0.0):
+    resolution: {integrity: ${SRI("B")}}
+`;
+  const got = parsePnpmLock(lock).map((p) => [p.digest, p.descriptors]);
+  expect(got).toEqual([[SRI("A"), undefined], [SRI("B"), ["foo@^1.0.0"]]]);
+});
+
+test("an importer version whose key was deduped into another entry still gets its descriptor", () => {
+  const lock = `lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: 1.0.0(patch_hash=abc)
+packages:
+  foo@1.0.0:
+    resolution: {integrity: ${SRI("A")}}
+  foo@1.0.0(patch_hash=abc):
+    resolution: {integrity: ${SRI("A")}}
+  foo@1.0.0(patch_hash=def):
+    resolution: {integrity: ${SRI("B")}}
+snapshots:
+  foo@1.0.0: {}
+  foo@1.0.0(patch_hash=abc): {}
+  foo@1.0.0(patch_hash=def): {}
+`;
+  const got = parsePnpmLock(lock).map((p) => [p.digest, p.descriptors]);
+  expect(got).toEqual([[SRI("A"), ["foo@^1.0.0"]], [SRI("B"), undefined]]);
+});

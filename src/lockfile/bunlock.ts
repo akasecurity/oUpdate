@@ -79,13 +79,16 @@ const DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"];
 function addDescriptors(lock: { packages?: Record<string, unknown[]>; workspaces?: Record<string, unknown> }, byKey: Map<string, LockedPackage>): void {
   const packages = lock.packages ?? {};
   const sets = new Map<LockedPackage, Set<string>>();
-  const record = (from: string, info: unknown, fields: string[]) => {
+  const record = (from: string, info: unknown, fields: string[], nests: string[] = []) => {
     if (!info || typeof info !== "object") return;
     for (const f of fields) {
       const deps = (info as Record<string, unknown>)[f];
       if (!deps || typeof deps !== "object") continue;
       for (const [name, range] of Object.entries(deps as Record<string, unknown>)) {
-        const target = typeof range === "string" ? byKey.get(resolveDep(packages, from, name) ?? "") : undefined;
+        if (typeof range !== "string") continue;
+        // A workspace's own nested copy (under its name) wins over the root-hoisted one.
+        const nested = nests.map((n) => `${n}/${name}`).find((k) => Object.hasOwn(packages, k));
+        const target = byKey.get(nested ?? resolveDep(packages, from, name) ?? "");
         if (!target) continue;
         const set = sets.get(target) ?? new Set<string>();
         set.add(`${name}@${range}`);
@@ -94,7 +97,12 @@ function addDescriptors(lock: { packages?: Record<string, unknown[]>; workspaces
     }
   };
   for (const [key, entry] of Object.entries(packages)) record(key, entry[2], DEP_FIELDS);
-  for (const ws of Object.values(lock.workspaces ?? {})) record("", ws, [...DEP_FIELDS, "devDependencies"]);
+  for (const [path, ws] of Object.entries(lock.workspaces ?? {})) {
+    const wsName = ws && typeof ws === "object" ? (ws as Record<string, unknown>).name : undefined;
+    // The root's dependencies are top-level; a workspace's nest under its package name, never its folder path.
+    const nests = path && typeof wsName === "string" && wsName ? [wsName] : [];
+    record("", ws, [...DEP_FIELDS, "devDependencies"], nests);
+  }
   for (const [p, set] of sets) p.descriptors = [...set].sort();
 }
 
