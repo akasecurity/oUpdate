@@ -1150,3 +1150,24 @@ describe("round 28: heredoc cost, quoted runners, archive case, narrow forms", (
     expect(held({ postinstall: "npm run build", build: "echo ok" }, { ".env": "A=1\n" }, { ".env": "BUN_CONFIG_X=1\n" })).toBe(true);
   });
 });
+
+describe("round 29: unknown flags before the script read inert files, env assignments, huge fed files", () => {
+  const inertOnly = (cmd: string) => held({ postinstall: cmd, build: "node test/x.js" }, { "test/x.js": "1\n" }, { "test/x.js": "evil()\n" });
+
+  test("1. an unknown flag before the script name reads an inert-only change", () => {
+    for (const cmd of ["yarn run -T build", "yarn -T build", "pnpm run --foo build", "pnpm --bar build", "bun run --bun build", "npm run --foo build", "yarn run -- build"]) {
+      expect(inertOnly(cmd), cmd).toBe(true);
+    }
+    expect(inertOnly("npm run build")).toBe(true);
+  });
+
+  test("2. an env assignment does not stop the scan of the next commands", () => {
+    expect(held({ postinstall: "FOO=1 node a.js && cd test && node b.js" }, { "a.js": "1\n", "test/b.js": "1\n" }, { "a.js": "1\n", "test/b.js": "evil()\n" })).toBe(true);
+    expect(held({ postinstall: "FOO=1 npm run build && cd test && node b.js", build: "echo ok" }, { "test/b.js": "1\n" }, { "test/b.js": "evil()\n" })).toBe(true);
+  });
+
+  test("3. a fed file over 1 MB reads every file", () => {
+    const big = `echo ${"a".repeat(1_100_000)}\n`;
+    expect(held({ postinstall: "sh < scripts/big.sh" }, { "scripts/big.sh": big, "test/x.js": "1\n" }, { "scripts/big.sh": big, "test/x.js": "evil()\n" })).toBe(true);
+  });
+});

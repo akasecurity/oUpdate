@@ -3584,6 +3584,7 @@ function readFed(ctx: Ctx, path: string): void {
   const text = dec.decode(ctx.bytes.get(key));
   if (text.length > 1_000_000) {
     ctx.widenInert = true;
+    widenAll(ctx);
     return;
   }
   if (/\.(?:sh|bash|zsh|ksh|bats)$/i.test(logical) || /^#!.*\b(?:sh|bash|zsh|dash|ksh)\b/.test(text)) {
@@ -4501,6 +4502,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     const sub = readWord(ctx, argv, i);
     if (!sub) {
       // A flag no form here models may move the run to another package or take the next word as its value.
+      ctx.widenInert = true;
       widenAll(ctx);
       return;
     }
@@ -4512,6 +4514,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     if (RUN_SUB.has(sub.word)) {
       const name = readWord(ctx, argv, sub.i + 1);
       if (!name) {
+        ctx.widenInert = true;
         widenAll(ctx);
         return;
       }
@@ -4557,6 +4560,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     if (!sub) {
       // A flag no form here models (`yarn run -T`, `pnpm --dir-like` options) may move the run to another
       // package or take the next word as its value.
+      ctx.widenInert = true;
       widenAll(ctx);
       return;
     }
@@ -4581,6 +4585,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     }
     const name = readWord(ctx, argv, sub.i + 1);
     if (!name) {
+      ctx.widenInert = true;
       widenAll(ctx);
       return;
     }
