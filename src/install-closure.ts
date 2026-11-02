@@ -4705,6 +4705,16 @@ function dispatch(ctx: Ctx, cmd: string): void {
       ctx.depth--;
     }
   }
+  // A command this does not know in front of a package runner (`dotenv -- npm run setup`, `flock /tmp/l npm run x`,
+  // `./bin/wrap yarn run x`): the runner is dispatched from its own word, whatever the wrapper is.
+  if (!RUNNERS.has(runnerName(bin)) && !SINK_WORD.test(bin) && !PLAIN_CMDS.has(bin) && !WRAP_BINS.has(bin) && !WRAPPER_SPEC[bin] && !/^(?:cd|pushd|popd|\.|source|echo|printf|true|false|:|test|\[|node-gyp|run-s|run-p|npm-run-all|lerna|turbo|nx|rush)$/.test(bin) && argv.length <= 200 && ctx.depth < DEPTH) {
+    const k = argv.findIndex((a, q) => q >= i && RUNNERS.has(runnerName(a.replace(/^\\+/, ""))));
+    if (k >= 0) {
+      ctx.depth++;
+      dispatch(ctx, argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      ctx.depth--;
+    }
+  }
   // A directory change leaves this package whatever the target resolves to.
   if (bin === "cd" || bin === "pushd" || bin === "popd") {
     // Once the scan was unsure the widen already reads everything.
@@ -4940,7 +4950,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
   // prebuild-install and node-pre-gyp already returned. They download; they do not widen.
   // node already returned and keeps named files plus the require walk.
   // A sourced file runs in this shell, from the directory an earlier cd moved to.
-  if ((bin === "." || bin === "source") && argv[i]) readFed(ctx, argv[i]!, true);
+  if ((bin === "." || bin === "source") && argv[i]) readFed(ctx, argv[i] === "--" && argv[i + 1] ? argv[i + 1]! : argv[i]!, true);
   // A script run by its path is read as a body (what its first line names runs it).
   if (/^(?:\.\.?\/|[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)/.test(argv[i - 1] ?? "") && bin !== "npx" && bin !== "bunx") readFed(ctx, argv[i - 1]!, true);
   closeUnknownRunner(ctx, argv, i);

