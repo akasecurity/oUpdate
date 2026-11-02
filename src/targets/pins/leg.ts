@@ -7,7 +7,7 @@
 import { join } from "node:path";
 import type { OciSource } from "../../adapters/oci/registry.ts";
 import { cooldownVerdict } from "../../cooldown.ts";
-import type { Reviewer, ReviewResult } from "../../review.ts";
+import { stripTerminal, type Reviewer, type ReviewResult } from "../../review.ts";
 import type { LegResult } from "../model.ts";
 import { GIT_ENV } from "../reach.ts";
 import type { LegRunner, TargetFs } from "../run.ts";
@@ -230,7 +230,7 @@ export function pinBumpRunner(deps: PinLegDeps): LegRunner<PinBumpLeg> {
         if (rv.decision !== "land") {
           const bad = rv.layers.filter((l) => l.verdict === "stop" || l.verdict === "error");
           (bad.some((l) => l.verdict === "stop") ? flagged : errors).push(`${name} ${a.change.to}`);
-          lines.push(`${name}: artifact review of ${what} held it: ${bad.map((l) => `${l.layer} ${l.verdict}: ${l.detail}`).join("; ") || "held"}`);
+          lines.push(`${name}: artifact review of ${what} held it: ${bad.map((l) => `${l.layer} ${l.verdict}: ${stripTerminal(l.detail)}`).join("; ") || "held"}`);
           ok = false;
           break;
         }
@@ -247,9 +247,9 @@ export function pinBumpRunner(deps: PinLegDeps): LegRunner<PinBumpLeg> {
     }
     const { next, text, changes, list, branch } = prop;
     const v = await reviewPins(deps.reviewer, { pinsPath: leg.pinsPath, changes, diff: pinsDiff(file, next) });
-    lines.push(`pins review: ${v.verdict} (${v.detail})`, ...(v.text ? v.text.split("\n").map((l) => `│ ${l}`) : []));
-    if (v.verdict === "FLAG") return done(`pins FLAGGED by ${v.detail} (${list})`, true);
-    if (v.verdict === "error") return done(`pins review error: ${v.detail} (${list})`, true);
+    lines.push(`pins review: ${v.verdict} (${stripTerminal(v.detail)})`, ...(v.text ? v.text.split("\n").map((l) => `│ ${stripTerminal(l)}`) : []));
+    if (v.verdict === "FLAG") return done(`pins FLAGGED by ${stripTerminal(v.detail)} (${list})`, true);
+    if (v.verdict === "error") return done(`pins review error: ${stripTerminal(v.detail)} (${list})`, true);
     if (ctx.dryRun) return done(`pins would propose ${branch} (${list})`);
 
     const indexFile = join(deps.tmpDir, `oupdate-pins-index-${process.pid}-${Date.now()}`);

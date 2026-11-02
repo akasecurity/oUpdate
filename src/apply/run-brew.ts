@@ -13,6 +13,7 @@ import { loadApprovedTaps, outdatedVersions, tapIn } from "./taps.ts";
 import { reviewedVersion, typeAReview, versionMismatch } from "./typea.ts";
 import type { TypeBRun } from "./typeb.ts";
 import { handoff } from "./waiter.ts";
+import { ownersNotRunning } from "./run-release.ts";
 import { type GkOps, type RunCtx, words, uniq, last, named, holdRunningBun, PKG_NAME, DECLARED_DEPS } from "./run-ctx.ts";
 
 /** The real Gatekeeper env, or undefined when brew cannot say where the Caskroom and prefix are. */
@@ -210,6 +211,18 @@ export async function brewSection(rt: RunCtx) {
       if (hold && view.candidate === hold.version) {
         log.push(`  holding ${f} ${hold.version} (HELD by release check — failed ${hold.at}, rolled back to ${hold.from}; a newer release is tried)`);
         b.rcHeld.push(`${f} ${hold.version}`);
+        b.rcHeldNames.push(n);
+        continue;
+      }
+      // The check needs its owner restarted onto the new version: one not running means the check can
+      // never run, so nothing is upgraded (and the keg is left alone).
+      const down = rc.owners?.length ? await ownersNotRunning(rt, rc.owners) : [];
+      if (down.length) {
+        log.push(`  holding ${f} (release check: its owner ${down.join(" ")} is not running — not upgraded, its keg is untouched)`);
+        b.rcNotes.push(`${f} not upgraded, owner ${down.join(" ")} not running`);
+        b.failed.push(`release-check:${f}`);
+        b.flagged = true;
+        await notify(`⚠️ <b>${host} release check ${f}: held, not upgraded</b>\nOwner ${down.join(" ")} is not running, so the check could not run.\nLog: ${cfg.logFile ?? "-"}`);
         b.rcHeldNames.push(n);
         continue;
       }

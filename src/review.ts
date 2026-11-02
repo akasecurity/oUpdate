@@ -104,11 +104,16 @@ export function parseVerdict(text: string): "APPROVE" | "FLAG" {
   return "APPROVE";
 }
 
+/** Controls (ESC, CR, C1), bidi and zero-width characters dropped: for model output that reaches the terminal raw. Newlines go too, so split lines first. */
+export function stripTerminal(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "");
+}
+
 /** The model's first reasoning line after its FLAG, one line and cut, so a hold says why (empty for a bare FLAG).
  *  Model output can echo package bytes and the line reaches the terminal raw: controls, bidi and zero-width characters are dropped. */
 function flagReason(text: string): string {
   const line = text.split("\n").slice(1)
-    .map((l) => l.replace(/\s+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "").trim())
+    .map((l) => stripTerminal(l.replace(/\s+/g, " ")).trim())
     .find(Boolean);
   if (!line) return "";
   const cps = [...line];

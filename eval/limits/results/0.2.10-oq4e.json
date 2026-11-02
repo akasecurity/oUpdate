@@ -1,0 +1,395 @@
+{
+  "summary": {
+    "tool_version": "0.2.10",
+    "reviewer": "local reviewer",
+    "cutoff": "2026-04-15",
+    "repeats": 10,
+    "held_out": {
+      "k": 70,
+      "n": 70,
+      "lo": 0.9479751251327163,
+      "hi": 0.9999999999999999
+    },
+    "earlier": {
+      "k": 0,
+      "n": 0,
+      "lo": 0,
+      "hi": 1
+    },
+    "false_holds": {
+      "k": 30,
+      "n": 140,
+      "lo": 0.15442678106920676,
+      "hi": 0.28940587930164563
+    },
+    "policy_holds": {
+      "k": 10,
+      "n": 10,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    }
+  },
+  "rows": [
+    {
+      "id": "function-color-update",
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 68.1,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "function-color-install",
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 67,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "function-flag-install",
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 6.6,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "function-flag-update",
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 9,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "keyv-style-preinstall-worm",
+      "disclosed": "2026-08-05",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 3.1,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "node-gyp-style-binding-gyp",
+      "disclosed": "2026-06-03",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 3.4,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "jscrambler-style-preinstall-binary",
+      "disclosed": "2026-07-11",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 4.5,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    }
+  ],
+  "clean_rows": [
+    {
+      "id": "control-patch-update",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 6.5,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "lookalike-color-install",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 14.8,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "lookalike-color-dep-range-update",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 4.5,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "lookalike-banner-update",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 88.3,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "lookalike-prebuilt-update",
+      "policy_hold": true,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 12,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "clean-new-dependency",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 17.7,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-husky-prepare",
+      "policy_hold": false,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 9.9,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "clean-native-gyp-build",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 5.3,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-cli-bin-added",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 9.6,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-funding-notice",
+      "policy_hold": false,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 26.9,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "clean-http-client-feature",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 11.2,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-exports-map",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 9.3,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-minified-dist",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 4.1,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-dependency-major",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 4.9,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-reads-env-config",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0
+      },
+      "sec_per_review": 8.1,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    }
+  ]
+}

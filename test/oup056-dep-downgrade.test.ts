@@ -62,6 +62,11 @@ const cases: [string, "HOLD" | "QUIET", Record<string, unknown>, Record<string, 
   ["X2 the dependency moved to peer while another key kept the old alias", "HOLD", deps({ "function-flag": "^4.0.0" }), { peerDependencies: { "function-flag": "^1.0.0" }, dependencies: { ff: "npm:function-flag@^4.0.0" } }],
   ["X3 the optional edge fell while another key kept the old alias", "HOLD", { optionalDependencies: { "function-flag": "^4.0.0" } }, { optionalDependencies: { "function-flag": "^1.0.0" }, dependencies: { ff: "npm:function-flag@^4.0.0" } }],
   ["X4 the same key fell while an optional alias kept the old range", "HOLD", deps({ "function-flag": "^4.0.0" }), { dependencies: { "function-flag": "npm:function-flag@^1.0.0" }, optionalDependencies: { x: "npm:function-flag@^4.0.0" } }],
+  ["A1 a same-key alias swapped to another package (OUP-57)", "HOLD", deps({ foo: "npm:foo@1.0.0" }), deps({ foo: "npm:evil@1.0.0" })],
+  ["A2 a same-key plain range swapped to an alias of another package (OUP-57)", "HOLD", deps({ foo: "^1.0.0" }), deps({ foo: "npm:evil@^1.0.0" })],
+  ["A3 a same-key alias swapped to a plain range (OUP-57)", "HOLD", deps({ foo: "npm:evil@^1.0.0" }), deps({ foo: "^1.0.0" })],
+  ["A4 a same-key alias swap in optionalDependencies (OUP-57)", "HOLD", { optionalDependencies: { foo: "npm:foo@1.0.0" } }, { optionalDependencies: { foo: "npm:evil@1.0.0" } }],
+  ["A5 a same-key alias to the same package with a rising range stays quiet", "QUIET", deps({ foo: "npm:foo@^1.0.0" }), deps({ foo: "npm:foo@^1.1.0" })],
   ["H1 the same key gained an optional copy of the same range", "QUIET", deps({ "function-flag": "^4.0.0" }), { dependencies: { "function-flag": "^4.0.0" }, optionalDependencies: { "function-flag": "^4.0.0" } }],
 ];
 
@@ -78,6 +83,14 @@ for (const [name, want, oldF, newF, extra] of cases) {
 test("a devDependency downgrade is not install-time surface", () => {
   const body = (range: string) => JSON.stringify({ name: "text-pad", version: "1.0.0", devDependencies: { "function-flag": range } }) + "\n";
   expect(hard({ "package.json": body("^4.0.0") }, { "package.json": body("^1.7.3") })).toEqual([]);
+});
+
+// OUP-57 residual 1, documented as intended: the rule is about floors that fell. A dependency name
+// that was not there before has no floor to fall from; reviewing what a new name is (and whether it
+// is a plain registry pin) belongs to the surface scan and the model review, not to this hold.
+test("a new dependency name in a release stays quiet (intended: reviewed by another layer)", () => {
+  const [a, b] = pair(deps({ "function-flag": "^4.0.0" }), deps({ "function-flag": "^4.0.0", "brand-new": "^1.0.0" }));
+  expect(hard(a, b)).toEqual([]);
 });
 
 test("a new package with a dependency stays quiet", () => {
