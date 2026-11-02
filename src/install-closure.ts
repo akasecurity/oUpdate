@@ -3123,7 +3123,7 @@ function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
 const WORKSPACE_WIDEN: Record<"yarn" | "pnpm" | "bun", RegExp> = {
   pnpm: /^(?:-[A-Za-z]*[FCrw].*|--filter(?:-prod)?(?:=.*)?|--dir(?:=.*)?|--prefix(?:=.*)?|--recursive(?:=.*)?|--workspace-root(?:=.*)?)$/,
   yarn: /^(?:--cwd(?:=.*)?|workspace|workspaces)$/,
-  bun: /^(?:-F.*|--filter(?:=.*)?|--cwd(?:=.*)?)$/,
+  bun: /^(?:-F.*|--filter(?:=.*)?|--cwd(?:=.*)?|--workspaces)$/,
 };
 const RUNNER_BUILTINS = new Set(["exec", "x", "dlx", "create", "init", "add", "remove", "rm", "install", "i", "link", "up", "upgrade", "update", "pm", "patch", "set", "config", "node", "workspace", "workspaces", "rebuild", "unplug"]);
 
