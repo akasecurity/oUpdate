@@ -1359,7 +1359,7 @@ describe("round 35: wrapped c-strings, parameters, long options after -c, cd the
   });
 
   test("3. a double dash or a long option after -c", () => {
-    for (const cmd of ["bash -c -- 'node test/evil.js'", "bash -c --norc 'node test/evil.js'", "bash -c --posix -- 'node test/evil.js'"]) {
+    for (const cmd of ["bash -c -- 'node test/evil.js'", "bash -c --norc 'node test/evil.js'", "bash -c --posix -- 'node test/evil.js'", "sh -c -- 'node test/evil.js'", "dash -c -- 'node test/evil.js'", "zsh -c -- 'node test/evil.js'", "/bin/sh -c -- 'node test/evil.js'", "bash -ec -- 'node test/evil.js'", "zsh -c --login 'node test/evil.js'", "env sh -c -- 'node test/evil.js'"]) {
       expect(changed(cmd, "test/evil.js"), cmd).toBe(true);
     }
   });
