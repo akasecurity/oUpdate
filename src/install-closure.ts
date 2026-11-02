@@ -75,6 +75,10 @@ interface Ctx {
   scanned: Set<string>;
   ranSh: Set<string>;
   depth: number;
+  // Directories a cd or a directory flag moved a run into: their files are not inert whatever the folder name.
+  movedDirs: Set<string>;
+  // A package runner (npm, pnpm, yarn, bun, npx, bunx, corepack) was reached by the hook.
+  sawRunner: boolean;
   sawNodeGyp: boolean;
   // A binary field, prebuild-install, or node-pre-gyp can still compile binding.gyp.
   reachGyp: boolean;
@@ -2862,6 +2866,11 @@ function noteHookArg(ctx: Ctx, token: string): void {
 // A widen means the run may have left this package's layout: those scripts live in other packages'
 // manifests, so every non-root package.json joins the surface on every widen (tests/ and docs/ included, and
 // the files under their folders). The root manifest is read on its own path.
+function movedInto(ctx: Ctx, logical: string): boolean {
+  for (const dir of ctx.movedDirs) if (logical.startsWith(`${dir}/`)) return true;
+  return false;
+}
+
 function widenAll(ctx: Ctx): void {
   // A directory that holds a nested manifest is another package: a run can land there, so its files are not
   // inert whatever folder name they sit under (tests/pkg, docs/pkg).
@@ -2871,7 +2880,7 @@ function widenAll(ctx: Ctx): void {
     if (isManifest(logical)) {
       // The root manifest is read on its own path. A manifest under tests/ or docs/ is a package like any other.
       if (!logical.includes("/")) continue;
-    } else if (omitInert(ctx, logical) && !pkgDirs.some((d) => logical.startsWith(d))) continue;
+    } else if (omitInert(ctx, logical) && !pkgDirs.some((d) => logical.startsWith(d)) && !movedInto(ctx, logical)) continue;
     ctx.files.add(key);
     if (ctx.fromGyp) ctx.gypFiles.add(key);
   }
@@ -3065,13 +3074,6 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
 }
 
 function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
-  // `sh -c 'cd sub && npm run build'` runs a string that may leave this package.
-  for (let j = i; j < argv.length && argv[j]!.startsWith("-"); j++) {
-    if (/^-[a-z]*c[a-z]*$/.test(argv[j]!) && j + 1 < argv.length) {
-      if (movesRun(argv.slice(j + 1).join(" "))) widenAll(ctx);
-      break;
-    }
-  }
   if (i >= argv.length || argv[i]!.startsWith("-") || i + 1 !== argv.length) {
     fail(ctx, "unresolved: shell");
     return;
@@ -3282,34 +3284,127 @@ function shellSegments(body: string): string[] {
   return out;
 }
 
-// Whether a shell body moves a run: a command whose command word is a directory change, a workspace tool, or a
-// runner given a workspace flag or an npm flag not known to stay in place. Other programs' flags and quoted text
-// (`tar -C dir`, `echo 'workspace'`) are not looked at. A backslash, `command` or `builtin` before the word is
-// skipped, and `sh -c '...'` is read as its own body.
-function movesRun(body: string): boolean {
-  for (const seg of shellSegments(body)) {
-    const w = words(seg.replace(/\\(?=\S)/g, "")).filter((t) => !/^\d*[<>]/.test(t));
-    let k = 0;
-    while (k < w.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w[k]!) || w[k] === "command" || w[k] === "builtin")) k++;
-    if (k >= w.length) continue;
-    const bin = runnerName(w[k]!);
-    const rest = w.slice(k + 1);
-    if (/^(?:cd|pushd|popd)$/.test(bin) || WORKSPACE_TOOLS.has(bin)) return true;
-    if (bin === "npm" && (npmFlagWidens(rest, 0) || rest.some((t) => NPM_WORKSPACE_WIDEN.test(t)))) return true;
-    if ((bin === "yarn" || bin === "pnpm" || bin === "bun") && rest.some((t) => WORKSPACE_WIDEN[bin].test(t))) return true;
-    if (bin === "npx" || bin === "bunx" || bin === "corepack") {
-      const n = rest.findIndex((t) => ["npm", "yarn", "pnpm", "bun"].includes(runnerName(t)) || WORKSPACE_TOOLS.has(runnerName(t)));
-      if (n >= 0) {
-        if (WORKSPACE_TOOLS.has(runnerName(rest[n]!))) return true;
-        if (movesRun(rest.slice(n).join(" "))) return true;
-      }
+const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_|YARN_|PNPM_|BUN_|COREPACK_)/;
+const RUNNERS = new Set(["npm", "pnpm", "yarn", "bun", "bunx", "npx", "corepack"]);
+const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
+const DIR_FLAG = /^(?:--prefix|--dir|--cwd|-C)(?:=(.*))?$/;
+
+// Directories a flag names: `--prefix sub`, `-C sub`, `--dir=sub`, `-Csub`.
+function flagDirs(rest: string[], dirs: string[]): void {
+  for (let j = 0; j < rest.length && rest[j] !== "--"; j++) {
+    const m = DIR_FLAG.exec(rest[j]!);
+    if (m) {
+      const v = m[1] ?? rest[j + 1];
+      if (v) dirs.push(v);
+    } else if (/^-C./.test(rest[j]!)) dirs.push(rest[j]!.slice(2));
+    else if (/^-w./.test(rest[j]!)) dirs.push(rest[j]!.slice(2));
+  }
+}
+
+// Whether one command (its words) moves a run: a directory change, a workspace tool, a runner given a workspace
+// flag or an npm flag not known to stay in place, or a wrapper (env, cross-env, exec, command, npx, npm exec,
+// pnpm exec, sh -c) around one of those. Only the command word is looked at, so other programs' flags and quoted
+// text (`tar -C dir`, `echo 'workspace'`) are not. Directories named on the way go to `dirs`.
+function moves(argv: string[], dirs: string[]): boolean {
+  let k = 0;
+  let wrapped = false;
+  while (k < argv.length) {
+    const a = argv[k]!;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) {
+      if (SPECIAL_ENV.test(a)) return true;
+    } else if (wrapped && a.startsWith("-")) {
+      // an option of env or time
+    } else if (WRAPPERS.has(runnerName(a.replace(/^\\+/, "")))) wrapped = true;
+    else break;
+    k++;
+  }
+  if (k >= argv.length) return false;
+  const bin = runnerName(argv[k]!.replace(/^\\+/, ""));
+  const rest = argv.slice(k + 1);
+  if (/^(?:cd|pushd|popd)$/.test(bin)) {
+    const t = rest.find((x) => !x.startsWith("-"));
+    if (t) dirs.push(t);
+    return true;
+  }
+  if (WORKSPACE_TOOLS.has(bin)) return true;
+  if (bin === "npm") {
+    flagDirs(rest, dirs);
+    const ex = rest.findIndex((a, j) => (a === "exec" || a === "x") && rest.slice(0, j).every((t) => t.startsWith("-")));
+    if (ex >= 0) return execMoves(rest.slice(ex + 1), dirs) || npmFlagWidens(rest.slice(0, ex), 0);
+    const dd = rest.indexOf("--");
+    return npmFlagWidens(rest, 0) || rest.slice(0, dd < 0 ? rest.length : dd).some((t) => NPM_WORKSPACE_WIDEN.test(t));
+  }
+  if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
+    const before = rest.slice(0, rest.indexOf("--") < 0 ? rest.length : rest.indexOf("--"));
+    if (before.some((t) => WORKSPACE_WIDEN[bin].test(t))) {
+      flagDirs(rest, dirs);
+      return true;
     }
-    if (bin === "sh" || bin === "bash") {
-      const c = rest.findIndex((t) => /^-[a-z]*c[a-z]*$/.test(t));
-      if (c >= 0 && c + 1 < rest.length && movesRun(rest[c + 1]!)) return true;
+    if (rest.some((t) => WORKSPACE_TOOLS.has(runnerName(t)))) return true;
+    const ex = rest.findIndex((t) => t === "exec" || t === "x" || t === "dlx");
+    return ex >= 0 && moves(rest.slice(ex + 1), dirs);
+  }
+  if (bin === "npx" || bin === "bunx" || bin === "corepack") {
+    let n = 0;
+    while (n < rest.length && rest[n]!.startsWith("-")) {
+      if ((rest[n] === "-c" || rest[n] === "--call") && rest[n + 1] !== undefined) return movesRun(rest[n + 1]!, dirs);
+      n++;
+    }
+    return n < rest.length && moves(rest.slice(n), dirs);
+  }
+  if (/^(?:sh|bash|zsh|dash|ksh)$/.test(bin)) {
+    // `-c` may sit anywhere among the options, after options that take a value (`-o pipefail`, `--rcfile x`).
+    for (let j = 0; j < rest.length && (rest[j]!.startsWith("-") || rest[j]!.startsWith("+")); j++) {
+      const o = rest[j]!;
+      if (/^-[A-Za-z]*c[A-Za-z]*$/.test(o)) return rest[j + 1] === undefined || movesRun(rest[j + 1]!, dirs);
+      if (/^[-+][A-Za-z]*[oO]$/.test(o) || o === "--rcfile" || o === "--init-file") j++;
     }
   }
   return false;
+}
+
+// `npm exec` options, then the command: `-c` hands over a shell string.
+function execMoves(rest: string[], dirs: string[]): boolean {
+  let n = 0;
+  while (n < rest.length && rest[n] !== "--" && rest[n]!.startsWith("-")) {
+    const a = rest[n]!;
+    const eq = a.indexOf("=");
+    const flag = eq > 0 ? a.slice(0, eq) : a;
+    if (flag === "-c" || flag === "--call") return movesRun(eq > 0 ? a.slice(eq + 1) : rest[n + 1] ?? "", dirs);
+    if (flag === "-p" || flag === "--package") {
+      if (eq < 0) n++;
+    } else if (/^-c./.test(a) && !a.startsWith("--")) return movesRun(a.slice(2), dirs);
+    n++;
+  }
+  if (rest[n] === "--") n++;
+  return n < rest.length && moves(rest.slice(n), dirs);
+}
+
+// A body is split into commands outside quotes, at `;`, `&`, `|`, newlines, parentheses and backticks.
+function movesRun(body: string, dirs: string[] = []): boolean {
+  let hit = false;
+  for (const seg of shellSegments(body)) {
+    const w = words(seg).filter((t) => !/^\d*[<>]/.test(t));
+    if (moves(w, dirs)) hit = true;
+  }
+  return hit;
+}
+
+// Extra arguments given to a package script reach the commands in its body: `npm run go -- -w sub` with
+// `go: "npm run build"` runs `npm run build -w sub`. When the body names a runner or workspace tool, widen.
+function scriptArgsMove(ctx: Ctx, argv: string[]): boolean {
+  const k = argv.findIndex((a) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(a));
+  if (k < 0) return false;
+  const bin = runnerName(argv[k]!);
+  if (bin !== "npm" && bin !== "yarn" && bin !== "pnpm" && bin !== "bun") return false;
+  const rest = argv.slice(k + 1).filter((a) => !BOOL_FLAGS.has(a));
+  let n = rest.findIndex((a) => !a.startsWith("-"));
+  if (n < 0) return false;
+  if (RUN_SUB.has(rest[n]!) || (bin !== "npm" && rest[n] === "run")) n = rest.findIndex((a, j) => j > n && !a.startsWith("-"));
+  const name = n >= 0 ? rest[n]! : "";
+  const body = ctx.raw[["test", "t", "tst"].includes(name) && bin === "npm" ? "test" : name];
+  if (typeof body !== "string" || rest.length <= n + 1) return false;
+  return /(?:^|[\s;&|(`'"])(?:npm|pnpm|yarn|bun|bunx|npx|corepack|lerna|turbo|nx|rush|wsrun|cd|pushd|sh|bash)(?![A-Za-z0-9_-])/.test(body);
 }
 
 function dispatch(ctx: Ctx, cmd: string): void {
@@ -3321,7 +3416,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     // Every leading assignment is checked, not only the first.
     let j = 0;
     while (j < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[j]!)) {
-      if (/^(?:npm_|NPM_|NODE_|YARN_|PNPM_|BUN_|COREPACK_)/.test(argv[j]!)) widenAll(ctx);
+      if (SPECIAL_ENV.test(argv[j]!)) widenAll(ctx);
       j++;
     }
     // The command after the assignments is read exactly as without them (cd, workspace flags, runners).
@@ -3335,6 +3430,16 @@ function dispatch(ctx: Ctx, cmd: string): void {
     else i++;
   }
   if (i >= argv.length) return;
+  // One structural check on every command: a move or a script argument that may carry one widens first.
+  const moved: string[] = [];
+  if (moves(argv, moved) || scriptArgsMove(ctx, argv)) {
+    for (const d of moved) {
+      const n = normalize(d);
+      if (n) ctx.movedDirs.add(n);
+    }
+    widenAll(ctx);
+  }
+  if (argv.some((a) => RUNNERS.has(runnerName(a)))) ctx.sawRunner = true;
   const bin = binName(argv[i]!);
   i++;
   // A directory change leaves this package whatever the target resolves to.
@@ -3861,6 +3966,8 @@ export function installView(files: FileMap): InstallView {
     fromGyp: false,
     fileCount: files.size,
     hookNamed: new Set(),
+    movedDirs: new Set(),
+    sawRunner: false,
     logical: indexed.logical,
     raw: {},
     config: {},
@@ -3912,8 +4019,7 @@ export function installView(files: FileMap): InstallView {
   // templates) keep the inert rule; a nested package's own config is read by the widen.
   const rootConfigs = [...indexed.logical].filter(([logical]) => !logical.includes("/") && RUNNER_CONFIGS.has(logical.toLowerCase()));
   if (rootConfigs.length) {
-    const texts = [...ran, ...ctx.seen].map((n) => ctx.raw[n]).filter((t): t is string => typeof t === "string");
-    if (texts.some((t) => /(?:^|[^A-Za-z0-9_-])(?:npm|pnpm|yarn|bun|bunx|npx|corepack)(?![A-Za-z0-9_-])/.test(t))) {
+    if (ctx.sawRunner) {
       for (const [, key] of rootConfigs) ctx.files.add(key);
       widenAll(ctx);
     }

