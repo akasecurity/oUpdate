@@ -794,3 +794,30 @@ describe("round 17: unknown flags keep dispatching, += assignments, directory al
     }
   });
 });
+
+describe("round 18: general wrappers, valued interpreter flags, IFS", () => {
+  const fed = (cmd: string) => held({ postinstall: cmd }, { "lib/setup.js": "1", "x.sh": "echo hi\n" }, { "lib/setup.js": "evil()", "x.sh": "echo hi\n" });
+
+  test("1. wrappers that are not named", () => {
+    for (const cmd of ["cat x.sh | nice sh", "cat x.sh | nice -n 5 sh", "cat x.sh | timeout 5 sh", "cat x.sh | stdbuf -o0 sh", "nice sh < x.sh", "cat x.sh | ionice -c3 bash", "cat x.sh | setsid sh", "cat x.sh | caffeinate sh", "cat x.sh | arch -arm64 zsh", "cat x.js | chrt 1 node"]) {
+      expect(fed(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("2. more interpreters and valued flags", () => {
+    for (const cmd of ["cat x.js | bun -", "cat x.js | deno run -", "cat x.sh | python3", "cat x | perl", "cat x | ruby", "cat x | php", "cat x.js | node --stack-size 100", "cat x.js | node --max-old-space-size=100"]) {
+      expect(fed(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("3. a program flag is not a stdin sink", () => {
+    for (const cmd of ["node -e 1 < /dev/null", "node -p 1 < /dev/null", "node --eval 1 < /dev/null", "python3 -c 1 < /dev/null", "grep sh x.sh | sort"]) {
+      expect(fed(cmd), cmd).toBe(false);
+    }
+  });
+
+  test("4. IFS changes how words split", () => {
+    expect(fed("IFS=/ ; node -e 1")).toBe(true);
+    expect(fed("export IFS=/; node -e 1")).toBe(true);
+  });
+});

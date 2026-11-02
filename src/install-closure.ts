@@ -3336,7 +3336,7 @@ function shellSegments(body: string): string[] {
 const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 const NODE_OPTS = /^NODE_OPTIONS\+?=/;
 const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS\+?=|YARN_|PNPM_|BUN_|COREPACK_)/;
-const UNSAFE_ENV = /^(?:CDPATH|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)\+?=/;
+const UNSAFE_ENV = /^(?:CDPATH|IFS|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)\+?=/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|-C)(?:=(.*))?$/;
@@ -3718,8 +3718,19 @@ function unwrapSink(w: string[]): { words: string[]; xargs: boolean } {
       while (i < w.length && w[i]!.startsWith("-")) i += /^-[IiLnPsdEaJ]$/.test(w[i]!) ? 2 : 1;
     } else break;
   }
-  return { words: w.slice(i), xargs };
+  let words = w.slice(i);
+  // A wrapper this does not name (nice, timeout, stdbuf, ionice, chrt, setsid, caffeinate, arch, ...) runs the
+  // first shell or interpreter word after it: unless the first word is itself one or a known plain command, the
+  // sink is read from that word on.
+  const first = runnerName((words[0] ?? "").replace(/^\\+/, ""));
+  if (words.length > 0 && !SINK_WORD.test(first) && !PLAIN_CMDS.has(first)) {
+    const at = words.findIndex((t, q) => q > 0 && SINK_WORD.test(runnerName(t.replace(/^\\+/, ""))));
+    if (at > 0) words = words.slice(at);
+  }
+  return { words, xargs };
 }
+const SINK_WORD = /^(?:sh|bash|zsh|dash|ksh|node|nodejs|python[0-9.]*|perl|ruby|deno|bun|php)$/;
+const PLAIN_CMDS = new Set(["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "sed", "awk", "head", "tail", "tr", "ls", "test", "[", "true", "false", ":", "cp", "mv", "rm", "mkdir", "touch", "chmod", "which", "tee", "sort", "uniq", "wc", "cut", "find", "diff", "tar", "curl", "wget", "git", "make"]);
 
 // Interpreters that read their program from stdin when given no script operand: the flags that carry a program
 // (`-e`), and the flags that take a separate value.
@@ -3729,6 +3740,7 @@ const STDIN_INTERPS: Record<string, { code: RegExp; value: RegExp }> = {
   perl: { code: /^-[A-Za-z0-9]*[eE][A-Za-z0-9]*$/, value: /^(?:-I|-M|-m|-C)$/ },
   ruby: { code: /^-[A-Za-z0-9]*e[A-Za-z0-9]*$/, value: /^(?:-I|-r|-C|-E|-x)$/ },
   deno: { code: /^$/, value: /^(?:--config|-c|--import-map|--reload|--lock|--cert|--location|--seed|--v8-flags)$/ },
+  php: { code: /^-[A-Za-z]*[rRfF]$/, value: /^(?:-d|-c|-z|-n)$/ },
   bun: { code: /^(?:-e|--eval|-p|--print)(?:=|$)/, value: /^(?:--cwd|--config|-c|--preload|-r|--define|-d|--tsconfig-override|--env-file)$/ },
 };
 
@@ -3739,22 +3751,28 @@ function interpReadsStdin(bin: string, w: string[]): boolean {
   const spec = STDIN_INTERPS[key];
   if (!spec) return false;
   const args = w.slice(1);
-  let j = 0;
-  if ((key === "deno" || key === "bun") && args[0] === "run") j = 1;
+  let start = 0;
+  if ((key === "deno" || key === "bun") && args[0] === "run") start = 1;
   else if (key === "deno" && args[0] !== undefined && !args[0].startsWith("-") && args[0] !== "-") return false;
-  for (; j < args.length; j++) {
-    const t = args[j]!;
-    if (t === "-") return true;
-    if (t === "--") return args[j + 1] === "-" || args[j + 1] === undefined;
-    if (spec.code.test(t)) return false;
-    if (spec.value.test(t)) {
-      j++;
-      continue;
+  // An unknown `--long` flag with no `=` may take the next word as its value or not: either reading that ends at
+  // stdin counts (`node --stack-size 100` reads stdin, `node --foo x.js` may not).
+  const scan = (j: number): boolean => {
+    for (; j < args.length; j++) {
+      const t = args[j]!;
+      if (t === "-") return true;
+      if (t === "--") return args[j + 1] === "-" || args[j + 1] === undefined;
+      if (spec.code.test(t)) return false;
+      if (spec.value.test(t)) {
+        j++;
+        continue;
+      }
+      if (t.startsWith("--") && !t.includes("=") && j + 1 < args.length && !args[j + 1]!.startsWith("-")) return scan(j + 2) || scan(j + 1);
+      if (t.startsWith("-")) continue;
+      return false;
     }
-    if (t.startsWith("-")) continue;
-    return false;
-  }
-  return true;
+    return true;
+  };
+  return scan(start);
 }
 
 // Whether a shell command reads its script from stdin: no -c, and either -s, /dev/stdin, `-`, or no script file.
