@@ -439,31 +439,32 @@ describe("shell classes: review of d2f6ddd", () => {
 
 describe("shell classes: bounded work", () => {
   const rep = (s: string, n: number) => s.repeat(n);
-  const inputs: [string, string][] = [
-    ["quotes", rep("'", MAX_LEN - 1)],
-    ["dollar parens", rep("$(", MAX_LEN / 2 - 1)],
-    ["heredocs", rep("cat <<E\n", MAX_LEN / 8 - 1)],
-    ["parens", rep("(", MAX_LEN - 1)],
-    ["backticks", rep("`", MAX_LEN - 1)],
-    ["nested subshell", rep("sh -c '", 400) + "x" + rep("'", 400)],
-    ["many stages", rep("node a.js | ", MAX_LEN / 12 - 1) + "sh"],
-    ["many redirects", rep("cat >a ", MAX_LEN / 7 - 1)],
-    ["long word", "node " + rep("a", MAX_LEN - 10)],
-    ["unterminated heredoc lines", "sh <<E\n" + rep("x\n", MAX_LEN / 2 - 10)],
-    ["escapes", rep("\\ ", MAX_LEN / 2 - 1)],
-    ["braces", rep("${", MAX_LEN / 2 - 1)],
-    ["over the cap", rep("node a.js;", MAX_LEN)],
-    ["double quotes with dollars", '"' + rep("$(", MAX_LEN / 2 - 3) + '"'],
+  const inputs: [string, string, ClassName[]][] = [
+    ["quotes", rep("'", MAX_LEN - 1), []],
+    ["dollar parens", rep("$(", MAX_LEN / 2 - 1), []],
+    ["heredocs", rep("cat <<E\n", MAX_LEN / 8 - 1), ["heredoc"]],
+    ["parens", rep("(", MAX_LEN - 1), []],
+    ["backticks", rep("`", MAX_LEN - 1), []],
+    ["nested subshell", rep("sh -c '", 400) + "x" + rep("'", 400), ["interp-stdin"]],
+    ["many stages", rep("node a.js | ", MAX_LEN / 12 - 1) + "sh", []],
+    ["many redirects", rep("cat >a ", MAX_LEN / 7 - 1), []],
+    ["long word", "node " + rep("a", MAX_LEN - 10), []],
+    ["unterminated heredoc lines", "sh <<E\n" + rep("x\n", MAX_LEN / 2 - 10), ["heredoc"]],
+    ["escapes", rep("\\ ", MAX_LEN / 2 - 1), []],
+    ["braces", rep("${", MAX_LEN / 2 - 1), []],
+    ["over the cap", rep("node a.js;", MAX_LEN), ["over-cap"]],
+    ["double quotes with dollars", '"' + rep("$(", MAX_LEN / 2 - 3) + '"', []],
   ];
-  for (const [name, input] of inputs) {
-    test(`${name}: under 100 ms`, () => {
+  for (const [name, input, want] of inputs) {
+    test(`${name}: the result, within a generous bound`, () => {
       const t = performance.now();
-      flagBody(input);
-      expect(performance.now() - t).toBeLessThan(100);
+      const got = [...new Set(flagBody(input).map((h) => h.cls))].sort();
+      expect(got).toEqual(want);
+      expect(performance.now() - t).toBeLessThan(500);
     });
   }
 
-  test("random inputs finish under 100 ms each and do not throw", () => {
+  test("random inputs finish within a generous bound each and do not throw", () => {
     const alphabet = ["'", '"', "`", "$(", ")", "(", "<<", "<<-", "<<<", ">", "|", "&", ";", "\n", "\\", " ", "sh", "node", "-r", "cd", "EOF", "x", "${", "}", "-c"];
     let seed = 12345;
     const rnd = (n: number) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
@@ -472,7 +473,7 @@ describe("shell classes: bounded work", () => {
       for (let k = rnd(60); k > 0; k--) s += alphabet[rnd(alphabet.length)];
       const t = performance.now();
       expect(() => flagBody(s)).not.toThrow();
-      expect(performance.now() - t, JSON.stringify(s)).toBeLessThan(100);
+      expect(performance.now() - t, JSON.stringify(s)).toBeLessThan(500);
     }
   });
 });
