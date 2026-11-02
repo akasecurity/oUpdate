@@ -3501,7 +3501,14 @@ function movesCore(argv: string[], dirs: string[]): boolean {
           dirs.push(UNSURE);
           return true;
         }
-        return rest[n] === undefined || movesRun(rest[n]!, dirs);
+        // A file sourced inside the string runs in that shell and may sit under test/ or docs/: its directory is read.
+        let sourced = false;
+        for (const m of (rest[n] ?? "").matchAll(/(?:^|[\s;&|({])(?:source|\.)\s+['"]?([^\s;&|)'"]+)/g)) {
+          fedDir(dirs, m[1]!);
+          sourced = true;
+        }
+        const mv = rest[n] !== undefined && movesRun(rest[n]!, dirs);
+        return sourced || rest[n] === undefined || mv;
       }
       if (/^[-+][A-Za-z]+$/.test(o)) j += (o.match(/[oO]/g) ?? []).length;
       else if (o === "--rcfile" || o === "--init-file") j++;
