@@ -2989,9 +2989,15 @@ function runScript(ctx: Ctx, name: string, optional: boolean): void {
   ctx.scripts[name] = raw;
   if (raw.length === 0) return;
   ctx.depth++;
+  // Each script starts at the package root, whatever an earlier script changed into.
+  const savedCwd = ctx.cwd;
+  ctx.cwd = "";
   runScript(ctx, `pre${name}`, true);
+  ctx.cwd = "";
   runBody(ctx, raw);
+  ctx.cwd = "";
   runScript(ctx, `post${name}`, true);
+  ctx.cwd = savedCwd;
   ctx.depth--;
 }
 
@@ -3361,7 +3367,7 @@ function shellSegments(body: string): string[] {
 const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 const NODE_OPTS = /^NODE_OPTIONS\+?=/;
 const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS\+?=|YARN_|PNPM_|BUN_|COREPACK_)/;
-const UNSAFE_ENV = /^(?:CDPATH|IFS|PYTHONPATH|PYTHONSTARTUP|PERL5LIB|PERL5OPT|RUBYOPT|RUBYLIB|ZDOTDIR|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)\+?=/;
+const UNSAFE_ENV = /^(?:CDPATH|IFS|GIT_SSH_COMMAND|GIT_SSH|GIT_EXTERNAL_DIFF|GIT_PAGER|GIT_EDITOR|GIT_ASKPASS|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|SSH_ASKPASS|EDITOR|VISUAL|PAGER|PYTHONPATH|PYTHONSTARTUP|PERL5LIB|PERL5OPT|RUBYOPT|RUBYLIB|ZDOTDIR|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)\+?=/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|--workspace|-C|-w)(?:=(.*))?$/;
@@ -3567,8 +3573,11 @@ function readFed(ctx: Ctx, path: string): void {
   const key = findKey(ctx, logical);
   if (!key || isManifest(key)) return;
   noteHookArg(ctx, path);
-  if (ctx.ranSh.has(key) || ctx.ranSh.size >= DEPTH || ctx.depth >= DEPTH) {
-    if (ctx.depth >= DEPTH) ctx.widenInert = true;
+  if (ctx.ranSh.has(key)) return;
+  if (ctx.ranSh.size >= DEPTH || ctx.depth >= DEPTH) {
+    // A budget ran out with a fed file unread: read every file.
+    ctx.widenInert = true;
+    widenAll(ctx);
     return;
   }
   ctx.ranSh.add(key);
@@ -3956,6 +3965,46 @@ function interpReadsStdin(bin: string, w: string[]): boolean {
   return scan(start);
 }
 
+// Files a program text names in quotes (`require('./test/x.js')`, `open("test/x.py")`): fed text for an interpreter is
+// not shell, so its string literals are the paths it can load. An expansion in it is unsure.
+function textRefs(text: string, dirs: string[]): void {
+  if (/[$`]/.test(text)) dirs.push(UNSURE);
+  for (const m of text.matchAll(/['"]([^'"\s]{1,512})['"]/g)) {
+    const f = m[1]!;
+    if (/^[A-Za-z0-9._/-]+$/.test(f) && /[./]/.test(f) && f !== "." && f !== "..") fedDir(dirs, f.replace(/^(?:\.\/)+/, ""));
+  }
+  for (const m of text.matchAll(/(?:^|[\s(=])(\.{0,2}\/[A-Za-z0-9._/-]+)/g)) fedDir(dirs, m[1]!.replace(/^(?:\.\/)+/, ""));
+}
+
+// Files a shell or interpreter loads through flags (`node -r ./x.js`, `python3 -m test.x`, `php -f x.php`,
+// `ruby -x x.rb`, `deno run --reload x.ts`), in an unsplit body too. A flag value that is a plain path is read.
+function flagFiles(bin: string, w: string[]): string[] {
+  const key = /^(?:node|nodejs)$/.test(bin) ? "node" : /^python[0-9.]*$/.test(bin) ? "python" : bin;
+  const spec = STDIN_INTERPS[key];
+  if (!spec) return [];
+  const args = w.slice(1);
+  const out: string[] = [];
+  for (let j = 0; j < args.length; j++) {
+    const t = args[j]!;
+    if (t === "--") break;
+    const eq = t.indexOf("=");
+    const name = eq > 0 ? t.slice(0, eq) : t;
+    if (key === "python" && /^-[A-Za-z]*m$/.test(t) && args[j + 1]) {
+      const mod = args[j + 1]!.replace(/\./g, "/");
+      out.push(`${mod}.py`, `${mod}/__main__.py`);
+      j++;
+    } else if (spec.value.test(name)) {
+      const v = eq > 0 ? t.slice(eq + 1) : args[j + 1];
+      if (v) out.push(v);
+      if (eq < 0) j++;
+    } else if (/^-[A-Za-z]*[rIM]./.test(t) && key !== "python" && !t.startsWith("--")) {
+      // joined short value (`-r./x.js`)
+      out.push(t.replace(/^-[A-Za-z]*?[rIM]/, ""));
+    }
+  }
+  return out;
+}
+
 // The script file a shell or interpreter is given (`sh test/x.sh`, `node ./a.js`), or undefined when it runs a program
 // from a flag (`-c`, `-e`) or reads stdin.
 function scriptOperand(bin: string, w: string[]): string | undefined {
@@ -4001,15 +4050,15 @@ const STDIN_CODE = /readFileSync\s*\(\s*(?:0\b|['"]\/dev\/stdin)|\/dev\/stdin|\/
 
 // Flags of otherwise plain commands that run a program.
 const RUNS_PROGRAM: Record<string, RegExp> = {
-  tar: /^(?:--(?:to-command|use-compress-program|checkpoint-action|rsh-command|info-script)(?:=.*)?|-I|-F|--new-volume-script(?:=.*)?)$/,
+  tar: /^(?:--(?:to-command|use-compress-program|checkpoint-action|rsh-command|info-script)(?:=.*)?|-[A-Za-z]*[IF].*|--new-volume-script(?:=.*)?)$/,
   zip: /^(?:-TT|--unzip-command(?:=.*)?)$/,
   split: /^--filter(?:=.*)?$/,
   sort: /^--compress-program(?:=.*)?$/,
   rg: /^--pre(?:=.*)?$/,
   find: /^-(?:exec|execdir|ok|okdir)$/,
-  git: /^(?:--upload-pack|--receive-pack|--exec-path)(?:=.*)?$/,
+  git: /^(?:--upload-pack|--receive-pack|--exec-path)(?:=.*)?$|^(?:-c)?core\.(?:hooksPath|sshCommand|pager|editor|fsmonitor|askPass)|^(?:alias|credential|diff|merge|filter|gpg)\.\S*(?:=|$)|^-c.*(?:hooksPath|sshCommand|pager|editor|fsmonitor)/,
   less: /^--lesskey-src(?:=.*)?$/,
-  rsync: /^(?:-e|--rsh(?:=.*)?|--rsync-path(?:=.*)?)$/,
+  rsync: /^(?:-[A-Za-z]*e.*|--rsh(?:=.*)?|--rsync-path(?:=.*)?)$/,
 };
 
 // Whether a shell command reads its script from stdin: no -c, and either -s, /dev/stdin, `-`, or no script file.
@@ -4058,6 +4107,9 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
   // Files a command wrote (`> build.js`, `tee build.js`) with the files that fed that stage, so a later command that
   // runs the written file reads the sources.
   const written = new Map<string, string[]>();
+  // Sources of commands that create files at names this scan does not follow (tar x, unzip, patch, git apply, cp into
+  // a directory): a later shell or interpreter, or a path as the command, reads them.
+  let produced: string[] = [];
   // An output process substitution (`cat test/x.sh > >(sh)`) is a consumer whose feed this scan does not follow.
   if (/>\(/.test(body)) {
     hit = true;
@@ -4168,8 +4220,30 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       const text = m[1] || raw[q + 1] || "";
       hit = true;
       if (!text || /[$`]/.test(text)) dirs.push(UNSURE);
-      else if (movesRun(text, dirs)) hit = true;
+      else if (isShell || !SINK_WORD.test(sb)) {
+        if (movesRun(text, dirs)) hit = true;
+      } else textRefs(text, dirs);
     }
+    // Literal text piped into an interpreter that is not a shell is program text, not commands.
+    if (bare && !isShell && SINK_WORD.test(sb) && prev !== undefined && /^(?:echo|printf)$/.test(prev)) {
+      hit = true;
+      textRefs(prevArgs.join(" "), dirs);
+    }
+    // A heredoc fed to an interpreter: its text is program text.
+    if (SINK_WORD.test(sb) && /<<-?\s*['"]?\w+/.test(seg)) {
+      hit = true;
+      const d = /<<-?\s*(['"]?)(\w+)\1/.exec(seg);
+      if (d) {
+        const hd = new RegExp(`<<-?\\s*['"]?${d[2]}['"]?[^\\n]*\\n([\\s\\S]*?)\\n[\\t ]*${d[2]}(?:\\n|$)`).exec(body.slice(Math.max(0, body.indexOf(seg))));
+        if (hd) {
+          if (isShell) {
+            if (movesRun(hd[1]!, dirs)) hit = true;
+          } else textRefs(hd[1]!, dirs);
+        } else dirs.push(UNSURE);
+      }
+    }
+    // Flags that load a file, and the script operand, in an unsplit body.
+    if (SINK_WORD.test(sb)) for (const f of flagFiles(sb, un.words)) fedDir(dirs, f.replace(/^(?:\.\/)+/, ""));
     // xargs turns its input lines into the arguments of a shell or interpreter (`echo test/x.sh | xargs sh`).
     if (un.xargs && SINK_WORD.test(sb)) {
       hit = true;
@@ -4193,6 +4267,10 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
         hit = true;
       }
     }
+    if (produced.length > 0 && (SINK_WORD.test(un.lead) || /^\.{0,2}\//.test(un.lead) || un.lead === "." || un.lead === "source")) {
+      // The sources are read as files (not a widen): what they create is not followed.
+      for (const f of produced) fedDir(dirs, f.replace(/^(?:\.\/)+/, ""));
+    }
     // A command that runs a file an earlier stage wrote reads the files that fed that stage.
     if (written.size > 0 && !PLAIN_CMDS.has(un.lead)) {
       for (const t of w) {
@@ -4208,6 +4286,24 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       if (name && !name.startsWith("/dev/")) written.set(name.replace(/^(?:\.\/)+/, ""), pipeFiles.slice());
     }
     if (un.lead === "tee") for (const t of w.slice(1)) if (!t.startsWith("-")) written.set(t.replace(/^(?:\.\/)+/, ""), pipeFiles.slice());
+    {
+      const args = w.slice(1);
+      const t = un.lead;
+      const extracts = (t === "tar" && args.some((x) => /^-[A-Za-z]*x|^--(?:extract|get)$/.test(x) || x === "x")) || /^(?:unzip|7z|7za|unrar|gunzip|bunzip2|unxz|cpio)$/.test(t) || t === "patch" || (t === "git" && args.some((x) => /^(?:apply|am|checkout|restore|stash|merge|cherry-pick|rebase|pull)$/.test(x)));
+      if (extracts || /^(?:cp|mv|ln|install|rsync|ditto)$/.test(t)) {
+        // Every non-flag operand counts (a destination or an option value is read as a file and found missing).
+        for (const x of args) if (!x.startsWith("-")) produced.push(x);
+        // patch -i FILE, git apply FILE, tar -xf FILE: the operands include the fed file.
+        for (const x of raw) {
+          const m = /^\d*<(?!<)(.*)$/.exec(x);
+          if (m && m[1]) produced.push(m[1]);
+        }
+        if (produced.length > 64) {
+          dirs.push(UNSURE);
+          produced = produced.slice(0, 64);
+        }
+      }
+    }
     // cp, mv and ln make the destination a copy of the sources.
     if (/^(?:cp|mv|ln|install|rsync)$/.test(un.lead)) {
       const args = w.slice(1).filter((t) => !t.startsWith("-"));

