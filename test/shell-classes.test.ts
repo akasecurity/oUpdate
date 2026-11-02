@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { flagBody, MAX_LEN, type ClassName } from "../src/shell-classes.ts";
+import { flagBody, LIMITS, MAX_LEN, type ClassName } from "../src/shell-classes.ts";
 import { prepass, type FileMap } from "../src/prepass.ts";
 
 const classes = (body: string): ClassName[] => [...new Set(flagBody(body).map((h) => h.cls))].sort();
@@ -72,9 +72,79 @@ describe("shell classes", () => {
     expect(classes("(node -r ./p.js a.js)")).toEqual(["interp-flag"]);
   });
 
-  test("a body it cannot parse reports nothing, an unterminated heredoc reports", () => {
-    for (const c of ["node -r ./p.js 'a", "node -r ./p.js $(", "node -r ./p.js )", "node <(x) -r ./p.js", "node -r ./p.js \\"]) expect(classes(c), c).toEqual([]);
+  test("an unclosed quote, backtick or paren reports nothing, an unterminated heredoc reports", () => {
+    for (const c of ["node -r ./p.js 'a", "node -r ./p.js $(", "node -r ./p.js `a", "node -r ./p.js \"a", "echo a(b)", "node -p \\\"require('x').targets\\\""]) expect(classes(c), c).toEqual([]);
     expect(classes("sh <<")).toEqual(["heredoc"]);
+  });
+
+  test("structure the parser reads: case, functions, $'..', process substitution, stray parens", () => {
+    const P = "node -r ./p.js a.js";
+    for (const c of [`case x in *) ${P};; esac`, `case x in (a|b) ${P};; esac`, `f() { ${P}; }; f`, `function f { ${P}; }; f`, `function f() { ${P}; }`, `${P}; echo $'x\\'y'`, `${P}; : <(true)`, `: >(cat); ${P}`, `if true; then ${P}; fi`, `for i in a b; do ${P}; done`]) {
+      expect(classes(c), c).toEqual(["interp-flag"]);
+    }
+    expect(classes("case x in *) node a.js;; esac")).toEqual([]);
+  });
+
+  test("a parse that gives up for structure fails closed with a named reason", () => {
+    for (const c of [`echo $(echo $(echo $(echo $(echo $(node -r ./p.js a.js)))))`, "echo hi \\", "echo >"]) {
+      expect(classes(c), c).toEqual(["unparsed"]);
+    }
+    expect(classes("echo $(echo $(echo $(echo $(node a.js))))")).toEqual([]); // depth 4 still reads
+    const saved = LIMITS.fuel;
+    try {
+      LIMITS.fuel = 50;
+      const hits = flagBody("echo " + "a ".repeat(100));
+      expect(hits.map((h) => h.cls)).toEqual(["unparsed"]);
+      expect(hits[0]!.why).toContain("budget");
+    } finally { LIMITS.fuel = saved; }
+  });
+
+  test("many heredoc openers do not rescan: each search starts after the last terminator", () => {
+    const t = performance.now();
+    expect(classes("cat " + "<<E ".repeat(100) + "\n" + "\n".repeat(5000) + "E\n")).toEqual(["heredoc"]); // 100 openers, one terminator
+    expect(classes("cat <<E\n".repeat(100) + "\n".repeat(5000) + "E\n")).toEqual([]); // one heredoc whose body holds the rest
+    expect(classes("cat <<E <<E\na\nE\nb\nE\n")).toEqual([]);
+    expect(performance.now() - t).toBeLessThan(100);
+  });
+
+  test("a heredoc, here-string or redirect into an interpreter with a flag", () => {
+    for (const c of ["node --no-warnings <<E\nx\nE\n", "python3 -u <<E\nprint(1)\nE\n", "node --input-type=module <<< 'x'"]) expect(classes(c), c).toEqual(["heredoc"]);
+    expect(classes("node --no-warnings < x.js")).toEqual(["interp-stdin"]);
+    for (const c of ["node --version", "python3 --version", "node -e 1 < /dev/null", "node -v"]) expect(classes(c), c).toEqual([]);
+  });
+
+  test("clustered shell flags: -ec, -xc, -lc, -c --", () => {
+    const P = "node -r ./p.js a.js";
+    for (const c of [`bash -ec '${P}'`, `sh -xc '${P}'`, `bash -lc '${P}'`, `sh -c -- '${P}'`, `sh -c -e '${P}'`, `bash -o pipefail -c '${P}'`, `bash -c -o pipefail '${P}'`]) {
+      expect(classes(c), c).toEqual(["interp-flag"]);
+    }
+    expect(classes("bash -ec 'echo hi'")).toEqual([]);
+  });
+
+  test("a cd and a written file carry into nested bodies", () => {
+    expect(classes("cd sub && sh -c 'node a.js'")).toEqual(["cd-relative"]);
+    expect(classes("cd sub && echo $(node a.js)")).toEqual(["cd-relative"]);
+    expect(classes("cat t > b.js && sh -c 'node b.js'")).toEqual(["writer-exec"]);
+    expect(classes("cat t > b.js && bash -lc 'node b.js'")).toEqual(["writer-exec"]);
+    expect(classes("(cat t > b.js) && node b.js")).toEqual(["writer-exec"]);
+    expect(classes("(cd sub) && sh -c 'node a.js'")).toEqual([]); // a cd inside a subshell does not leave it
+    expect(classes("sh -c 'cd sub' && node a.js")).toEqual([]);
+  });
+
+  test("wrappers with option arguments", () => {
+    const P = "node -r ./p.js a.js";
+    for (const c of [`nice -n 5 ${P}`, `nice -5 ${P}`, `timeout -s KILL 10 ${P}`, `timeout 10 ${P}`, `timeout -k 5 -s TERM 10 ${P}`, `sudo -u root ${P}`, `sudo -E -u root -g wheel ${P}`, `env -u X ${P}`, `env -i A=1 ${P}`, `env -S '${P}'`, `xargs ${P}`, `xargs -n 1 -I{} ${P}`, `stdbuf -o0 ${P}`, `stdbuf -o L ${P}`, `setsid ${P}`, `arch -arm64 ${P}`, `builtin command nohup ${P}`, `ionice -c 3 ${P}`, `time -o t.log ${P}`, `exec -a x ${P}`, `nohup nice -n 5 timeout 9 ${P}`]) {
+      expect(classes(c), c).toEqual(["interp-flag"]);
+    }
+    expect(classes("env -u X NODE_OPTIONS=--require=./p.js node a.js")).toEqual(["env-assign"]);
+    expect(classes("env -C sub node a.js")).toEqual(["cd-relative"]);
+    expect(classes("env --chdir=sub node a.js")).toEqual(["cd-relative"]);
+    for (const c of ["nice -n 5 node a.js", "timeout -s KILL 10 node a.js", "sudo -u root node a.js", "xargs -n 1 echo"]) expect(classes(c), c).toEqual([]);
+  });
+
+  test("clustered interpreter flags", () => {
+    for (const c of ["python3 -Bm pkg", "python3 -m pkg", "perl -wMFoo a.pl", "perl -wI lib a.pl", "ruby -wrfoo a.rb", "ruby -I lib a.rb"]) expect(classes(c), c).toEqual(["interp-flag"]);
+    for (const c of ["python3 -Bu a.py", "perl -w a.pl", "ruby -w a.rb", "python3 -Bc 'print(1)'"]) expect(classes(c), c).toEqual([]);
   });
 
   test("a body over the character cap fails closed", () => {
