@@ -81,6 +81,7 @@ export function npmPrivateRegistry(url: unknown): string | undefined {
  */
 export function descriptorOf(name: string, range: string, scope = ""): string {
   const esc = (s: string) => s.replace(/[\\[\]]/g, "\\$&");
-  const n = name.slice(0, 1) + name.slice(1).replace(/[\\@]/g, "\\$&");
+  const keep = /^@[^/@\\]+\//.test(name) ? 1 : 0; // only the scope prefix of @scope/pkg keeps its at-sign
+  const n = name.slice(0, keep) + name.slice(keep).replace(/[\\@]/g, "\\$&");
   return scope ? `${n}@${esc(range)} [${esc(scope)}]` : `${n}@${esc(range)}`;
 }
