@@ -60,6 +60,7 @@ describe("install closure", () => {
       { postinstall: "cross-env A=1 npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "env npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "npx run-s setup", setup: "node assets/x.bmp" },
+      // Holds because run-s resolves to the setup script, which runs the changed file; it is not a widen.
       { postinstall: "npm exec -- run-s setup", setup: "node assets/x.bmp" },
       { postinstall: "yarn setup", setup: "node assets/x.bmp" },
       { postinstall: "pnpm setup2", setup2: "node assets/x.bmp" },

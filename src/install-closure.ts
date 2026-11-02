@@ -103,9 +103,8 @@ function binName(token: string): string {
 
 // `pnpm@9` and `yarn@1.22.22` are the pinned form of the runner. Only the runner comparison strips it.
 function runnerName(token: string): string {
-  const name = binName(token);
-  const at = name.indexOf("@", 1);
-  return at > 0 ? name.slice(0, at) : name;
+  // Only a version, range or tag follows the name. `pnpm@file:x.tgz` and `pnpm@npm:other` stay unknown.
+  return binName(token).replace(/^(.+?)@[0-9A-Za-z.^~<>=*+-]+$/, "$1");
 }
 
 function words(cmd: string): string[] {
@@ -2926,6 +2925,9 @@ function runBody(ctx: Ctx, body: string): void {
   if (sub === null || ctx.hold) return;
   const cmds = splitCommands(ctx, sub);
   if (!cmds) {
+    // The body was not split, so a `cd` or a workspace flag inside a redirect, pipe or subshell may be moving a
+    // run to another package. A body that stays in place (`node safe.js > out`) is not widened.
+    if (movesRun(sub)) widenAll(ctx);
     noteUnparsedCompile(ctx, sub);
     return;
   }
@@ -3056,6 +3058,8 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
 }
 
 function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
+  // `sh -c 'cd sub && npm run build'` runs a string that may leave this package.
+  if (/^-[a-z]*c[a-z]*$/.test(argv[i] ?? "") && movesRun(argv.slice(i + 1).join(" "))) widenAll(ctx);
   if (i >= argv.length || argv[i]!.startsWith("-") || i + 1 !== argv.length) {
     fail(ctx, "unresolved: shell");
     return;
@@ -3156,6 +3160,7 @@ function wrappedScript(ctx: Ctx, argv: string[], i: number): string | undefined 
   if (inner === undefined || inner.startsWith("-")) return undefined;
   const runner = runnerName(inner);
   if (runner !== "npm" && runner !== "yarn" && runner !== "pnpm" && runner !== "bun") return undefined;
+  if (runner === "npm" && npmFlagWidens(argv, i + 1)) return undefined;
   let j = i + 1;
   while (j < argv.length && BOOL_FLAGS.has(argv[j]!)) j++;
   const sub = argv[j];
@@ -3184,19 +3189,42 @@ function localEntry(w: string): boolean {
   return false;
 }
 
+const NPM_QUIET_FLAGS = new Set(["--loglevel", "--max-parallel", "--jobs", "-j"]);
+
+// True when an argument before a bare `--` is a flag that is not known to leave the run in place.
+function npmFlagWidens(argv: string[], from: number): boolean {
+  for (let j = from; j < argv.length && argv[j] !== "--"; j++) {
+    const a = argv[j]!;
+    if (!a.startsWith("-") || a === "-") continue;
+    const eq = a.indexOf("=");
+    const name = eq > 0 ? a.slice(0, eq) : a;
+    if (NPM_WORKSPACE_WIDEN.test(a) || !(BOOL_FLAGS.has(name) || NPM_QUIET_FLAGS.has(name))) return true;
+  }
+  return false;
+}
+
+// Tools that run a script of every package. A file named among their arguments is a config, not an entry.
+const WORKSPACE_TOOLS = new Set(["lerna", "turbo", "nx", "rush", "wsrun"]);
+
+// Words of an unsplit shell body that move a run: a directory change, a workspace tool or a workspace flag.
+function movesRun(body: string): boolean {
+  return body.split(/[\s;&|()`'"<>]+/).some((w) => /^(?:cd|pushd|popd)$/.test(w) || WORKSPACE_TOOLS.has(w) || NPM_WORKSPACE_WIDEN.test(w) || Object.values(WORKSPACE_WIDEN).some((rx) => rx.test(w)));
+}
+
 function dispatch(ctx: Ctx, cmd: string): void {
   if (ctx.hold) return;
   const argv = words(cmd);
   let i = 0;
   if (i < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i]!)) {
     // An assignment such as npm_config_workspace=sub or npm_config_prefix=sub moves the run to another package.
-    widenAll(ctx);
+    if (/^(?:npm_|NPM_|NODE_|YARN_|PNPM_|BUN_|COREPACK_)/.test(argv[i]!)) widenAll(ctx);
     fail(ctx, "unresolved: env");
     return;
   }
   if (i >= argv.length) return;
   const bin = binName(argv[i]!);
   i++;
+  if (WORKSPACE_TOOLS.has(bin) || ((bin === "npx" || bin === "bunx" || bin === "corepack") && WORKSPACE_TOOLS.has(runnerName(argv[i] ?? "")))) widenAll(ctx);
   if (bin === "echo" || bin === "true" || bin === ":") return;
   if (bin === "node" || bin === "nodejs") {
     dispatchNode(ctx, argv, i);
@@ -3215,11 +3243,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
   }
   if (bin === "npm") {
     // Every argument before a bare `--` is checked, so a flag value cannot hide a later workspace flag.
-    for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
-      if (NPM_WORKSPACE_WIDEN.test(argv[j]!)) {
-        widenAll(ctx);
-        return;
-      }
+    // npm reads a flag wherever it sits before `--`, and accepts unique prefixes (`--prefi`) and joined short
+    // options (`-sw`), so any flag that is not a known quiet one widens, in every position.
+    if (npmFlagWidens(argv, i)) {
+      widenAll(ctx);
+      return;
     }
     const sub = readWord(ctx, argv, i);
     if (!sub) {
@@ -3267,7 +3295,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
         else if (/^-c./.test(a) && !a.startsWith("--")) call = a.slice(2);
         k++;
       }
-      if (call !== undefined) dispatch(ctx, call);
+      if (call !== undefined) runBody(ctx, call);
       else {
         if (argv[k] === "--") k++;
         if (k >= argv.length || remote || !localEntry(argv[k]!)) {

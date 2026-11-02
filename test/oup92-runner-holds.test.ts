@@ -134,3 +134,50 @@ describe("npm exec forms and runner config files", () => {
     }
   });
 });
+
+describe("third review round", () => {
+  test("npm flags after the script name, by prefix or joined, widen", () => {
+    for (const cmd of ["npm run build --prefi sub", "npm run build --prefi=sub", "npm run build -sw sub", "npm test --userconf ./rc", "npm run build --script-shell=./x", "npm run build --node-options=--require=./x", "npx npm run build --prefi sub"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("known quiet npm flags and flags after -- stay local", () => {
+    for (const cmd of ["npm run build --silent", "npm run build --loglevel silent", "npm run build --if-present", "npm run build -- --prefi sub"]) {
+      expect(manifestHeld(cmd), cmd).toBe(false);
+    }
+  });
+
+  test("npm exec -c runs the whole shell string", () => {
+    for (const cmd of ["npm exec -c 'node ./safe.js && pnpm -C sub build'", "npm exec --call='node ./safe.js && pnpm -C sub build'"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("a runner spec that is not a version or tag is not the trusted runner", () => {
+    for (const cmd of ["npx pnpm@file:pnpm.tgz build", "npx pnpm@npm:other-pkg build", "corepack pnpm@https://x.example/p.tgz build"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+    for (const cmd of ["npx pnpm@9.1.0 build", "npx pnpm@latest build", "corepack pnpm@9.1.0+sha256.abc build"]) {
+      expect(fileHeld(cmd), cmd).toBe(false);
+    }
+  });
+
+  test("a body the splitter gives up on still widens when it moves the run", () => {
+    for (const cmd of ["pnpm -C sub build > /dev/null", "npm run build -w sub | tee log", "(cd sub && npm run build)", "sh -c 'cd sub && npm run build'", "lerna run build --config ./lerna.json", "npx lerna run build --config ./lerna.json", "turbo run build"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+    expect(manifestHeld("npm run build > /dev/null")).toBe(false);
+  });
+
+  test("an environment assignment widens only for runner configuration names", () => {
+    expect(manifestHeld("npm_config_workspace=sub npm run build")).toBe(true);
+    expect(manifestHeld("YARN_RC_FILENAME=x yarn build")).toBe(true);
+    expect(manifestHeld("FOO=1 npm run build")).toBe(false);
+  });
+
+  test("a widened hook does not hold when only the root version bumps", () => {
+    const hook = (version: string) => ({ "package.json": JSON.stringify({ name: "x", version, scripts: { postinstall: "lerna run build" } }), ...subManifest("echo a") });
+    expect(prepass("npm", map(hook("1.0.0")), map(hook("1.0.1"))).hard.some((f) => f.kind === "install-script")).toBe(false);
+  });
+});
