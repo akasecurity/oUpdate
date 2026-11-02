@@ -3247,12 +3247,24 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
     return;
   }
   if (argv[k] === "--") k++;
+  else if (k < argv.length && npmFlagWidens(argv, k + 1)) {
+    widenAll(ctx);
+    fail(ctx, "unresolved: runner");
+    return;
+  }
   const inner = argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
+  if (ctx.depth >= DEPTH) {
+    widenAll(ctx);
+    fail(ctx, "unresolved: script depth");
+    return;
+  }
+  ctx.depth++;
   if (k >= argv.length || remote || !localEntry(argv[k]!)) {
     if (k < argv.length) dispatch(ctx, inner);
     widenAll(ctx);
     fail(ctx, "unresolved: runner");
   } else dispatch(ctx, inner);
+  ctx.depth--;
 }
 
 const NPM_QUIET_FLAGS = new Set(["--loglevel", "--max-parallel", "--jobs", "-j"]);
@@ -3316,9 +3328,9 @@ function flagDirs(rest: string[], dirs: string[]): void {
     const m = DIR_FLAG.exec(rest[j]!);
     if (m) {
       const v = m[1] ?? rest[j + 1];
-      if (v) dirs.push(v);
-    } else if (/^-C./.test(rest[j]!)) dirs.push(rest[j]!.slice(2));
-    else if (/^-w./.test(rest[j]!)) dirs.push(rest[j]!.slice(2));
+      if (v) pushDir(dirs, v);
+    } else if (/^-C./.test(rest[j]!)) pushDir(dirs, rest[j]!.slice(2));
+    else if (/^-w./.test(rest[j]!)) pushDir(dirs, rest[j]!.slice(2));
   }
 }
 
@@ -3326,7 +3338,12 @@ function flagDirs(rest: string[], dirs: string[]): void {
 // flag or an npm flag not known to stay in place, or a wrapper (env, cross-env, exec, command, npx, npm exec,
 // pnpm exec, sh -c) around one of those. Only the command word is looked at, so other programs' flags and quoted
 // text (`tar -C dir`, `echo 'workspace'`) are not. Directories named on the way go to `dirs`.
-function moves(argv: string[], dirs: string[]): boolean {
+function movesCore(argv: string[], dirs: string[]): boolean {
+  // CDPATH changes where any later cd lands, here or in a later command.
+  if (argv.some((a) => a.startsWith("CDPATH="))) {
+    dirs.push(UNSURE);
+    return true;
+  }
   let k = 0;
   let wrapped = false;
   while (k < argv.length) {
@@ -3338,11 +3355,11 @@ function moves(argv: string[], dirs: string[]): boolean {
     } else if (wrapped && a.startsWith("-")) {
       // An option of env or time. `env -C dir` / `--chdir=dir` runs the command in another directory.
       if (a === "--chdir") {
-        if (argv[k + 1]) dirs.push(argv[k + 1]!);
+        if (argv[k + 1]) pushDir(dirs, argv[k + 1]!);
         return true;
       }
       if (a.startsWith("--chdir=")) {
-        dirs.push(a.slice(8));
+        pushDir(dirs, a.slice(8));
         return true;
       }
       // `-S string` / `--split-string=string` is a whole command line.
@@ -3353,7 +3370,7 @@ function moves(argv: string[], dirs: string[]): boolean {
       if (c && !a.startsWith("--")) {
         const tail = a.slice(c[0].length);
         const d = tail || argv[k + 1];
-        if (d) dirs.push(d);
+        if (d) pushDir(dirs, d);
         return true;
       }
     } else if (WRAPPERS.has(runnerName(a.replace(/^\\+/, "")))) wrapped = true;
@@ -3365,8 +3382,8 @@ function moves(argv: string[], dirs: string[]): boolean {
   const bin = runnerName(argv[k]!.replace(/^\\+/, "")).replace(/^yarnpkg$/, "yarn").replace(/^pnpx$/, "npx");
   const rest = argv.slice(k + 1);
   if (/^(?:cd|pushd|popd)$/.test(bin)) {
-    const t = rest.find((x) => !x.startsWith("-"));
-    if (t) dirs.push(t);
+    const t = rest.find((x) => x === "-" || !x.startsWith("-"));
+    if (t) pushDir(dirs, t);
     return true;
   }
   if (WORKSPACE_TOOLS.has(bin)) return true;
@@ -3460,7 +3477,9 @@ function execMoves(rest: string[], dirs: string[]): boolean {
     } else if (/^-c./.test(a) && !a.startsWith("--")) return movesRun(a.slice(2), dirs);
     n++;
   }
+  // Without a `--`, npm reads the flags after the command word as its own (`npm exec ./x.js -w sub`).
   if (rest[n] === "--") n++;
+  else if (npmFlagWidens(rest, n + 1)) return true;
   return n < rest.length && moves(rest.slice(n), dirs);
 }
 
@@ -3469,6 +3488,7 @@ function execMoves(rest: string[], dirs: string[]): boolean {
 function joinDir(cwd: string, d: string): string | undefined {
   if (d.startsWith("/") || d.startsWith("~") || d.includes("$")) return undefined;
   const out = cwd ? cwd.split("/") : [];
+  if (out.length > 64 || d.length > 4096) return undefined;
   for (const part of d.split("/")) {
     if (part === "" || part === ".") continue;
     if (part === "..") {
@@ -3479,7 +3499,42 @@ function joinDir(cwd: string, d: string): string | undefined {
   return out.join("/");
 }
 
+// The shell readers recurse through wrapped commands and substitutions; past this depth they stop and fail closed.
+const MOVE_DEPTH = 24;
+let moveDepth = 0;
+
+function guarded<T>(dirs: string[] | undefined, over: T, f: () => T): T {
+  if (moveDepth >= MOVE_DEPTH) {
+    dirs?.push(UNSURE);
+    return over;
+  }
+  moveDepth++;
+  try {
+    return f();
+  } finally {
+    moveDepth--;
+  }
+}
+
+function moves(argv: string[], dirs: string[]): boolean {
+  return guarded(dirs, true, () => movesCore(argv, dirs));
+}
+
+function movesRun(body: string, dirs: string[] = []): boolean {
+  return guarded(dirs, true, () => movesRunCore(body, dirs));
+}
+
+function scriptArgsMove(ctx: Ctx, argv: string[]): boolean {
+  return guarded(undefined, true, () => scriptArgsMoveCore(ctx, argv));
+}
+
 const CD_WORD = /^(?:cd|pushd)$/;
+
+// A directory a command moves into. A name that holds an expansion, a glob or a brace, or `cd -`, cannot be resolved
+// here, so it is recorded as unsure (the widen then reads every file).
+function pushDir(dirs: string[], d: string): void {
+  dirs.push(/[$`*?[{]/.test(d) || d === "-" ? UNSURE : d);
+}
 // A directory entry that means the scan was not sure: the widen then reads every file, inert paths included.
 const UNSURE = "\u0000";
 
@@ -3579,7 +3634,7 @@ function substitutions(body: string): string[] | null {
   return dq ? null : out;
 }
 
-function movesRun(body: string, dirs: string[] = []): boolean {
+function movesRunCore(body: string, dirs: string[] = []): boolean {
   let hit = false;
   let cwd = "";
   let fedHit = false;
@@ -3596,7 +3651,15 @@ function movesRun(body: string, dirs: string[] = []): boolean {
     const local: string[] = [];
     if (moves(w, local)) hit = true;
     // Both the raw and the joined directory are recorded: the base may be wrong across a subshell or a popd.
-    for (const d of local) dirs.push(d, joinDir(cwd, d) ?? d);
+    // Bounded: a body with hundreds of directory changes reads every file.
+    if (dirs.length > 512 || cwd.split("/").length >= 64) {
+      dirs.push(UNSURE);
+      return true;
+    }
+    for (const d of local) {
+      if (d === UNSURE) dirs.push(UNSURE);
+      else dirs.push(d, joinDir(cwd, d) ?? d);
+    }
     const first = w.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{)$/.test(t));
     if (first && CD_WORD.test(runnerName(first.replace(/^\\+/, ""))) && local[0] !== undefined) cwd = joinDir(cwd, local[0]) ?? cwd;
     // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
@@ -3609,7 +3672,7 @@ function movesRun(body: string, dirs: string[] = []): boolean {
 
 // Extra arguments given to a package script reach the commands in its body: `npm run go -- -w sub` with
 // `go: "npm run build"` runs `npm run build -w sub`. When the body names a runner or workspace tool, widen.
-function scriptArgsMove(ctx: Ctx, argv: string[]): boolean {
+function scriptArgsMoveCore(ctx: Ctx, argv: string[]): boolean {
   const k = argv.findIndex((a) => RUNNERS.has(runnerName(a.replace(/^\\+/, ""))));
   if (k < 0) return false;
   const bin = runnerName(argv[k]!.replace(/^\\+/, ""));
@@ -3637,6 +3700,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
     // Every leading assignment is checked, not only the first.
     let j = 0;
     while (j < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[j]!)) {
+      // CDPATH changes where a later cd lands: read every file.
+      if (argv[j]!.startsWith("CDPATH=")) {
+        ctx.widenInert = true;
+        widenAll(ctx);
+      }
       if (SPECIAL_ENV.test(argv[j]!)) widenAll(ctx);
       j++;
     }
@@ -3653,7 +3721,9 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (i >= argv.length) return;
   // One structural check on every command: a move or a script argument that may carry one widens first.
   const moved: string[] = [];
-  if (moves(argv, moved) || scriptArgsMove(ctx, argv)) {
+  // Once the scan was unsure the widen already reads everything: later commands need not be rescanned.
+  if (!ctx.widenInert && (moves(argv, moved) || scriptArgsMove(ctx, argv))) {
+    if (ctx.movedDirs.size >= 256 || ctx.cwd.split("/").length >= 64) ctx.widenInert = true;
     for (const d of moved) {
       const r = joinDir(ctx.cwd, d) ?? d;
       const n = normalize(r);

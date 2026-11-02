@@ -539,3 +539,51 @@ describe("round 11b: unclosed substitutions and nested escaped backticks", () =>
     expect(pkgHeld("echo `echo \\`cd tests/pkg && node build.js\\``")).toBe(true);
   });
 });
+
+describe("round 12: unresolvable cd targets, npm exec flags after the command, bounded recursion, CDPATH", () => {
+  const testHeld = (cmd: string, extra: Record<string, string> = {}) => held({ postinstall: cmd }, { "test/setup.js": "1", ...extra }, { "test/setup.js": "evil()", ...extra });
+
+  test("1. a cd target with an expansion, glob or brace reads every file", () => {
+    for (const cmd of ["cd $PWD/test && node setup.js", "cd te* && node setup.js", "cd ${D:-test} && node setup.js", "cd $(echo test) && node setup.js", "pushd te?t && node setup.js", "cd {test,x} && node setup.js", "cd - && node setup.js"]) {
+      expect(testHeld(cmd), cmd).toBe(true);
+    }
+    expect(testHeld("cd lib && node setup.js", { "lib/setup.js": "1" })).toBe(false);
+  });
+
+  test("2. npm flags after the exec command word are npm's own", () => {
+    const f = (v: string) => ({ "tools/x.js": "1", "sub/lib/y.js": v, ...subManifest("echo a") });
+    const h = (cmd: string) => held({ postinstall: cmd }, f("1"), f("evil()"));
+    expect(h("npm exec ./tools/x.js -w sub")).toBe(true);
+    expect(h("npm exec ./tools/x.js --prefix sub")).toBe(true);
+  });
+
+  test("3. deep wrapper recursion widens instead of crashing", () => {
+    for (const hook of ["npx ".repeat(20000) + "x", "pnpm exec ".repeat(20000) + "x", "npm exec ".repeat(20000)]) {
+      const t = Date.now();
+      expect(testHeld(hook), hook.slice(0, 12)).toBe(true);
+      expect(Date.now() - t).toBeLessThan(5000);
+    }
+  });
+
+  test("3b. a long wrapper chain is read without crashing", () => {
+    const t = Date.now();
+    held({ postinstall: "env ".repeat(20000) + "x" }, {}, {});
+    held({ postinstall: "sh -c ".repeat(5000) + "x" }, {}, {});
+    expect(Date.now() - t).toBeLessThan(5000);
+  });
+
+  test("3c. thousands of directory changes are bounded and read every file", () => {
+    for (const hook of ["cd x && ".repeat(20000) + "node a.js", "cd x > /dev/null && ".repeat(20000) + "node a.js"]) {
+      const t = Date.now();
+      expect(testHeld(hook, { "a.js": "1" })).toBe(true);
+      expect(Date.now() - t).toBeLessThan(5000);
+    }
+  });
+
+  test("4. CDPATH changes where cd lands", () => {
+    const f = (v: string) => ({ "test/fixtures/setup.js": v });
+    const h = (cmd: string) => held({ postinstall: cmd }, f("1"), f("evil()"));
+    expect(h("CDPATH=test cd fixtures && node setup.js")).toBe(true);
+    expect(h("export CDPATH=test ; cd fixtures && node setup.js")).toBe(true);
+  });
+});
