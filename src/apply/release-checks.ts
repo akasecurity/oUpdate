@@ -506,7 +506,11 @@ export async function resume(
     // No verdict, the new version kept: after is owed as for a check that could not run, before or not.
     p.after = "run";
     await env.notify(`⚠️ <b>${env.host} release check ${f} ${p.to}: not run, the owner restart failed</b>\n${r.note}\nLog: ${log}`);
-    return end({ note: `${f} ${p.to} not checked, owner restart failed`, failed });
+    if (o.stopping()) return { stopped: true };
+    // Not ended: no verdict was reached, so the record and the previous keg (the rollback) stay for a
+    // later run (bounded by the run's owner-wait count, which ends it).
+    await o.save();
+    return { wait: true, waitWhy: r.note, note: `${f} ${p.to} not checked, owner restart failed`, failed };
   };
   /** The owners were restarted onto the candidate in this run (the record's flag says only that some run did). */
   let restartedNew = false;

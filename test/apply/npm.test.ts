@@ -7,7 +7,7 @@ import { scripted } from "./helpers.ts";
 const APPROVE = "APPROVE\nno attack indicators found";
 const OUTDATED = JSON.stringify({ tool: { current: "1.0.0", wanted: "1.1.0", latest: "1.1.0" }, "@scope/b": { current: "2.0.0", latest: "3.0.0" } });
 
-function host(o: { outdated?: string[]; outdatedRc?: number; scripts?: string; oldScripts?: string; tarball?: string; updateRc?: Record<string, number>; installs?: Record<string, string> } = {}) {
+function host(o: { outdated?: string[]; outdatedRc?: number; scripts?: string; oldScripts?: string; tarball?: string; updateRc?: Record<string, number>; installs?: Record<string, string>; deps?: string; oldDeps?: string; depsRc?: number } = {}) {
   const installed = new Map<string, string>();
   const calls: string[] = [];
   const outdated = [...(o.outdated ?? [OUTDATED, "{}"])];
@@ -20,6 +20,8 @@ function host(o: { outdated?: string[]; outdatedRc?: number; scripts?: string; o
     }
     // The installed versions in OUTDATED are 1.0.0 and 2.0.0; their scripts default to the new ones (no hook change).
     if (argv[1] === "view" && argv[3] === "scripts") return { rc: 0, out: (/@(1|2)\.0\.0$/.test(argv[2]!) ? o.oldScripts ?? o.scripts : o.scripts) ?? "", err: "" };
+    // The registry answers `dependencies optionalDependencies --json` as one object, or nothing when both are empty.
+    if (argv[1] === "view" && argv[3] === "dependencies") return { rc: o.depsRc ?? 0, out: (/@(1|2)\.0\.0$/.test(argv[2]!) ? o.oldDeps ?? o.deps : o.deps) ?? "", err: "" };
     if (argv[1] === "view" && argv[3] === "dist.tarball") return { rc: 0, out: o.tarball ?? `https://registry.npmjs.org/${argv[2]!.replace(/@[^@]*$/, "")}/-/x.tgz\n`, err: "" };
     if (argv[1] === "install") {
       const spec = argv[3]!;
@@ -189,6 +191,46 @@ describe("npmSection", () => {
     expect(s.status).toBe("FLAGGED — could not read tool@1.1.0 scripts (npm view rc 1), tool@1.0.0 scripts (npm view rc 1), @scope/b@3.0.0 scripts (npm view rc 1), @scope/b@2.0.0 scripts (npm view rc 1) — not reviewed");
     expect(h.calls.some((c) => c.startsWith("npm install") || c.startsWith("npm update"))).toBe(false);
     expect(notices).toHaveLength(1);
+  });
+  test("the lane reads dependencies and optionalDependencies of the current and next version", async () => {
+    const h = host();
+    await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+    for (const at of ["tool@1.1.0", "tool@1.0.0", "@scope/b@3.0.0", "@scope/b@2.0.0"]) expect(h.calls).toContain(`npm view ${at} dependencies optionalDependencies --json`);
+  });
+  test("a transitive floor drop between versions holds the batch, even on an APPROVE", async () => {
+    // Mutant caught: dependencies never read, so a lowered floor on a transitive package upgraded unreviewed.
+    const h = host({ oldDeps: '{"dependencies": {"left": "^2.1.0"}}', deps: '{"dependencies": {"left": "^1.0.0"}}' });
+    const s = await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+    expect(s.status).toBe("FLAGGED — FLAG: dependency floor dropped or alias retargeted: tool@1.1.0 left, @scope/b@3.0.0 left (structural pre-gate)");
+    expect(h.calls.some((c) => c.startsWith("npm install"))).toBe(false);
+  });
+  test("the shapes npm 12 prints (one-element array, bare map) are read, so a floor drop still holds", async () => {
+    // Mutant caught: parseDeps rejected the array npm 12 prints, so every upgrade was held as unreadable (or a bare map read as empty and a drop passed).
+    for (const [o, n] of [['[{"left": "^2.1.0"}]', '[{"left": "^1.0.0"}]'], ['{"left": "^2.1.0"}', '{"left": "^1.0.0"}'], ['[{"dependencies": {"left": "^2.1.0"}}]', '[{"dependencies": {"left": "^1.0.0"}}]']] as const) {
+      const h = host({ oldDeps: o, deps: n });
+      const s = await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+      expect(s.status).toMatch(/dependency floor dropped or alias retargeted/);
+      expect(s.status).not.toMatch(/unparseable|unread/);
+    }
+  });
+  test("an optionalDependencies alias swapped under the same key holds the batch", async () => {
+    const h = host({ oldDeps: '{"optionalDependencies": {"k": "npm:good@^1.0.0"}}', deps: '{"optionalDependencies": {"k": "npm:evil@^1.0.0"}}' });
+    const s = await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+    expect(s.status).toMatch(/^FLAGGED — FLAG: dependency floor dropped or alias retargeted: tool@1\.1\.0 k \(alias target changed\)/);
+  });
+  test("a new or raised dependency does not hold but is shown to the reviewer", async () => {
+    const h = host({ oldDeps: '{"dependencies": {"left": "^1.0.0"}}', deps: '{"dependencies": {"left": "^2.0.0", "fresh": "^1.0.0"}}' });
+    const { r, prompts } = scripted([APPROVE]);
+    expect((await npmSection(h.exec, r, opts().o)).status).toBe("upgraded: tool @scope/b");
+    expect(prompts[0]).toContain("+ fresh ^1.0.0");
+    expect(prompts[0]).toContain("~ left ^1.0.0 -> ^2.0.0");
+  });
+  test("unreadable dependencies hold the batch as unread, never as no dependencies", async () => {
+    for (const [name, h] of [["rc", host({ depsRc: 1 })], ["json", host({ deps: "not json" })]] as const) {
+      const s = await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+      expect(s.status).toMatch(/^FLAGGED — could not read tool@1\.1\.0 dependencies \((npm view rc 1|unparseable)\)/);
+      expect(h.calls.some((c) => c.startsWith("npm install")), name).toBe(false);
+    }
   });
   test("one failed update is FAILED — <pkg>; the others still run; what is left is tracked", async () => {
     const left = JSON.stringify({ tool: { current: "1.0.0", latest: "1.1.0" } });

@@ -661,7 +661,7 @@ describe("release checks: owners (custom launchd labels)", () => {
         if (line === `launchctl print system/${LABEL}`) {
           if (o.gone) return { rc: 113, out: "", err: "not found" };
           prints++;
-          return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 2 ? 77 : 88}\n\tpath = ${PLIST}\n`, err: "" };
+          return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 3 ? 77 : 88}\n\tpath = ${PLIST}\n`, err: "" };
         }
         if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
         if (argv[0]!.endsWith("lsof") && argv.includes("-p")) {
@@ -678,17 +678,16 @@ describe("release checks: owners (custom launchd labels)", () => {
     const r = await rcRun({ cfg: OWNED, ...daemon() });
     expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", `sudo -n launchctl kickstart -k system/${LABEL}`, "/opt/gate.test/check GATE_VERSION=1.3.0", "svcctl on"]);
   });
-  test("a named owner not running or not found is a restart failure: no check, notified, after runs", async () => {
+  test("a named owner not running or not found is held before the upgrade (OUP-78): no before, no upgrade, notified", async () => {
     const r = await rcRun({ cfg: OWNED, ...daemon({ gone: true }) });
-    expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", "svcctl on"]);
-    expect(r.notices().some((n) => n.includes("not run, the owner restart failed"))).toBe(true);
+    expect(r.flow).toEqual([]);
+    expect(r.notices().some((n) => n.includes("held, not upgraded"))).toBe(true);
     expect(r.brew).toContain("FAILED: release-check:gadget");
   });
-  test("review 8 (I1): with after and no before, an owner restart failure (no verdict, the new version kept) runs after", async () => {
+  test("review 8 (I1): with after and no before, a named owner that is not running is held too (OUP-78)", async () => {
     const { before: _, ...afterOnly } = OWNED.releaseChecks[0]!;
     const r = await rcRun({ cfg: { ...OWNED, releaseChecks: [afterOnly] }, ...daemon({ gone: true }) });
-    expect(r.flow).toEqual(["brew upgrade example/tap/gadget", "svcctl on"]);
-    expect(r.notices().some((n) => n.includes("not run, the owner restart failed"))).toBe(true);
+    expect(r.flow).toEqual([]);
   });
 });
 
@@ -706,7 +705,7 @@ describe("release checks: review round 3 (3b26f7e)", () => {
       answer: (line, argv) => {
         if (line === `launchctl print system/${LABEL}`) {
           prints++;
-          return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 2 ? 77 : 88}\n\tpath = ${PLIST}\n`, err: "" };
+          return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 3 ? 77 : 88}\n\tpath = ${PLIST}\n`, err: "" };
         }
         if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
         if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: LSOF_HEAD, err: "" };
@@ -1077,7 +1076,7 @@ describe("release checks: review round 6 (2eeb039)", () => {
         if (line === `sudo -n launchctl kickstart -k system/${LABEL}`) kicked = true;
         if (line === `launchctl print system/${LABEL}`) {
           prints++;
-          return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 2 ? 77 : 88}\n\tpath = ${PLIST}\n`, err: "" };
+          return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 3 ? 77 : 88}\n\tpath = ${PLIST}\n`, err: "" };
         }
         if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
         if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: LSOF_HEAD, err: "" };
@@ -1390,5 +1389,55 @@ describe("release checks: owners on any keg of the formula but the expected one 
     expect(r.res.log).toContain(`  release check gadget: pid 77 still maps ${OLD} after its owners restarted`);
     expect(JSON.parse(r.files.get(PENDING)!)).toMatchObject({ unresolvedWaits: 1 });
     expect(r.flow.at(-1)).toBe("svcctl on");
+  });
+});
+
+describe("OUP-78: a formula whose check owner is not running is held, and an unfinished check keeps its keg", () => {
+  const LABEL = "com.max.gadget-server";
+  const PLIST = `/Library/LaunchDaemons/${LABEL}.plist`;
+  const OWNED = { releaseChecks: [{ ...CHECK, owners: [LABEL] }] };
+  /** The owner's launchd job: running for its first `upFor` prints, then not loaded. */
+  const daemon = (upFor: number) => {
+    let prints = 0;
+    return {
+      onFs: (fs: ApplyFs) => {
+        const exists = fs.exists;
+        fs.exists = async (p: string) => p === PLIST || exists(p);
+      },
+      answer: (line: string, argv: string[]) => {
+        if (line === `launchctl print system/${LABEL}`) {
+          prints++;
+          return prints <= upFor ? { rc: 0, out: `\tstate = running\n\tpid = 77\n\tpath = ${PLIST}\n`, err: "" } : { rc: 113, out: "", err: "not found" };
+        }
+        if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+        return undefined;
+      },
+    };
+  };
+
+  test("a: the owner is not running before the upgrade: held, no before, no upgrade, no cleanup of its keg, a held line in the summary", async () => {
+    const r = await rcRun({ cfg: OWNED, ...daemon(0) });
+    expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
+    expect(r.flow).toEqual([]);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${LABEL} is not running — not upgraded, its keg is untouched)`);
+    expect(r.brew).toContain(`gadget not upgraded, owner ${LABEL} not running`);
+    expect(r.brew).toContain("FAILED: release-check:gadget");
+    expect(r.files.has(PENDING)).toBe(false);
+  });
+
+  test("b: an owner restart that fails keeps the record and the previous keg, in the run and in the next run", async () => {
+    // Running at the pre-upgrade probe, gone at the restart.
+    const first = await rcRun({ cfg: OWNED, ...daemon(1) });
+    expect(first.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", "svcctl on"]);
+    expect(first.notices().some((n) => n.includes("not run, the owner restart failed"))).toBe(true);
+    expect(first.files.has(PENDING)).toBe(true);
+    expect(first.calls).not.toContain("brew cleanup");
+    expect(first.calls).toContain("brew cleanup good-a");
+    // The next run: the owner is still gone.
+    const second = await rcRun({ cfg: OWNED, ...daemon(0), startLinked: "1.3.0", candidate: "1.3.0", script: { formulas: "", verbose: "" }, files: { [PENDING]: first.files.get(PENDING)! } });
+    expect(second.files.has(PENDING)).toBe(true);
+    expect(second.calls).not.toContain("brew cleanup");
+    expect(second.calls.some((c) => c.startsWith("brew cleanup") && c.includes("gadget"))).toBe(false);
+    expect(second.calls.some((c) => c.startsWith("brew uninstall"))).toBe(false);
   });
 });

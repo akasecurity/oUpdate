@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readArtifact, normalizePaths, mergeArtifactPair } from "./artifact.ts";
-import { reviewUpdate, LAYERS, type LayerName, type LayerVerdict, type ReviewResult } from "./review.ts";
+import { reviewUpdate, stripTerminal, LAYERS, type LayerName, type LayerVerdict, type ReviewResult } from "./review.ts";
 import type { Ecosystem, FileMap } from "./prepass.ts";
 import type { ArtifactFile, Registry } from "./adapters/ecosystem/types.ts";
 import { npmRegistry } from "./adapters/ecosystem/npm.ts";
@@ -118,10 +118,10 @@ async function download(url: string, dir: string, sri?: string, f: typeof fetch 
   return file;
 }
 
-function render(r: ReviewResult): string {
+export function render(r: ReviewResult): string {
   const lines = [`${r.eco} ${r.name} ${r.from} -> ${r.to}: ${r.decision.toUpperCase()}`];
   if (r.malicious?.length) lines.push(`  MALICIOUS (${r.malicious.join(", ")}): check where ${r.name} ${r.to} is already installed`);
-  for (const l of r.layers) lines.push(`  ${l.layer.padEnd(9)} ${l.verdict.padEnd(7)} ${l.detail}`);
+  for (const l of r.layers) lines.push(`  ${l.layer.padEnd(9)} ${l.verdict.padEnd(7)} ${stripTerminal(l.detail)}`);
   return lines.join("\n");
 }
 
