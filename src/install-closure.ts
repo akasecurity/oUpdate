@@ -1,6 +1,7 @@
 // Install-time closure of one npm artifact. A command we cannot reduce to a known
 // form holds the release. Caps hold too: a long pattern, a glob we do not expand,
 // or more keys than the star walk is allowed to touch.
+import { flagBody } from "./shell-classes.ts";
 import { gypCommands, starMatch, STAR_KEY_MAX, STAR_PATTERN_MAX, STAR_TEXT_MAX, surfaceCap, type FileMap } from "./prepass.ts";
 
 export interface InstallView {
@@ -3311,8 +3312,15 @@ function readParts(ctx: Ctx, body: string): void {
   }
 }
 
+// Shell forms that run code the text does not name (see shell-classes.ts): read every file, like an unrecognised runner.
+function noteClasses(ctx: Ctx, body: string): void {
+  if (flagBody(body).length === 0) return;
+  widenAll(ctx);
+}
+
 function runBody(ctx: Ctx, body: string): void {
   if (ctx.hold) return;
+  noteClasses(ctx, body);
   if (ctx.depth >= DEPTH) {
     ctx.widenInert = true;
     widenAll(ctx);
