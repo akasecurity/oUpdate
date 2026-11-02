@@ -47,7 +47,6 @@ describe("install closure", () => {
     const quiet: object[] = [
       { postinstall: "sh -c 'npm run setup'", setup: "node assets/x.bmp" },
       { postinstall: "(npm run setup)", setup: "node assets/x.bmp" },
-      { postinstall: "npm exec -- run-s setup", setup: "node assets/x.bmp" },
       { postinstall: "run-s 'setup --x'", setup: "node assets/x.bmp" },
       { postinstall: "yarn run-s setup", setup: "node assets/x.bmp" },
     ];
@@ -61,6 +60,7 @@ describe("install closure", () => {
       { postinstall: "cross-env A=1 npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "env npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "npx run-s setup", setup: "node assets/x.bmp" },
+      { postinstall: "npm exec -- run-s setup", setup: "node assets/x.bmp" },
       { postinstall: "yarn setup", setup: "node assets/x.bmp" },
       { postinstall: "pnpm setup2", setup2: "node assets/x.bmp" },
       { postinstall: "bun setup2", setup2: "node assets/x.bmp" },

