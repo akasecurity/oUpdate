@@ -3337,6 +3337,9 @@ function shellSegments(body: string): string[] {
     } else if (c === "'" || c === '"') {
       quote = c;
       cur += c;
+    } else if ((c === "&" && (/[<>]$/.test(cur) || body[i + 1] === ">")) || (c === "|" && /[<>]$/.test(cur) && cur.endsWith(">"))) {
+      // `2>&1`, `>&2`, `&>file` and `>|file` are redirects, not command separators.
+      cur += c;
     } else if (";&|\n()`".includes(c)) {
       if (cur.trim()) out.push(cur.trim());
       cur = "";
@@ -3467,7 +3470,8 @@ function movesCore(argv: string[], dirs: string[]): boolean {
   if (bin === "npx" || bin === "bunx" || bin === "corepack") {
     let n = 0;
     while (n < rest.length && rest[n]!.startsWith("-")) {
-      if ((rest[n] === "-c" || rest[n] === "--call") && rest[n + 1] !== undefined) return movesRun(rest[n + 1]!, dirs);
+      const ef = execFlag(rest[n]!);
+      if (ef?.kind === "call" && (ef.value !== undefined || rest[n + 1] !== undefined)) return movesRun(ef.value ?? rest[n + 1]!, dirs);
       // npx and bunx take the workspace and prefix flags too.
       if (NPM_WORKSPACE_WIDEN.test(rest[n]!) || (bin === "bunx" && WORKSPACE_WIDEN.bun.test(rest[n]!))) {
         flagDirs(rest, dirs);
@@ -3479,6 +3483,7 @@ function movesCore(argv: string[], dirs: string[]): boolean {
     return n < rest.length && moves(rest.slice(n), dirs);
   }
   if (/^(?:sh|bash|zsh|dash|ksh)$/.test(bin)) {
+    let rc = false;
     // `-c` may sit anywhere among the options, after options that take a value (`-o pipefail`, `--rcfile x`).
     for (let j = 0; j < rest.length && (rest[j]!.startsWith("-") || rest[j]!.startsWith("+")); j++) {
       const o = rest[j]!;
@@ -3509,8 +3514,17 @@ function movesCore(argv: string[], dirs: string[]): boolean {
         return sourced || rest[n] === undefined || mv;
       }
       if (/^[-+][A-Za-z]+$/.test(o)) j += (o.match(/[oO]/g) ?? []).length;
-      else if (o === "--rcfile" || o === "--init-file") j++;
+      else if (o === "--rcfile" || o === "--init-file") {
+        // The startup file runs in the shell: read it even under test/ or docs/.
+        fedDir(dirs, rest[j + 1] ?? "");
+        rc = true;
+        j++;
+      } else if (/^--(?:rcfile|init-file)=/.test(o)) {
+        fedDir(dirs, o.slice(o.indexOf("=") + 1));
+        rc = true;
+      }
     }
+    if (rc) return true;
   }
   // A command word not modeled here (nice, timeout, eval, xargs, a wrapper with value options) may run what
   // follows it: read the first later cd, runner or workspace-tool word as the command, and any later word that
@@ -3839,7 +3853,7 @@ function unwrapSink(w0: string[]): { words: string[]; xargs: boolean; lead: stri
   return { words: ws, xargs, lead };
 }
 const SINK_WORD = /^(?:sh|bash|zsh|dash|ksh|node|nodejs|python[0-9.]*|perl|ruby|deno|bun|php)$/;
-const PLAIN_CMDS = new Set(["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "sed", "head", "tail", "tr", "ls", "test", "[", "true", "false", ":", "cp", "mv", "rm", "mkdir", "touch", "chmod", "which", "sort", "uniq", "wc", "cut", "find", "diff", "tar", "curl", "wget", "less", "more", "jq", "yq", "gzip", "gunzip", "zcat", "bzip2", "xz", "xxd", "od", "hexdump", "openssl", "shasum", "sha256sum", "sha1sum", "md5", "md5sum", "cksum", "fold", "nl", "rev", "paste", "comm", "join", "column", "cmp", "sleep", "date", "pwd", "wait", "read", "tput", "stat", "file", "du", "df", "ps", "npm", "pnpm", "yarn", "unzip", "zip", "strings", "tac", "expand", "unexpand", "split", "mktemp", "basename", "dirname", "realpath", "readlink", "ln"]);
+const PLAIN_CMDS = new Set(["echo", "tee", "tar", "find", "printf", "cat", "grep", "egrep", "fgrep", "rg", "head", "tail", "tr", "ls", "test", "[", "true", "false", ":", "cp", "mv", "rm", "mkdir", "touch", "chmod", "which", "sort", "uniq", "wc", "cut", "diff", "curl", "wget", "less", "more", "jq", "yq", "gzip", "gunzip", "zcat", "bzip2", "xz", "xxd", "od", "hexdump", "openssl", "shasum", "sha256sum", "sha1sum", "md5", "md5sum", "cksum", "fold", "nl", "rev", "paste", "comm", "join", "column", "cmp", "sleep", "date", "pwd", "wait", "read", "tput", "stat", "file", "du", "df", "ps", "unzip", "zip", "strings", "tac", "expand", "unexpand", "split", "mktemp", "basename", "dirname", "realpath", "readlink", "ln"]);
 
 // Interpreters that read their program from stdin when given no script operand: the flags that carry a program
 // (`-e`), and the flags that take a separate value.
@@ -3849,12 +3863,14 @@ const STDIN_INTERPS: Record<string, { code: RegExp; value: RegExp }> = {
   perl: { code: /^-[A-Za-z0-9]*[eE][A-Za-z0-9]*$/, value: /^(?:-I|-M|-m|-C)$/ },
   ruby: { code: /^-[A-Za-z0-9]*e[A-Za-z0-9]*$/, value: /^(?:-I|-r|-C|-E|-x)$/ },
   deno: { code: /^$/, value: /^(?:--config|-c|--import-map|--reload|--lock|--cert|--location|--seed|--v8-flags)$/ },
-  php: { code: /^-[A-Za-z]*[rRfF]$/, value: /^(?:-d|-c|-z|-n)$/ },
+  php: { code: /^-[A-Za-z]*[rR]$/, value: /^(?:-d|-c|-z|-n|-f)$/ },
   bun: { code: /^(?:-e|--eval|-p|--print)(?:=|$)/, value: /^(?:--cwd|--config|-c|--preload|-r|--define|-d|--tsconfig-override|--env-file)$/ },
 };
 
 // Whether an interpreter other than a shell reads its program from stdin: no program flag, and no script
 // operand (or `-`). `deno` and `bun` read `run` as a subcommand; `deno eval` and other subcommands are not.
+const STDIN_PATH = /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0|php:\/\/stdin)$/;
+
 function interpReadsStdin(bin: string, w: string[]): boolean {
   const key = /^(?:node|nodejs)$/.test(bin) ? "node" : /^python[0-9.]*$/.test(bin) ? "python" : bin;
   const spec = STDIN_INTERPS[key];
@@ -3877,15 +3893,16 @@ function interpReadsStdin(bin: string, w: string[]): boolean {
     for (; j < args.length; j++) {
       const t = args[j]!;
       if (t === "-") return true;
-      if (t === "--") return args[j + 1] === "-" || args[j + 1] === undefined;
+      if (t === "--") return args[j + 1] === "-" || args[j + 1] === undefined || STDIN_PATH.test(args[j + 1]!);
       if (spec.code.test(t)) return false;
       if (spec.value.test(t)) {
+        if (args[j + 1] !== undefined && STDIN_PATH.test(args[j + 1]!)) return true;
         j++;
         continue;
       }
       if (t.startsWith("--") && !t.includes("=") && j + 1 < args.length && !args[j + 1]!.startsWith("-")) return scan(j + 2) || scan(j + 1);
       if (t.startsWith("-")) continue;
-      return false;
+      return STDIN_PATH.test(t);
     }
     return true;
   };
@@ -3900,7 +3917,7 @@ function readsStdin(bin: string, w: string[]): boolean {
   // Options end at `--` or the first operand; what follows is the script file and its arguments, not options.
   for (let j = 0; j < args.length; j++) {
     const t = args[j]!;
-    if (t === "--") return sFlag || args[j + 1] === undefined || args[j + 1] === "/dev/stdin";
+    if (t === "--") return sFlag || args[j + 1] === undefined || STDIN_PATH.test(args[j + 1]!);
     if (t === "-") return true;
     if (t === "--rcfile" || t === "--init-file") {
       j++;
@@ -3914,7 +3931,7 @@ function readsStdin(bin: string, w: string[]): boolean {
       if (/[oO]/.test(t)) j += (t.match(/[oO]/g) ?? []).length;
       continue;
     }
-    return sFlag || t === "/dev/stdin";
+    return sFlag || STDIN_PATH.test(t);
   }
   return true;
 }
@@ -3935,6 +3952,14 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
   for (const inner of subs) if (movesRun(inner, dirs)) hit = true;
   let pos = 0;
   let pipeFiles: string[] = [];
+  // Files a command wrote (`> build.js`, `tee build.js`) with the files that fed that stage, so a later command that
+  // runs the written file reads the sources.
+  const written = new Map<string, string[]>();
+  // An output process substitution (`cat test/x.sh > >(sh)`) is a consumer whose feed this scan does not follow.
+  if (/>\(/.test(body)) {
+    hit = true;
+    dirs.push(UNSURE);
+  }
   // A process substitution (`sh <(cat test/x.sh)`) feeds a command from a file: the files it names are read.
   for (const m of body.matchAll(/<\(([^)]*)\)/g)) {
     hit = true;
@@ -3956,7 +3981,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     const noRedir: string[] = [];
     for (let q = 0; q < raw.length; q++) {
       if (/^\d*[<>]/.test(raw[q]!)) {
-        if (/^\d*(?:<<?|>>?|<>|[<>]&|>\|)$/.test(raw[q]!)) q++;
+        if (/^\d*(?:<{1,3}-?|>>?|<>|[<>]&|>\|)$/.test(raw[q]!)) q++;
       } else noRedir.push(raw[q]!);
     }
     const w = noRedir;
@@ -4019,6 +4044,56 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
         else for (const t of pipeFiles) fedDir(dirs, t);
       }
     }
+    // A here-string hands its text to the consumer: a shell or interpreter runs it, so its text is read as a command line.
+    for (let q = 0; q < raw.length; q++) {
+      const m = /^\d*<<<(.*)$/.exec(raw[q]!);
+      if (!m || !redirSink) continue;
+      const text = m[1] || raw[q + 1] || "";
+      hit = true;
+      if (!text || /[$`]/.test(text)) dirs.push(UNSURE);
+      else if (movesRun(text, dirs)) hit = true;
+    }
+    // xargs turns its input lines into the arguments of a shell or interpreter (`echo test/x.sh | xargs sh`).
+    if (un.xargs && SINK_WORD.test(sb)) {
+      hit = true;
+      if (prev === undefined) dirs.push(UNSURE);
+      else if (/^(?:echo|printf)$/.test(prev) && !prevArgs.some((t) => /[$`]/.test(t))) for (const t of prevArgs) if (!t.startsWith("-")) fedDir(dirs, t);
+      else if (/^(?:echo|printf)$/.test(prev)) dirs.push(UNSURE);
+      else for (const t of pipeFiles) fedDir(dirs, t);
+    }
+    // find -exec, tar --to-command and a shell's --rcfile run a file or a program named by their arguments.
+    if (un.lead === "find" && w.some((t) => /^-(?:exec|execdir|ok|okdir)$/.test(t))) {
+      hit = true;
+      dirs.push(UNSURE);
+    }
+    if (un.lead === "tar" && w.some((t) => /^--(?:to-command|use-compress-program)|^-I$/.test(t))) {
+      hit = true;
+      dirs.push(UNSURE);
+    }
+    if (isShell) {
+      for (let q = 1; q < un.words.length; q++) {
+        const t = un.words[q]!;
+        if (t === "--rcfile" || t === "--init-file") fedDir(dirs, un.words[q + 1] ?? "");
+        else if (/^--(?:rcfile|init-file)=/.test(t)) fedDir(dirs, t.slice(t.indexOf("=") + 1));
+        else continue;
+        hit = true;
+      }
+    }
+    // A command that runs a file an earlier stage wrote reads the files that fed that stage.
+    if (written.size > 0 && !PLAIN_CMDS.has(un.lead)) {
+      for (const t of w) {
+        const src = written.get(t);
+        if (!src) continue;
+        hit = true;
+        for (const f of src) fedDir(dirs, f);
+      }
+    }
+    for (let q = 0; q < raw.length; q++) {
+      const m = /^\d*>>?(?!&)(.*)$/.exec(raw[q]!);
+      const name = m ? m[1] || raw[q + 1] || "" : "";
+      if (name && !name.startsWith("/dev/")) written.set(name, pipeFiles.slice());
+    }
+    if (un.lead === "tee") for (const t of w.slice(1)) if (!t.startsWith("-")) written.set(t, pipeFiles.slice());
     prev = b;
     prevArgs = w.slice(1);
     // The producer's words read as one command line (`echo cd test \; node setup.js | sh`).
@@ -4270,6 +4345,22 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (bin === "run-s" || bin === "run-p" || bin === "npm-run-all") {
     dispatchRuns(ctx, argv, i);
     return;
+  }
+  if (bin === "npx" || bin === "bunx") {
+    // The call string of `npx -c '...'` (or `--cal`, `-yc`) is a shell body.
+    for (let j = i; j < argv.length && argv[j] !== "--" && argv[j]!.startsWith("-"); j++) {
+      const ef = execFlag(argv[j]!);
+      if (ef?.kind === "call") {
+        const call = ef.value ?? argv[j + 1];
+        if (call !== undefined && ctx.depth < DEPTH) {
+          ctx.depth++;
+          runBody(ctx, call);
+          ctx.depth--;
+        }
+        break;
+      }
+      if (ef?.kind === "package" && ef.value === undefined) j++;
+    }
   }
   if (bin === "npx" || bin === "corepack") {
     // `npx pnpm -C sub build` runs a script of another package through the wrapped runner.

