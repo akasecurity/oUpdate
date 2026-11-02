@@ -112,7 +112,8 @@ function binName(token: string): string {
 // `pnpm@9` and `yarn@1.22.22` are the pinned form of the runner. Only the runner comparison strips it.
 function runnerName(token: string): string {
   // Only a version, range or tag follows the name. `pnpm@file:x.tgz` and `pnpm@npm:other` stay unknown.
-  return binName(token).replace(/^(.+?)@[0-9A-Za-z.^~<>=*+-]+$/, "$1");
+  // A spec that starts with a dot (`pnpm@.`, `pnpm@..`) is a directory, not a version.
+  return binName(token).replace(/^(.+?)@[0-9A-Za-z^~<>=*+-][0-9A-Za-z.^~<>=*+-]*$/, "$1");
 }
 
 function words(cmd: string): string[] {
@@ -3349,7 +3350,11 @@ function movesCore(argv: string[], dirs: string[]): boolean {
   while (k < argv.length) {
     const a = argv[k]!;
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) {
-      if (SPECIAL_ENV.test(a)) return true;
+      if (SPECIAL_ENV.test(a)) {
+        // NODE_OPTIONS=--require=./x.js names a file node runs first: read every file.
+        if (a.startsWith("NODE_OPTIONS=")) dirs.push(UNSURE);
+        return true;
+      }
     } else if (/^(?:!|then|do|else|elif|if|while|until|\{)$/.test(a)) {
       // a shell reserved word before the command
     } else if (wrapped && a.startsWith("-")) {
@@ -3390,6 +3395,8 @@ function movesCore(argv: string[], dirs: string[]): boolean {
   if (bin === "npm") {
     flagDirs(rest, dirs);
     const ex = rest.findIndex((a, j) => (a === "exec" || a === "x") && rest.slice(0, j).every((t) => t.startsWith("-")));
+    // These name a file npm or node then runs; the file is not resolved here, so read every file.
+    if (rest.some((t) => /^--(?:node-options|script-shell|userconfig|globalconfig)/.test(t))) dirs.push(UNSURE);
     if (ex >= 0) return execMoves(rest.slice(ex + 1), dirs) || npmFlagWidens(rest.slice(0, ex), 0);
     const dd = rest.indexOf("--");
     return npmFlagWidens(rest, 0) || rest.slice(0, dd < 0 ? rest.length : dd).some((t) => NPM_WORKSPACE_WIDEN.test(t));
@@ -3408,6 +3415,12 @@ function movesCore(argv: string[], dirs: string[]): boolean {
     let n = 0;
     while (n < rest.length && rest[n]!.startsWith("-")) {
       if ((rest[n] === "-c" || rest[n] === "--call") && rest[n + 1] !== undefined) return movesRun(rest[n + 1]!, dirs);
+      // npx and bunx take the workspace and prefix flags too.
+      if (NPM_WORKSPACE_WIDEN.test(rest[n]!) || (bin === "bunx" && WORKSPACE_WIDEN.bun.test(rest[n]!))) {
+        flagDirs(rest, dirs);
+        if (/^--(?:userconfig|globalconfig)/.test(rest[n]!)) dirs.push(UNSURE);
+        return true;
+      }
       n++;
     }
     return n < rest.length && moves(rest.slice(n), dirs);
@@ -3475,6 +3488,12 @@ function execMoves(rest: string[], dirs: string[]): boolean {
     if (flag === "-p" || flag === "--package") {
       if (eq < 0) n++;
     } else if (/^-c./.test(a) && !a.startsWith("--")) return movesRun(a.slice(2), dirs);
+    else if (NPM_WORKSPACE_WIDEN.test(a) || (a !== "--yes" && a !== "-y" && a !== "--no" && npmFlagWidens([a], 0))) {
+      // exec's own workspace, prefix and unknown flags run the command in another package.
+      flagDirs(rest, dirs);
+      if (/^--(?:node-options|script-shell|userconfig|globalconfig)/.test(a)) dirs.push(UNSURE);
+      return true;
+    }
     n++;
   }
   // Without a `--`, npm reads the flags after the command word as its own (`npm exec ./x.js -w sub`).
@@ -3660,7 +3679,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       if (d === UNSURE) dirs.push(UNSURE);
       else dirs.push(d, joinDir(cwd, d) ?? d);
     }
-    const first = w.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{)$/.test(t));
+    const first = w.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{|command|builtin)$/.test(t));
     if (first && CD_WORD.test(runnerName(first.replace(/^\\+/, ""))) && local[0] !== undefined) cwd = joinDir(cwd, local[0]) ?? cwd;
     // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
     const b = runnerName((w[0] ?? "").replace(/^\\+/, ""));
@@ -3705,6 +3724,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
         ctx.widenInert = true;
         widenAll(ctx);
       }
+      if (argv[j]!.startsWith("NODE_OPTIONS=")) ctx.widenInert = true;
       if (SPECIAL_ENV.test(argv[j]!)) widenAll(ctx);
       j++;
     }
@@ -3734,7 +3754,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
       const raw = normalize(d);
       if (raw) ctx.movedDirs.add(raw);
       if (n) ctx.movedDirs.add(n);
-      if (CD_WORD.test(runnerName(argv.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{)$/.test(t))?.replace(/^\\+/, "") ?? "")) && n) ctx.cwd = n;
+      if (CD_WORD.test(runnerName(argv.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{|command|builtin)$/.test(t))?.replace(/^\\+/, "") ?? "")) && n) ctx.cwd = n;
     }
     widenAll(ctx);
   }

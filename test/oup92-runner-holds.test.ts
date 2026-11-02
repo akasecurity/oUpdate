@@ -587,3 +587,39 @@ describe("round 12: unresolvable cd targets, npm exec flags after the command, b
     expect(h("export CDPATH=test ; cd fixtures && node setup.js")).toBe(true);
   });
 });
+
+describe("round 13: exec workspace flags, dot specs, file-naming options, command cd", () => {
+  const subHeld = (cmd: string) => held({ postinstall: cmd }, { "sub/build.js": "1", ...subManifest("echo a") }, { "sub/build.js": "evil()", ...subManifest("echo a") });
+
+  test("1. npm exec and npx workspace flags in an unsplit body", () => {
+    for (const cmd of ["npm exec --workspace=sub -- node build.js > /dev/null", "npx -w sub node build.js | tee log", "npm exec -w sub -- node build.js > /dev/null", "npx --prefix sub node build.js > /dev/null", "bunx --cwd sub node build.js | tee log"]) {
+      expect(subHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("2. a runner spec that starts with a dot is a directory", () => {
+    for (const cmd of ["npx pnpm@. setup", "npx pnpm@.. setup", "corepack yarn@. setup"]) {
+      expect(held({ postinstall: cmd, setup: "echo ok" }, { "sub/lib/y.js": "1" }, { "sub/lib/y.js": "2" }), cmd).toBe(true);
+    }
+    expect(held({ postinstall: "npx pnpm@9.1.0 setup", setup: "echo ok" }, { "sub/lib/y.js": "1" }, { "sub/lib/y.js": "2" })).toBe(false);
+  });
+
+  test("3. options that name a file read every file", () => {
+    const f = (v: string) => ({ "test/x.js": v });
+    const h = (cmd: string) => held({ postinstall: cmd, build: "echo ok" }, f("1"), f("evil()"));
+    for (const cmd of ["NODE_OPTIONS=--require=./test/x.js npm run build", "npm run build --node-options=--require=./test/x.js", "npm run build --script-shell=./test/x.js", "npm run build --userconfig ./test/x.js"]) {
+      expect(h(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("4. command cd and builtin cd move the base", () => {
+    const f = (v: string) => ({ "docs/gen.js": v });
+    const h = (cmd: string) => held({ postinstall: cmd }, f("1"), f("evil()"));
+    expect(h("command cd tools > /dev/null && cd ../docs && node gen.js")).toBe(true);
+    expect(h("builtin cd tools && cd ../docs && node gen.js")).toBe(true);
+  });
+
+  test("5. pnpm recursive is a workspace form", () => {
+    expect(manifestHeld("pnpm recursive run build")).toBe(true);
+  });
+});
