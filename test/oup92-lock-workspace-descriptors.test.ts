@@ -129,4 +129,6 @@ test("a descriptor does not collide across the name, range and scope splits trie
   expect(descriptorOf("a@b", "c")).not.toBe(descriptorOf("a", "b@c"));
   expect(descriptorOf("@s/p", "^1")).toBe("@s/p@^1");
   expect(descriptorOf("", "@x")).not.toBe(descriptorOf("@", "x"));
+  expect(descriptorOf("", "a/@")).not.toBe(descriptorOf("@a/", ""));
+  expect(descriptorOf("", "s/pkg@r")).not.toBe(descriptorOf("@s/pkg", "r"));
 });

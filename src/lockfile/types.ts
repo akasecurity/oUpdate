@@ -82,6 +82,7 @@ export function npmPrivateRegistry(url: unknown): string | undefined {
 export function descriptorOf(name: string, range: string, scope = ""): string {
   const esc = (s: string) => s.replace(/[\\[\]]/g, "\\$&");
   const keep = /^@[^/@\\]+\//.test(name) ? 1 : 0; // only the scope prefix of @scope/pkg keeps its at-sign
-  const n = name.slice(0, keep) + name.slice(keep).replace(/[\\@]/g, "\\$&");
+  // An empty name renders as a token the escaper never produces (a backslash before a zero), so it cannot read as a scoped name.
+  const n = name === "" ? "\\0" : name.slice(0, keep) + name.slice(keep).replace(/[\\@]/g, "\\$&");
   return scope ? `${n}@${esc(range)} [${esc(scope)}]` : `${n}@${esc(range)}`;
 }
