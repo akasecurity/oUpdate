@@ -6,7 +6,7 @@
 // package-lock.json. Every hash of the integrity is checked on the download; one the gate cannot check throws.
 
 import { sriHashes } from "../targets/pins/npm.ts";
-import { directKind, npmCanonicalTarball, npmPrivateRegistry, type LockedPackage } from "./types.ts";
+import { directKind, npmCanonicalTarball, npmPrivateRegistry, descriptorOf, type LockedPackage } from "./types.ts";
 
 /**
  * Whether a bun.lock registry field is a registry the review reads name@version from: the registry's own tarball of
@@ -79,7 +79,7 @@ const DEP_FIELDS = ["dependencies", "optionalDependencies", "peerDependencies"];
 function addDescriptors(lock: { packages?: Record<string, unknown[]>; workspaces?: Record<string, unknown> }, byKey: Map<string, LockedPackage>): void {
   const packages = lock.packages ?? {};
   const sets = new Map<LockedPackage, Set<string>>();
-  const record = (from: string, info: unknown, fields: string[], nests: string[] = []) => {
+  const record = (from: string, info: unknown, fields: string[], nests: string[] = [], scope = "") => {
     if (!info || typeof info !== "object") return;
     for (const f of fields) {
       const deps = (info as Record<string, unknown>)[f];
@@ -91,7 +91,7 @@ function addDescriptors(lock: { packages?: Record<string, unknown[]>; workspaces
         const target = byKey.get(nested ?? resolveDep(packages, from, name) ?? "");
         if (!target) continue;
         const set = sets.get(target) ?? new Set<string>();
-        set.add(`${name}@${range}`);
+        set.add(descriptorOf(name, range, scope));
         sets.set(target, set);
       }
     }
@@ -101,7 +101,8 @@ function addDescriptors(lock: { packages?: Record<string, unknown[]>; workspaces
     const wsName = ws && typeof ws === "object" ? (ws as Record<string, unknown>).name : undefined;
     // The root's dependencies are top-level; a workspace's nest under its package name, never its folder path.
     const nests = path && typeof wsName === "string" && wsName ? [wsName] : [];
-    record("", ws, [...DEP_FIELDS, "devDependencies"], nests);
+    // A workspace's ranges carry its folder, so two workspaces asking the same range stay separate descriptors.
+    record("", ws, [...DEP_FIELDS, "devDependencies"], nests, path);
   }
   for (const [p, set] of sets) p.descriptors = [...set].sort();
 }
