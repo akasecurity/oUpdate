@@ -2938,6 +2938,11 @@ function runBody(ctx: Ctx, body: string): void {
     fail(ctx, `key count ${ctx.fileCount} > ${STAR_KEY_MAX}`);
     return;
   }
+  // ANSI-C quoting hides quotes from the command splitter as well: read every file.
+  if (body.includes("$'")) {
+    ctx.widenInert = true;
+    widenAll(ctx);
+  }
   const sub = subst(ctx, body);
   if (sub === null || ctx.hold) {
     // An expansion that cannot be resolved may name another directory: widen when the body moves the run.
@@ -3290,8 +3295,11 @@ function shellSegments(body: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quote: string | undefined;
+  let escEnd = false;
   for (let i = 0; i < body.length; i++) {
     const c = body[i]!;
+    const wasEsc = escEnd;
+    escEnd = false;
     if (quote) {
       cur += c;
       // A backslash escapes inside double quotes only.
@@ -3301,7 +3309,8 @@ function shellSegments(body: string): string[] {
       // An escaped character is a plain character: it opens no quote and ends no command.
       cur += c;
       if (i + 1 < body.length) cur += body[++i]!;
-    } else if (c === "#" && (cur === "" || /\s$/.test(cur))) {
+      escEnd = true;
+    } else if (c === "#" && (cur === "" || (/\s$/.test(cur) && !wasEsc))) {
       // A comment runs to the end of the line.
       while (i + 1 < body.length && body[i + 1] !== "\n") i++;
     } else if (c === "'" || c === '"') {
@@ -3319,6 +3328,7 @@ function shellSegments(body: string): string[] {
 }
 
 const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS=|YARN_|PNPM_|BUN_|COREPACK_)/;
+const UNSAFE_ENV = /^(?:CDPATH|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|DYLD_INSERT_LIBRARIES)=/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|-C)(?:=(.*))?$/;
@@ -3340,8 +3350,9 @@ function flagDirs(rest: string[], dirs: string[]): void {
 // pnpm exec, sh -c) around one of those. Only the command word is looked at, so other programs' flags and quoted
 // text (`tar -C dir`, `echo 'workspace'`) are not. Directories named on the way go to `dirs`.
 function movesCore(argv: string[], dirs: string[]): boolean {
-  // CDPATH changes where any later cd lands, here or in a later command.
-  if (argv.some((a) => a.startsWith("CDPATH="))) {
+  // CDPATH, PATH, HOME and the startup-file variables change what any later command resolves to, here or in a later
+  // command: read every file.
+  if (argv.some((a) => UNSAFE_ENV.test(a))) {
     dirs.push(UNSURE);
     return true;
   }
@@ -3441,6 +3452,11 @@ function movesCore(argv: string[], dirs: string[]): boolean {
           }
           n += 1 + (/^[-+][A-Za-z]+$/.test(rest[n]!) ? (rest[n]!.match(/[oO]/g) ?? []).length : rest[n] === "--rcfile" || rest[n] === "--init-file" ? 1 : 0);
         }
+        // A string that is wholly an expansion cannot be read.
+        if (rest[n] !== undefined && /^\s*\$/.test(rest[n]!)) {
+          dirs.push(UNSURE);
+          return true;
+        }
         return rest[n] === undefined || movesRun(rest[n]!, dirs);
       }
       if (/^[-+][A-Za-z]+$/.test(o)) j += (o.match(/[oO]/g) ?? []).length;
@@ -3450,6 +3466,10 @@ function movesCore(argv: string[], dirs: string[]): boolean {
   // A command word not modeled here (nice, timeout, eval, xargs, a wrapper with value options) may run what
   // follows it: read the first later cd, runner or workspace-tool word as the command, and any later word that
   // holds a whole command line (`env -S '...'`, `eval '...'`) as a body. `tar -C dir` and `rm -rf` have none.
+  if (bin === "eval" && rest.some((t) => t.includes("$") || t.includes("`"))) {
+    dirs.push(UNSURE);
+    return true;
+  }
   if (bin !== "echo" && bin !== "printf") {
     const n = rest.findIndex((t) => {
       const b = runnerName(t.replace(/^\\+/, ""));
@@ -3471,6 +3491,9 @@ function noteBody(ctx: Ctx, body: string): boolean {
     else {
       const n = normalize(d);
       if (n) ctx.movedDirs.add(n);
+      const r = joinDir(ctx.cwd, d);
+      const m = r === undefined ? undefined : normalize(r);
+      if (m) ctx.movedDirs.add(m);
     }
   }
   for (const seg of shellSegments(body)) if (words(seg).some((t) => RUNNERS.has(runnerName(t.replace(/^\\+/, ""))))) ctx.sawRunner = true;
@@ -3565,6 +3588,8 @@ const SUB_DEPTH = 16;
 const SUB_STEPS = 200_000;
 
 function substitutions(body: string): string[] | null {
+  // `$'...'` is ANSI-C quoting, where a backslash escapes a quote: not modeled, so unsure.
+  if (body.includes("$'")) return null;
   if (!body.includes("$(") && !body.includes("`")) return [];
   const budget = { steps: 0 };
   const out: string[] = [];
@@ -3657,6 +3682,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
   let hit = false;
   let cwd = "";
   let fedHit = false;
+  let prev: string | undefined;
   // A command substitution inside text (`echo "$(cd test && node setup.js)"`, backticks) runs its content.
   const subs = substitutions(body);
   if (subs === null) {
@@ -3683,7 +3709,14 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     if (first && CD_WORD.test(runnerName(first.replace(/^\\+/, ""))) && local[0] !== undefined) cwd = joinDir(cwd, local[0]) ?? cwd;
     // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
     const b = runnerName((w[0] ?? "").replace(/^\\+/, ""));
-    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(b) && w.slice(1).every((t) => t.startsWith("-") || t.startsWith("+")) && fedHit) hit = true;
+    const bare = /^(?:sh|bash|zsh|dash|ksh)$/.test(b) && w.slice(1).every((t) => t.startsWith("-") || t.startsWith("+"));
+    if (bare && fedHit) hit = true;
+    // A bare shell fed from a file (`sh < x.sh`) or by a producer that is not a literal echo or printf
+    // (`cat x.sh | sh`, `... | base64 -d | sh`) runs text that is not read here: widen.
+    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(b) && (/<(?!<)/.test(seg) || (bare && prev !== undefined && !/^(?:echo|printf)$/.test(prev)))) {
+      hit = true;
+    }
+    prev = b;
     for (const t of w.slice(1)) if (/\s/.test(t) && movesRun(t, dirs)) fedHit = true;
   }
   return hit;
@@ -3707,7 +3740,7 @@ function scriptArgsMoveCore(ctx: Ctx, argv: string[]): boolean {
   const name = n >= 0 ? rest[n]! : "";
   const body = ctx.raw[["test", "t", "tst"].includes(name) && bin === "npm" ? "test" : name];
   if (typeof body !== "string" || rest.length <= n + 1) return false;
-  return /(?:^|[\s;&|(`'"])(?:npm|pnpm|yarn|bun|bunx|npx|corepack|lerna|turbo|nx|rush|wsrun|cd|pushd|sh|bash)(?![A-Za-z0-9_-])/.test(body);
+  return /(?:^|[\s;&|(`'"])(?:npm|pnpm|yarn|yarnpkg|pnpx|bun|bunx|npx|corepack|lerna|turbo|nx|rush|wsrun|cd|pushd|popd|sh|bash|zsh|dash|ksh|eval)(?![A-Za-z0-9_-])/.test(body);
 }
 
 function dispatch(ctx: Ctx, cmd: string): void {
@@ -3720,7 +3753,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     let j = 0;
     while (j < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[j]!)) {
       // CDPATH changes where a later cd lands: read every file.
-      if (argv[j]!.startsWith("CDPATH=")) {
+      if (UNSAFE_ENV.test(argv[j]!)) {
         ctx.widenInert = true;
         widenAll(ctx);
       }
