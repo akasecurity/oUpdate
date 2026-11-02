@@ -2936,14 +2936,14 @@ function runBody(ctx: Ctx, body: string): void {
   const sub = subst(ctx, body);
   if (sub === null || ctx.hold) {
     // An expansion that cannot be resolved may name another directory: widen when the body moves the run.
-    if (sub === null && movesRun(body)) widenAll(ctx);
+    if (sub === null && noteBody(ctx, body)) widenAll(ctx);
     return;
   }
   const cmds = splitCommands(ctx, sub);
   if (!cmds) {
     // The body was not split, so a `cd` or a workspace flag inside a redirect, pipe or subshell may be moving a
     // run to another package. A body that stays in place (`node safe.js > out`) is not widened.
-    if (movesRun(sub)) widenAll(ctx);
+    if (noteBody(ctx, sub)) widenAll(ctx);
     noteUnparsedCompile(ctx, sub);
     return;
   }
@@ -3273,10 +3273,20 @@ function shellSegments(body: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quote: string | undefined;
-  for (const c of body) {
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
     if (quote) {
       cur += c;
-      if (c === quote) quote = undefined;
+      // A backslash escapes inside double quotes only.
+      if (c === "\\" && quote === '"' && i + 1 < body.length) cur += body[++i]!;
+      else if (c === quote) quote = undefined;
+    } else if (c === "\\") {
+      // An escaped character is a plain character: it opens no quote and ends no command.
+      cur += c;
+      if (i + 1 < body.length) cur += body[++i]!;
+    } else if (c === "#" && (cur === "" || /\s$/.test(cur))) {
+      // A comment runs to the end of the line.
+      while (i + 1 < body.length && body[i + 1] !== "\n") i++;
     } else if (c === "'" || c === '"') {
       quote = c;
       cur += c;
@@ -3285,7 +3295,9 @@ function shellSegments(body: string): string[] {
       cur = "";
     } else cur += c;
   }
-  if (cur.trim()) out.push(cur.trim());
+  // An unterminated quote is a shell error, but nothing after it is trusted: read it split without quotes too.
+  if (quote) out.push(...cur.split(/[;&|\n()`]+/).map((t) => t.trim()).filter(Boolean));
+  else if (cur.trim()) out.push(cur.trim());
   return out;
 }
 
@@ -3392,6 +3404,19 @@ function moves(argv: string[], dirs: string[]): boolean {
     if (rest.some((t) => /\s/.test(t) && movesRun(t, dirs))) return true;
   }
   return false;
+}
+
+// movesRun for a body that is not dispatched command by command: the directories it moves into and the
+// runners it names are recorded on the context.
+function noteBody(ctx: Ctx, body: string): boolean {
+  const dirs: string[] = [];
+  const hit = movesRun(body, dirs);
+  for (const d of dirs) {
+    const n = normalize(d);
+    if (n) ctx.movedDirs.add(n);
+  }
+  for (const seg of shellSegments(body)) if (words(seg).some((t) => RUNNERS.has(runnerName(t.replace(/^\\+/, ""))))) ctx.sawRunner = true;
+  return hit;
 }
 
 // `npm exec` options, then the command: `-c` hands over a shell string.

