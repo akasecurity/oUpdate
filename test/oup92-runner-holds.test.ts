@@ -692,7 +692,7 @@ describe("round 15: export assignments, cd past the root, root configs, piped te
   });
 
   test("4. text piped into a shell is read as one command line", () => {
-    expect(testHeld("echo cd test \; node setup.js | sh")).toBe(true);
+    expect(testHeld("echo cd test \\; node setup.js | sh")).toBe(true);
     expect(testHeld('echo "$X" | sh')).toBe(true);
     expect(testHeld('echo "$(cat x.sh)" | sh', { "x.sh": "1" })).toBe(true);
     expect(testHeld("printf '%s' \"$(cat x.sh)\" | sh", { "x.sh": "1" })).toBe(true);
@@ -744,6 +744,53 @@ describe("round 16: wrapped stdin sinks, node stdin, more library variables", ()
   test("3. library variables", () => {
     for (const v of ["DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH", "LD_AUDIT"]) {
       expect(fed(`${v}=lib node a.js`), v).toBe(true);
+    }
+  });
+});
+
+describe("round 17: unknown flags keep dispatching, += assignments, directory allowlist, more interpreters", () => {
+  const testHeld = (cmd: string, extra: Record<string, string> = {}, scripts: object = {}) => held({ postinstall: cmd, build: "node test/x.js", ...scripts }, { "test/x.js": "1", ...extra }, { "test/x.js": "evil()", ...extra });
+  const fed = (cmd: string) => held({ postinstall: cmd }, { "lib/setup.js": "1", "x.sh": "echo hi\n" }, { "lib/setup.js": "evil()", "x.sh": "echo hi\n" });
+
+  test("1. an unknown flag still dispatches the command", () => {
+    expect(testHeld("npm --color=false run build")).toBe(true);
+    expect(testHeld("npm --foo run build")).toBe(true);
+    expect(testHeld("npm --foo=1 --color run build")).toBe(true);
+    for (const cmd of ["npm --foo exec evil-pkg", "npm exec --foo evil-pkg", "npm exec --foo -- evil-pkg"]) expect(fed(cmd), cmd).toBe(true);
+  });
+
+  test("2. append assignments", () => {
+    for (const cmd of ["NODE_OPTIONS+=--require=./test/x.js npm run build", "export NODE_OPTIONS+=--require=./test/x.js; npm run build", "PATH+=:test npm run build", "CDPATH+=:test npm run build", "export PATH+=:test; node a.js"]) {
+      expect(testHeld(cmd, { "a.js": "1" }), cmd).toBe(true);
+    }
+  });
+
+  test("3. a directory with unusual characters is unsure", () => {
+    for (const cmd of ["echo test | xargs -I% sh -c 'cd % && node setup.js'", "cd test>/dev/null && node setup.js", "cd \\test && node setup.js", "cd ~ && node setup.js", "cd && node setup.js"]) {
+      expect(held({ postinstall: cmd }, { "test/setup.js": "1" }, { "test/setup.js": "evil()" }), cmd).toBe(true);
+    }
+  });
+
+  test("4. popd without an argument is unsure", () => {
+    expect(held({ postinstall: "pushd lib && popd && node setup.js" }, { "test/setup.js": "1", "lib/a.js": "1" }, { "test/setup.js": "evil()", "lib/a.js": "1" })).toBe(true);
+  });
+
+  test("5. a yarn PnP file is a runner config", () => {
+    expect(testHeld("npm run build", { ".pnp.cjs": "1" })).toBe(true);
+    expect(testHeld("npm run build", { ".pnp.loader.mjs": "1" })).toBe(true);
+  });
+
+  test("6. sourced files that cd or export", () => {
+    expect(held({ postinstall: ". ./x.sh && node a.js" }, { "x.sh": "cd test\n", "test/a.js": "1" }, { "x.sh": "cd test\n", "test/a.js": "evil()" })).toBe(true);
+    expect(held({ postinstall: "source x.sh; npm run build", build: "node test/x.js" }, { "x.sh": "export npm_config_workspace=sub\n", "test/x.js": "1" }, { "x.sh": "export npm_config_workspace=sub\n", "test/x.js": "evil()" })).toBe(true);
+  });
+
+  test("7. other interpreters as stdin sinks", () => {
+    for (const cmd of ["cat x | python3", "cat x | python -", "python3 < x.py", "cat x | python3 -W ignore", "cat x | perl", "perl < x.pl", "cat x | ruby", "cat x | deno run -", "cat x | bun run -", "cat x | env python3", "cat x | sudo perl"]) {
+      expect(fed(cmd), cmd).toBe(true);
+    }
+    for (const cmd of ["echo hi | python3 -c 'print(1)'", "echo hi | perl -e 'print 1'", "echo hi | ruby -e 'p 1'"]) {
+      expect(fed(cmd), cmd).toBe(false);
     }
   });
 });
