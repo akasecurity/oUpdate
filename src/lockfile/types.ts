@@ -72,3 +72,13 @@ export function npmPrivateRegistry(url: unknown): string | undefined {
   if (!host) return "(local registry)"; // file: and other hostless URLs are not the public registry
   return NPM_DEFAULT_HOSTS.has(host) ? undefined : host;
 }
+
+/**
+ * The descriptor text for a range a dependent asks for: `name@range`, or `name@range [scope]` for a workspace. Backslash and
+ * brackets in the range and scope are escaped, so no range can read as a scope and two different (range, scope) pairs never
+ * give the same text.
+ */
+export function descriptorOf(name: string, range: string, scope = ""): string {
+  const esc = (s: string) => s.replace(/[\\[\]]/g, "\\$&");
+  return scope ? `${name}@${esc(range)} [${esc(scope)}]` : `${name}@${esc(range)}`;
+}

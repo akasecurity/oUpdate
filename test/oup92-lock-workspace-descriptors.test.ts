@@ -64,3 +64,67 @@ test("npm: a workspace folder's ranges carry the folder", () => {
   });
   expect(parseNpmLock(lock).find((p) => p.name === "dep")!.descriptors).toEqual(["dep@^1.0.0 [pkgs/a]"]);
 });
+
+import { descriptorOf } from "../src/lockfile/types.ts";
+
+const pnpm = (aVer: string, bVer: string, aDir = "packages/a") => `lockfileVersion: '9.0'
+importers:
+  ${aDir}:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: ${aVer}
+  packages/b:
+    dependencies:
+      foo:
+        specifier: ^1.0.0
+        version: ${bVer}
+packages:
+  foo@1.0.0:
+    resolution: {integrity: ${h(1)}}
+  foo@1.1.0:
+    resolution: {integrity: ${h(2)}}
+snapshots:
+  foo@1.0.0: {}
+  foo@1.1.0: {}
+`;
+
+const npm = (aVer: string, bVer: string, aDir = "pkgs/a") => {
+  const e = (v: string) => ({ version: v, resolved: `https://registry.npmjs.org/dep/-/dep-${v}.tgz`, integrity: h(v === "1.0.0" ? 1 : 2) });
+  return JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      "": { name: "r", workspaces: ["pkgs/*", "libs/*"] },
+      [aDir]: { name: "a", version: "1.0.0", dependencies: { dep: "^1.0.0" } },
+      "pkgs/b": { name: "b", version: "1.0.0", dependencies: { dep: "^1.0.0" } },
+      [`${aDir}/node_modules/dep`]: e(aVer),
+      "pkgs/b/node_modules/dep": e(bVer),
+    },
+  });
+};
+
+test("pnpm: two importers trading what one range resolves to is a change", () => {
+  const d = diffLocks(parsePnpmLock(pnpm("1.0.0", "1.1.0")), parsePnpmLock(pnpm("1.1.0", "1.0.0")));
+  expect(d.length).toBeGreaterThan(0);
+  expect(d.every((c) => c.swapped)).toBe(true);
+});
+
+test("npm: two workspaces trading what one range resolves to is a change", () => {
+  const d = diffLocks(parseNpmLock(npm("1.0.0", "1.1.0")), parseNpmLock(npm("1.1.0", "1.0.0")));
+  expect(d.length).toBeGreaterThan(0);
+  expect(d.every((c) => c.swapped)).toBe(true);
+});
+
+test("moving a workspace folder alone is no change", () => {
+  expect(diffLocks(parsePnpmLock(pnpm("1.0.0", "1.1.0")), parsePnpmLock(pnpm("1.0.0", "1.1.0", "libs/a")))).toEqual([]);
+  // npm also records the workspace itself as a link whose folder moved: that is reported, the dependency is not.
+  const moved = diffLocks(parseNpmLock(npm("1.0.0", "1.1.0")), parseNpmLock(npm("1.0.0", "1.1.0", "libs/a")));
+  expect(moved.filter((c) => c.name === "dep")).toEqual([]);
+});
+
+test("a descriptor is injective in name, range and scope", () => {
+  expect(descriptorOf("d", "^1 [x", "y")).not.toBe(descriptorOf("d", "^1", "x [y"));
+  expect(descriptorOf("d", "^1.0.0 [pkgs/a]")).not.toBe(descriptorOf("d", "^1.0.0", "pkgs/a"));
+  expect(descriptorOf("d", "^1", "a")).toBe("d@^1 [a]");
+  expect(descriptorOf("d", "^1")).toBe("d@^1");
+});

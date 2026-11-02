@@ -6,7 +6,7 @@
 // package-lock.json. Every hash of the integrity is checked on the download; one the gate cannot check throws.
 
 import { sriHashes } from "../targets/pins/npm.ts";
-import { directKind, npmCanonicalTarball, npmPrivateRegistry, type LockedPackage } from "./types.ts";
+import { directKind, npmCanonicalTarball, npmPrivateRegistry, descriptorOf, type LockedPackage } from "./types.ts";
 
 /**
  * Whether a bun.lock registry field is a registry the review reads name@version from: the registry's own tarball of
@@ -91,7 +91,7 @@ function addDescriptors(lock: { packages?: Record<string, unknown[]>; workspaces
         const target = byKey.get(nested ?? resolveDep(packages, from, name) ?? "");
         if (!target) continue;
         const set = sets.get(target) ?? new Set<string>();
-        set.add(scope ? `${name}@${range} [${scope}]` : `${name}@${range}`);
+        set.add(descriptorOf(name, range, scope));
         sets.set(target, set);
       }
     }
