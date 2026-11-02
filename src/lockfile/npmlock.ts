@@ -8,7 +8,7 @@
 // without an integrity) is from the default registry, marked unhashed when it has no integrity either (the gate holds it); one with neither a resolved nor a version throws.
 
 import { sriHashes } from "../targets/pins/npm.ts";
-import { directKind, npmCanonicalTarball, npmPrivateRegistry, type LockedPackage } from "./types.ts";
+import { directKind, npmCanonicalTarball, npmPrivateRegistry, descriptorOf, type LockedPackage } from "./types.ts";
 
 interface Entry {
   name?: string;
@@ -49,7 +49,8 @@ function addDescriptors(packages: Record<string, Entry>, byKey: Map<string, Lock
         const target = typeof range === "string" ? byKey.get(resolveDep(packages, key, name) ?? "") : undefined;
         if (!target) continue;
         const set = sets.get(target) ?? new Set<string>();
-        set.add(`${name}@${range}`);
+        // A workspace folder's ranges carry the folder, so two workspaces asking the same range stay separate.
+        set.add(descriptorOf(name, range, key === "" || key.includes(NM) ? "" : key));
         sets.set(target, set);
       }
     }

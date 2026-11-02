@@ -12,7 +12,7 @@
 
 import { posix } from "node:path";
 import { sriHashes } from "../targets/pins/npm.ts";
-import { directKind, npmCanonicalTarball, npmPrivateRegistry, type LockedPackage } from "./types.ts";
+import { directKind, npmCanonicalTarball, npmPrivateRegistry, descriptorOf, type LockedPackage } from "./types.ts";
 
 interface Entry {
   name?: string;
@@ -114,7 +114,7 @@ function addImporterDescriptors(lock: Record<string, unknown>, out: LockedPackag
   const rec = (o: unknown) => (o && typeof o === "object" ? (o as Record<string, unknown>) : {});
   const importers = lock.importers === undefined ? { ".": lock } : rec(lock.importers);
   const sets = new Map<LockedPackage, Set<string>>();
-  for (const imp of Object.values(importers)) {
+  for (const [path, imp] of Object.entries(importers)) {
     for (const field of IMPORTER_FIELDS) {
       for (const [name, dep] of Object.entries(rec(rec(imp)[field]))) {
         const d = rec(dep);
@@ -129,7 +129,7 @@ function addImporterDescriptors(lock: Record<string, unknown>, out: LockedPackag
         // No key names the importer version (an alias or an odd shape): every match takes it, as before.
         for (const p of exact.length ? exact : same) {
           const set = sets.get(p) ?? new Set<string>();
-          set.add(`${name}@${d.specifier}`);
+          set.add(descriptorOf(name, d.specifier, path === "." ? "" : path));
           sets.set(p, set);
         }
       }
