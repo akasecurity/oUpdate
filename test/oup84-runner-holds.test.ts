@@ -45,6 +45,35 @@ describe("unresolved package-manager runners hold", () => {
     }
   });
 
+  test("pnpm -C/--dir and -r/--recursive without --filter widen", () => {
+    for (const cmd of ["pnpm -C sub build", "pnpm -Csub build", "pnpm --dir sub build", "pnpm --dir=sub build", "pnpm -r build", "pnpm --recursive build", "pnpm --recursive=true build", "pnpm -C sub run build", "pnpm --silent -r run build", "pnpm -w build", "pnpm --workspace-root build", "pnpm --filter-prod sub build", "pnpm --filter-prod=sub build", "pnpm -rs build", "pnpm --prefix sub build", "pnpm recursive run build", "pnpm m run build", "pnpm multi run build"]) {
+      expect(hardFor({ postinstall: cmd, build: "echo ok" }).length, cmd).toBeGreaterThan(0);
+    }
+  });
+
+  test("yarn and bun workspace forms widen", () => {
+    for (const cmd of ["yarn workspace sub build", "yarn workspaces foreach run build", "yarn workspaces run build", "yarn --cwd sub build", "yarn --cwd=sub build", "bun --filter sub build", "bun run --filter sub build", "bun --cwd sub build", "bun --cwd=sub run build", "bun -F sub build", "bun run --workspaces build"]) {
+      expect(hardFor({ postinstall: cmd, build: "echo ok" }).length, cmd).toBeGreaterThan(0);
+    }
+  });
+
+  test("pnpm recursive, m and multi widen through npx and corepack even when a script has that name", () => {
+    for (const w of ["npx", "corepack"]) {
+      for (const c of ["recursive", "m", "multi"]) {
+        const cmd = `${w} pnpm ${c} run build`;
+        expect(hardFor({ postinstall: cmd, build: "echo ok", [c]: "echo ok" }).length, cmd).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test("yarn m and bun m still follow a local script named m", () => {
+    for (const cmd of ["yarn m", "bun m", "yarn recursive", "bun multi"]) {
+      const name = cmd.split(" ")[1]!;
+      expect(hardFor({ postinstall: cmd, [name]: "node assets/x.js" }).length, cmd).toBeGreaterThan(0);
+      expect(hardFor({ postinstall: cmd, [name]: "node assets/other.js" }), cmd).toEqual([]);
+    }
+  });
+
   test("bun run <file> follows the file instead of looking up a script", () => {
     expect(hardFor({ postinstall: "bun run ./assets/x.js" }).length).toBeGreaterThan(0);
     expect(hardFor({ postinstall: "bun run ./assets/other.js" })).toEqual([]);

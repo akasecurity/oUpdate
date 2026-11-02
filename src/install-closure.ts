@@ -3120,6 +3120,11 @@ function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
   }
 }
 
+const WORKSPACE_WIDEN: Record<"yarn" | "pnpm" | "bun", RegExp> = {
+  pnpm: /^(?:-[A-Za-z]*[FCrw].*|--filter(?:-prod)?(?:=.*)?|--dir(?:=.*)?|--prefix(?:=.*)?|--recursive(?:=.*)?|--workspace-root(?:=.*)?|recursive|m|multi)$/,
+  yarn: /^(?:--cwd(?:=.*)?|workspace|workspaces)$/,
+  bun: /^(?:-F.*|--filter(?:=.*)?|--cwd(?:=.*)?|--workspaces)$/,
+};
 const RUNNER_BUILTINS = new Set(["exec", "x", "dlx", "create", "init", "add", "remove", "rm", "install", "i", "link", "up", "upgrade", "update", "pm", "patch", "set", "config", "node", "workspace", "workspaces", "rebuild", "unplug"]);
 
 // A shorthand word that looks like a file path (`bun payload.js`, `yarn ./x`) runs that file,
@@ -3150,6 +3155,8 @@ function wrappedScript(ctx: Ctx, argv: string[], i: number): string | undefined 
     return (sub === "start" || sub === "stop") && has(sub) ? sub : undefined;
   }
   if (RUNNER_BUILTINS.has(sub) || pathLikeWord(sub)) return undefined;
+  // pnpm runs its own recursive command for these words, never a script of that name.
+  if (runner === "pnpm" && /^(?:recursive|m|multi)$/.test(sub)) return undefined;
   return has(sub) ? sub : undefined;
 }
 
@@ -3223,15 +3230,14 @@ function dispatch(ctx: Ctx, cmd: string): void {
     return;
   }
   if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
-    // `pnpm --filter <pkg> <script>` runs a script of another workspace package. That package's
-    // scripts are not modeled here, so the whole package surface is reached.
-    if (bin === "pnpm") {
-      // Every argument before a bare `--` is checked: a flag value such as `-C sub` must not hide a later filter.
-      for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
-        if (/^(?:-F.*|--filter(?:=.*)?)$/.test(argv[j]!)) {
-          widenAll(ctx);
-          return;
-        }
+    // Forms that run a script of another workspace package or another directory. Those scripts are not
+    // modeled here, so the whole package surface is reached. Every argument before a bare `--` is checked,
+    // so a flag value cannot hide a later widening flag.
+    const widen = WORKSPACE_WIDEN[bin];
+    for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
+      if (widen.test(argv[j]!)) {
+        widenAll(ctx);
+        return;
       }
     }
     const sub = readWord(ctx, argv, i);
