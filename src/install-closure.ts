@@ -3247,22 +3247,35 @@ function dispatch(ctx: Ctx, cmd: string): void {
     }
     if (sub.word === "exec" || sub.word === "x") {
       // `npm exec -- pnpm -C sub build` runs the command after the flags, so that command is dispatched.
+      // A named package (`-p`, `--package`) or a command that is not a local path is fetched when it is not
+      // installed, so it is never resolved: it widens and holds as the unknown runner does.
       let k = sub.i + 1;
+      let remote = false;
+      let call: string | undefined;
       while (k < argv.length && argv[k] !== "--" && argv[k]!.startsWith("-")) {
-        if (argv[k] === "-c" || argv[k] === "--call" || argv[k] === "-p" || argv[k] === "--package") {
-          if (argv[k] === "-c" || argv[k] === "--call") {
-            dispatch(ctx, argv[k + 1] ?? "");
-            return;
-          }
-          k++;
-        }
+        const a = argv[k]!;
+        const eq = a.indexOf("=");
+        const flag = eq > 0 ? a.slice(0, eq) : a;
+        const val = eq > 0 ? a.slice(eq + 1) : undefined;
+        if (flag === "-c" || flag === "--call") {
+          call = val ?? argv[k + 1] ?? "";
+          if (val === undefined) k++;
+        } else if (flag === "-p" || flag === "--package") {
+          remote = true;
+          if (val === undefined) k++;
+        } else if (/^-p./.test(a) && !a.startsWith("--") || a.startsWith("--package")) remote = true;
+        else if (/^-c./.test(a) && !a.startsWith("--")) call = a.slice(2);
         k++;
       }
-      if (argv[k] === "--") k++;
-      if (k >= argv.length) {
-        widenAll(ctx);
-        fail(ctx, "unresolved: runner");
-      } else dispatch(ctx, argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      if (call !== undefined) dispatch(ctx, call);
+      else {
+        if (argv[k] === "--") k++;
+        if (k >= argv.length || remote || !localEntry(argv[k]!)) {
+          if (k < argv.length) dispatch(ctx, argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+          widenAll(ctx);
+          fail(ctx, "unresolved: runner");
+        } else dispatch(ctx, argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      }
       return;
     }
     if (sub.word === "test" || sub.word === "t" || sub.word === "tst") {
@@ -3392,6 +3405,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
   fail(ctx, `unresolved: runner ${bin}`);
 }
 
+const RUNNER_CONFIGS = new Set([".npmrc", ".yarnrc.yml", ".yarnrc", "pnpm-workspace.yaml", ".pnpmfile.cjs", "bunfig.toml"]);
 const PREBUILD_DIRS = ["prebuilds", "build/Release", "build/Debug"];
 const PATCH_BOOL = new Set(["--error-on-fail", "--error-on-warn", "--reverse", "--partial", "--use-yarn"]);
 
@@ -3772,11 +3786,13 @@ export function installView(files: FileMap): InstallView {
     const raw = ctx.raw[name];
     if (typeof raw === "string" && raw.length > 0) runScript(ctx, name, false);
   }
-  // A .npmrc in the package (`workspace=sub`, `prefix=sub`) can move any npm run to another package, so
-  // with an install hook it joins the surface and the other manifests are read.
-  if (ran.some((name) => typeof ctx.raw[name] === "string") && [...indexed.logical.keys()].some((l) => l.slice(l.lastIndexOf("/") + 1) === ".npmrc")) {
+  // A runner config file in the package (`.npmrc` with `workspace=sub`, `.yarnrc.yml` with `yarnPath`,
+  // `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `bunfig.toml`) can move or replace any run, so with an install
+  // hook it joins the surface and the other manifests are read.
+  const isRunnerConfig = (logical: string) => RUNNER_CONFIGS.has(logical.slice(logical.lastIndexOf("/") + 1).toLowerCase());
+  if (ran.some((name) => typeof ctx.raw[name] === "string") && [...indexed.logical.keys()].some(isRunnerConfig)) {
     for (const [logical, key] of indexed.logical) {
-      if (logical.slice(logical.lastIndexOf("/") + 1) === ".npmrc") ctx.files.add(key);
+      if (isRunnerConfig(logical)) ctx.files.add(key);
     }
     widenAll(ctx);
   }

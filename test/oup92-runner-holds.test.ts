@@ -111,3 +111,26 @@ describe("a manifest under a test or docs folder is still read by a directory-ch
     expect(held({ postinstall: "npm --prefix tests/pkg run build", build: "echo ok" }, nested("tests/pkg", "echo a"), nested("tests/pkg", "echo a"))).toBe(false);
   });
 });
+
+describe("npm exec forms and runner config files", () => {
+  test("npm exec and npm x hold a changed file the command reaches, remote or not", () => {
+    for (const cmd of ["npm exec -- run-s setup", "npm x -- run-s setup", "npm exec -p evil-pkg -- node ./sub/x.js", "npm exec --package=evil-pkg -- node ./sub/x.js", "npm exec --call='node ./sub/x.js'", "npm exec -c='node ./sub/x.js'", "npm exec -c 'node ./sub/x.js'", "npm exec --call 'node ./sub/x.js'"]) {
+      expect(held({ postinstall: cmd, setup: "node sub/x.js" }, SUB_OLD, SUB_NEW), cmd).toBe(true);
+    }
+  });
+
+  test("npm exec with -c dispatches the call string to the wrapped runner", () => {
+    for (const cmd of ["npm exec --call='pnpm -C sub build'", "npm exec -c='pnpm -C sub build'", "npm x -p pnpm -- pnpm -C sub build"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("a changed runner config file with an install hook holds", () => {
+    const scripts = { postinstall: "npm run build", build: "echo ok" };
+    for (const f of [".npmrc", ".yarnrc.yml", ".yarnrc", "pnpm-workspace.yaml", ".pnpmfile.cjs", "bunfig.toml"]) {
+      expect(held(scripts, { [f]: "a" }, { [f]: "b" }), f).toBe(true);
+      expect(held(scripts, { [f]: "a" }, { [f]: "a" }), f).toBe(false);
+      expect(held(scripts, {}, { [f]: "b" }), `added ${f}`).toBe(true);
+    }
+  });
+});
