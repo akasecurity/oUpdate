@@ -3060,7 +3060,8 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
     if (ctx.hold) return;
     const a = argv[i]!;
     if (a === "--") {
-      fail(ctx, "unresolved: flag");
+      // What follows is the script and its arguments.
+      for (let q = i + 1; q < argv.length; q++) noteHookArg(ctx, argv[q]!);
       return;
     }
     if (a.startsWith("-")) {
@@ -3098,8 +3099,11 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
         i++;
         continue;
       }
-      fail(ctx, "unresolved: flag");
-      return;
+      // A node option this does not know (--no-warnings, --max-old-space-size=4096, --title foo, -C dev) may take
+      // the next word as its value or load a file: widen, and keep reading the words that follow as files.
+      widenAll(ctx);
+      i++;
+      continue;
     }
     noteHookArg(ctx, a);
     i++;
@@ -3107,15 +3111,41 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
 }
 
 function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
-  if (i >= argv.length || argv[i]!.startsWith("-") || i + 1 !== argv.length) {
+  // Options come first. Any option this does not know widens (it may take a value or load a
+  // file); the first operand is the script, and arguments after it are the script's own.
+  let j = i;
+  for (; j < argv.length; j++) {
+    const t = argv[j]!;
+    if (t === "--") {
+      j++;
+      break;
+    }
+    if (!t.startsWith("-") && !t.startsWith("+")) break;
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(t)) {
+      // A command string is read by the structural scan of the body, not here.
+      fail(ctx, "unresolved: shell");
+      return;
+    }
+    if (/^[-+][A-Za-z]+$/.test(t)) {
+      // -o / +o / -O take an option name.
+      j += (t.match(/[oO]/g) ?? []).length;
+    } else if (t === "--rcfile" || t === "--init-file") {
+      if (argv[j + 1]) noteHookArg(ctx, argv[j + 1]!);
+      j++;
+    } else if (!/^--(?:norc|noprofile|posix|login|restricted|verbose|noediting|debugger|version|help)$/.test(t)) widenAll(ctx);
+  }
+  const token = argv[j];
+  if (token === undefined) {
+    // No script: the shell reads stdin.
     fail(ctx, "unresolved: shell");
     return;
   }
-  const token = argv[i]!;
   noteHookArg(ctx, token);
   if (ctx.hold) return;
   const key = findKey(ctx, normalize(token));
   if (!key) {
+    // A script this package does not hold: what it runs is not known.
+    widenAll(ctx);
     fail(ctx, "unresolved: shell");
     return;
   }
@@ -4436,7 +4466,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     {
       const args = w.slice(1);
       const t = un.lead;
-      const extracts = (t === "tar" && args.some((x) => /^-[A-Za-z]*x|^--(?:extract|get)$/.test(x) || x === "x") || /^[A-Za-z]*x[A-Za-z]*$/.test(args[0] ?? "")) || /^(?:unzip|7z|7za|unrar|gunzip|bunzip2|unxz|cpio)$/.test(t) || t === "patch" || (t === "git" && args.some((x) => /^(?:apply|am|checkout|restore|stash|merge|cherry-pick|rebase|pull)$/.test(x)));
+      const extracts = (t === "tar" && (args.some((x) => /^-[A-Za-z]*x|^--(?:extract|get)$/.test(x) || x === "x") || /^[A-Za-z]*x[A-Za-z]*$/.test(args[0] ?? ""))) || /^(?:unzip|7z|7za|unrar|gunzip|bunzip2|unxz|cpio)$/.test(t) || t === "patch" || (t === "git" && args.some((x) => /^(?:apply|am|checkout|restore|stash|merge|cherry-pick|rebase|pull)$/.test(x)));
       if (extracts || /^(?:cp|mv|ln|install|rsync|ditto)$/.test(t)) {
         // Every non-flag operand counts (a destination or an option value is read as a file and found missing).
         for (const x of args) if (!x.startsWith("-")) produced.push(x);
