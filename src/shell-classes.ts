@@ -148,7 +148,7 @@ function parse(text: string, depth: number): Stage[] {
         let e = i + 1;
         for (; e < text.length && text[e] !== '"'; e++) { if (--fuel < 0) fail("parse budget used up", "unparsed"); if (text[e] === "\\") e++; }
         if (e >= text.length) fail("quote");
-        const inner = text.slice(i + 1, e); if (/[$`]/.test(inner.replace(/\\./g, ""))) plain = false; t += inner.replace(/\\(["$`\\])/g, "$1"); i = e; continue;
+        const inner = text.slice(i + 1, e); if (/[$`]/.test(inner.replace(/\\./g, ""))) plain = false; for (const sub of extractSubs(inner, () => { if (--fuel < 0) fail("parse budget used up", "unparsed"); })) wordSubs.push(sub); t += inner.replace(/\\(["$`\\])/g, "$1"); i = e; continue;
       }
       if (c === "\\") { t += text[i + 1] ?? ""; i++; continue; }
       if (c === "$" && text[i + 1] === "(") { const e = matchClose(i + 2, "(", ")"); wordSubs.push(text.slice(i + 2, e)); plain = false; i = e; continue; }
@@ -248,19 +248,19 @@ function parse(text: string, depth: number): Stage[] {
       pendingHere.push({ delim: w.text, strip, active: !/['"\\]/.test(raw), st });
       i = next - 1; continue;
     }
-    if (c === "<" && text[i + 1] === "<" && text[i + 2] === "<") { endWord(); const { next } = readWordAt(i + 3); st.heredoc = true; st.reads.push("<<<"); i = next - 1; continue; }
+    if (c === "<" && text[i + 1] === "<" && text[i + 2] === "<") { endWord(); const { next } = readWordAt(i + 3); st.subs.push(...wordSubs); st.heredoc = true; st.reads.push("<<<"); i = next - 1; continue; }
     if (c === ">" || c === "<") {
       if (cur && /^[0-9]$/.test(cur.text) && cur.plain) cur = undefined; else endWord();
       let j = i + 1; let op = c;
       if (text[j] === ">" || text[j] === "|" || text[j] === "&") { op += text[j]; j++; }
-      if (op === ">&" || op === "<&") { const { w, next } = readWordAt(j); if (!/^[0-9-]+$/.test(w.text)) st.writes.push(w.text); i = next - 1; continue; }
+      if (op === ">&" || op === "<&") { const { w, next } = readWordAt(j); st.subs.push(...wordSubs); if (!/^[0-9-]+$/.test(w.text)) st.writes.push(w.text); i = next - 1; continue; }
       const { w, next } = readWordAt(j);
       st.subs.push(...wordSubs);
       if (!w.text && wordSubs.length === 0) fail("redirect target", "unparsed");
       if (c === ">") { if (w.text && w.text !== "/dev/null" && w.plain) st.writes.push(w.text); } else st.reads.push(w.text);
       i = next - 1; continue;
     }
-    if (c === "&" && text[i + 1] === ">") { endWord(); const { w, next } = readWordAt(i + 2); if (w.text !== "/dev/null" && w.plain) st.writes.push(w.text); i = next - 1; continue; }
+    if (c === "&" && text[i + 1] === ">") { endWord(); const { w, next } = readWordAt(i + 2); st.subs.push(...wordSubs); if (w.text !== "/dev/null" && w.plain) st.writes.push(w.text); i = next - 1; continue; }
     if (c === "|" && text[i + 1] !== "|") { endStage(); st.piped = true; if (text[i + 1] === "&") i++; continue; }
     if (c === "|" || c === "&" || c === ";") { endStage(); if (text[i + 1] === c) i++; continue; }
     if (c === "\n") {
@@ -313,6 +313,7 @@ const WRAP: Record<string, { val: string[]; dur?: boolean }> = {
   arch: { val: ["-arch"] },
   xargs: { val: ["-n", "-I", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "--max-args", "--max-procs", "--delimiter", "--arg-file", "--replace"] },
   busybox: { val: [] },
+  coproc: { val: [] },
   caffeinate: { val: ["-t", "-w"] },
 };
 const INTERP = /^(?:node|nodejs|bun|deno|python\d*(?:\.\d+)?|ruby\d*|perl\d*|php\d*|lua\d*)$/;
@@ -413,15 +414,17 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     while (w.length && ((w[0]!.plain && w[0]!.text === "function") || w[0]!.text === "{" || w[0]!.text === "!")) {
       w = w[0]!.text === "function" ? w.slice(Math.min(2, w.length)) : w.slice(1);
     }
-    for (let n = 0; n < 8 && w.length; n++) {
+    for (let n = 0; w.length; n++) {
       const spec = WRAP[BASE(w[0]!.text)];
       if (!spec || !w[0]!.plain) break;
+      if (n >= 8) { hit("unparsed", "more than 8 wrappers before the command"); break; }
       const name = BASE(w[0]!.text);
       let k = 1;
       for (; k < w.length; k++) {
         const t = w[k]!.text;
         if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) { if (BAD_ENV.test(t)) envHit(); continue; }
         if (t === "--") { k++; break; }
+        if (name === "env" && t === "-") continue; // env - : an empty environment, the command follows
         if (!t.startsWith("-") || t === "-") break;
         if (name === "env" && (t === "-S" || t === "--split-string")) { if (w[k + 1]) nested(w[k + 1]!.text); k++; continue; }
         if (name === "env" && (t === "-C" || t === "--chdir" || t.startsWith("--chdir="))) cwd = true;
@@ -441,9 +444,10 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     const ranWritten = (f: string) => { if (written(f)) hit("writer-exec", `runs ${f}, written or copied by this body`); };
     if (DECL.has(b)) { if (args.some((a) => BAD_ENV.test(a.text))) envHit(); continue; }
     if (COPIES.has(b)) { for (const a of args) if (!a.text.startsWith("-")) copyTargets.add(a.text.replace(/^\.\//, "")); continue; }
+    if (b === "eval") { const t = args.map((a) => a.text).join(" "); if (t) nested(t); continue; } // eval joins its words and runs them as shell
     if (b === "cd" || b === "pushd" || b === "popd") { cwd = true; continue; }
     if (b === "make") { if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--(?:file|makefile)(?:=|$)/.test(a.text))) hit("program-file", "make -f"); continue; }
-    if (b === "awk") { if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--file/.test(a.text) || /system|getline/.test(a.text))) hit("program-file", "awk program file or system()"); continue; }
+    if (/^(?:awk|gawk|mawk|nawk)$/.test(b)) { if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--file/.test(a.text) || /system|getline/.test(a.text))) hit("program-file", "awk program file or system()"); continue; }
     if (b === "sed") {
       if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--file/.test(a.text))) hit("program-file", "sed -f");
       else if (args.some((a) => !a.text.startsWith("-") && sedExecs(a.text))) hit("program-file", "sed e command or s///e");
@@ -529,7 +533,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       continue;
     }
     if (head.text.includes("/") && !PM.test(b)) {
-      if (head.text.startsWith("/") || head.text.startsWith("../")) continue;
+      if (head.text.startsWith("/") || (head.text.startsWith("../") && !cwd)) continue; // after a cd, ../x is not the package's
       if (cwd) hit("cd-relative", "path command after cd");
       ranWritten(head.text);
     }

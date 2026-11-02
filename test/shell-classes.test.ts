@@ -278,6 +278,40 @@ describe("shell classes", () => {
   });
 });
 
+describe("shell classes: review part 2", () => {
+  test("gawk, mawk and nawk are awk", () => {
+    expect(classes("gawk -f x.awk a")).toEqual(["program-file"]);
+    expect(classes("mawk 'BEGIN{system(\"id\")}' a")).toEqual(["program-file"]);
+    expect(classes("nawk -f x.awk a")).toEqual(["program-file"]);
+  });
+  test("eval runs its joined words as shell", () => {
+    expect(classes("eval node -r ./p.js a.js")).toEqual(["interp-flag"]);
+    expect(classes("eval 'node -r ./p.js a.js'")).toEqual(["interp-flag"]);
+    expect(classes("eval echo hi")).toEqual([]);
+  });
+  test("coproc runs the command behind it", () => {
+    expect(classes("coproc node -r ./p.js a.js")).toEqual(["interp-flag"]);
+  });
+  test("a command substitution in a here-string or redirect target is walked", () => {
+    expect(classes('cat <<< "$(node -r ./p.js a.js)"')).toEqual(["interp-flag"]);
+    expect(classes("cat <<< $(node -r ./p.js a.js)")).toEqual(["interp-flag"]);
+    expect(classes('echo > "$(node -r ./p.js a.js)"')).toEqual(["interp-flag"]);
+    expect(classes('echo >& "$(node -r ./p.js a.js)"')).toEqual(["interp-flag"]);
+    expect(classes("echo hi > \"$(echo log)\"")).toEqual([]);
+  });
+  test("more than 8 wrappers fails closed", () => {
+    expect(classes("nohup ".repeat(9) + "node -r ./p.js a.js")).toEqual(["unparsed"]);
+    expect(classes("nohup ".repeat(8) + "node -r ./p.js a.js")).toEqual(["interp-flag"]);
+  });
+  test("env - is an empty environment, not the command", () => {
+    expect(classes("env - node -r ./p.js a.js")).toEqual(["interp-flag"]);
+  });
+  test("a ../ command after a cd is not the package's", () => {
+    expect(classes("cd a/b && ../c.sh")).toEqual(["cd-relative"]);
+    expect(classes("../c.sh")).toEqual([]);
+  });
+});
+
 describe("shell classes: bounded work", () => {
   const rep = (s: string, n: number) => s.repeat(n);
   const inputs: [string, string][] = [
