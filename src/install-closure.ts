@@ -2862,8 +2862,11 @@ function noteHookArgCwd(ctx: Ctx, token: string): void {
   noteHookArg(ctx, token);
   if (ctx.cwd && token && !token.startsWith("-") && !token.startsWith("/")) {
     const j = joinDir(ctx.cwd, token);
-    if (j === undefined) ctx.widenInert = true;
-    else noteHookArg(ctx, j);
+    if (j === undefined) {
+      // A path that leaves the package: every file is read, and later checks are not switched off first.
+      ctx.widenInert = true;
+      widenAll(ctx);
+    } else noteHookArg(ctx, j);
   }
 }
 
@@ -3453,7 +3456,7 @@ const NODE_OPTS = /^NODE_OPTIONS\+?=/;
 const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS\+?=|YARN_|PNPM_|BUN_|COREPACK_)/;
 const UNSAFE_ENV = /^(?:CDPATH|IFS|GIT_SSH_COMMAND|GIT_SSH|GIT_EXTERNAL_DIFF|GIT_PAGER|GIT_EDITOR|GIT_ASKPASS|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|SSH_ASKPASS|EDITOR|VISUAL|PAGER|PYTHONPATH|PYTHONSTARTUP|PERL5LIB|PERL5OPT|RUBYOPT|RUBYLIB|ZDOTDIR|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)\+?=/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
-const WRAP_BINS = new Set(["env", "nohup", "time", "exec", "cross-env", "sudo", "doas", "nice", "ionice", "timeout", "stdbuf", "setsid", "caffeinate", "busybox", "chrt", "arch"]);
+const WRAP_BINS = new Set(["xargs", "env", "nohup", "time", "exec", "cross-env", "sudo", "doas", "nice", "ionice", "timeout", "stdbuf", "setsid", "caffeinate", "busybox", "chrt", "arch"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|--workspace|-C|-w)(?:=(.*))?$/;
 // npm reads any unique prefix of a long flag (`--prefi`, `--workspa`) and a short cluster ending in w or C
@@ -3670,8 +3673,10 @@ function readFed(ctx: Ctx, path: string, shell = false): void {
   // Resolved from the directory an earlier cd moved to as well as from the package root.
   if (ctx.cwd && path && !path.startsWith("/")) {
     const j = joinDir(ctx.cwd, path);
-    if (j === undefined) ctx.widenInert = true;
-    else if (j !== path) readFedAt(ctx, j, shell);
+    if (j === undefined) {
+      ctx.widenInert = true;
+      widenAll(ctx);
+    } else if (j !== path) readFedAt(ctx, j, shell);
   }
   readFedAt(ctx, path, shell);
 }
@@ -4010,7 +4015,7 @@ function unwrapSink(w0: string[]): { words: string[]; xargs: boolean; lead: stri
           i = 0;
           break;
         }
-        i += n === "env" && /^-[uC]$/.test(w[i]!) ? 2 : 1;
+        i += n === "env" && /^(?:-[uC]|--unset|--chdir)$/.test(w[i]!) ? 2 : 1;
       }
     } else if (n === "sudo" || n === "doas") {
       i++;
@@ -4051,6 +4056,30 @@ const STDIN_INTERPS: Record<string, { code: RegExp; value: RegExp }> = {
 
 // Whether an interpreter other than a shell reads its program from stdin: no program flag, and no script
 // operand (or `-`). `deno` and `bun` read `run` as a subcommand; `deno eval` and other subcommands are not.
+// Wrappers that run the command after their own options and operands: the options that take a value, and how many
+// operands precede the command (`timeout 300 npm run setup`).
+const WRAPPER_SPEC: Record<string, { value: RegExp; operands: number }> = {
+  nice: { value: /^(?:-n|--adjustment)$/, operands: 0 },
+  ionice: { value: /^-[cnpP]$/, operands: 0 },
+  timeout: { value: /^(?:-[sk]|--signal|--kill-after)$/, operands: 1 },
+  stdbuf: { value: /^-[ioe]$/, operands: 0 },
+  setsid: { value: /^$/, operands: 0 },
+  caffeinate: { value: /^-[tw]$/, operands: 0 },
+  chrt: { value: /^$/, operands: 1 },
+  arch: { value: /^$/, operands: 0 },
+  exec: { value: /^-a$/, operands: 0 },
+};
+
+// The command a wrapper from WRAPPER_SPEC runs, or undefined when the first word is not one.
+function stripWrapper(w: string[]): string[] | undefined {
+  const spec = WRAPPER_SPEC[runnerName((w[0] ?? "").replace(/^\\+/, ""))];
+  if (!spec) return undefined;
+  let i = 1;
+  while (i < w.length && w[i]!.startsWith("-") && w[i] !== "--") i += spec.value.test(w[i]!) ? 2 : 1;
+  if (w[i] === "--") i++;
+  return w.slice(Math.min(w.length, i + spec.operands));
+}
+
 const STDIN_PATH = /^(?:\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/self\/fd\/0|php:\/\/stdin)$/;
 
 function interpReadsStdin(bin: string, w: string[]): boolean {
@@ -4652,11 +4681,14 @@ function dispatch(ctx: Ctx, cmd: string): void {
   i++;
   // A wrapper (env, nohup, time, sudo, nice, timeout, ...) runs the command after its own options: that command is
   // dispatched too (`env bash -c 'node test/x.js'`, `/usr/bin/env sh -c ...`), and the wrapper's own reading goes on.
-  if (WRAP_BINS.has(bin) && ctx.depth < DEPTH) {
+  if ((WRAP_BINS.has(bin) || WRAPPER_SPEC[bin]) && ctx.depth < DEPTH) {
     const un = unwrapSink(argv.slice(i - 1));
-    if (un.words.length > 0 && un.words.length < argv.length - (i - 1) && !un.xargs) {
+    const own = stripWrapper(argv.slice(i - 1));
+    let inner = un.words;
+    if (own && (inner.length >= argv.length - (i - 1) || own.length < inner.length)) inner = own;
+    if (inner.length > 0 && inner.join("\u0000") !== argv.slice(i - 1).join("\u0000")) {
       ctx.depth++;
-      dispatch(ctx, un.words.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      dispatch(ctx, inner.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
       ctx.depth--;
     }
   }
@@ -4894,6 +4926,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
   }
   // prebuild-install and node-pre-gyp already returned. They download; they do not widen.
   // node already returned and keeps named files plus the require walk.
+  // A sourced file runs in this shell, from the directory an earlier cd moved to.
+  if ((bin === "." || bin === "source") && argv[i]) readFed(ctx, argv[i]!, true);
   // A script run by its path is read as a body (what its first line names runs it).
   if (/^(?:\.\.?\/|[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)/.test(argv[i - 1] ?? "") && bin !== "npx" && bin !== "bunx") readFed(ctx, argv[i - 1]!, true);
   closeUnknownRunner(ctx, argv, i);

