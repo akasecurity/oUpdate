@@ -3286,6 +3286,16 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
 
 const NPM_QUIET_FLAGS = new Set(["--loglevel", "--max-parallel", "--jobs", "-j"]);
 
+// Whether every word is a flag, a quiet flag taking its value as the next word (`--loglevel silent`, `-j 4`) included.
+function flagsOnly(ws: string[]): boolean {
+  for (let j = 0; j < ws.length; j++) {
+    const t = ws[j]!;
+    if (!t.startsWith("-")) return false;
+    if (NPM_QUIET_FLAGS.has(t)) j++;
+  }
+  return true;
+}
+
 // True when an argument before a bare `--` is a flag that is not known to leave the run in place.
 function npmFlagWidens(argv: string[], from: number): boolean {
   for (let j = from; j < argv.length && argv[j] !== "--"; j++) {
@@ -3294,6 +3304,8 @@ function npmFlagWidens(argv: string[], from: number): boolean {
     const eq = a.indexOf("=");
     const name = eq > 0 ? a.slice(0, eq) : a;
     if (NPM_WORKSPACE_WIDEN.test(a) || !(BOOL_FLAGS.has(name) || NPM_QUIET_FLAGS.has(name))) return true;
+    // A quiet flag with a separate value: the value is not a flag or a word of the command.
+    if (eq < 0 && NPM_QUIET_FLAGS.has(name)) j++;
   }
   return false;
 }
@@ -3344,15 +3356,27 @@ const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS\+?=|YARN_|PNPM_|BUN_|COREPACK_)/
 const UNSAFE_ENV = /^(?:CDPATH|IFS|PYTHONPATH|PYTHONSTARTUP|PERL5LIB|PERL5OPT|RUBYOPT|RUBYLIB|ZDOTDIR|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)\+?=/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
-const DIR_FLAG = /^(?:--prefix|--dir|--cwd|-C)(?:=(.*))?$/;
+const DIR_FLAG = /^(?:--prefix|--dir|--cwd|--workspace|-C|-w)(?:=(.*))?$/;
+// npm reads any unique prefix of a long flag (`--prefi`, `--workspa`) and a short cluster ending in w or C
+// (`-sw dir`): all of them name a directory.
+function dirFlagName(a: string): { name: string; value?: string } | undefined {
+  const eq = a.indexOf("=");
+  const name = eq > 0 ? a.slice(0, eq) : a;
+  const value = eq > 0 ? a.slice(eq + 1) : undefined;
+  if (DIR_FLAG.test(name)) return { name, value };
+  if (name.startsWith("--") && name.length >= 3 && ["--prefix", "--workspace", "--workspaces", "--dir", "--cwd"].some((f) => f.startsWith(name))) return { name, value };
+  if (/^-[A-Za-z]+[wC]$/.test(name)) return { name, value };
+  return undefined;
+}
 
 // Directories a flag names: `--prefix sub`, `-C sub`, `--dir=sub`, `-Csub`.
 function flagDirs(rest: string[], dirs: string[]): void {
   for (let j = 0; j < rest.length && rest[j] !== "--"; j++) {
-    const m = DIR_FLAG.exec(rest[j]!);
+    const m = dirFlagName(rest[j]!);
     if (m) {
-      const v = m[1] ?? rest[j + 1];
-      if (v) pushDir(dirs, v);
+      // A flag that takes no value (`--workspaces`) leaves a following word as a command word: both are recorded.
+      const v = m.value ?? rest[j + 1];
+      if (v && !v.startsWith("-")) pushDir(dirs, v);
     } else if (/^-C./.test(rest[j]!)) pushDir(dirs, rest[j]!.slice(2));
     else if (/^-w./.test(rest[j]!)) pushDir(dirs, rest[j]!.slice(2));
   }
@@ -3425,7 +3449,7 @@ function movesCore(argv: string[], dirs: string[]): boolean {
   if (WORKSPACE_TOOLS.has(bin)) return true;
   if (bin === "npm") {
     flagDirs(rest, dirs);
-    const ex = rest.findIndex((a, j) => (a === "exec" || a === "x") && rest.slice(0, j).every((t) => t.startsWith("-")));
+    const ex = rest.findIndex((a, j) => (a === "exec" || a === "x") && flagsOnly(rest.slice(0, j)));
     // These name a file npm or node then runs; the file is not resolved here, so read every file.
     if (rest.some((t) => /^--(?:node-options|script-shell|userconfig|globalconfig)/.test(t))) dirs.push(UNSURE);
     if (ex >= 0) return execMoves(rest.slice(ex + 1), dirs) || npmFlagWidens(rest.slice(0, ex), 0);
@@ -3716,7 +3740,34 @@ function substitutions(body: string): string[] | null {
 
 // The words of a command with leading wrappers (env, command, exec, sudo, busybox, xargs and their flags and
 // assignments) removed, so the interpreter the line really runs is first.
-function unwrapSink(w: string[]): { words: string[]; xargs: boolean } {
+// A text with `<` and `>` redirects set off as words of their own outside quotes (`sh<x.sh` is `sh < x.sh`),
+// a leading file descriptor kept with its operator (`2>&1`).
+function spaceRedirects(t: string): string {
+  if (!/[<>]/.test(t)) return t;
+  let out = "";
+  let q = "";
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i]!;
+    if (q) {
+      out += c;
+      if (c === q) q = "";
+      else if (c === "\\" && q === '"' && i + 1 < t.length) out += t[++i]!;
+    } else if (c === "\\" && i + 1 < t.length) out += c + t[++i]!;
+    else if (c === "'" || c === '"') {
+      q = c;
+      out += c;
+    } else if (c === "<" || c === ">") {
+      let op = c;
+      while (i + 1 < t.length && /[<>&|]/.test(t[i + 1]!) && !(t[i + 1] === "(" )) op += t[++i]!;
+      const fd = /(?:^|\s)(\d+)$/.exec(out);
+      out += (fd ? "" : " ") + op + " ";
+    } else out += c;
+  }
+  return out;
+}
+
+function unwrapSink(w0: string[]): { words: string[]; xargs: boolean } {
+  let w = w0;
   let i = 0;
   let xargs = false;
   for (let guard = 0; i < w.length && guard < 64; guard++) {
@@ -3724,7 +3775,17 @@ function unwrapSink(w: string[]): { words: string[]; xargs: boolean } {
     if (ASSIGN.test(w[i]!)) i++;
     else if (WRAPPERS.has(n) || n === "busybox") {
       i++;
-      while (i < w.length && (w[i]!.startsWith("-") || ASSIGN.test(w[i]!))) i += n === "env" && /^-[uCS]$/.test(w[i]!) ? 2 : 1;
+      while (i < w.length && (w[i]!.startsWith("-") || ASSIGN.test(w[i]!))) {
+        // `env -S 'sh -s'` splits its string into the command: the string's words come next.
+        const sv = n === "env" ? (w[i] === "-S" || w[i] === "--split-string" ? w[i + 1] : /^-S./.test(w[i]!) ? w[i]!.slice(2) : w[i]!.startsWith("--split-string=") ? w[i]!.slice(15) : undefined) : undefined;
+        if (sv !== undefined) {
+          const used = w[i] === "-S" || w[i] === "--split-string" ? 2 : 1;
+          w = [...words(sv), ...w.slice(i + used)];
+          i = 0;
+          break;
+        }
+        i += n === "env" && /^-[uC]$/.test(w[i]!) ? 2 : 1;
+      }
     } else if (n === "sudo" || n === "doas") {
       i++;
       while (i < w.length && w[i]!.startsWith("-")) i += /^-[ughpCDRTU]$/.test(w[i]!) ? 2 : 1;
@@ -3734,19 +3795,19 @@ function unwrapSink(w: string[]): { words: string[]; xargs: boolean } {
       while (i < w.length && w[i]!.startsWith("-")) i += /^-[IiLnPsdEaJ]$/.test(w[i]!) ? 2 : 1;
     } else break;
   }
-  let words = w.slice(i);
+  let ws = w.slice(i);
   // A wrapper this does not name (nice, timeout, stdbuf, ionice, chrt, setsid, caffeinate, arch, ...) runs the
   // first shell or interpreter word after it: unless the first word is itself one or a known plain command, the
   // sink is read from that word on.
-  const first = runnerName((words[0] ?? "").replace(/^\\+/, ""));
-  if (words.length > 0 && !SINK_WORD.test(first) && !PLAIN_CMDS.has(first)) {
-    const at = words.findIndex((t, q) => q > 0 && SINK_WORD.test(runnerName(t.replace(/^\\+/, ""))));
-    if (at > 0) words = words.slice(at);
+  const first = runnerName((ws[0] ?? "").replace(/^\\+/, ""));
+  if (ws.length > 0 && !SINK_WORD.test(first) && !PLAIN_CMDS.has(first)) {
+    const at = ws.findIndex((t, q) => q > 0 && SINK_WORD.test(runnerName(t.replace(/^\\+/, ""))));
+    if (at > 0) ws = ws.slice(at);
   }
-  return { words, xargs };
+  return { words: ws, xargs };
 }
 const SINK_WORD = /^(?:sh|bash|zsh|dash|ksh|node|nodejs|python[0-9.]*|perl|ruby|deno|bun|php)$/;
-const PLAIN_CMDS = new Set(["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "sed", "awk", "head", "tail", "tr", "ls", "test", "[", "true", "false", ":", "cp", "mv", "rm", "mkdir", "touch", "chmod", "which", "tee", "sort", "uniq", "wc", "cut", "find", "diff", "tar", "curl", "wget", "git", "make"]);
+const PLAIN_CMDS = new Set(["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "sed", "awk", "head", "tail", "tr", "ls", "test", "[", "true", "false", ":", "cp", "mv", "rm", "mkdir", "touch", "chmod", "which", "tee", "sort", "uniq", "wc", "cut", "find", "diff", "tar", "curl", "wget", "git", "make", "less", "more", "jq", "yq", "base64", "gzip", "gunzip", "zcat", "bzip2", "xz", "xxd", "od", "hexdump", "openssl", "shasum", "sha256sum", "sha1sum", "md5", "md5sum", "cksum", "fold", "nl", "rev", "paste", "comm", "join", "column", "cmp", "dd", "sleep", "date", "pwd", "wait", "read", "tput", "stat", "file", "du", "df", "ps", "npm", "pnpm", "yarn", "unzip", "zip", "strings", "tac", "expand", "unexpand", "split", "mktemp", "basename", "dirname", "realpath", "readlink", "ln", "install", "rsync", "scp", "ssh", "nc", "gawk", "mawk", "patch"]);
 
 // Interpreters that read their program from stdin when given no script operand: the flags that carry a program
 // (`-e`), and the flags that take a separate value.
@@ -3772,7 +3833,15 @@ function interpReadsStdin(bin: string, w: string[]): boolean {
   else if (key === "deno" && args[0] !== undefined && !args[0].startsWith("-") && args[0] !== "-") return false;
   // An unknown `--long` flag with no `=` may take the next word as its value or not: either reading that ends at
   // stdin counts (`node --stack-size 100` reads stdin, `node --foo x.js` may not).
-  const scan = (j: number): boolean => {
+  const memo = new Map<number, boolean>();
+  const scan = (j0: number): boolean => {
+    const hit = memo.get(j0);
+    if (hit !== undefined) return hit;
+    const r = scanFrom(j0);
+    memo.set(j0, r);
+    return r;
+  };
+  const scanFrom = (j: number): boolean => {
     for (; j < args.length; j++) {
       const t = args[j]!;
       if (t === "-") return true;
@@ -3824,8 +3893,21 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     return true;
   }
   for (const inner of subs) if (movesRun(inner, dirs)) hit = true;
+  let pos = 0;
   for (const seg of shellSegments(body)) {
-    const w = words(seg).filter((t) => !/^\d*[<>]/.test(t));
+    // Whether a single `|` joins this command to the one before it.
+    const at = body.indexOf(seg, pos);
+    const piped = at < 0 || /(?:^|[^|])\|(?!\|)/.test(body.slice(pos, at));
+    if (at >= 0) pos = at + seg.length;
+    // Redirects are set off as words (`sh<x.sh`) and their operands are not arguments: `node < x.js` has none.
+    const raw = words(spaceRedirects(seg));
+    const noRedir: string[] = [];
+    for (let q = 0; q < raw.length; q++) {
+      if (/^\d*[<>]/.test(raw[q]!)) {
+        if (/^\d*(?:<<?|>>?|<>|[<>]&|>\|)$/.test(raw[q]!)) q++;
+      } else noRedir.push(raw[q]!);
+    }
+    const w = noRedir;
     const local: string[] = [];
     if (moves(w, local)) hit = true;
     // Both the raw and the joined directory are recorded: the base may be wrong across a subshell or a popd.
@@ -3846,14 +3928,6 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     if (first && CD_WORD.test(runnerName(first.replace(/^\\+/, ""))) && local[0] !== undefined) cwd = joinDir(cwd, local[0]) ?? cwd;
     // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
     const b = runnerName((w[0] ?? "").replace(/^\\+/, ""));
-    // Redirection operands are not arguments: `node < x.js` has none.
-    const raw = words(seg);
-    const noRedir: string[] = [];
-    for (let q = 0; q < raw.length; q++) {
-      if (/^\d*[<>]/.test(raw[q]!)) {
-        if (/^\d*(?:<<?|>>?|<>|[<>]&|>\|)$/.test(raw[q]!)) q++;
-      } else noRedir.push(raw[q]!);
-    }
     const un = unwrapSink(noRedir);
     const sb = runnerName((un.words[0] ?? "").replace(/^\\+/, ""));
     const isShell = /^(?:sh|bash|zsh|dash|ksh)$/.test(sb);
@@ -3873,7 +3947,11 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
         if (m) fedDir(dirs, m[1] || raw[q + 1] || "");
       }
     }
-    if (bare && prev !== undefined) {
+    // A pipe whose producer is not literal text feeds any consumer that is not a known plain command (`ash`,
+    // `tsx`, `lua -`, `tclsh`, `env -S 'sh -s'`): the consumer is treated as a sink instead of being named.
+    const consumer = runnerName((un.words[0] ?? "").replace(/^\\+/, ""));
+    const classSink = piped && prev !== undefined && !/^(?:echo|printf)$/.test(prev) && !bare && (un.words.length === 0 ? noRedir.length > 0 : !PLAIN_CMDS.has(consumer) && !SINK_WORD.test(consumer));
+    if ((bare || classSink) && prev !== undefined) {
       if (!/^(?:echo|printf)$/.test(prev) || prevArgs.some((t) => /[$`]/.test(t))) {
         hit = true;
         if (/^(?:echo|printf)$/.test(prev)) dirs.push(UNSURE);
@@ -3991,7 +4069,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     // npm reads a flag wherever it sits before `--`, and accepts unique prefixes (`--prefi`) and joined short
     // options (`-sw`), so any flag that is not a known quiet one widens, in every position.
     // `npm exec` takes its own `-c`, `--call`, `-p` and `--package`, so it is read before the flag rule.
-    const ex = argv.findIndex((a, j) => j >= i && (a === "exec" || a === "x") && argv.slice(i, j).every((t) => t.startsWith("-")));
+    const ex = argv.findIndex((a, j) => j >= i && (a === "exec" || a === "x") && flagsOnly(argv.slice(i, j)));
     const dd = argv.indexOf("--");
     if (ex >= 0 && (dd < 0 || dd > ex)) {
       npmExec(ctx, argv, i, ex);
