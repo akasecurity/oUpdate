@@ -3503,6 +3503,8 @@ function substitutions(body: string): string[] | null {
   const skipBacktick = (t: string, i: number): number => {
     for (let j = i; j < t.length; j++) {
       if (!tick()) return -1;
+      // An escaped backtick inside a backtick body opens a nested substitution: not modeled, so unsure.
+      if (t[j] === "\\" && t[j + 1] === "`") return -1;
       if (t[j] === "\\") j++;
       else if (t[j] === "`") return j + 1;
     }

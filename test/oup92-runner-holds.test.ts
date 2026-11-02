@@ -519,3 +519,23 @@ describe("round 11: fail closed when the shell scan cannot be sure", () => {
     expect(Date.now() - t).toBeLessThan(3000);
   });
 });
+
+describe("round 11b: unclosed substitutions and nested escaped backticks", () => {
+  const pkgHeld = (cmd: string) => held({ postinstall: cmd }, { "tests/pkg/build.js": "1" }, { "tests/pkg/build.js": "evil()" });
+  const timed = (cmd: string) => {
+    const t = Date.now();
+    const r = pkgHeld(cmd);
+    expect(Date.now() - t).toBeLessThan(3000);
+    return r;
+  };
+
+  test("an unclosed substitution in a long hook widens quickly", () => {
+    expect(timed(`${"$(".repeat(5000)} cd tests/pkg && node build.js`)).toBe(true);
+    expect(timed(`${'echo "$(" '.repeat(5000)} cd tests/pkg && node build.js`)).toBe(true);
+    expect(timed(`${"$(".repeat(2000)}${")".repeat(2000)}`)).toBe(true);
+  });
+
+  test("an escaped backtick inside a backtick body widens", () => {
+    expect(pkgHeld("echo `echo \\`cd tests/pkg && node build.js\\``")).toBe(true);
+  });
+});
