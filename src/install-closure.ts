@@ -3121,7 +3121,7 @@ function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
 }
 
 const WORKSPACE_WIDEN: Record<"yarn" | "pnpm" | "bun", RegExp> = {
-  pnpm: /^(?:-[A-Za-z]*[FCrw].*|--filter(?:-prod)?(?:=.*)?|--dir(?:=.*)?|--prefix(?:=.*)?|--recursive(?:=.*)?|--workspace-root(?:=.*)?)$/,
+  pnpm: /^(?:-[A-Za-z]*[FCrw].*|--filter(?:-prod)?(?:=.*)?|--dir(?:=.*)?|--prefix(?:=.*)?|--recursive(?:=.*)?|--workspace-root(?:=.*)?|recursive|m|multi)$/,
   yarn: /^(?:--cwd(?:=.*)?|workspace|workspaces)$/,
   bun: /^(?:-F.*|--filter(?:=.*)?|--cwd(?:=.*)?|--workspaces)$/,
 };

@@ -46,7 +46,7 @@ describe("unresolved package-manager runners hold", () => {
   });
 
   test("pnpm -C/--dir and -r/--recursive without --filter widen", () => {
-    for (const cmd of ["pnpm -C sub build", "pnpm -Csub build", "pnpm --dir sub build", "pnpm --dir=sub build", "pnpm -r build", "pnpm --recursive build", "pnpm --recursive=true build", "pnpm -C sub run build", "pnpm --silent -r run build", "pnpm -w build", "pnpm --workspace-root build", "pnpm --filter-prod sub build", "pnpm --filter-prod=sub build", "pnpm -rs build", "pnpm --prefix sub build"]) {
+    for (const cmd of ["pnpm -C sub build", "pnpm -Csub build", "pnpm --dir sub build", "pnpm --dir=sub build", "pnpm -r build", "pnpm --recursive build", "pnpm --recursive=true build", "pnpm -C sub run build", "pnpm --silent -r run build", "pnpm -w build", "pnpm --workspace-root build", "pnpm --filter-prod sub build", "pnpm --filter-prod=sub build", "pnpm -rs build", "pnpm --prefix sub build", "pnpm recursive run build", "pnpm m run build", "pnpm multi run build"]) {
       expect(hardFor({ postinstall: cmd, build: "echo ok" }).length, cmd).toBeGreaterThan(0);
     }
   });
