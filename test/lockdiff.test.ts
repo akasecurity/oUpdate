@@ -111,3 +111,17 @@ test("the swap report names the origin the range dropped", () => {
   expect(d.length).toBeGreaterThan(0);
   expect(d.every((c) => c.swapped!.from.includes("/X"))).toBe(true);
 });
+
+test("bumping one copy of a range that resolves to two versions does not flag the untouched copy", () => {
+  const a = [
+    { name: "dep", version: "1.0.0", descriptors: ["dep@^1"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@^1"] },
+  ];
+  const b = [
+    { name: "dep", version: "1.6.0", descriptors: ["dep@^1"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@^1"] },
+  ];
+  const d = diffLocks(a, b);
+  expect(d.length).toBe(1);
+  expect(d[0]!.to).toBe("1.6.0");
+});

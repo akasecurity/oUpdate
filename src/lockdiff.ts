@@ -66,7 +66,10 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
       const d = (p.descriptors ?? []).find((x) => {
         const olds = oldTarget.get(x);
         if (!olds) return false;
-        was = olds.find((o) => !newTargetFull.get(x)?.has(full(o))) ?? (olds.some((o) => full(o) === full(p)) ? undefined : olds[0]);
+        // A dropped entry is reported here only when the range's new entries were all in the old lock; a new one is
+        // reported on its own as a version update or an origin change.
+        const onlyOld = [...(newTargetFull.get(x) ?? [])].every((f) => oldFull.has(f));
+        was = (onlyOld ? olds.find((o) => !newTargetFull.get(x)?.has(full(o))) : undefined) ?? (olds.some((o) => full(o) === full(p)) ? undefined : olds[0]);
         return was !== undefined;
       });
       if (d !== undefined && was !== undefined) {
