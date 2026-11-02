@@ -260,7 +260,7 @@ function parse(text: string, depth: number): Stage[] {
       if (c === ">") { if (w.text && w.text !== "/dev/null" && w.plain) st.writes.push(w.text); } else st.reads.push(w.text);
       i = next - 1; continue;
     }
-    if (c === "&" && text[i + 1] === ">") { endWord(); const { w, next } = readWordAt(i + 2); st.subs.push(...wordSubs); if (w.text !== "/dev/null" && w.plain) st.writes.push(w.text); i = next - 1; continue; }
+    if (c === "&" && text[i + 1] === ">") { endWord(); const { w, next } = readWordAt(i + 2); st.subs.push(...wordSubs); if (!w.text && wordSubs.length === 0) fail("redirect target", "unparsed"); if (w.text !== "/dev/null" && w.plain) st.writes.push(w.text); i = next - 1; continue; }
     if (c === "|" && text[i + 1] !== "|") { endStage(); st.piped = true; if (text[i + 1] === "&") i++; continue; }
     if (c === "|" || c === "&" || c === ";") { endStage(); if (text[i + 1] === c) i++; continue; }
     if (c === "\n") {
@@ -435,6 +435,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       if (spec.dur && k < w.length) k++;
       w = w.slice(k);
     }
+    while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0]!.text)) { if (BAD_ENV.test(w[0]!.text)) envHit(); w = w.slice(1); } // env -- NAME=v cmd: the assignment after -- is the first word
     if (!w.length) continue;
     const head = w[0]!;
     if (!head.plain) continue; // an expanded command word is not one of the reported classes

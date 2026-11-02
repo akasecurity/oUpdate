@@ -312,6 +312,28 @@ describe("shell classes: review part 2", () => {
   });
 });
 
+describe("shell classes: review part 3", () => {
+  test("an empty &> target fails closed like > and <", () => {
+    expect(classes("echo hi &>; node a.js")).toEqual(["unparsed"]);
+    expect(classes("echo hi &> /dev/null; node a.js")).toEqual([]);
+  });
+  test("an assignment after env -- is checked", () => {
+    expect(classes("env -- NODE_OPTIONS=-r./p.js node a.js")).toEqual(["env-assign"]);
+    expect(classes("env -- FOO=1 node a.js")).toEqual([]);
+  });
+  test("prose with parens and an escaped backtick in a heredoc or word still finds the substitution", () => {
+    expect(classes("cat <<EOF\nUsage: (foo) $(node -r ./p.js a.js)\nEOF")).toEqual(["interp-flag"]);
+    expect(classes("echo \\`a $(node -r ./p.js a.js)")).toEqual(["interp-flag"]);
+    expect(classes('echo "a\\`b\\`" $(node -r ./p.js a.js)')).toEqual(["interp-flag"]);
+  });
+  test("nested substitutions stay linear in the body length", () => {
+    let inner = "echo a";
+    for (let d = 0; d < 5; d++) inner = "echo $(" + inner + " ; " + "echo b ".repeat(300) + ")";
+    const t = performance.now(); flagBody(inner); flagBody("cat <<EOF\n" + "$(echo $(echo $(echo $(echo x))))\n".repeat(550) + "EOF");
+    expect(performance.now() - t).toBeLessThan(500);
+  });
+});
+
 describe("shell classes: bounded work", () => {
   const rep = (s: string, n: number) => s.repeat(n);
   const inputs: [string, string][] = [
