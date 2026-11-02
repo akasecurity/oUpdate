@@ -2853,9 +2853,13 @@ function noteHookArg(ctx: Ctx, token: string): void {
 
 // No resolved file argument (python3 -c, rollup -c, cross-env, ./bin). Docs, tests, and
 // workflows stay out. Files are recorded directly so a large package does not trip the depth cap.
-function widenAll(ctx: Ctx): void {
+// `workspace` is set for a form that runs a script of another package or directory: those scripts live in
+// the other package's manifest, so every non-root package.json joins the surface too. The root manifest is
+// read on its own path.
+function widenAll(ctx: Ctx, workspace = false): void {
   for (const [logical, key] of ctx.logical) {
-    if (isManifest(logical) || omitInert(ctx, logical)) continue;
+    if (isManifest(logical) && !(workspace && logical.includes("/"))) continue;
+    if (omitInert(ctx, logical)) continue;
     ctx.files.add(key);
     if (ctx.fromGyp) ctx.gypFiles.add(key);
   }
@@ -3125,6 +3129,8 @@ const WORKSPACE_WIDEN: Record<"yarn" | "pnpm" | "bun", RegExp> = {
   yarn: /^(?:--cwd(?:=.*)?|workspace|workspaces)$/,
   bun: /^(?:-F.*|--filter(?:=.*)?|--cwd(?:=.*)?|--workspaces)$/,
 };
+// npm reaches another package with --prefix/-C, -w/--workspace and --workspaces/-ws.
+const NPM_WORKSPACE_WIDEN = /^(?:--prefix(?:=.*)?|-C.*|-w.*|--workspaces?(?:=.*)?|--include-workspace-root(?:=.*)?|-iwr)$/;
 const RUNNER_BUILTINS = new Set(["exec", "x", "dlx", "create", "init", "add", "remove", "rm", "install", "i", "link", "up", "upgrade", "update", "pm", "patch", "set", "config", "node", "workspace", "workspaces", "rebuild", "unplug"]);
 
 // A shorthand word that looks like a file path (`bun payload.js`, `yarn ./x`) runs that file,
@@ -3196,14 +3202,30 @@ function dispatch(ctx: Ctx, cmd: string): void {
     return;
   }
   if (bin === "npm") {
+    // Every argument before a bare `--` is checked, so a flag value cannot hide a later workspace flag.
+    for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
+      if (NPM_WORKSPACE_WIDEN.test(argv[j]!)) {
+        widenAll(ctx, true);
+        return;
+      }
+    }
     const sub = readWord(ctx, argv, i);
-    if (!sub || !sub.word) {
+    if (!sub) {
+      // A flag no form here models may move the run to another package or take the next word as its value.
+      widenAll(ctx, true);
+      return;
+    }
+    if (!sub.word) {
       if (!ctx.hold) fail(ctx, "unresolved: runner");
       return;
     }
     if (RUN_SUB.has(sub.word)) {
       const name = readWord(ctx, argv, sub.i + 1);
-      if (!name || !name.word) {
+      if (!name) {
+        widenAll(ctx, true);
+        return;
+      }
+      if (!name.word) {
         if (!ctx.hold) fail(ctx, "unresolved: script");
         return;
       }
@@ -3236,19 +3258,25 @@ function dispatch(ctx: Ctx, cmd: string): void {
     const widen = WORKSPACE_WIDEN[bin];
     for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
       if (widen.test(argv[j]!)) {
-        widenAll(ctx);
+        widenAll(ctx, true);
         return;
       }
     }
     const sub = readWord(ctx, argv, i);
+    if (!sub) {
+      // A flag no form here models (`yarn run -T`, `pnpm --dir-like` options) may move the run to another
+      // package or take the next word as its value.
+      widenAll(ctx, true);
+      return;
+    }
     // `yarn setup` and `pnpm test` run the script of that name when one exists.
     if (sub?.word && sub.word !== "run" && sub.word !== "run-script" && !pathLikeWord(sub.word) && !RUNNER_BUILTINS.has(sub.word) && typeof ctx.raw[sub.word] === "string") {
       runScript(ctx, sub.word, false);
       return;
     }
-    if (!sub || (sub.word !== "run" && sub.word !== "run-script")) {
+    if (sub.word !== "run" && sub.word !== "run-script") {
       if (!ctx.hold) fail(ctx, "unresolved: runner");
-      if (sub?.word === undefined) return;
+      if (sub.word === undefined) return;
       // dlx fetches remote code, so no named file makes it resolved.
       if (sub.word === "dlx" || (bin === "bun" && sub.word === "x")) widenAll(ctx);
       // A file (`bun ./x.ts`) is followed like node; exec widens when no file resolves.
@@ -3258,7 +3286,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
       return;
     }
     const name = readWord(ctx, argv, sub.i + 1);
-    if (!name || !name.word) {
+    if (!name) {
+      widenAll(ctx, true);
+      return;
+    }
+    if (!name.word) {
       if (!ctx.hold) fail(ctx, "unresolved: script");
       return;
     }
@@ -3275,6 +3307,18 @@ function dispatch(ctx: Ctx, cmd: string): void {
     return;
   }
   if (bin === "npx" || bin === "corepack") {
+    // `npx pnpm -C sub build` runs a script of another package through the wrapped runner.
+    const inner = argv.slice(i).findIndex((a) => ["npm", "yarn", "pnpm", "bun"].includes(binName(a)));
+    if (inner >= 0) {
+      const wrapped = binName(argv[i + inner]!) as "npm" | "yarn" | "pnpm" | "bun";
+      const rx = wrapped === "npm" ? NPM_WORKSPACE_WIDEN : WORKSPACE_WIDEN[wrapped];
+      for (let j = i + inner + 1; j < argv.length && argv[j] !== "--"; j++) {
+        if (rx.test(argv[j]!)) {
+          widenAll(ctx, true);
+          return;
+        }
+      }
+    }
     // Only a wrapped runner that names a script of this package re-dispatches to it.
     // Every other form keeps the unknown-runner reach below.
     const named = wrappedScript(ctx, argv, i);
