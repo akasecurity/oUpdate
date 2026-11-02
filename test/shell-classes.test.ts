@@ -389,6 +389,15 @@ describe("shell classes: review of fcdb6a0", () => {
   });
 });
 
+describe("shell classes: computed command word", () => {
+  test("a command word that is an expansion can be any interpreter", () => {
+    for (const c of ["$N -r ./p.js a.js", "${N} -r ./p.js a.js", "N=node; $N -r ./p.js a.js", "N=node\n$N -r ./p.js a.js", "x=1 $N a.js", "$(echo node) -r ./p.js a.js", "`echo node` -r ./p.js a.js", '"$N" a.js', "env $N a.js", "nohup $N a.js"]) {
+      expect(classes(c), c).toEqual(["computed-command"]);
+    }
+    for (const c of ["echo $N", "node $N", "FOO=$N node a.js", "cat $(echo a)"]) expect(classes(c), c).toEqual([]);
+  });
+});
+
 describe("shell classes: bounded work", () => {
   const rep = (s: string, n: number) => s.repeat(n);
   const inputs: [string, string][] = [

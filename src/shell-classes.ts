@@ -16,6 +16,7 @@
 //   program-file  `sed -f`, `awk -f`, `awk` with system/getline, `make -f`: the program is in a file
 //   env-assign    a NODE_OPTIONS, NODE_PATH, npm_config_*, BASH_ENV, PERL5OPT, RUBYOPT, PYTHONPATH, PYTHONSTARTUP,
 //                 LD_PRELOAD or DYLD_INSERT_LIBRARIES assignment (leading, after `env`, or `export`)
+//   computed-command  the command word itself is an expansion (`$N -r ./p.js a.js`, `$(echo node) a.js`): it can be any interpreter
 //   over-cap      a body longer than MAX_LEN characters, which is not parsed (fails closed)
 //   unparsed      a structure the parser gives up on (nesting past MAX_DEPTH, fuel out, a trailing backslash, an
 //                 empty redirect target): fails closed
@@ -25,7 +26,7 @@
 // inside a word, reports nothing and leaves the existing scan's result: the shell would reject those, and reporting
 // them would widen 15 of 77 quiet bodies in the real clean set (JSON-escaped quotes copied out of binding.gyp).
 
-export type ClassName = "over-cap" | "unparsed" | "interp-flag" | "interp-stdin" | "heredoc" | "cd-relative" | "writer-exec" | "program-file" | "env-assign";
+export type ClassName = "over-cap" | "unparsed" | "interp-flag" | "interp-stdin" | "heredoc" | "cd-relative" | "writer-exec" | "program-file" | "env-assign" | "computed-command";
 export interface Hit { cls: ClassName; why: string }
 
 interface Word { text: string; plain: boolean } // plain: no $ or backtick expansion (a backslash only quotes)
@@ -96,7 +97,8 @@ function extractSubs(body: string, spend: () => void): string[] {
       }
       if (d > 0) break;
       const inner = body.slice(i + 2, j - 1);
-      out.push(body[i + 2] === "(" && inner.endsWith(")") ? inner.slice(1, -1) : inner);
+      if (body[i + 2] === "(" && inner.endsWith(")")) out.push(...extractSubs(inner.slice(1, -1), spend)); // arithmetic: only the substitutions in it run
+      else out.push(inner);
       i = j - 1;
     }
   }
@@ -164,6 +166,7 @@ function parse(text: string, depth: number): Stage[] {
     return fail("unclosed " + open);
   };
   const isBreak = (c: string) => c === " " || c === "\t" || c === "\n" || c === "\r" || c === ";" || c === "&" || c === "|" || c === "(" || c === ")" || c === "<" || c === ">";
+  const spend0 = () => { if (--FUEL < 0) fail("parse budget used up", "unparsed"); };
   let wordSubs: string[] = []; // command substitutions inside the word readWordAt just read (a redirect target, a delimiter)
   const readWordAt = (i: number): { w: Word; next: number } => {
     wordSubs = [];
@@ -235,10 +238,10 @@ function parse(text: string, depth: number): Stage[] {
         const inner = text.slice(i + 2, e);
         if (!dbl) st.subs.push(inner);
         else if (!wrapsAll(inner)) st.subs.push(inner); // `$( (a) && (b) )`: two subshells in a substitution, not arithmetic
-        else { const a = inner.slice(1, -1); if (/[$`]\(|`/.test(a) || COMMANDISH.test(a)) st.subs.push(a); }
+        else { const a = inner.slice(1, -1); const found = extractSubs(a, spend0); st.subs.push(...found); if (!found.length && COMMANDISH.test(a)) st.subs.push(a); }
         add("", false); i = e; continue;
       }
-      if (text[i + 1] === "[") { const e = matchClose(i + 2, "[", "]"); const inner = text.slice(i + 2, e); if (/\$\(|`/.test(inner)) st.subs.push(inner); add("", false); i = e; continue; }
+      if (text[i + 1] === "[") { const e = matchClose(i + 2, "[", "]"); st.subs.push(...extractSubs(text.slice(i + 2, e), spend0)); add("", false); i = e; continue; }
       if (text[i + 1] === "{") { const e = matchClose(i + 2, "{", "}"); const inner = text.slice(i + 2, e); if (/\$\(|`/.test(inner)) st.subs.push(inner); add("${" + inner + "}", false); i = e; continue; }
       if (text[i + 1] === "'") {
         // ANSI-C quoting: a quoted word whose escapes the scan does not decode, so it is not plain.
@@ -286,7 +289,7 @@ function parse(text: string, depth: number): Stage[] {
       const e = matchClose(i + 1, "(", ")");
       const inner = text.slice(i + 1, e);
       // `((expr))` is arithmetic: only a $(..) or backtick inside it runs anything
-      if (wrapsAll(inner)) { const a = inner.slice(1, -1); if (/\$\(|`/.test(a) || COMMANDISH.test(a)) st.subs.push(a); }
+      if (wrapsAll(inner)) { const a = inner.slice(1, -1); const found = extractSubs(a, spend0); st.subs.push(...found); if (!found.length && COMMANDISH.test(a)) st.subs.push(a); }
       else st.subs.push(inner);
       i = e; continue;
     }
@@ -523,7 +526,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0]!.text)) { if (badEnv(w[0]!.text)) envHit(); w = w.slice(1); } // env -- NAME=v cmd: the assignment after -- is the first word
     if (!w.length) continue;
     const head = w[0]!;
-    if (!head.plain) continue; // an expanded command word is not one of the reported classes
+    if (!head.plain) { hit("computed-command", "the command word is an expansion (a variable, a substitution)"); continue; } // it can name any interpreter
     const b = BASE(head.text);
     const args = w.slice(1);
     const stdin = (what: string) => { if (!st.piped || st.heredoc || st.reads.length) hit(st.heredoc ? "heredoc" : "interp-stdin", `${what} reads its program from stdin`); };
