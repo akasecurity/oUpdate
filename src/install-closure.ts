@@ -114,7 +114,7 @@ function runnerName(token: string): string {
   // Only a version, range or tag follows the name. `pnpm@file:x.tgz` and `pnpm@npm:other` stay unknown.
   // A spec that starts with a dot (`pnpm@.`, `pnpm@..`) is a directory, not a version.
   // A spec ending .tgz, .tar or .zip is a local archive, not a version.
-  return binName(token).replace(/^(.+?)@(?![0-9A-Za-z.^~<>=*+-]*\.(?:tgz|tar|zip|gz)$)[0-9A-Za-z^~<>=*+-][0-9A-Za-z.^~<>=*+-]*$/, "$1");
+  return binName(token).replace(/^(.+?)@(?![0-9A-Za-z.^~<>=*+-]*\.(?:tgz|tar|zip|gz)$)[0-9A-Za-z^~<>=*+-][0-9A-Za-z.^~<>=*+-]*$/i, "$1");
 }
 
 function words(cmd: string): string[] {
@@ -3612,6 +3612,8 @@ function noteBody(ctx: Ctx, body: string): boolean {
     }
   }
   for (const seg of shellSegments(body)) if (words(seg).some((t) => RUNNERS.has(runnerName(t.replace(/^\\+/, ""))))) ctx.sawRunner = true;
+  // A runner inside a quoted string (`bash -c 'npm run build'`) is a runner too.
+  if (/(?:^|[\s;&|('"`])(?:npm|pnpm|yarn|yarnpkg|bun|bunx|npx|pnpx|corepack)(?![\w-])/.test(body)) ctx.sawRunner = true;
   return hit;
 }
 
@@ -4091,6 +4093,15 @@ function readsStdin(bin: string, w: string[]): boolean {
 function movesRunCore(body: string, dirs: string[] = []): boolean {
   let hit = false;
   let cwd = "";
+  // A fed or operand path is read as written and joined with the directory an earlier cd moved to.
+  const fedBoth = (f: string): void => {
+    fedDir(dirs, f);
+    if (cwd && f && !f.startsWith("/") && !f.startsWith("-")) {
+      const j = joinDir(cwd, f);
+      if (j === undefined) dirs.push(UNSURE);
+      else fedDir(dirs, j);
+    }
+  };
   let fedHit = false;
   let prev: string | undefined;
   let prevArgs: string[] = [];
@@ -4104,6 +4115,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
   for (const inner of subs) if (movesRun(inner, dirs)) hit = true;
   let pos = 0;
   let pipeFiles: string[] = [];
+  let heredocs = 0;
   // Files a command wrote (`> build.js`, `tee build.js`) with the files that fed that stage, so a later command that
   // runs the written file reads the sources.
   const written = new Map<string, string[]>();
@@ -4120,14 +4132,14 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     hit = true;
     // The command word counts when it is itself a path (`<(./test/gen.sh)`).
     words(m[1]!).forEach((t, q) => {
-      if (!t.startsWith("-") && (q > 0 || t.includes("/"))) fedDir(dirs, t);
+      if (!t.startsWith("-") && (q > 0 || t.includes("/"))) fedBoth(t);
     });
   }
   // A file sourced anywhere in the text, inside a quoted eval or sh -c string included, runs in this shell and may
   // sit under test/ or docs/: its directory is read.
   for (const m of body.matchAll(/(?:^|[\s;&|({'"`])(?:source|\.)\s+['"]?([^\s;&|)'"`]+)/g)) {
     hit = true;
-    fedDir(dirs, m[1]!);
+    fedBoth(m[1]!);
   }
   for (const seg of shellSegments(body)) {
     // Whether a single `|` joins this command to the one before it.
@@ -4144,7 +4156,8 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     }
     const w = noRedir;
     // Every file named anywhere in a pipeline: arguments and `<` operands of each stage.
-    if (!piped) pipeFiles = [];
+    // A lone closing word (`}`, `fi`, `done`) between a group and its pipe does not end the pipeline.
+    if (!piped && !/^(?:\}|fi|done|esac)$/.test(seg)) pipeFiles = [];
     for (let q = 0; q < raw.length; q++) {
       const m = /^\d*<(?!<)(.*)$/.exec(raw[q]!);
       if (m) pipeFiles.push(m[1] || raw[q + 1] || "");
@@ -4183,12 +4196,12 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     const codeStdin = SINK_WORD.test(sb) && !bare && un.words.slice(1).some((t) => STDIN_CODE.test(t));
     if (codeStdin && prev !== undefined && !/^(?:echo|printf)$/.test(prev)) {
       hit = true;
-      for (const t of pipeFiles) fedDir(dirs, t);
+      for (const t of pipeFiles) fedBoth(t);
     }
     // A shell or interpreter given a script file runs it, whether or not the body was split into commands.
     if (SINK_WORD.test(sb) && !bare) {
       const operand = scriptOperand(sb, un.words);
-      if (operand) fedDir(dirs, operand);
+      if (operand) fedBoth(operand);
     }
     if (bare && fedHit) hit = true;
     // A shell fed from a file (`sh < x.sh`) or by a producer that is not echo or printf with literal words
@@ -4199,7 +4212,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       hit = true;
       for (let q = 0; q < raw.length; q++) {
         const m = /^\d*<(?!<)(.*)$/.exec(raw[q]!);
-        if (m) fedDir(dirs, m[1] || raw[q + 1] || "");
+        if (m) fedBoth(m[1] || raw[q + 1] || "");
       }
     }
     // A pipe whose producer is not literal text feeds any consumer that is not a known plain command (`ash`,
@@ -4210,14 +4223,19 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       if (!/^(?:echo|printf)$/.test(prev) || prevArgs.some((t) => /[$`]/.test(t))) {
         hit = true;
         if (/^(?:echo|printf)$/.test(prev)) dirs.push(UNSURE);
-        else for (const t of pipeFiles) fedDir(dirs, t);
+        else for (const t of pipeFiles) fedBoth(t);
       }
     }
     // A here-string hands its text to the consumer: a shell or interpreter runs it, so its text is read as a command line.
     for (let q = 0; q < raw.length; q++) {
       const m = /^\d*<<<(.*)$/.exec(raw[q]!);
-      if (!m || !redirSink) continue;
+      if (!m) continue;
       const text = m[1] || raw[q + 1] || "";
+      // A here-string with an expansion on a stage that pipes on (`cat <<< "$(cat test/x.sh)" | sh`) is unsure.
+      if (!redirSink) {
+        if (/[$`]/.test(text) && at >= 0 && /^\s*\|(?!\|)/.test(body.slice(at + seg.length))) dirs.push(UNSURE);
+        continue;
+      }
       hit = true;
       if (!text || /[$`]/.test(text)) dirs.push(UNSURE);
       else if (isShell || !SINK_WORD.test(sb)) {
@@ -4233,24 +4251,37 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     if (SINK_WORD.test(sb) && /<<-?\s*['"]?\w+/.test(seg)) {
       hit = true;
       const d = /<<-?\s*(['"]?)(\w+)\1/.exec(seg);
-      if (d) {
-        const hd = new RegExp(`<<-?\\s*['"]?${d[2]}['"]?[^\\n]*\\n([\\s\\S]*?)\\n[\\t ]*${d[2]}(?:\\n|$)`).exec(body.slice(Math.max(0, body.indexOf(seg))));
-        if (hd) {
-          if (isShell) {
-            if (movesRun(hd[1]!, dirs)) hit = true;
-          } else textRefs(hd[1]!, dirs);
-        } else dirs.push(UNSURE);
-      }
+      // The terminator line is found from this segment's own offset, and the reads per body are capped.
+      const nl = at >= 0 ? body.indexOf("\n", at + seg.length) : -1;
+      if (d && ++heredocs <= 32 && nl >= 0) {
+        const text: string[] = [];
+        let found = false;
+        for (let cursor = nl + 1; cursor <= body.length; ) {
+          const e = body.indexOf("\n", cursor);
+          const line = body.slice(cursor, e < 0 ? undefined : e);
+          if (line.replace(/^\t+/, "").trimEnd() === d[2]) {
+            found = true;
+            break;
+          }
+          text.push(line);
+          if (e < 0) break;
+          cursor = e + 1;
+        }
+        if (!found) dirs.push(UNSURE);
+        else if (isShell) {
+          if (movesRun(text.join("\n"), dirs)) hit = true;
+        } else textRefs(text.join("\n"), dirs);
+      } else dirs.push(UNSURE);
     }
     // Flags that load a file, and the script operand, in an unsplit body.
-    if (SINK_WORD.test(sb)) for (const f of flagFiles(sb, un.words)) fedDir(dirs, f.replace(/^(?:\.\/)+/, ""));
+    if (SINK_WORD.test(sb)) for (const f of flagFiles(sb, un.words)) fedBoth(f.replace(/^(?:\.\/)+/, ""));
     // xargs turns its input lines into the arguments of a shell or interpreter (`echo test/x.sh | xargs sh`).
     if (un.xargs && SINK_WORD.test(sb)) {
       hit = true;
       if (prev === undefined) dirs.push(UNSURE);
-      else if (/^(?:echo|printf)$/.test(prev) && !prevArgs.some((t) => /[$`]/.test(t))) for (const t of prevArgs) if (!t.startsWith("-")) fedDir(dirs, t);
+      else if (/^(?:echo|printf)$/.test(prev) && !prevArgs.some((t) => /[$`]/.test(t))) for (const t of prevArgs) if (!t.startsWith("-")) fedBoth(t);
       else if (/^(?:echo|printf)$/.test(prev)) dirs.push(UNSURE);
-      else for (const t of pipeFiles) fedDir(dirs, t);
+      else for (const t of pipeFiles) fedBoth(t);
     }
     // find -exec, tar --to-command and a shell's --rcfile run a file or a program named by their arguments.
     const rp = RUNS_PROGRAM[un.lead];
@@ -4261,15 +4292,15 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     if (isShell) {
       for (let q = 1; q < un.words.length; q++) {
         const t = un.words[q]!;
-        if (t === "--rcfile" || t === "--init-file") fedDir(dirs, un.words[q + 1] ?? "");
-        else if (/^--(?:rcfile|init-file)=/.test(t)) fedDir(dirs, t.slice(t.indexOf("=") + 1));
+        if (t === "--rcfile" || t === "--init-file") fedBoth(un.words[q + 1] ?? "");
+        else if (/^--(?:rcfile|init-file)=/.test(t)) fedBoth(t.slice(t.indexOf("=") + 1));
         else continue;
         hit = true;
       }
     }
     if (produced.length > 0 && (SINK_WORD.test(un.lead) || /^\.{0,2}\//.test(un.lead) || un.lead === "." || un.lead === "source")) {
       // The sources are read as files (not a widen): what they create is not followed.
-      for (const f of produced) fedDir(dirs, f.replace(/^(?:\.\/)+/, ""));
+      for (const f of produced) fedBoth(f.replace(/^(?:\.\/)+/, ""));
     }
     // A command that runs a file an earlier stage wrote reads the files that fed that stage.
     if (written.size > 0 && !PLAIN_CMDS.has(un.lead)) {
@@ -4277,7 +4308,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
         const src = written.get(t.replace(/^(?:\.\/)+/, ""));
         if (!src) continue;
         hit = true;
-        for (const f of src) fedDir(dirs, f);
+        for (const f of src) fedBoth(f);
       }
     }
     for (let q = 0; q < raw.length; q++) {
@@ -4637,7 +4668,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
   fail(ctx, `unresolved: runner ${bin}`);
 }
 
-const RUNNER_CONFIGS = new Set([".npmrc", ".yarnrc.yml", ".yarnrc", "pnpm-workspace.yaml", ".pnpmfile.cjs", "bunfig.toml", ".pnp.cjs", ".pnp.loader.mjs"]);
+const RUNNER_CONFIGS = new Set([".npmrc", ".yarnrc.yml", ".yarnrc", "pnpm-workspace.yaml", ".pnpmfile.cjs", "bunfig.toml", ".pnp.cjs", ".pnp.loader.mjs", ".env", ".env.yarn", ".env.local", ".env.development", ".env.production", ".env.test"]);
 const PREBUILD_DIRS = ["prebuilds", "build/Release", "build/Debug"];
 const PATCH_BOOL = new Set(["--error-on-fail", "--error-on-warn", "--reverse", "--partial", "--use-yarn"]);
 

