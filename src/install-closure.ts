@@ -2925,7 +2925,11 @@ function runBody(ctx: Ctx, body: string): void {
     return;
   }
   const sub = subst(ctx, body);
-  if (sub === null || ctx.hold) return;
+  if (sub === null || ctx.hold) {
+    // An expansion that cannot be resolved may name another directory: widen when the body moves the run.
+    if (sub === null && movesRun(body)) widenAll(ctx);
+    return;
+  }
   const cmds = splitCommands(ctx, sub);
   if (!cmds) {
     // The body was not split, so a `cd` or a workspace flag inside a redirect, pipe or subshell may be moving a
@@ -3062,7 +3066,12 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
 
 function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
   // `sh -c 'cd sub && npm run build'` runs a string that may leave this package.
-  if (/^-[a-z]*c[a-z]*$/.test(argv[i] ?? "") && movesRun(argv.slice(i + 1).join(" "))) widenAll(ctx);
+  for (let j = i; j < argv.length && argv[j]!.startsWith("-"); j++) {
+    if (/^-[a-z]*c[a-z]*$/.test(argv[j]!) && j + 1 < argv.length) {
+      if (movesRun(argv.slice(j + 1).join(" "))) widenAll(ctx);
+      break;
+    }
+  }
   if (i >= argv.length || argv[i]!.startsWith("-") || i + 1 !== argv.length) {
     fail(ctx, "unresolved: shell");
     return;
@@ -3209,9 +3218,12 @@ function npmFlagWidens(argv: string[], from: number): boolean {
 // Tools that run a script of every package. A file named among their arguments is a config, not an entry.
 const WORKSPACE_TOOLS = new Set(["lerna", "turbo", "nx", "rush", "wsrun"]);
 
-// Words of an unsplit shell body that move a run: a directory change, a workspace tool or a workspace flag.
+// Words of a shell body that move a run: a directory change, a workspace tool, a workspace flag or any npm flag that
+// is not known to stay in place. A backslash before a word (`\\cd`) does not hide it.
 function movesRun(body: string): boolean {
-  return body.split(/[\s;&|()`'"<>]+/).some((w) => /^(?:cd|pushd|popd)$/.test(w) || WORKSPACE_TOOLS.has(w) || NPM_WORKSPACE_WIDEN.test(w) || Object.values(WORKSPACE_WIDEN).some((rx) => rx.test(w)));
+  const w = body.split(/[\s;&|()`'"<>\\]+/);
+  if (w.some((t) => /^(?:cd|pushd|popd)$/.test(t) || WORKSPACE_TOOLS.has(t) || NPM_WORKSPACE_WIDEN.test(t) || Object.values(WORKSPACE_WIDEN).some((rx) => rx.test(t)))) return true;
+  return w.some((t, n) => t === "npm" && npmFlagWidens(w, n + 1));
 }
 
 function dispatch(ctx: Ctx, cmd: string): void {
@@ -3220,13 +3232,28 @@ function dispatch(ctx: Ctx, cmd: string): void {
   let i = 0;
   if (i < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i]!)) {
     // An assignment such as npm_config_workspace=sub or npm_config_prefix=sub moves the run to another package.
-    if (/^(?:npm_|NPM_|NODE_|YARN_|PNPM_|BUN_|COREPACK_)/.test(argv[i]!)) widenAll(ctx);
+    // Every leading assignment is checked, not only the first.
+    let j = 0;
+    while (j < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[j]!)) {
+      if (/^(?:npm_|NPM_|NODE_|YARN_|PNPM_|BUN_|COREPACK_)/.test(argv[j]!)) widenAll(ctx);
+      j++;
+    }
     fail(ctx, "unresolved: env");
     return;
+  }
+  // `\cd`, `command cd` and `builtin cd` are the plain command.
+  while (i < argv.length && (/^(?:command|builtin)$/.test(argv[i]!) || argv[i]!.startsWith("\\"))) {
+    if (argv[i]!.startsWith("\\")) argv[i] = argv[i]!.slice(1);
+    else i++;
   }
   if (i >= argv.length) return;
   const bin = binName(argv[i]!);
   i++;
+  // A directory change leaves this package whatever the target resolves to.
+  if (bin === "cd" || bin === "pushd" || bin === "popd") {
+    widenAll(ctx);
+    return;
+  }
   if (WORKSPACE_TOOLS.has(bin) || ((bin === "npx" || bin === "bunx" || bin === "corepack") && WORKSPACE_TOOLS.has(runnerName(argv[i] ?? "")))) widenAll(ctx);
   if (bin === "echo" || bin === "true" || bin === ":") return;
   if (bin === "node" || bin === "nodejs") {
@@ -3432,7 +3459,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
   // A package runner fetches or resolves a package, so a local file named among its
   // arguments does not make the run resolved, as with dlx.
   // `-p`/`--package` fetches a package onto PATH for the named file, so it always widens.
-  if ((bin === "bunx" || bin === "npx") && (argv.slice(i).some((a) => a === "-p" || a === "--package" || a.startsWith("--package=") || (a.startsWith("-p") && !a.startsWith("--") && a.length > 2)) || !localEntry(argv[i] ?? ""))) widenAll(ctx);
+  if ((bin === "bunx" || bin === "npx" || bin === "corepack") && (argv.slice(i).some((a) => a === "-p" || a === "--package" || a.startsWith("--package=") || (a.startsWith("-p") && !a.startsWith("--") && a.length > 2)) || !localEntry(argv[i] ?? ""))) widenAll(ctx);
   fail(ctx, `unresolved: runner ${bin}`);
 }
 

