@@ -3091,6 +3091,13 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
         i++;
         return next;
       };
+      if (name === "--test") {
+        // The test runner globs test files under any test directory: every file is read, inert paths included.
+        ctx.widenInert = true;
+        widenAll(ctx);
+        i++;
+        continue;
+      }
       if (name === "--run") {
         const script = take();
         if (!script) return;
@@ -4218,6 +4225,9 @@ const STDIN_CODE = /readFileSync\s*\(\s*(?:0\b|['"]\/dev\/stdin)|\/dev\/stdin|\/
 const RUNS_PROGRAM: Record<string, RegExp> = {
   tar: /^(?:--(?:to-command|use-compress-program|checkpoint-action|rsh-command|info-script)(?:=.*)?|-[A-Za-z]*[IF].*|--new-volume-script(?:=.*)?)$/,
   zip: /^(?:-TT|--unzip-command(?:=.*)?)$/,
+  // node --test runs every test file by default glob, under any test directory.
+  node: /^--test$/,
+  nodejs: /^--test$/,
   split: /^--filter(?:=.*)?$/,
   sort: /^--compress-program(?:=.*)?$/,
   rg: /^--pre(?:=.*)?$/,

