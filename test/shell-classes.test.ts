@@ -398,6 +398,41 @@ describe("shell classes: computed command word", () => {
   });
 });
 
+describe("shell classes: review of d2f6ddd", () => {
+  const F: ClassName[] = ["interp-flag"];
+  test("a for ((;;)) loop and time -p [[ ]] are read", () => {
+    expect(classes("for ((i=0;i<1;i++)); do node --loader ./l.mjs a.js; done")).toEqual(F);
+    expect(classes("time -p [[ a =~ (b) ]]; node -r ./p.js a.js")).toEqual(F);
+    expect(classes("for ((i=0;i<1;i++)); do echo $i; done")).toEqual([]);
+  });
+  test("a clustered -o on a shell takes its value", () => {
+    expect(classes("cat t > a.sh && bash -euo pipefail a.sh")).toEqual(["writer-exec"]);
+    expect(classes("cat t > a.sh && bash +o errexit a.sh")).toEqual(["writer-exec"]);
+  });
+  test("node options with a separate value", () => {
+    for (const f of ["--cpu-prof-dir x", "--heap-prof-dir x", "--report-filename x", "--max-http-header-size 9"]) expect(classes(`cat t > b.js && node ${f} b.js`), f).toEqual(["writer-exec"]);
+  });
+  test("more loaders: node config and openssl files, and their variables", () => {
+    expect(classes("node --experimental-config-file=./c.json a.js")).toEqual(F);
+    expect(classes("node --openssl-config=./o.cnf a.js")).toEqual(F);
+    for (const c of ["OPENSSL_CONF=./o.cnf node a.js", "PHP_INI_SCAN_DIR=. php a.php", "PHPRC=. php a.php", "GCONV_PATH=. node a.js", "LD_AUDIT=./x.so node a.js"]) expect(classes(c), c).toEqual(["env-assign"]);
+  });
+  test("an in-place edit writes the file that is then run", () => {
+    expect(classes("sed -i 's/^/x/' a.js && node a.js")).toEqual(["writer-exec"]);
+    expect(classes("sed -i -e 's/^/x/' a.js && node a.js")).toEqual(["writer-exec"]);
+    expect(classes("perl -pi -e 1 a.js && node a.js")).toEqual(["writer-exec"]);
+    expect(classes("sed -i 's/^/x/' a.txt && node a.js")).toEqual([]);
+  });
+  test("a lookup or a version query is not a program read from stdin", () => {
+    for (const c of ["command -v node >/dev/null 2>&1 && node a.js", "command -v python3 >/dev/null || exit 0", "command -V node", "bash --version", "sh -h", "php -m", "php -i", "python3 -VV"]) expect(classes(c), c).toEqual([]);
+    expect(classes("command node")).toEqual(["interp-stdin"]);
+  });
+  test("clustered inline code is code, not a script file", () => {
+    expect(classes("cd sub && python3 -Bc 'x'")).toEqual([]);
+    expect(classes("python3 -Bc 'x' -m y")).toEqual([]);
+  });
+});
+
 describe("shell classes: bounded work", () => {
   const rep = (s: string, n: number) => s.repeat(n);
   const inputs: [string, string][] = [

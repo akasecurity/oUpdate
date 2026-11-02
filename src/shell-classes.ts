@@ -253,7 +253,7 @@ function parse(text: string, depth: number): Stage[] {
       add("$", false); continue;
     }
     if ((c === "<" || c === ">") && text[i + 1] === "(") { const e = matchClose(i + 2, "(", ")"); st.subs.push(text.slice(i + 2, e)); add("", false); i = e; continue; }
-    if (c === "[" && text[i + 1] === "[" && !cur && st.words.every((w) => w.plain && (w.text === "time" || w.text === "!")) && (text[i + 2] === " " || text[i + 2] === "\t")) {
+    if (c === "[" && text[i + 1] === "[" && !cur && st.words.every((w) => w.plain && (w.text === "time" || w.text === "!" || w.text === "-p")) && (text[i + 2] === " " || text[i + 2] === "\t")) {
       // `[[ cond ]]`: parens and operators inside are not shell syntax; only an expansion in it runs anything
       let e = i + 2;
       for (;; e++) {
@@ -269,6 +269,11 @@ function parse(text: string, depth: number): Stage[] {
       st.words.push({ text: "[[", plain: true }); i = e + 1; continue;
     }
     if (c === "(") {
+      if (!cur && text[i + 1] === "(" && st.words.length === 1 && st.words[0]!.plain && /^(?:for|select)$/.test(st.words[0]!.text)) { // for ((i=0;i<n;i++))
+        const e = matchClose(i + 1, "(", ")");
+        const found = extractSubs(text.slice(i + 2, e - 1), spend0); st.subs.push(...found);
+        st.words = []; i = e; continue;
+      }
       if (!cur && st.words.length && st.words[st.words.length - 1]!.text === "in") { endStage(); i = matchClose(i + 1, "(", ")"); continue; } // case (pattern)
       if (cur && /^[@?*+!]$/.test(cur.text.slice(-1)) && !(st.words.length && !cur.text.slice(0, -1) && false)) { // extglob @(a|b) in a word or a case pattern
         const e = matchClose(i + 1, "(", ")");
@@ -383,7 +388,7 @@ const PM = /^(?:npm|yarn|pnpm|bun|npx|pnpx|bunx|corepack)$/;
 // (`node -e`, `python -c`, `perl -e`) is not in this list: the existing scan reads it. Short flags can be clustered
 // (`python3 -Bm pkg`, `perl -wMFoo`, `ruby -wrfoo`), so the letter classes match inside a cluster.
 const LOADS: Record<string, RegExp> = {
-  node: /^(?:-r|--require|--import|--loader|--experimental-loader|--env-file|--env-file-if-exists|--run|--preload|--test)(?:=|$)|^-r./,
+  node: /^(?:-r|--require|--import|--loader|--experimental-loader|--env-file|--env-file-if-exists|--run|--preload|--test|--experimental-config-file|--experimental-default-config-file|--openssl-config)(?:=|$)|^-r./,
   python: /^-[A-Za-z]*m/,
   ruby: /^-[A-Za-z0-9]*[rI]/,
   perl: /^-[A-Za-z]*[MmI]/,
@@ -391,10 +396,10 @@ const LOADS: Record<string, RegExp> = {
   lua: /^-l/,
   deno: /^--(?:import-map|config|preload|import|cert|lock)(?:=|$)|^-c$/,
 };
-const INLINE = /^(?:-p|-pe|-c|-r|-pi|--eval|--print)$|^-[A-Za-z]*e$/; // -e, -le, -ne, -we ...
+const INLINE = /^(?:-p|-pe|-c|-r|-pi|--eval|--print)$|^-[A-Za-z]*[ec]$/; // -e, -le, -we, -Bc ...
 // Flags whose value is the next word, per interpreter (so the value is not taken for the script).
 const VALUED: Record<string, string[]> = {
-  node: ["--title", "-C", "--conditions", "--input-type", "--inspect-port", "--disable-warning", "--watch-path", "--diagnostic-dir", "--report-dir", "--unhandled-rejections", "--dns-result-order", "--experimental-default-type", "--redirect-warnings", "--openssl-config", "--icu-data-dir", "--tls-cipher-list", "--test-name-pattern", "--test-reporter", "--secure-heap", "--heapsnapshot-signal", "--trace-event-categories", "--stack-size"],
+  node: ["--title", "-C", "--conditions", "--input-type", "--inspect-port", "--disable-warning", "--watch-path", "--diagnostic-dir", "--report-dir", "--cpu-prof-dir", "--cpu-prof-name", "--heap-prof-dir", "--heap-prof-name", "--report-filename", "--report-signal", "--max-http-header-size", "--unhandled-rejections", "--dns-result-order", "--experimental-default-type", "--redirect-warnings", "--openssl-config", "--icu-data-dir", "--tls-cipher-list", "--test-name-pattern", "--test-reporter", "--secure-heap", "--heapsnapshot-signal", "--trace-event-categories", "--stack-size"],
   python: ["-W", "-X", "-Q"],
   ruby: ["-E", "-C", "--encoding", "--external-encoding", "--internal-encoding"],
   perl: [],
@@ -405,8 +410,9 @@ const VALUED: Record<string, string[]> = {
 const PHP_INI = /^(?:auto_(?:pre|ap)pend_file|extension|zend_extension|include_path|user_ini\.\w+)/;
 // Loading flags whose value is the next word.
 const VALUE_AFTER = new Set(["-l", "-r", "--require", "--import", "--loader", "--experimental-loader", "--env-file", "--env-file-if-exists", "--preload", "-I"]);
-const NO_PROGRAM = /^(?:-v|-V|--version|-h|--help|--v8-options|--check|-\?)$/;
-const BAD_ENV = /^(?:NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|BASH_ENV|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|npm_config_\w+)\+?=/i;
+const NO_PROGRAM = /^(?:-v|-V|-VV|--version|-h|--help|--v8-options|--check|-\?)$/;
+const NO_PROGRAM_PHP = /^(?:-m|-i|--modules|--info|--ini)$/; // php -m lists modules, php -i prints the configuration
+const BAD_ENV = /^(?:NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|BASH_ENV|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|OPENSSL_CONF|OPENSSL_MODULES|PHP_INI_SCAN_DIR|PHPRC|GCONV_PATH|LD_AUDIT|npm_config_\w+)\+?=/i;
 const BAD_NAME = new RegExp(BAD_ENV.source.replace(/\\\+\?=$/, "$"), "i");
 // More loaders: shell startup files, Lua and Perl library paths, the prompt string (run by `sh -x`), and a PATH or
 // HOME with an entry that is not absolute and comes before the system ones (it points inside the package or at the working directory).
@@ -500,6 +506,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     while (w.length && ((w[0]!.plain && w[0]!.text === "function") || w[0]!.text === "{" || w[0]!.text === "!")) {
       w = w[0]!.text === "function" ? w.slice(Math.min(2, w.length)) : w.slice(1);
     }
+    let lookup = false;
     for (let n = 0; w.length; n++) {
       const spec = WRAP[BASE(w[0]!.text)];
       if (!spec || !w[0]!.plain) break;
@@ -508,6 +515,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       const name = BASE(w[0]!.text);
       let k = 1;
       for (; k < w.length; k++) {
+        if (name === "command" && /^-[pvV]*[vV][pvV]*$/.test(w[k]!.text)) { lookup = true; break; } // command -v node: a lookup, nothing runs
         const t = w[k]!.text;
         if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) { if (badEnv(t)) envHit(); continue; }
         if (t === "--") { k++; break; }
@@ -524,7 +532,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       w = w.slice(k);
     }
     while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0]!.text)) { if (badEnv(w[0]!.text)) envHit(); w = w.slice(1); } // env -- NAME=v cmd: the assignment after -- is the first word
-    if (!w.length) continue;
+    if (lookup || !w.length) continue;
     const head = w[0]!;
     if (!head.plain) { hit("computed-command", "the command word is an expansion (a variable, a substitution)"); continue; } // it can name any interpreter
     const b = BASE(head.text);
@@ -545,6 +553,12 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (b === "make") { if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--(?:file|makefile)(?:=|$)/.test(a.text))) hit("program-file", "make -f"); continue; }
     if (/^(?:awk|gawk|mawk|nawk)$/.test(b)) { if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--file/.test(a.text) || /^-[iEl]$|^--(?:include|load|exec)/.test(a.text) || /system|getline/.test(a.text))) hit("program-file", "awk program file or system()"); continue; }
     if (b === "sed") {
+      const inplace = args.some((a) => /^-[A-Za-z]*i|^--in-place/.test(a.text) && !a.text.startsWith("--expression"));
+      if (inplace) { // sed -i rewrites the files it names; they are then run like a written file
+        const files = args.filter((a) => !a.text.startsWith("-")).map((a) => a.text);
+        const viaFlag = args.some((a) => /^-[A-Za-z]*[ef]/.test(a.text) || /^--(?:expression|file)/.test(a.text));
+        for (const f of viaFlag ? files : files.slice(1)) copyTargets.add(norm(f));
+      }
       if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--file/.test(a.text))) hit("program-file", "sed -f");
       else {
         const scripts: string[] = [];
@@ -581,13 +595,14 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (b === "source" || b === ".") { if (args[0]?.plain) { if (cwd && !args[0].text.startsWith("/")) hit("cd-relative", "sourced file after cd"); ranWritten(args[0].text); } continue; }
     if (SHELL.test(b)) {
       const rest: Word[] = [];
-      let code: Word | undefined; let wantCode = false; let stdinFlag = false;
+      let code: Word | undefined; let wantCode = false; let stdinFlag = false; let noProgram = false;
       for (let k = 0; k < args.length; k++) {
         const a = args[k]!;
         const t = a.text;
         if (t === "--") continue;
-        if (/^[-+]o$|^-O$/.test(t)) { k++; continue; }
+        if (/^[-+][A-Za-z]*[oO]$/.test(t)) { k++; continue; } // -o NAME, -euo NAME, +O NAME
         if (/^--(?:rcfile|init-file)$/.test(t)) { hit("interp-flag", `${b} ${t}`); k++; continue; }
+        if (NO_PROGRAM.test(t)) { noProgram = true; continue; } // bash --version
         if (/^-[A-Za-z]*s[A-Za-z]*$/.test(t) && !wantCode && !t.includes("c")) { stdinFlag = true; continue; }
         if (/^-[A-Za-z]+$/.test(t) && t.includes("c")) { wantCode = true; continue; } // -c, -ec, -xc, -lc
         if (t.startsWith("-") || t.startsWith("+")) { if (!a.plain) hit("interp-flag", `${b} flag is escaped or expanded`); continue; }
@@ -595,6 +610,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
         rest.push(a); break; // the first operand is the script; what follows is its arguments
       }
       if (wantCode) { if (code) nested(code.text); continue; } // a double-quoted string with $ or \\ is walked as written
+      if (noProgram && rest.length === 0) continue;
       if (rest.length === 0 || stdinFlag) { stdin(b); continue; }
       const f = rest[0]!;
       if (!f.plain || f.text.startsWith("/")) continue;
@@ -613,6 +629,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       const loads = LOADS[kind];
       const valued = VALUED[kind] ?? [];
       let file: Word | undefined; let inline = false; let noProgram = false;
+      const inplace = (kind === "perl" || kind === "ruby") && args.some((a) => /^-[A-Za-z]*i/.test(a.text));
       let rest = args;
       if (kind === "deno") {
         const sub = rest[0]?.text;
@@ -637,11 +654,14 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
             if (rest[k + 1] && !rest[k + 1]!.text.startsWith("-")) k++;
             continue;
           }
-          if (NO_PROGRAM.test(a.text)) noProgram = true;
+          if (NO_PROGRAM.test(a.text) || (kind === "php" && NO_PROGRAM_PHP.test(a.text))) noProgram = true;
           else if (valued.includes(a.text)) k++;
           continue;
         }
-        if (inline) break; // the words after inline code are its arguments
+        if (inline) { // the words after inline code are its arguments (the files, for perl -pi / ruby -i)
+          if (inplace) for (const f of rest.slice(k)) if (!f.text.startsWith("-")) copyTargets.add(norm(f.text));
+          break;
+        }
         if (!a.plain && k < rest.length - 1) { hit("interp-flag", `${b} an expanded word before the script (it can hold flags)`); continue; }
         file = a; break;
       }
