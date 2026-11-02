@@ -2877,11 +2877,18 @@ function movedInto(ctx: Ctx, logical: string): boolean {
   return false;
 }
 
+// The directories that hold a nested manifest, per file map (the map does not change during a scan).
+const PKG_DIRS = new WeakMap<object, string[]>();
+
 function widenAll(ctx: Ctx): void {
   // A directory that holds a nested manifest is another package: a run can land there, so its files are not
   // inert whatever folder name they sit under (tests/pkg, docs/pkg).
-  const pkgDirs: string[] = [];
-  for (const logical of ctx.logical.keys()) if (isManifest(logical) && logical.includes("/")) pkgDirs.push(logical.slice(0, logical.lastIndexOf("/") + 1));
+  let pkgDirs = PKG_DIRS.get(ctx.logical);
+  if (!pkgDirs) {
+    pkgDirs = [];
+    for (const logical of ctx.logical.keys()) if (isManifest(logical) && logical.includes("/")) pkgDirs.push(logical.slice(0, logical.lastIndexOf("/") + 1));
+    PKG_DIRS.set(ctx.logical, pkgDirs);
+  }
   for (const [logical, key] of ctx.logical) {
     if (isManifest(logical)) {
       // The root manifest is read on its own path. A manifest under tests/ or docs/ is a package like any other.
@@ -3872,7 +3879,10 @@ function spaceRedirects(t: string): string {
     } else if (c === "<" || c === ">") {
       let op = c;
       while (i + 1 < t.length && /[<>&|]/.test(t[i + 1]!) && !(t[i + 1] === "(" )) op += t[++i]!;
-      const fd = /(?:^|\s)(\d+)$/.exec(out);
+      // A file descriptor number that is a word of its own stays attached to the operator.
+      let k = out.length;
+      while (k > 0 && out.charCodeAt(k - 1) >= 48 && out.charCodeAt(k - 1) <= 57) k--;
+      const fd = k < out.length && (k === 0 || /\s/.test(out[k - 1]!));
       out += (fd ? "" : " ") + op + " ";
     } else out += c;
   }
@@ -3949,6 +3959,8 @@ function interpReadsStdin(bin: string, w: string[]): boolean {
   else if (key === "deno" && args[0] !== undefined && !args[0].startsWith("-") && args[0] !== "-") return false;
   // An unknown `--long` flag with no `=` may take the next word as its value or not: either reading that ends at
   // stdin counts (`node --stack-size 100` reads stdin, `node --foo x.js` may not).
+  // A very long flag list is read as stdin (fail closed) rather than recursed through.
+  if (args.length > 2000) return true;
   const memo = new Map<number, boolean>();
   const scan = (j0: number): boolean => {
     const hit = memo.get(j0);
@@ -4113,7 +4125,13 @@ function stripHeredocs(body: string): { text: string; docs: Map<number, string[]
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     out.push(line);
-    const marks = [...line.matchAll(/(?<!<)<<(?!<)(-?)\s*(['"]?)([A-Za-z0-9_]+)\2/g)];
+    let marks = [...line.matchAll(/(?<!<)<<(?!<)(-?)\s*(['"]?)([A-Za-z0-9_]+)\2/g)];
+    // A mark after `((` is an arithmetic shift (`$((1 << A))`), not a heredoc: left in place and unsure.
+    const arith = line.indexOf("((");
+    if (marks.length > 0 && arith >= 0 && marks.some((m) => m.index > arith)) {
+      unsure = true;
+      marks = [];
+    }
     if (marks.length > 0) {
       let j = i + 1;
       const bodies: string[] = [];
@@ -4164,6 +4182,11 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       else fedDir(dirs, j, fedShell);
     }
   };
+  // A body this large is not read command by command: every file is read.
+  if (body.length > 200_000) {
+    dirs.push(UNSURE);
+    return true;
+  }
   // Terminated heredoc bodies are cut out before the text is split into commands, and read by their command.
   const hd = stripHeredocs(body);
   body = hd.text;
@@ -4185,6 +4208,8 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
   // Files a command wrote (`> build.js`, `tee build.js`) with the files that fed that stage, so a later command that
   // runs the written file reads the sources.
   const written = new Map<string, string[]>();
+  // Heredoc text written to a file (`cat <<EOF > r.sh`), run later by name.
+  const writtenText = new Map<string, string>();
   // Sources of commands that create files at names this scan does not follow (tar x, unzip, patch, git apply, cp into
   // a directory): a later shell or interpreter, or a path as the command, reads them.
   let produced: string[] = [];
@@ -4256,7 +4281,8 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     const un = unwrapSink(noRedir);
     const sb = runnerName((un.words[0] ?? "").replace(/^\\+/, ""));
     const isShell = /^(?:sh|bash|zsh|dash|ksh)$/.test(sb);
-    fedShell = isShell || !SINK_WORD.test(sb);
+    // Input of xargs is arguments (a list of files), not commands.
+    fedShell = (isShell || !SINK_WORD.test(sb)) && !un.xargs;
     // `... | xargs bash -c` runs the piped text as the command string.
     const bare =
       readsStdin(sb, un.words) ||
@@ -4268,6 +4294,9 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       hit = true;
       for (const t of pipeFiles) fedBoth(t);
     }
+    // A script run by its path (`./scripts/setup.sh > /dev/null`) is run by whatever its first line names: read as a body.
+    const head = un.words[0] ?? "";
+    if (/^(?:\.\.?\/|[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)/.test(head) && !SINK_WORD.test(sb) && !PLAIN_CMDS.has(sb)) fedBoth(head);
     // A shell or interpreter given a script file runs it, whether or not the body was split into commands.
     if (SINK_WORD.test(sb) && !bare) {
       const operand = scriptOperand(sb, un.words);
@@ -4325,15 +4354,23 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       hit = true;
       textRefs(prevArgs.join(" "), dirs);
     }
-    // A heredoc fed to a shell is commands, to an interpreter program text. Its body was cut out above.
-    if (SINK_WORD.test(sb) && /<<(?!<)/.test(seg)) {
-      hit = true;
+    // Heredocs opened on this stage take their bodies in order (their text was cut out above). A body fed to a shell is
+    // commands, to an interpreter program text; on a producer stage it flows on to the next stage or into a written file.
+    let docText: string | undefined;
+    const marks = (seg.match(/(?<!<)<<(?!<)/g) ?? []).length;
+    if (marks > 0) {
       const le = at >= 0 ? body.indexOf("\n", at) : -1;
-      const text = hd.docs.get(le < 0 ? body.length : le)?.shift();
-      if (text === undefined) dirs.push(UNSURE);
-      else if (isShell) {
-        if (movesRun(text, dirs)) hit = true;
-      } else textRefs(text, dirs);
+      const own = hd.docs.get(le < 0 ? body.length : le)?.splice(0, marks) ?? [];
+      if (own.length < marks) dirs.push(UNSURE);
+      else docText = own[own.length - 1];
+    }
+    if (docText !== undefined) {
+      if (SINK_WORD.test(sb)) {
+        hit = true;
+        if (isShell) {
+          if (movesRun(docText, dirs)) hit = true;
+        } else textRefs(docText, dirs);
+      } else pipeText = docText;
     }
     // Flags that load a file, and the script operand, in an unsplit body.
     if (SINK_WORD.test(sb)) for (const f of flagFiles(sb, un.words)) fedBoth(f.replace(/^(?:\.\/)+/, ""));
@@ -4367,7 +4404,13 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     // A command that runs a file an earlier stage wrote reads the files that fed that stage.
     if (written.size > 0 && !PLAIN_CMDS.has(un.lead)) {
       for (const t of w) {
-        const src = written.get(t.replace(/^(?:\.\/)+/, ""));
+        const key = t.replace(/^(?:\.\/)+/, "");
+        const tx = writtenText.get(key);
+        if (tx !== undefined) {
+          hit = true;
+          if (movesRun(tx, dirs)) hit = true;
+        }
+        const src = written.get(key);
         if (!src) continue;
         hit = true;
         for (const f of src) fedBoth(f);
@@ -4376,13 +4419,24 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     for (let q = 0; q < raw.length; q++) {
       const m = /^\d*>>?\|?(?!&)(.*)$/.exec(raw[q]!);
       const name = m ? m[1] || raw[q + 1] || "" : "";
-      if (name && !name.startsWith("/dev/")) written.set(name.replace(/^(?:\.\/)+/, ""), pipeFiles.slice());
+      if (name && !name.startsWith("/dev/")) {
+        written.set(name.replace(/^(?:\.\/)+/, ""), pipeFiles.slice());
+        if (docText !== undefined) writtenText.set(name.replace(/^(?:\.\/)+/, ""), docText);
+        else if (pipeText !== undefined) writtenText.set(name.replace(/^(?:\.\/)+/, ""), pipeText);
+      }
     }
-    if (un.lead === "tee") for (const t of w.slice(1)) if (!t.startsWith("-")) written.set(t.replace(/^(?:\.\/)+/, ""), pipeFiles.slice());
+    if (un.lead === "tee") {
+      for (const t of w.slice(1)) {
+        if (t.startsWith("-")) continue;
+        written.set(t.replace(/^(?:\.\/)+/, ""), pipeFiles.slice());
+        const tx = docText ?? pipeText;
+        if (tx !== undefined) writtenText.set(t.replace(/^(?:\.\/)+/, ""), tx);
+      }
+    }
     {
       const args = w.slice(1);
       const t = un.lead;
-      const extracts = (t === "tar" && args.some((x) => /^-[A-Za-z]*x|^--(?:extract|get)$/.test(x) || x === "x")) || /^(?:unzip|7z|7za|unrar|gunzip|bunzip2|unxz|cpio)$/.test(t) || t === "patch" || (t === "git" && args.some((x) => /^(?:apply|am|checkout|restore|stash|merge|cherry-pick|rebase|pull)$/.test(x)));
+      const extracts = (t === "tar" && args.some((x) => /^-[A-Za-z]*x|^--(?:extract|get)$/.test(x) || x === "x") || /^[A-Za-z]*x[A-Za-z]*$/.test(args[0] ?? "")) || /^(?:unzip|7z|7za|unrar|gunzip|bunzip2|unxz|cpio)$/.test(t) || t === "patch" || (t === "git" && args.some((x) => /^(?:apply|am|checkout|restore|stash|merge|cherry-pick|rebase|pull)$/.test(x)));
       if (extracts || /^(?:cp|mv|ln|install|rsync|ditto)$/.test(t)) {
         // Every non-flag operand counts (a destination or an option value is read as a file and found missing).
         for (const x of args) if (!x.startsWith("-")) produced.push(x);
@@ -4726,6 +4780,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
   }
   // prebuild-install and node-pre-gyp already returned. They download; they do not widen.
   // node already returned and keeps named files plus the require walk.
+  // A script run by its path is read as a body (what its first line names runs it).
+  if (/^(?:\.\.?\/|[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)/.test(argv[i - 1] ?? "") && bin !== "npx" && bin !== "bunx") readFed(ctx, argv[i - 1]!, true);
   closeUnknownRunner(ctx, argv, i);
   // A package runner fetches or resolves a package, so a local file named among its
   // arguments does not make the run resolved, as with dlx.
