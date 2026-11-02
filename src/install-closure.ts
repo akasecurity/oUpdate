@@ -2954,6 +2954,11 @@ function runBody(ctx: Ctx, body: string): void {
     // The body was not split, so a `cd` or a workspace flag inside a redirect, pipe or subshell may be moving a
     // run to another package. A body that stays in place (`node safe.js > out`) is not widened.
     if (noteBody(ctx, sub)) widenAll(ctx);
+    // A sourced file runs in this shell and may sit under test/ or docs/: read every file.
+    if (/(?:^|[\s;&|({])(?:source|\.)\s+[^\s;&|)]/.test(sub)) {
+      ctx.widenInert = true;
+      widenAll(ctx);
+    }
     noteUnparsedCompile(ctx, sub);
     return;
   }
@@ -3336,7 +3341,7 @@ function shellSegments(body: string): string[] {
 const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 const NODE_OPTS = /^NODE_OPTIONS\+?=/;
 const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS\+?=|YARN_|PNPM_|BUN_|COREPACK_)/;
-const UNSAFE_ENV = /^(?:CDPATH|IFS|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)\+?=/;
+const UNSAFE_ENV = /^(?:CDPATH|IFS|PYTHONPATH|PYTHONSTARTUP|PERL5LIB|PERL5OPT|RUBYOPT|RUBYLIB|ZDOTDIR|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)\+?=/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|-C)(?:=(.*))?$/;
@@ -3598,6 +3603,17 @@ function pushDir(dirs: string[], d: string): void {
   // Only plain path characters are taken literally: anything else (`%`, `~`, `>`, quotes, a leading `-`) is unsure.
   dirs.push(/^[A-Za-z0-9._/-]+$/.test(d) && d !== "-" ? d : UNSURE);
 }
+// The directory of a file that feeds a shell or interpreter: it may sit under test/ or docs/, so its directory is
+// read as moved into. A name with characters outside a plain path is unsure.
+function fedDir(dirs: string[], f: string): void {
+  if (f === "" || f === "-" || f.startsWith("/dev/")) return;
+  if (!/^[A-Za-z0-9._/-]+$/.test(f) || f.startsWith("/")) {
+    dirs.push(UNSURE);
+    return;
+  }
+  const k = f.lastIndexOf("/");
+  if (k > 0) dirs.push(f.slice(0, k));
+}
 // A directory entry that means the scan was not sure: the widen then reads every file, inert paths included.
 const UNSURE = "\u0000";
 
@@ -3849,11 +3865,19 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     if (bare && fedHit) hit = true;
     // A shell fed from a file (`sh < x.sh`) or by a producer that is not echo or printf with literal words
     // (`cat x.sh | sh`, `echo "$X" | sh`, `... | base64 -d | sh`) runs text that is not read here: widen.
-    if ((isShell || interpReadsStdin(sb, un.words)) && /<(?!<)/.test(seg)) hit = true;
+    // The fed file may itself sit under test/ or docs/, so the scan is unsure and reads inert paths too.
+    if ((isShell || interpReadsStdin(sb, un.words)) && /<(?!<)/.test(seg)) {
+      hit = true;
+      for (let q = 0; q < raw.length; q++) {
+        const m = /^\d*<(?!<)(.*)$/.exec(raw[q]!);
+        if (m) fedDir(dirs, m[1] || raw[q + 1] || "");
+      }
+    }
     if (bare && prev !== undefined) {
       if (!/^(?:echo|printf)$/.test(prev) || prevArgs.some((t) => /[$`]/.test(t))) {
         hit = true;
         if (/^(?:echo|printf)$/.test(prev)) dirs.push(UNSURE);
+        else for (const t of prevArgs) if (!t.startsWith("-")) fedDir(dirs, t);
       }
     }
     prev = b;
@@ -3975,10 +3999,9 @@ function dispatch(ctx: Ctx, cmd: string): void {
     }
     if (npmFlagWidens(argv, i)) {
       widenAll(ctx);
-      // A workspace or prefix flag runs another package's script, which the widen covers. Any other flag is
-      // read on: the command is still dispatched, or fails as unresolved.
+      // A workspace or prefix flag may run another package's script, which the widen covers, and may name this
+      // package (`--prefix .`), so the root's own script is read too: the flags are dropped and the rest dispatched.
       const dd2 = argv.indexOf("--");
-      if (argv.slice(i, dd2 < 0 ? argv.length : dd2).some((t) => NPM_WORKSPACE_WIDEN.test(t))) return;
       if (ctx.depth >= DEPTH) {
         fail(ctx, "unresolved: script depth");
         return;
@@ -3991,8 +4014,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
         for (let q = i; q < argv.length; q++) {
           const t = argv[q]!;
           const nm = t.indexOf("=") > 0 ? t.slice(0, t.indexOf("=")) : t;
-          if (q < end && t.startsWith("-") && t !== "-" && !(BOOL_FLAGS.has(nm) || VALUE_FLAGS.has(nm) || NPM_QUIET_FLAGS.has(nm))) {
-            if (takesValue && !t.includes("=") && q + 1 < end) q++;
+          if (q < end && t.startsWith("-") && t !== "-" && !(BOOL_FLAGS.has(nm) || NPM_QUIET_FLAGS.has(nm))) {
+            if ((takesValue || VALUE_FLAGS.has(nm)) && !t.includes("=") && q + 1 < end) q++;
             continue;
           }
           out.push(t);
