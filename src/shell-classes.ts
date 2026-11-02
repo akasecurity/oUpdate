@@ -13,10 +13,13 @@
 //   program-file  `sed -f`, `awk -f`, `awk` with system/getline, `make -f`: the program is in a file
 //   env-assign    a NODE_OPTIONS or npm_config_* assignment (leading, after `env`, or `export`)
 //
-// The parse is one linear pass with a fuel counter. A body it cannot parse (unclosed quote, stray paren, over the
-// caps) reports nothing: the existing scan keeps its own result for it.
+//   over-cap      a body longer than MAX_LEN characters, which is not parsed (fails closed)
+//
+// The parse is one linear pass with a fuel counter. A body it cannot parse (unclosed quote, stray paren, fuel or
+// depth cap) reports nothing: the existing scan keeps its own result for it. Reporting those too would widen 15 of
+// 77 quiet bodies in the real clean set (JSON-escaped quotes copied out of binding.gyp), so they stay out.
 
-export type ClassName = "interp-flag" | "interp-stdin" | "heredoc" | "cd-relative" | "writer-exec" | "program-file" | "env-assign";
+export type ClassName = "over-cap" | "interp-flag" | "interp-stdin" | "heredoc" | "cd-relative" | "writer-exec" | "program-file" | "env-assign";
 export interface Hit { cls: ClassName; why: string }
 
 interface Word { text: string; plain: boolean } // plain: no expansion, no escape trickery
@@ -35,7 +38,7 @@ const KW_SKIP = new Set(["if", "then", "elif", "else", "fi", "while", "until", "
 
 function parse(text: string, depth: number): Stage[] {
   if (depth > MAX_DEPTH) fail("nesting");
-  if (text.length > MAX_LEN) fail("long");
+  if (text.length > MAX_LEN) fail("body is over the " + MAX_LEN + " character cap", "over-cap");
   const stages: Stage[] = [];
   const fresh = (): Stage => ({ words: [], assigns: [], writes: [], reads: [], subs: [], hereSubs: [], heredoc: false, piped: false });
   let st: Stage = fresh();

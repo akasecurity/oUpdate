@@ -77,6 +77,17 @@ describe("shell classes", () => {
     expect(classes("sh <<")).toEqual(["heredoc"]);
   });
 
+  test("a body over the character cap fails closed", () => {
+    const long = "node a.js; " + "echo hi; ".repeat(MAX_LEN / 9);
+    expect(long.length).toBeGreaterThan(MAX_LEN);
+    expect(flagBody(long).map((h) => h.cls)).toEqual(["over-cap"]);
+    expect(flagBody(long)[0]!.why).toContain(String(MAX_LEN));
+    expect(flagBody("a".repeat(MAX_LEN))).toEqual([]);
+    expect(classes("echo $(" + "a".repeat(MAX_LEN) + ")")).toEqual(["over-cap"]);
+    expect(held(long)).toBe(true);
+    expect(held("node a.js")).toBe(false);
+  });
+
   test("integration: a flagged body reads files the hook does not name", () => {
     for (const c of ["node --loader ./l.mjs lib/other.js", "node -r ./nope.js a.js", "python3 -m pkg", "sh <<EOF\nnode a.js\nEOF", "cd sub && node a.js", "cat t > b.js && node b.js", "sed -f p.sed x", "NODE_OPTIONS=--require=./p.js node a.js"]) {
       expect(held(c), c).toBe(true);
