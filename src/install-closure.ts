@@ -3335,12 +3335,20 @@ function moves(argv: string[], dirs: string[]): boolean {
       // a shell reserved word before the command
     } else if (wrapped && a.startsWith("-")) {
       // An option of env or time. `env -C dir` / `--chdir=dir` runs the command in another directory.
-      if (/^(?:-C|--chdir)$/.test(a)) {
+      if (a === "--chdir") {
         if (argv[k + 1]) dirs.push(argv[k + 1]!);
         return true;
       }
-      if (/^-C./.test(a) || a.startsWith("--chdir=")) {
-        dirs.push(a.startsWith("--chdir=") ? a.slice(8) : a.slice(2));
+      if (a.startsWith("--chdir=")) {
+        dirs.push(a.slice(8));
+        return true;
+      }
+      // A short cluster holding C (`-C`, `-Cdir`, `-iC dir`, `-iCdir`): the directory follows the C or is the next word.
+      const c = /^-[A-Za-z]*C/.exec(a);
+      if (c && !a.startsWith("--")) {
+        const tail = a.slice(c[0].length);
+        const d = tail || argv[k + 1];
+        if (d) dirs.push(d);
         return true;
       }
     } else if (WRAPPERS.has(runnerName(a.replace(/^\\+/, "")))) wrapped = true;
@@ -3389,8 +3397,8 @@ function moves(argv: string[], dirs: string[]): boolean {
       if (/^-[A-Za-z]*c[A-Za-z]*$/.test(o)) {
         // POSIX allows options between -c and the string (`sh -c -e '...'`, `bash -c -- '...'`, `sh -c -o pipefail '...'`).
         let n = j + 1;
-        // A cluster ending in o/O (`-eco pipefail`) takes its option name before the string.
-        if (/[oO]$/.test(o)) n++;
+        // Each o/O in the cluster (`-eco pipefail`, `-oc pipefail`) takes an option name before the string.
+        n += (o.match(/[oO]/g) ?? []).length;
         while (n < rest.length && (rest[n]!.startsWith("-") || rest[n]!.startsWith("+"))) {
           if (rest[n] === "--") {
             n++;
@@ -3400,7 +3408,8 @@ function moves(argv: string[], dirs: string[]): boolean {
         }
         return rest[n] === undefined || movesRun(rest[n]!, dirs);
       }
-      if (/^[-+][A-Za-z]*[oO]$/.test(o) || o === "--rcfile" || o === "--init-file") j++;
+      if (/^[-+][A-Za-z]+$/.test(o)) j += (o.match(/[oO]/g) ?? []).length;
+      else if (o === "--rcfile" || o === "--init-file") j++;
     }
   }
   // A command word not modeled here (nice, timeout, eval, xargs, a wrapper with value options) may run what
@@ -3464,20 +3473,45 @@ function joinDir(cwd: string, d: string): string | undefined {
 
 const CD_WORD = /^(?:cd|pushd)$/;
 
+// The top-level command substitutions of a text: `$(...)` up to its matching parenthesis and backtick pairs, with a
+// backslash escaping the next character. Each is returned once, so a text with many of them is read in linear time.
+function substitutions(body: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (c === "\\") i++;
+    else if (c === "$" && body[i + 1] === "(") {
+      let depth = 1;
+      let j = i + 2;
+      for (; j < body.length && depth > 0; j++) {
+        if (body[j] === "\\") j++;
+        else if (body[j] === "(") depth++;
+        else if (body[j] === ")") depth--;
+      }
+      out.push(body.slice(i + 2, depth === 0 ? j - 1 : j));
+      i = j - 1;
+    } else if (c === "`") {
+      let j = i + 1;
+      for (; j < body.length && body[j] !== "`"; j++) if (body[j] === "\\") j++;
+      out.push(body.slice(i + 1, j));
+      i = j;
+    }
+  }
+  return out;
+}
+
 function movesRun(body: string, dirs: string[] = []): boolean {
   let hit = false;
   let cwd = "";
   const fed: string[] = [];
   // A command substitution inside text (`echo "$(cd test && node setup.js)"`, backticks) runs its content.
-  for (let at = body.indexOf("$("); at >= 0; at = body.indexOf("$(", at + 2)) if (movesRun(body.slice(at + 2), dirs)) hit = true;
-  body.split("`").forEach((part, n) => {
-    if (n % 2 === 1 && movesRun(part, dirs)) hit = true;
-  });
+  for (const inner of substitutions(body)) if (movesRun(inner, dirs)) hit = true;
   for (const seg of shellSegments(body)) {
     const w = words(seg).filter((t) => !/^\d*[<>]/.test(t));
     const local: string[] = [];
     if (moves(w, local)) hit = true;
-    for (const d of local) dirs.push(joinDir(cwd, d) ?? d);
+    // Both the raw and the joined directory are recorded: the base may be wrong across a subshell or a popd.
+    for (const d of local) dirs.push(d, joinDir(cwd, d) ?? d);
     const first = w.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{)$/.test(t));
     if (first && CD_WORD.test(runnerName(first.replace(/^\\+/, ""))) && local[0] !== undefined) cwd = joinDir(cwd, local[0]) ?? cwd;
     // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
@@ -3538,6 +3572,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
     for (const d of moved) {
       const r = joinDir(ctx.cwd, d) ?? d;
       const n = normalize(r);
+      const raw = normalize(d);
+      if (raw) ctx.movedDirs.add(raw);
       if (n) ctx.movedDirs.add(n);
       if (CD_WORD.test(runnerName(argv.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{)$/.test(t))?.replace(/^\\+/, "") ?? "")) && n) ctx.cwd = n;
     }

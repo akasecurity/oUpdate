@@ -446,3 +446,36 @@ describe("joined env directory flags, clustered shell options, substitutions, re
     expect(m("pnpx pnpm -C sub build")).toBe(true);
   });
 });
+
+describe("round 10: linear substitutions, clustered o, wrong cd base, clustered env -C", () => {
+  const dirHeld = (cmd: string, dir: string, extra: Record<string, string> = {}, scripts: object = {}) => held({ postinstall: cmd, ...scripts }, { [`${dir}/setup.js`]: "1", [`${dir}/gen.js`]: "1", ...extra }, { [`${dir}/setup.js`]: "evil()", [`${dir}/gen.js`]: "evil()", ...extra });
+
+  test("1. many substitutions are read in linear time", () => {
+    const hook = `true "${"$(a) ".repeat(60)}x"`;
+    const t = Date.now();
+    held({ postinstall: hook }, {}, {});
+    expect(Date.now() - t).toBeLessThan(1000);
+    const nested = `true "${"$(a ".repeat(30)}${")".repeat(30)}"`;
+    const t2 = Date.now();
+    held({ postinstall: nested }, {}, {});
+    expect(Date.now() - t2).toBeLessThan(1000);
+  });
+
+  test("2. o anywhere in a -c cluster takes an option name", () => {
+    for (const cmd of ["bash -oc pipefail 'cd test && node setup.js'", "bash -eoc pipefail 'cd test && node setup.js'", "bash -ocu pipefail 'cd test && node setup.js'"]) {
+      expect(dirHeld(cmd, "test"), cmd).toBe(true);
+    }
+  });
+
+  test("3. a cd base from another script, subshell or popd does not hide the real folder", () => {
+    expect(dirHeld("npm run a && npm run b", "docs", {}, { a: "cd tools && node x.js", b: "cd docs && node gen.js" })).toBe(true);
+    expect(dirHeld("(cd test && node a.js); cd docs && node gen.js", "docs", { "test/a.js": "1" })).toBe(true);
+    expect(dirHeld("pushd tools; popd; cd docs && node gen.js", "docs")).toBe(true);
+  });
+
+  test("4/5. clustered env -C, and an escaped backtick does not shift the substitutions", () => {
+    expect(dirHeld("env -iCtest node setup.js", "test")).toBe(true);
+    expect(dirHeld("env -iC test node setup.js", "test")).toBe(true);
+    expect(dirHeld('echo "\\`" "`cd test && node setup.js`"', "test")).toBe(true);
+  });
+});
