@@ -3328,7 +3328,7 @@ function shellSegments(body: string): string[] {
 }
 
 const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS=|YARN_|PNPM_|BUN_|COREPACK_)/;
-const UNSAFE_ENV = /^(?:CDPATH|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|DYLD_INSERT_LIBRARIES)=/;
+const UNSAFE_ENV = /^(?:CDPATH|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|path|cdpath|fpath)=/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|-C)(?:=(.*))?$/;
@@ -3354,6 +3354,11 @@ function movesCore(argv: string[], dirs: string[]): boolean {
   // command: read every file.
   if (argv.some((a) => UNSAFE_ENV.test(a))) {
     dirs.push(UNSURE);
+    return true;
+  }
+  // The same variables in any word, not only a leading one (`export npm_config_workspace=sub; npm run build`).
+  if (argv.some((a) => SPECIAL_ENV.test(a))) {
+    if (argv.some((a) => a.startsWith("NODE_OPTIONS="))) dirs.push(UNSURE);
     return true;
   }
   let k = 0;
@@ -3492,6 +3497,8 @@ function noteBody(ctx: Ctx, body: string): boolean {
       const n = normalize(d);
       if (n) ctx.movedDirs.add(n);
       const r = joinDir(ctx.cwd, d);
+      // A path that leaves the package root, or an absolute one, cannot be resolved: read every file.
+      if (r === undefined) ctx.widenInert = true;
       const m = r === undefined ? undefined : normalize(r);
       if (m) ctx.movedDirs.add(m);
     }
@@ -3544,12 +3551,15 @@ function joinDir(cwd: string, d: string): string | undefined {
 // The shell readers recurse through wrapped commands and substitutions; past this depth they stop and fail closed.
 const MOVE_DEPTH = 24;
 let moveDepth = 0;
+let scanSteps = 0;
 
 function guarded<T>(dirs: string[] | undefined, over: T, f: () => T): T {
   if (moveDepth >= MOVE_DEPTH) {
     dirs?.push(UNSURE);
     return over;
   }
+  // One step budget per top-level scan, shared by every nested level.
+  if (moveDepth === 0) scanSteps = 0;
   moveDepth++;
   try {
     return f();
@@ -3591,9 +3601,8 @@ function substitutions(body: string): string[] | null {
   // `$'...'` is ANSI-C quoting, where a backslash escapes a quote: not modeled, so unsure.
   if (body.includes("$'")) return null;
   if (!body.includes("$(") && !body.includes("`")) return [];
-  const budget = { steps: 0 };
   const out: string[] = [];
-  const tick = (): boolean => ++budget.steps <= SUB_STEPS;
+  const tick = (): boolean => ++scanSteps <= SUB_STEPS;
   // Index just past the closing quote of the text opened before `i`, or -1.
   const skipSingle = (t: string, i: number): number => {
     const j = t.indexOf("'", i);
@@ -3678,11 +3687,31 @@ function substitutions(body: string): string[] | null {
   return dq ? null : out;
 }
 
+// Whether a shell command reads its script from stdin: no -c, and either -s, /dev/stdin, `-`, or no script file.
+function readsStdin(bin: string, w: string[]): boolean {
+  if (!/^(?:sh|bash|zsh|dash|ksh)$/.test(bin)) return false;
+  const args = w.slice(1);
+  if (args.some((t) => /^-[A-Za-z]*c[A-Za-z]*$/.test(t))) return false;
+  if (args.some((t) => /^-[A-Za-z]*s[A-Za-z]*$/.test(t))) return true;
+  for (let j = 0; j < args.length; j++) {
+    const t = args[j]!;
+    if (t === "-") return true;
+    if (t.startsWith("-") || t.startsWith("+")) {
+      // -o / +o / -O take an option name.
+      if (/^[-+][A-Za-z]*[oO]$/.test(t) && !t.startsWith("--")) j++;
+      continue;
+    }
+    return t === "/dev/stdin";
+  }
+  return true;
+}
+
 function movesRunCore(body: string, dirs: string[] = []): boolean {
   let hit = false;
   let cwd = "";
   let fedHit = false;
   let prev: string | undefined;
+  let prevArgs: string[] = [];
   // A command substitution inside text (`echo "$(cd test && node setup.js)"`, backticks) runs its content.
   const subs = substitutions(body);
   if (subs === null) {
@@ -3703,20 +3732,31 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     }
     for (const d of local) {
       if (d === UNSURE) dirs.push(UNSURE);
-      else dirs.push(d, joinDir(cwd, d) ?? d);
+      else {
+        const j = joinDir(cwd, d);
+        if (j === undefined) dirs.push(UNSURE);
+        else dirs.push(d, j);
+      }
     }
     const first = w.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{|command|builtin)$/.test(t));
     if (first && CD_WORD.test(runnerName(first.replace(/^\\+/, ""))) && local[0] !== undefined) cwd = joinDir(cwd, local[0]) ?? cwd;
     // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
     const b = runnerName((w[0] ?? "").replace(/^\\+/, ""));
-    const bare = /^(?:sh|bash|zsh|dash|ksh)$/.test(b) && w.slice(1).every((t) => t.startsWith("-") || t.startsWith("+"));
+    const bare = readsStdin(b, w);
     if (bare && fedHit) hit = true;
-    // A bare shell fed from a file (`sh < x.sh`) or by a producer that is not a literal echo or printf
-    // (`cat x.sh | sh`, `... | base64 -d | sh`) runs text that is not read here: widen.
-    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(b) && (/<(?!<)/.test(seg) || (bare && prev !== undefined && !/^(?:echo|printf)$/.test(prev)))) {
-      hit = true;
+    // A shell fed from a file (`sh < x.sh`) or by a producer that is not echo or printf with literal words
+    // (`cat x.sh | sh`, `echo "$X" | sh`, `... | base64 -d | sh`) runs text that is not read here: widen.
+    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(b) && /<(?!<)/.test(seg)) hit = true;
+    if (bare && prev !== undefined) {
+      if (!/^(?:echo|printf)$/.test(prev) || prevArgs.some((t) => /[$`]/.test(t))) {
+        hit = true;
+        if (/^(?:echo|printf)$/.test(prev)) dirs.push(UNSURE);
+      }
     }
     prev = b;
+    prevArgs = w.slice(1);
+    // The producer's words read as one command line (`echo cd test \; node setup.js | sh`).
+    if (/^(?:echo|printf)$/.test(b) && movesRun(prevArgs.join(" "), dirs)) fedHit = true;
     for (const t of w.slice(1)) if (/\s/.test(t) && movesRun(t, dirs)) fedHit = true;
   }
   return hit;
@@ -3778,12 +3818,14 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (!ctx.widenInert && (moves(argv, moved) || scriptArgsMove(ctx, argv))) {
     if (ctx.movedDirs.size >= 256 || ctx.cwd.split("/").length >= 64) ctx.widenInert = true;
     for (const d of moved) {
-      const r = joinDir(ctx.cwd, d) ?? d;
-      const n = normalize(r);
       if (d === UNSURE) {
         ctx.widenInert = true;
         continue;
       }
+      const jr = joinDir(ctx.cwd, d);
+      if (jr === undefined) ctx.widenInert = true;
+      const r = jr ?? d;
+      const n = normalize(r);
       const raw = normalize(d);
       if (raw) ctx.movedDirs.add(raw);
       if (n) ctx.movedDirs.add(n);
@@ -4375,6 +4417,8 @@ export function installView(files: FileMap): InstallView {
   if (rootConfigs.length) {
     if (ctx.sawRunner) {
       for (const [, key] of rootConfigs) ctx.files.add(key);
+      // A config can name a file under test/ or docs/ (yarnPath, node-options, script-shell, preload).
+      ctx.widenInert = true;
       widenAll(ctx);
     }
   }

