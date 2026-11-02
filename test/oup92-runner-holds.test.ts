@@ -479,3 +479,43 @@ describe("round 10: linear substitutions, clustered o, wrong cd base, clustered 
     expect(dirHeld('echo "\\`" "`cd test && node setup.js`"', "test")).toBe(true);
   });
 });
+
+describe("round 11: fail closed when the shell scan cannot be sure", () => {
+  const testHeld = (cmd: string) => held({ postinstall: cmd }, { "test/setup.js": "1" }, { "test/setup.js": "evil()" });
+
+  test("1. quotes and case inside a substitution do not hide the cd", () => {
+    for (const cmd of [
+      `echo "$(echo ')'; cd test && node setup.js)" > /dev/null`,
+      "echo '`' \"`cd test && node setup.js`\" > /dev/null",
+      `echo "$(case a in a) cd test && node setup.js;; esac)" > /dev/null`,
+    ]) {
+      expect(testHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("2. env -S in an unsplit body", () => {
+    for (const cmd of ["env -S 'cd test && node setup.js' > /dev/null", "env --split-string='cd test && node setup.js' > /dev/null", "env -iS 'cd test && node setup.js' > /dev/null"]) {
+      expect(testHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("3. o before and after -c follow one rule", () => {
+    for (const cmd of ["bash -c -oe pipefail 'cd test && node setup.js'", "bash -c -o pipefail 'cd test && node setup.js'", "bash -oc pipefail 'cd test && node setup.js'"]) {
+      expect(testHeld(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("4. deep nesting stays within a budget and widens", () => {
+    const hook = `echo "${"$(".repeat(20000)}${")".repeat(20000)}"`;
+    const t = Date.now();
+    expect(testHeld(hook)).toBe(true);
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+
+  test("5. a long run of pipes into a shell stays linear", () => {
+    const hook = "echo 'a b' | sh; ".repeat(2000);
+    const t = Date.now();
+    held({ postinstall: hook }, {}, {});
+    expect(Date.now() - t).toBeLessThan(3000);
+  });
+});

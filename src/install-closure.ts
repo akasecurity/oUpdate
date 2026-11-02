@@ -79,6 +79,8 @@ interface Ctx {
   movedDirs: Set<string>;
   // The directory the last `cd` of the hook moved to, relative to the package root.
   cwd: string;
+  // The shell scan was not sure what a body does: the widen reads every file, inert paths included.
+  widenInert: boolean;
   // A package runner (npm, pnpm, yarn, bun, npx, bunx, corepack) was reached by the hook.
   sawRunner: boolean;
   sawNodeGyp: boolean;
@@ -2882,7 +2884,7 @@ function widenAll(ctx: Ctx): void {
     if (isManifest(logical)) {
       // The root manifest is read on its own path. A manifest under tests/ or docs/ is a package like any other.
       if (!logical.includes("/")) continue;
-    } else if (omitInert(ctx, logical) && !pkgDirs.some((d) => logical.startsWith(d)) && !movedInto(ctx, logical)) continue;
+    } else if (!ctx.widenInert && omitInert(ctx, logical) && !pkgDirs.some((d) => logical.startsWith(d)) && !movedInto(ctx, logical)) continue;
     ctx.files.add(key);
     if (ctx.fromGyp) ctx.gypFiles.add(key);
   }
@@ -3343,6 +3345,9 @@ function moves(argv: string[], dirs: string[]): boolean {
         dirs.push(a.slice(8));
         return true;
       }
+      // `-S string` / `--split-string=string` is a whole command line.
+      const sv = a.startsWith("--split-string=") ? a.slice(15) : /^-[A-Za-z]*S/.test(a) && !a.startsWith("--") ? a.slice(a.indexOf("S") + 1) || argv[k + 1] : a === "--split-string" ? argv[k + 1] : undefined;
+      if (sv !== undefined && movesRun(sv, dirs)) return true;
       // A short cluster holding C (`-C`, `-Cdir`, `-iC dir`, `-iCdir`): the directory follows the C or is the next word.
       const c = /^-[A-Za-z]*C/.exec(a);
       if (c && !a.startsWith("--")) {
@@ -3404,7 +3409,7 @@ function moves(argv: string[], dirs: string[]): boolean {
             n++;
             break;
           }
-          n += /^[-+][A-Za-z]*[oO]$/.test(rest[n]!) ? 2 : 1;
+          n += 1 + (/^[-+][A-Za-z]+$/.test(rest[n]!) ? (rest[n]!.match(/[oO]/g) ?? []).length : rest[n] === "--rcfile" || rest[n] === "--init-file" ? 1 : 0);
         }
         return rest[n] === undefined || movesRun(rest[n]!, dirs);
       }
@@ -3432,8 +3437,11 @@ function noteBody(ctx: Ctx, body: string): boolean {
   const dirs: string[] = [];
   const hit = movesRun(body, dirs);
   for (const d of dirs) {
-    const n = normalize(d);
-    if (n) ctx.movedDirs.add(n);
+    if (d === UNSURE) ctx.widenInert = true;
+    else {
+      const n = normalize(d);
+      if (n) ctx.movedDirs.add(n);
+    }
   }
   for (const seg of shellSegments(body)) if (words(seg).some((t) => RUNNERS.has(runnerName(t.replace(/^\\+/, ""))))) ctx.sawRunner = true;
   return hit;
@@ -3472,40 +3480,115 @@ function joinDir(cwd: string, d: string): string | undefined {
 }
 
 const CD_WORD = /^(?:cd|pushd)$/;
+// A directory entry that means the scan was not sure: the widen then reads every file, inert paths included.
+const UNSURE = "\u0000";
 
-// The top-level command substitutions of a text: `$(...)` up to its matching parenthesis and backtick pairs, with a
-// backslash escaping the next character. Each is returned once, so a text with many of them is read in linear time.
-function substitutions(body: string): string[] {
+// The top-level command substitutions of a text, with quotes, escapes and parentheses tracked: `$(...)` up to its
+// matching parenthesis, and backtick pairs. Returns null when the scan cannot be sure (an unclosed quote,
+// parenthesis or backtick, a `case` inside, nesting deeper than SUB_DEPTH, or more than SUB_STEPS characters read):
+// the caller then widens. Each text is read once per level, so the work is bounded.
+const SUB_DEPTH = 16;
+const SUB_STEPS = 200_000;
+
+function substitutions(body: string): string[] | null {
+  if (!body.includes("$(") && !body.includes("`")) return [];
+  const budget = { steps: 0 };
   const out: string[] = [];
+  const tick = (): boolean => ++budget.steps <= SUB_STEPS;
+  // Index just past the closing quote of the text opened before `i`, or -1.
+  const skipSingle = (t: string, i: number): number => {
+    const j = t.indexOf("'", i);
+    return j < 0 ? -1 : j + 1;
+  };
+  const skipBacktick = (t: string, i: number): number => {
+    for (let j = i; j < t.length; j++) {
+      if (!tick()) return -1;
+      if (t[j] === "\\") j++;
+      else if (t[j] === "`") return j + 1;
+    }
+    return -1;
+  };
+  // From just after `$(`: index just past the matching `)`, or -1.
+  const parseSub = (t: string, i: number, depth: number): number => {
+    if (depth > SUB_DEPTH) return -1;
+    let paren = 1;
+    for (let j = i; j < t.length; j++) {
+      if (!tick()) return -1;
+      const c = t[j]!;
+      if (c === "\\") j++;
+      else if (c === "'") {
+        j = skipSingle(t, j + 1) - 1;
+        if (j < 0) return -1;
+      } else if (c === '"') {
+        j = parseDq(t, j + 1, depth) - 1;
+        if (j < 0) return -1;
+      } else if (c === "`") {
+        j = skipBacktick(t, j + 1) - 1;
+        if (j < 0) return -1;
+      } else if (c === "$" && t[j + 1] === "(") {
+        j = parseSub(t, j + 2, depth + 1) - 1;
+        if (j < 0) return -1;
+      } else if (c === "(") paren++;
+      else if (c === ")" && --paren === 0) {
+        const inner = t.slice(i, j);
+        return /(?:^|[^A-Za-z0-9_])case(?![A-Za-z0-9_])/.test(inner) ? -1 : j + 1;
+      }
+    }
+    return -1;
+  };
+  // From just after an opening `"`: index just past the closing one, or -1.
+  const parseDq = (t: string, i: number, depth: number): number => {
+    for (let j = i; j < t.length; j++) {
+      if (!tick()) return -1;
+      const c = t[j]!;
+      if (c === "\\") j++;
+      else if (c === '"') return j + 1;
+      else if (c === "`") {
+        j = skipBacktick(t, j + 1) - 1;
+        if (j < 0) return -1;
+      } else if (c === "$" && t[j + 1] === "(") {
+        j = parseSub(t, j + 2, depth + 1) - 1;
+        if (j < 0) return -1;
+      }
+    }
+    return -1;
+  };
+  let dq = false;
   for (let i = 0; i < body.length; i++) {
+    if (!tick()) return null;
     const c = body[i]!;
     if (c === "\\") i++;
-    else if (c === "$" && body[i + 1] === "(") {
-      let depth = 1;
-      let j = i + 2;
-      for (; j < body.length && depth > 0; j++) {
-        if (body[j] === "\\") j++;
-        else if (body[j] === "(") depth++;
-        else if (body[j] === ")") depth--;
-      }
-      out.push(body.slice(i + 2, depth === 0 ? j - 1 : j));
-      i = j - 1;
-    } else if (c === "`") {
-      let j = i + 1;
-      for (; j < body.length && body[j] !== "`"; j++) if (body[j] === "\\") j++;
-      out.push(body.slice(i + 1, j));
-      i = j;
+    else if (c === "'" && !dq) {
+      i = skipSingle(body, i + 1) - 1;
+      if (i < 0) return null;
+    } else if (c === '"') dq = !dq;
+    else if (c === "`") {
+      const e = skipBacktick(body, i + 1);
+      if (e < 0) return null;
+      out.push(body.slice(i + 1, e - 1));
+      i = e - 1;
+    } else if (c === "$" && body[i + 1] === "(") {
+      const e = parseSub(body, i + 2, 1);
+      if (e < 0) return null;
+      out.push(body.slice(i + 2, e - 1));
+      i = e - 1;
     }
   }
-  return out;
+  return dq ? null : out;
 }
 
 function movesRun(body: string, dirs: string[] = []): boolean {
   let hit = false;
   let cwd = "";
-  const fed: string[] = [];
+  let fedHit = false;
   // A command substitution inside text (`echo "$(cd test && node setup.js)"`, backticks) runs its content.
-  for (const inner of substitutions(body)) if (movesRun(inner, dirs)) hit = true;
+  const subs = substitutions(body);
+  if (subs === null) {
+    // The scan cannot be sure: fail closed, and read every file (test and docs too).
+    dirs.push(UNSURE);
+    return true;
+  }
+  for (const inner of subs) if (movesRun(inner, dirs)) hit = true;
   for (const seg of shellSegments(body)) {
     const w = words(seg).filter((t) => !/^\d*[<>]/.test(t));
     const local: string[] = [];
@@ -3516,8 +3599,8 @@ function movesRun(body: string, dirs: string[] = []): boolean {
     if (first && CD_WORD.test(runnerName(first.replace(/^\\+/, ""))) && local[0] !== undefined) cwd = joinDir(cwd, local[0]) ?? cwd;
     // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
     const b = runnerName((w[0] ?? "").replace(/^\\+/, ""));
-    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(b) && w.slice(1).every((t) => t.startsWith("-") || t.startsWith("+")) && fed.some((t) => movesRun(t, dirs))) hit = true;
-    fed.push(...w.slice(1).filter((t) => /\s/.test(t)));
+    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(b) && w.slice(1).every((t) => t.startsWith("-") || t.startsWith("+")) && fedHit) hit = true;
+    for (const t of w.slice(1)) if (/\s/.test(t) && movesRun(t, dirs)) fedHit = true;
   }
   return hit;
 }
@@ -3572,6 +3655,10 @@ function dispatch(ctx: Ctx, cmd: string): void {
     for (const d of moved) {
       const r = joinDir(ctx.cwd, d) ?? d;
       const n = normalize(r);
+      if (d === UNSURE) {
+        ctx.widenInert = true;
+        continue;
+      }
       const raw = normalize(d);
       if (raw) ctx.movedDirs.add(raw);
       if (n) ctx.movedDirs.add(n);
@@ -4108,6 +4195,7 @@ export function installView(files: FileMap): InstallView {
     hookNamed: new Set(),
     movedDirs: new Set(),
     cwd: "",
+    widenInert: false,
     sawRunner: false,
     logical: indexed.logical,
     raw: {},
