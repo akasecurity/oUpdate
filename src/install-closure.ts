@@ -3773,7 +3773,7 @@ function spaceRedirects(t: string): string {
   return out;
 }
 
-function unwrapSink(w0: string[]): { words: string[]; xargs: boolean } {
+function unwrapSink(w0: string[]): { words: string[]; xargs: boolean; lead: string } {
   let w = w0;
   let i = 0;
   let xargs = false;
@@ -3803,6 +3803,7 @@ function unwrapSink(w0: string[]): { words: string[]; xargs: boolean } {
     } else break;
   }
   let ws = w.slice(i);
+  const lead = runnerName((ws[0] ?? "").replace(/^\\+/, ""));
   // A wrapper this does not name (nice, timeout, stdbuf, ionice, chrt, setsid, caffeinate, arch, ...) runs the
   // first shell or interpreter word after it: unless the first word is itself one or a known plain command, the
   // sink is read from that word on.
@@ -3811,10 +3812,10 @@ function unwrapSink(w0: string[]): { words: string[]; xargs: boolean } {
     const at = ws.findIndex((t, q) => q > 0 && SINK_WORD.test(runnerName(t.replace(/^\\+/, ""))));
     if (at > 0) ws = ws.slice(at);
   }
-  return { words: ws, xargs };
+  return { words: ws, xargs, lead };
 }
 const SINK_WORD = /^(?:sh|bash|zsh|dash|ksh|node|nodejs|python[0-9.]*|perl|ruby|deno|bun|php)$/;
-const PLAIN_CMDS = new Set(["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "sed", "awk", "head", "tail", "tr", "ls", "test", "[", "true", "false", ":", "cp", "mv", "rm", "mkdir", "touch", "chmod", "which", "tee", "sort", "uniq", "wc", "cut", "find", "diff", "tar", "curl", "wget", "git", "make", "less", "more", "jq", "yq", "base64", "gzip", "gunzip", "zcat", "bzip2", "xz", "xxd", "od", "hexdump", "openssl", "shasum", "sha256sum", "sha1sum", "md5", "md5sum", "cksum", "fold", "nl", "rev", "paste", "comm", "join", "column", "cmp", "dd", "sleep", "date", "pwd", "wait", "read", "tput", "stat", "file", "du", "df", "ps", "npm", "pnpm", "yarn", "unzip", "zip", "strings", "tac", "expand", "unexpand", "split", "mktemp", "basename", "dirname", "realpath", "readlink", "ln", "install", "rsync", "scp", "ssh", "nc", "gawk", "mawk", "patch"]);
+const PLAIN_CMDS = new Set(["echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "sed", "head", "tail", "tr", "ls", "test", "[", "true", "false", ":", "cp", "mv", "rm", "mkdir", "touch", "chmod", "which", "sort", "uniq", "wc", "cut", "find", "diff", "tar", "curl", "wget", "less", "more", "jq", "yq", "gzip", "gunzip", "zcat", "bzip2", "xz", "xxd", "od", "hexdump", "openssl", "shasum", "sha256sum", "sha1sum", "md5", "md5sum", "cksum", "fold", "nl", "rev", "paste", "comm", "join", "column", "cmp", "sleep", "date", "pwd", "wait", "read", "tput", "stat", "file", "du", "df", "ps", "npm", "pnpm", "yarn", "unzip", "zip", "strings", "tac", "expand", "unexpand", "split", "mktemp", "basename", "dirname", "realpath", "readlink", "ln"]);
 
 // Interpreters that read their program from stdin when given no script operand: the flags that carry a program
 // (`-e`), and the flags that take a separate value.
@@ -3871,17 +3872,25 @@ function interpReadsStdin(bin: string, w: string[]): boolean {
 function readsStdin(bin: string, w: string[]): boolean {
   if (!/^(?:sh|bash|zsh|dash|ksh)$/.test(bin)) return false;
   const args = w.slice(1);
-  if (args.some((t) => /^-[A-Za-z]*c[A-Za-z]*$/.test(t))) return false;
-  if (args.some((t) => /^-[A-Za-z]*s[A-Za-z]*$/.test(t))) return true;
+  let sFlag = false;
+  // Options end at `--` or the first operand; what follows is the script file and its arguments, not options.
   for (let j = 0; j < args.length; j++) {
     const t = args[j]!;
+    if (t === "--") return sFlag || args[j + 1] === undefined || args[j + 1] === "/dev/stdin";
     if (t === "-") return true;
-    if (t.startsWith("-") || t.startsWith("+")) {
-      // -o / +o / -O take an option name.
-      if (/^[-+][A-Za-z]*[oO]$/.test(t) && !t.startsWith("--")) j++;
+    if (t === "--rcfile" || t === "--init-file") {
+      j++;
       continue;
     }
-    return t === "/dev/stdin";
+    if (t.startsWith("--")) continue;
+    if (t.startsWith("-") || t.startsWith("+")) {
+      if (/^-[A-Za-z]*c[A-Za-z]*$/.test(t)) return false;
+      if (/^-[A-Za-z]*s[A-Za-z]*$/.test(t)) sFlag = true;
+      // -o / +o / -O take an option name, anywhere in the cluster.
+      if (/[oO]/.test(t)) j += (t.match(/[oO]/g) ?? []).length;
+      continue;
+    }
+    return sFlag || t === "/dev/stdin";
   }
   return true;
 }
@@ -3901,6 +3910,12 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
   }
   for (const inner of subs) if (movesRun(inner, dirs)) hit = true;
   let pos = 0;
+  let pipeFiles: string[] = [];
+  // A process substitution (`sh <(cat test/x.sh)`) feeds a command from a file: the files it names are read.
+  for (const m of body.matchAll(/<\(([^)]*)\)/g)) {
+    hit = true;
+    for (const t of words(m[1]!).slice(1)) if (!t.startsWith("-")) fedDir(dirs, t);
+  }
   for (const seg of shellSegments(body)) {
     // Whether a single `|` joins this command to the one before it.
     const at = body.indexOf(seg, pos);
@@ -3915,6 +3930,14 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       } else noRedir.push(raw[q]!);
     }
     const w = noRedir;
+    // Every file named anywhere in a pipeline: arguments and `<` operands of each stage.
+    if (!piped) pipeFiles = [];
+    for (let q = 0; q < raw.length; q++) {
+      const m = /^\d*<(?!<)(.*)$/.exec(raw[q]!);
+      if (m) pipeFiles.push(m[1] || raw[q + 1] || "");
+    }
+    // The arguments of a network tool are addresses, not files.
+    if (!/^(?:curl|wget|nc|ssh|scp|rsync|ftp|sftp|http|https)$/.test(runnerName((w[0] ?? "").replace(/^\\+/, "")))) for (const t of w.slice(1)) if (!t.startsWith("-")) pipeFiles.push(t);
     const local: string[] = [];
     if (moves(w, local)) hit = true;
     // Both the raw and the joined directory are recorded: the base may be wrong across a subshell or a popd.
@@ -3947,7 +3970,8 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     // A shell fed from a file (`sh < x.sh`) or by a producer that is not echo or printf with literal words
     // (`cat x.sh | sh`, `echo "$X" | sh`, `... | base64 -d | sh`) runs text that is not read here: widen.
     // The fed file may itself sit under test/ or docs/, so the scan is unsure and reads inert paths too.
-    if ((isShell || interpReadsStdin(sb, un.words)) && /<(?!<)/.test(seg)) {
+    const redirSink = isShell || interpReadsStdin(sb, un.words) || (sb !== "" && !PLAIN_CMDS.has(sb) && !SINK_WORD.test(sb) && !RUNNERS.has(sb) && !CD_WORD.test(sb));
+    if (redirSink && /<(?!<)/.test(seg)) {
       hit = true;
       for (let q = 0; q < raw.length; q++) {
         const m = /^\d*<(?!<)(.*)$/.exec(raw[q]!);
@@ -3956,13 +3980,13 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     }
     // A pipe whose producer is not literal text feeds any consumer that is not a known plain command (`ash`,
     // `tsx`, `lua -`, `tclsh`, `env -S 'sh -s'`): the consumer is treated as a sink instead of being named.
-    const consumer = runnerName((un.words[0] ?? "").replace(/^\\+/, ""));
-    const classSink = piped && prev !== undefined && !/^(?:echo|printf)$/.test(prev) && !bare && (un.words.length === 0 ? noRedir.length > 0 : !PLAIN_CMDS.has(consumer) && !SINK_WORD.test(consumer));
+    const consumer = un.lead;
+    const classSink = piped && prev !== undefined && !/^(?:echo|printf)$/.test(prev) && !bare && (un.words.length === 0 ? noRedir.length > 0 : !PLAIN_CMDS.has(consumer) && !(SINK_WORD.test(consumer) && un.words[0] !== undefined && runnerName(un.words[0]) === consumer));
     if ((bare || classSink) && prev !== undefined) {
       if (!/^(?:echo|printf)$/.test(prev) || prevArgs.some((t) => /[$`]/.test(t))) {
         hit = true;
         if (/^(?:echo|printf)$/.test(prev)) dirs.push(UNSURE);
-        else for (const t of prevArgs) if (!t.startsWith("-")) fedDir(dirs, t);
+        else for (const t of pipeFiles) fedDir(dirs, t);
       }
     }
     prev = b;
