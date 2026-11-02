@@ -57,6 +57,15 @@ describe("unresolved package-manager runners hold", () => {
     }
   });
 
+  test("pnpm recursive, m and multi widen through npx and corepack even when a script has that name", () => {
+    for (const w of ["npx", "corepack"]) {
+      for (const c of ["recursive", "m", "multi"]) {
+        const cmd = `${w} pnpm ${c} run build`;
+        expect(hardFor({ postinstall: cmd, build: "echo ok", [c]: "echo ok" }).length, cmd).toBeGreaterThan(0);
+      }
+    }
+  });
+
   test("bun run <file> follows the file instead of looking up a script", () => {
     expect(hardFor({ postinstall: "bun run ./assets/x.js" }).length).toBeGreaterThan(0);
     expect(hardFor({ postinstall: "bun run ./assets/other.js" })).toEqual([]);
