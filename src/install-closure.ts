@@ -3125,7 +3125,7 @@ const WORKSPACE_WIDEN: Record<"yarn" | "pnpm" | "bun", RegExp> = {
   yarn: /^(?:--cwd(?:=.*)?|workspace|workspaces)$/,
   bun: /^(?:-F.*|--filter(?:=.*)?|--cwd(?:=.*)?|--workspaces)$/,
 };
-const RUNNER_BUILTINS = new Set(["exec", "x", "dlx", "create", "init", "add", "remove", "rm", "install", "i", "link", "up", "upgrade", "update", "pm", "patch", "set", "config", "node", "workspace", "workspaces", "recursive", "m", "multi", "rebuild", "unplug"]);
+const RUNNER_BUILTINS = new Set(["exec", "x", "dlx", "create", "init", "add", "remove", "rm", "install", "i", "link", "up", "upgrade", "update", "pm", "patch", "set", "config", "node", "workspace", "workspaces", "rebuild", "unplug"]);
 
 // A shorthand word that looks like a file path (`bun payload.js`, `yarn ./x`) runs that file,
 // not a script of the same name, so it is never resolved as a script.
@@ -3155,6 +3155,8 @@ function wrappedScript(ctx: Ctx, argv: string[], i: number): string | undefined 
     return (sub === "start" || sub === "stop") && has(sub) ? sub : undefined;
   }
   if (RUNNER_BUILTINS.has(sub) || pathLikeWord(sub)) return undefined;
+  // pnpm runs its own recursive command for these words, never a script of that name.
+  if (runner === "pnpm" && /^(?:recursive|m|multi)$/.test(sub)) return undefined;
   return has(sub) ? sub : undefined;
 }
 

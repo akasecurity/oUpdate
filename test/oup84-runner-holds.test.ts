@@ -66,6 +66,14 @@ describe("unresolved package-manager runners hold", () => {
     }
   });
 
+  test("yarn m and bun m still follow a local script named m", () => {
+    for (const cmd of ["yarn m", "bun m", "yarn recursive", "bun multi"]) {
+      const name = cmd.split(" ")[1]!;
+      expect(hardFor({ postinstall: cmd, [name]: "node assets/x.js" }).length, cmd).toBeGreaterThan(0);
+      expect(hardFor({ postinstall: cmd, [name]: "node assets/other.js" }), cmd).toEqual([]);
+    }
+  });
+
   test("bun run <file> follows the file instead of looking up a script", () => {
     expect(hardFor({ postinstall: "bun run ./assets/x.js" }).length).toBeGreaterThan(0);
     expect(hardFor({ postinstall: "bun run ./assets/other.js" })).toEqual([]);
