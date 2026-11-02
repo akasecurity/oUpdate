@@ -35,6 +35,7 @@ describe("install closure", () => {
       ["npm restart", { postinstall: "npm restart", start: "node assets/x.bmp" }],
       ["npm run --loglevel", { postinstall: "npm run --loglevel silent setup", setup: "node assets/x.bmp" }],
       ["node --run", { postinstall: "node --run setup", setup: "node assets/x.bmp" }],
+      ["sh -c string", { postinstall: "sh -c 'npm run setup'", setup: "node assets/x.bmp" }],
     ];
     for (const [label, scripts, extra] of cases) {
       const [oldF, newF] = same(scripts, extra);
@@ -45,7 +46,6 @@ describe("install closure", () => {
 
   test("an unresolved command does not hold when the closed bytes match", () => {
     const quiet: object[] = [
-      { postinstall: "sh -c 'npm run setup'", setup: "node assets/x.bmp" },
       { postinstall: "(npm run setup)", setup: "node assets/x.bmp" },
       { postinstall: "run-s 'setup --x'", setup: "node assets/x.bmp" },
       { postinstall: "yarn run-s setup", setup: "node assets/x.bmp" },

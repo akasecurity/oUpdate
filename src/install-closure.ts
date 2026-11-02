@@ -2857,6 +2857,16 @@ function markHookFile(ctx: Ctx, token: string): void {
   ctx.hookNamed.add(logical);
 }
 
+// A file named by a command, resolved from the directory an earlier cd moved to as well as from the package root.
+function noteHookArgCwd(ctx: Ctx, token: string): void {
+  noteHookArg(ctx, token);
+  if (ctx.cwd && token && !token.startsWith("-") && !token.startsWith("/")) {
+    const j = joinDir(ctx.cwd, token);
+    if (j === undefined) ctx.widenInert = true;
+    else noteHookArg(ctx, j);
+  }
+}
+
 function noteHookArg(ctx: Ctx, token: string): void {
   // `.` is not a named file. Recording it would be an unresolved-path hold.
   // A glob still reaches addRef, so the glob and pattern-length caps stay holds.
@@ -2906,7 +2916,7 @@ function closeUnknownRunner(ctx: Ctx, argv: string[], i: number): void {
   for (let j = i; j < argv.length; j++) {
     const arg = argv[j]!;
     if (arg.startsWith("-")) continue;
-    noteHookArg(ctx, arg);
+    noteHookArgCwd(ctx, arg);
     const logical = normalize(arg);
     if (!logical || badPath(logical)) continue;
     const key = findKey(ctx, logical);
@@ -3061,7 +3071,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
     const a = argv[i]!;
     if (a === "--") {
       // What follows is the script and its arguments.
-      for (let q = i + 1; q < argv.length; q++) noteHookArg(ctx, argv[q]!);
+      for (let q = i + 1; q < argv.length; q++) noteHookArgCwd(ctx, argv[q]!);
       return;
     }
     if (a.startsWith("-")) {
@@ -3095,7 +3105,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       if (name === "-r" || name === "--require" || name === "--import") {
         const spec = take();
         if (!spec) return;
-        noteHookArg(ctx, spec);
+        noteHookArgCwd(ctx, spec);
         i++;
         continue;
       }
@@ -3105,7 +3115,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       i++;
       continue;
     }
-    noteHookArg(ctx, a);
+    noteHookArgCwd(ctx, a);
     i++;
   }
 }
@@ -3114,6 +3124,7 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
   // Options come first. Any option this does not know widens (it may take a value or load a
   // file); the first operand is the script, and arguments after it are the script's own.
   let j = i;
+  let sFlag = false;
   for (; j < argv.length; j++) {
     const t = argv[j]!;
     if (t === "--") {
@@ -3122,10 +3133,22 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
     }
     if (!t.startsWith("-") && !t.startsWith("+")) break;
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(t)) {
-      // A command string is read by the structural scan of the body, not here.
-      fail(ctx, "unresolved: shell");
+      // The command string is a body: the options after -c that take a name come first, then the string.
+      let n = j + 1 + (t.match(/[oO]/g) ?? []).length;
+      while (n < argv.length && /^[-+][A-Za-z]+$/.test(argv[n]!)) n += 1 + (argv[n]!.match(/[oO]/g) ?? []).length;
+      const body = argv[n];
+      if (body === undefined || ctx.depth >= DEPTH) {
+        ctx.widenInert = true;
+        widenAll(ctx);
+        fail(ctx, "unresolved: shell");
+        return;
+      }
+      ctx.depth++;
+      runBody(ctx, body);
+      ctx.depth--;
       return;
     }
+    if (/^[-+][A-Za-z]*s[A-Za-z]*$/.test(t) && t.startsWith("-")) sFlag = true;
     if (/^[-+][A-Za-z]+$/.test(t)) {
       // -o / +o / -O take an option name.
       j += (t.match(/[oO]/g) ?? []).length;
@@ -3134,13 +3157,21 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
       j++;
     } else if (!/^--(?:norc|noprofile|posix|login|restricted|verbose|noediting|debugger|version|help)$/.test(t)) widenAll(ctx);
   }
+  // With -s the script comes from stdin and every operand is a positional parameter.
+  if (sFlag) {
+    for (let q = j; q < argv.length; q++) noteHookArgCwd(ctx, argv[q]!);
+    fail(ctx, "unresolved: shell");
+    return;
+  }
   const token = argv[j];
+  // The script's own arguments may name files it runs (`node "$1"`): they are read too.
+  for (let q = j + 1; q < argv.length; q++) noteHookArgCwd(ctx, argv[q]!);
   if (token === undefined) {
     // No script: the shell reads stdin.
     fail(ctx, "unresolved: shell");
     return;
   }
-  noteHookArg(ctx, token);
+  noteHookArgCwd(ctx, token);
   if (ctx.hold) return;
   const key = findKey(ctx, normalize(token));
   if (!key) {
@@ -3538,7 +3569,7 @@ function movesCore(argv: string[], dirs: string[]): boolean {
     }
     return n < rest.length && moves(rest.slice(n), dirs);
   }
-  if (/^(?:sh|bash|zsh|dash|ksh)$/.test(bin)) {
+  if (SHELL_RE.test(bin)) {
     let rc = false;
     // `-c` may sit anywhere among the options, after options that take a value (`-o pipefail`, `--rcfile x`).
     for (let j = 0; j < rest.length && (rest[j]!.startsWith("-") || rest[j]!.startsWith("+")); j++) {
@@ -3960,7 +3991,8 @@ function unwrapSink(w0: string[]): { words: string[]; xargs: boolean; lead: stri
   }
   return { words: ws, xargs, lead };
 }
-const SINK_WORD = /^(?:sh|bash|zsh|dash|ksh|node|nodejs|python[0-9.]*|perl|ruby|deno|bun|php)$/;
+const SHELL_RE = /^(?:sh|bash|zsh|dash|ksh|ash|mksh|yash)$/;
+const SINK_WORD = /^(?:sh|bash|zsh|dash|ksh|node|nodejs|python[0-9.]*|perl|ruby|deno|bun|php|ash|mksh|yash)$/;
 const PLAIN_CMDS = new Set(["echo", "tee", "tar", "find", "printf", "cat", "grep", "egrep", "fgrep", "rg", "head", "tail", "tr", "ls", "test", "[", "true", "false", ":", "cp", "mv", "rm", "mkdir", "touch", "chmod", "which", "sort", "uniq", "wc", "cut", "diff", "curl", "wget", "less", "more", "jq", "yq", "gzip", "gunzip", "zcat", "bzip2", "xz", "xxd", "od", "hexdump", "openssl", "shasum", "sha256sum", "sha1sum", "md5", "md5sum", "cksum", "fold", "nl", "rev", "paste", "comm", "join", "column", "cmp", "sleep", "date", "pwd", "wait", "read", "tput", "stat", "file", "du", "df", "ps", "unzip", "zip", "strings", "tac", "expand", "unexpand", "split", "mktemp", "basename", "dirname", "realpath", "readlink", "ln"]);
 
 // Interpreters that read their program from stdin when given no script operand: the flags that carry a program
@@ -4063,7 +4095,7 @@ function flagFiles(bin: string, w: string[]): string[] {
 // from a flag (`-c`, `-e`) or reads stdin.
 function scriptOperand(bin: string, w: string[]): string | undefined {
   const args = w.slice(1);
-  if (/^(?:sh|bash|zsh|dash|ksh)$/.test(bin)) {
+  if (SHELL_RE.test(bin)) {
     for (let j = 0; j < args.length; j++) {
       const t = args[j]!;
       if (t === "--") return args[j + 1];
@@ -4117,7 +4149,7 @@ const RUNS_PROGRAM: Record<string, RegExp> = {
 
 // Whether a shell command reads its script from stdin: no -c, and either -s, /dev/stdin, `-`, or no script file.
 function readsStdin(bin: string, w: string[]): boolean {
-  if (!/^(?:sh|bash|zsh|dash|ksh)$/.test(bin)) return false;
+  if (!SHELL_RE.test(bin)) return false;
   const args = w.slice(1);
   let sFlag = false;
   // Options end at `--` or the first operand; what follows is the script file and its arguments, not options.
@@ -4310,7 +4342,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     const b = runnerName((w[0] ?? "").replace(/^\\+/, ""));
     const un = unwrapSink(noRedir);
     const sb = runnerName((un.words[0] ?? "").replace(/^\\+/, ""));
-    const isShell = /^(?:sh|bash|zsh|dash|ksh)$/.test(sb);
+    const isShell = SHELL_RE.test(sb);
     // Input of xargs is arguments (a list of files), not commands.
     fedShell = (isShell || !SINK_WORD.test(sb)) && !un.xargs;
     // `... | xargs bash -c` runs the piped text as the command string.
@@ -4595,7 +4627,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     if (i < argv.length) fail(ctx, "unresolved: node-gyp");
     return;
   }
-  if (bin === "sh" || bin === "bash") {
+  if (SHELL_RE.test(bin)) {
     dispatchSh(ctx, argv, i);
     return;
   }
