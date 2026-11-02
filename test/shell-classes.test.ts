@@ -225,6 +225,51 @@ describe("shell classes", () => {
     expect(classes("((x=$(sh -c 'cd a && node b.js')))")).toEqual(["cd-relative"]);
   });
 
+  test("a syntax error on a later line leaves the complete lines before it classified", () => {
+    const L = "node --loader ./l.mjs a.js";
+    for (const c of [`${L}\necho a(b)`, `${L}\necho 'x`, `${L}\n: "x'`, `${L}\necho $(`, `${L}\n${L}\necho \`x`, `echo hi\n${L}\necho a(b)\n${L}`]) expect(classes(c), c).toEqual(["interp-flag"]);
+    // the line with the error is not read, and neither is anything after it; one line reports nothing
+    expect(classes(`echo a(b)\n${L}`)).toEqual([]);
+    expect(classes(`${L}; echo a(b)`)).toEqual([]);
+    expect(classes(`${L}; echo 'x`)).toEqual([]);
+    expect(classes(`${L}\n${L} 'x\n`)).toEqual(["interp-flag"]);
+    expect(held(`${L}\necho a(b)`)).toBe(true);
+    expect(held("echo a(b)")).toBe(false);
+  });
+
+  test("valid one-line shell the parser reads: expansions in redirect targets, arrays, [[ ]], comments, escaped quotes", () => {
+    const P = "node -r ./p.js a.js";
+    for (const c of [`${P} > $(echo log)`, `${P} > \`echo log\``, `${P} 2> "$(echo log)"`, `arr=(x y); ${P}`, `arr=($(echo x)); ${P}`, `[[ a =~ (a) ]] && ${P}`, `[[ -n $(true) ]] && ${P}`, `if [[ a == b* ]]; then ${P}; fi`, `echo $(true # it's\n); ${P}`, `echo $(cat <<E\nit's\nE\n); ${P}`, `echo $(cat <<-'E'\n\tit's\n\tE\n); ${P}`, `echo "x\\"y"; ${P}`, `echo "a \\" b" && ${P}`]) {
+      expect(classes(c), c).toEqual(["interp-flag"]);
+    }
+    expect(classes("arr=($(sh -c 'cd a && node b.js'))")).toEqual(["cd-relative"]);
+    expect(classes("[[ $(sh -c 'cd a && node b.js') ]]")).toEqual(["cd-relative"]);
+    expect(classes("echo > $(sh -c 'cd a && node b.js')")).toEqual(["cd-relative"]);
+  });
+
+  test("a backslash only quotes: \\node, \\cd, node -\\r", () => {
+    for (const c of ["\\node -r ./p.js a.js", "no\\de -r ./p.js a.js", "node -\\r ./p.js a.js", "node --\\loader ./l.mjs a.js"]) expect(classes(c), c).toEqual(["interp-flag"]);
+    expect(classes("\\cd sub && node a.js")).toEqual(["cd-relative"]);
+    expect(classes("c\\d sub && node a.js")).toEqual(["cd-relative"]);
+    expect(classes("sh -c \"cd $INIT_CWD/sub && node a.js\"")).toEqual(["cd-relative"]);
+    expect(classes("sh -c \"cd $INIT_CWD/sub && node -r ./p.js a.js\"").sort()).toEqual(["cd-relative", "interp-flag"]);
+    expect(classes("\\node a.js")).toEqual([]);
+  });
+
+  test("flags after inline code or a separate-value flag still load code", () => {
+    for (const c of ["node -e 1 -r ./p.js", "node -p 1 --require ./p.js", "node --eval 1 --import ./p.mjs", "perl -e 1 -MEvil", "perl -e 1 -I lib", "ruby -e 1 -r ./x", "python3 -W ignore -m evil", "python3 -X dev -m evil", "node --title x -r ./p.js a.js", "node -C dev -r ./p.js a.js"]) {
+      expect(classes(c), c).toEqual(["interp-flag"]);
+    }
+    for (const c of ["node -e 1", "node -e 1 a b", "perl -e 1 a", "python3 -c 'print(1)' -m x", "node -C dev a.js"]) expect(classes(c), c).toEqual([]);
+  });
+
+  test("a written file run by the name node resolves, or from a directory the body wrote", () => {
+    for (const c of ["cat t > b.js && node b", "cat t > index.js && node .", "cat t > index.js && node ./", "cp t b.mjs && node ./b", "mkdir lib && cp -r t lib && node lib/x.js", "cp -r t lib && node lib/x.js", "cat t > lib/index.js && node lib", "cat t > lib/package.json && node lib"]) {
+      expect(classes(c), c).toEqual(["writer-exec"]);
+    }
+    for (const c of ["cat t > b.js && node c", "cat t > lib2/x.js && node lib/x.js", "cp t library && node lib/x.js", "tar -xf v.tgz && node install.js"]) expect(classes(c), c).toEqual([]);
+  });
+
   test("integration: a flagged body reads files the hook does not name", () => {
     for (const c of ["node --loader ./l.mjs lib/other.js", "node -r ./nope.js a.js", "python3 -m pkg", "sh <<EOF\nnode a.js\nEOF", "cd sub && node a.js", "cat t > b.js && node b.js", "sed -f p.sed x", "NODE_OPTIONS=--require=./p.js node a.js"]) {
       expect(held(c), c).toBe(true);

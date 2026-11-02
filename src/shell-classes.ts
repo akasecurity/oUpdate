@@ -4,14 +4,15 @@
 //
 // Only these classes are reported. Anything else (an unknown command, an expanded command word, `node -e/-p` code,
 // `npx`, a dependency's bin) is left to the existing scan:
-//   interp-flag   an interpreter or shell flag that loads or runs other code (--loader, -r, -m, -c, -e, -C ...)
+//   interp-flag   an interpreter or shell flag that loads or runs other code (--loader, -r, -m, --env-file, --run, --rcfile ...)
 //   interp-stdin  an interpreter or shell that reads its program from stdin (`node -`, `sh`, `sh < f`); a pipeline sink
 //                 (`echo x | sh`) is left to the existing scan
 //   heredoc       a heredoc or here-string feeding an interpreter or shell, or a heredoc that does not terminate
 //   cd-relative   a relative script, shell file or path command run after a `cd`
-//   writer-exec   a file this body wrote by a redirect, cp/mv/ln/install, tee, curl -o or wget -O is then run by name
-//                 (a script, shell file, path command or `source`). Not covered: tar/unzip/patch output, `node dir`
-//                 or `node b` that resolves to a written file, a file written by another command
+//   writer-exec   a file this body wrote by a redirect, cp/mv/ln/install, tee, curl -o or wget -O is then run: by name,
+//                 by the name node resolves (`node b` for b.js, `node .` for index.js), or from inside a directory the
+//                 body wrote (`cp -r t lib && node lib/x.js`). Not covered: tar/unzip/patch/dd output (the files they
+//                 write are unknown; the existing scan holds those)
 //   program-file  `sed -f`, `awk -f`, `awk` with system/getline, `make -f`: the program is in a file
 //   env-assign    a NODE_OPTIONS, NODE_PATH, npm_config_*, BASH_ENV, PERL5OPT, RUBYOPT, PYTHONPATH, PYTHONSTARTUP,
 //                 LD_PRELOAD or DYLD_INSERT_LIBRARIES assignment (leading, after `env`, or `export`)
@@ -27,7 +28,7 @@
 export type ClassName = "over-cap" | "unparsed" | "interp-flag" | "interp-stdin" | "heredoc" | "cd-relative" | "writer-exec" | "program-file" | "env-assign";
 export interface Hit { cls: ClassName; why: string }
 
-interface Word { text: string; plain: boolean } // plain: no expansion, no escape trickery
+interface Word { text: string; plain: boolean } // plain: no $ or backtick expansion (a backslash only quotes)
 interface Stage { words: Word[]; assigns: string[]; writes: string[]; reads: string[]; subs: string[]; hereSubs: string[]; heredoc: boolean; piped: boolean }
 
 export const MAX_LEN = 20000;
@@ -35,9 +36,11 @@ export const LIMITS = { fuel: 200000 }; // a test lowers it
 const MAX_DEPTH = 4;
 
 class ParseFail extends Error {
-  constructor(message: string, readonly cls?: ClassName) { super(message); }
+  constructor(message: string, readonly cls?: ClassName, readonly pos = 0) { super(message); }
 }
-const fail = (why: string, cls?: ClassName): never => { throw new ParseFail(why, cls); };
+// Start of the token the parser is on; a class-less failure records it so the lines before it can still be read.
+let AT = 0;
+const fail = (why: string, cls?: ClassName): never => { throw new ParseFail(why, cls, AT); };
 
 const KW_SKIP = new Set(["if", "then", "elif", "else", "fi", "while", "until", "do", "done", "{", "}", "!"]);
 
@@ -95,10 +98,34 @@ function parse(text: string, depth: number): Stage[] {
   const add = (c: string, plain = true) => { cur ??= { text: "", plain: true }; cur.text += c; if (!plain) cur.plain = false; };
   const matchClose = (i: number, open: string, close: string): number => {
     let d = 1;
+    const pend: { delim: string; strip: boolean }[] = []; // heredocs opened inside the span: their bodies are not shell
     for (; i < text.length; i++) {
       if (--fuel < 0) fail("parse budget used up", "unparsed");
       const c = text[i]!;
+      if (open === "(" && c === "\n" && pend.length) {
+        for (const h of pend) {
+          let p = i + 1;
+          for (;;) {
+            if (--fuel < 0) fail("parse budget used up", "unparsed");
+            const nl = text.indexOf("\n", p); const line = text.slice(p, nl < 0 ? text.length : nl).replace(/\r$/, "");
+            if ((h.strip ? line.replace(/^\t+/, "") : line) === h.delim) { i = nl < 0 ? text.length : nl; break; }
+            if (nl < 0) return fail("unclosed (");
+            p = nl + 1;
+          }
+        }
+        pend.length = 0;
+        continue;
+      }
+      if (open === "(" && c === "<" && text[i + 1] === "<" && text[i + 2] !== "<") {
+        let j = i + 2; const strip = text[j] === "-"; if (strip) j++;
+        while (text[j] === " " || text[j] === "\t") j++;
+        let e = j; while (e < text.length && !/[\s;&|()<>]/.test(text[e]!)) e++;
+        const delim = text.slice(j, e).replace(/['"\\]/g, "");
+        if (delim) pend.push({ delim, strip });
+        i = e - 1; continue;
+      }
       if (c === "\\") { i++; continue; }
+      if (c === "#" && (i === 0 || /[\s;&|(]/.test(text[i - 1]!)) && open === "(") { while (i < text.length && text[i] !== "\n") i++; continue; } // a comment in $( )
       if (c === "'") { const e = text.indexOf("'", i + 1); if (e < 0) fail("quote"); i = e; continue; }
       if (c === '"') { i++; while (i < text.length && text[i] !== '"') { if (--fuel < 0) fail("parse budget used up", "unparsed"); if (text[i] === "\\") i++; i++; } continue; }
       if (c === open) d++;
@@ -107,7 +134,9 @@ function parse(text: string, depth: number): Stage[] {
     return fail("unclosed " + open);
   };
   const isBreak = (c: string) => c === " " || c === "\t" || c === "\n" || c === "\r" || c === ";" || c === "&" || c === "|" || c === "(" || c === ")" || c === "<" || c === ">";
+  let wordSubs: string[] = []; // command substitutions inside the word readWordAt just read (a redirect target, a delimiter)
   const readWordAt = (i: number): { w: Word; next: number } => {
+    wordSubs = [];
     while (text[i] === " " || text[i] === "\t") i++;
     let t = ""; let plain = true;
     for (; i < text.length; i++) {
@@ -121,8 +150,11 @@ function parse(text: string, depth: number): Stage[] {
         if (e >= text.length) fail("quote");
         const inner = text.slice(i + 1, e); if (/[$`]/.test(inner.replace(/\\./g, ""))) plain = false; t += inner.replace(/\\(["$`\\])/g, "$1"); i = e; continue;
       }
-      if (c === "\\") { plain = false; t += text[i + 1] ?? ""; i++; continue; }
-      if (c === "$" || c === "`") plain = false;
+      if (c === "\\") { t += text[i + 1] ?? ""; i++; continue; }
+      if (c === "$" && text[i + 1] === "(") { const e = matchClose(i + 2, "(", ")"); wordSubs.push(text.slice(i + 2, e)); plain = false; i = e; continue; }
+      if (c === "$" && text[i + 1] === "{") { const e = matchClose(i + 2, "{", "}"); const inner = text.slice(i + 2, e); if (/\$\(|`/.test(inner)) wordSubs.push(inner); t += "${" + inner + "}"; plain = false; i = e; continue; }
+      if (c === "`") { const e = text.indexOf("`", i + 1); if (e < 0) fail("backtick"); wordSubs.push(text.slice(i + 1, e)); plain = false; i = e; continue; }
+      if (c === "$") plain = false;
       t += c;
     }
     return { w: { text: t, plain }, next: i };
@@ -130,10 +162,11 @@ function parse(text: string, depth: number): Stage[] {
   for (let i = 0; i < text.length; i++) {
     if (--fuel < 0) fail("parse budget used up", "unparsed");
     const c = text[i]!;
+    AT = i;
     if (c === "\\") {
       if (text[i + 1] === "\n") { i++; continue; }
       if (i + 1 >= text.length) fail("trailing backslash", "unparsed");
-      add(text[i + 1]!, false); i++; continue;
+      add(text[i + 1]!); i++; continue;
     }
     if (c === "'") { const e = text.indexOf("'", i + 1); if (e < 0) fail("quote"); cur ??= { text: "", plain: true }; cur.text += text.slice(i + 1, e); i = e; continue; }
     if (c === '"') {
@@ -141,7 +174,7 @@ function parse(text: string, depth: number): Stage[] {
       let j = i + 1;
       for (; j < text.length && text[j] !== '"'; j++) {
         if (--fuel < 0) fail("parse budget used up", "unparsed");
-        if (text[j] === "\\") { cur.plain = false; cur.text += text[j + 1] ?? ""; j++; continue; }
+        if (text[j] === "\\") { cur.text += text[j + 1] ?? ""; j++; continue; }
         if (text[j] === "$" && text[j + 1] === "(") { const e = matchClose(j + 2, "(", ")"); st.subs.push(text.slice(j + 2, e)); cur.plain = false; j = e; continue; }
         if (text[j] === "`") { const e = text.indexOf("`", j + 1); if (e < 0) fail("backtick"); st.subs.push(text.slice(j + 1, e)); cur.plain = false; j = e; continue; }
         if (text[j] === "$") cur.plain = false;
@@ -171,8 +204,25 @@ function parse(text: string, depth: number): Stage[] {
       add("$", false); continue;
     }
     if ((c === "<" || c === ">") && text[i + 1] === "(") { const e = matchClose(i + 2, "(", ")"); st.subs.push(text.slice(i + 2, e)); add("", false); i = e; continue; }
+    if (c === "[" && text[i + 1] === "[" && !cur && st.words.length === 0 && (text[i + 2] === " " || text[i + 2] === "\t")) {
+      // `[[ cond ]]`: parens and operators inside are not shell syntax; only an expansion in it runs anything
+      let e = i + 2;
+      for (;;) {
+        e = text.indexOf("]]", e);
+        if (e < 0) fail("[[ is not closed");
+        if (/\s/.test(text[e - 1] ?? "") && (e + 2 >= text.length || /[\s;&|)]/.test(text[e + 2]!))) break;
+        e += 2;
+      }
+      for (const sub of extractSubs(text.slice(i + 2, e), () => { if (--fuel < 0) fail("parse budget used up", "unparsed"); })) st.subs.push(sub);
+      st.words.push({ text: "[[", plain: true }); i = e + 1; continue;
+    }
     if (c === "(") {
       if (!cur && st.words.length && st.words[st.words.length - 1]!.text === "in") { endStage(); i = matchClose(i + 1, "(", ")"); continue; } // case (pattern)
+      if (cur && !st.words.length && /^[A-Za-z_][A-Za-z0-9_]*\+?=$/.test(cur.text)) { // arr=(a b $(cmd))
+        const e = matchClose(i + 1, "(", ")");
+        for (const sub of extractSubs(text.slice(i + 1, e), () => { if (--fuel < 0) fail("parse budget used up", "unparsed"); })) st.subs.push(sub);
+        cur.text += "(" + text.slice(i + 1, e) + ")"; cur.plain = false; i = e; continue;
+      }
       if (cur || st.words.length) {
         // `name() { ... }` defines a function: drop the name, the body is read as the stages that follow.
         let j = i + 1; while (text[j] === " " || text[j] === "\t") j++;
@@ -205,8 +255,9 @@ function parse(text: string, depth: number): Stage[] {
       if (text[j] === ">" || text[j] === "|" || text[j] === "&") { op += text[j]; j++; }
       if (op === ">&" || op === "<&") { const { w, next } = readWordAt(j); if (!/^[0-9-]+$/.test(w.text)) st.writes.push(w.text); i = next - 1; continue; }
       const { w, next } = readWordAt(j);
-      if (!w.text) fail("redirect target", "unparsed");
-      if (c === ">") { if (w.text !== "/dev/null" && w.plain) st.writes.push(w.text); } else st.reads.push(w.text);
+      st.subs.push(...wordSubs);
+      if (!w.text && wordSubs.length === 0) fail("redirect target", "unparsed");
+      if (c === ">") { if (w.text && w.text !== "/dev/null" && w.plain) st.writes.push(w.text); } else st.reads.push(w.text);
       i = next - 1; continue;
     }
     if (c === "&" && text[i + 1] === ">") { endWord(); const { w, next } = readWordAt(i + 2); if (w.text !== "/dev/null" && w.plain) st.writes.push(w.text); i = next - 1; continue; }
@@ -328,14 +379,26 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
   try {
     stages = parse(text, depth);
   } catch (e) {
-    if (e instanceof ParseFail) { if (e.cls) hits.push({ cls: e.cls, why: e.message }); return; }
-    throw e;
+    if (!(e instanceof ParseFail)) throw e;
+    if (e.cls) { hits.push({ cls: e.cls, why: e.message }); return; }
+    // A syntax error the scan cannot read. On one line the shell runs nothing (and the JSON-escaped quotes of binding.gyp
+    // bodies land here), so nothing is reported. In a body of several lines the shell runs the complete lines before the
+    // error, so those are read; the lines from the error on are not.
+    const cut = text.lastIndexOf("\n", e.pos);
+    if (cut > 0) walk(text.slice(0, cut), depth, hits, parent);
+    return;
   }
   const hit = (cls: ClassName, why: string) => { if (!hits.some((h) => h.cls === cls && h.why === why)) hits.push({ cls, why }); };
   let cwd = parent.cwd;
   const copyTargets = parent.written;
   const nested = (t: string) => walk(t, depth + 1, hits, { cwd, written: copyTargets });
-  const written = (f: string) => copyTargets.has(f.replace(/^\.\//, ""));
+  const written = (f: string) => {
+    const n = f.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+    if (copyTargets.has(n)) return true;
+    for (const t of copyTargets) if (n.startsWith(t + "/")) return true; // inside a directory the body wrote (cp -r t lib)
+    const entries = n === "." || n === "" ? ["index.js", "index.cjs", "index.mjs", "package.json"] : [n + ".js", n + ".cjs", n + ".mjs", n + ".json", n + "/index.js", n + "/index.cjs", n + "/index.mjs", n + "/package.json"];
+    return entries.some((e) => copyTargets.has(e)); // node b -> b.js, node . -> index.js
+  };
   const envHit = () => hit("env-assign", "a variable that loads code or config (NODE_OPTIONS, npm_config_*, BASH_ENV, LD_PRELOAD ...)");
   let later: string[] = [];
   for (const st of stages) {
@@ -444,11 +507,17 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
             if (VALUE_AFTER.has(a.text)) k++;
             continue;
           }
-          if (INLINE.test(a.text)) { if (!NO_PROGRAM.test(a.text)) inline = true; else noProgram = true; break; } // inline code: read by the existing scan
+          if (INLINE.test(a.text)) { // inline code is read by the existing scan; later flags still load code (node -e 1 -r x, perl -e 1 -MX)
+            inline = true;
+            if (kind === "python") break; // after python -c CODE the rest is sys.argv
+            if (rest[k + 1] && !rest[k + 1]!.text.startsWith("-")) k++;
+            continue;
+          }
           if (NO_PROGRAM.test(a.text)) noProgram = true;
           else if (valued.includes(a.text)) k++;
           continue;
         }
+        if (inline) break; // the words after inline code are its arguments
         if (!a.plain && k < rest.length - 1 && /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$|^\$[@*]$/.test(a.text)) { hit("interp-flag", `${b} a bare variable before the script (it can hold flags)`); continue; }
         file = a; break;
       }
