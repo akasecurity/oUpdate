@@ -3173,7 +3173,9 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
   }
   noteHookArgCwd(ctx, token);
   if (ctx.hold) return;
-  const key = findKey(ctx, normalize(token));
+  // The script resolves from the directory an earlier cd moved to first.
+  const rel = ctx.cwd && !token.startsWith("/") ? joinDir(ctx.cwd, token) : undefined;
+  const key = (rel !== undefined ? findKey(ctx, normalize(rel)) : undefined) ?? findKey(ctx, normalize(token));
   if (!key) {
     // A script this package does not hold: what it runs is not known.
     widenAll(ctx);

