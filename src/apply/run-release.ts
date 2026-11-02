@@ -3,7 +3,7 @@
 
 import { dirname, join } from "node:path";
 import { kegHolders, lsofMaps, type Holder, type KegEnv } from "./kegs.ts";
-import { matchOwner, ownerDir, ownerFiles, ownerOps, type OwnerWaiterEnv, type QueuedOwner } from "./owner-waiter.ts";
+import { matchOwner, ownerDir, ownerFiles, ownerOps, parsePrint, type OwnerWaiterEnv, type QueuedOwner } from "./owner-waiter.ts";
 import { asUser, brewView, resume, findCheck, holdFailed, pendingPath, readHold, runHook, savePending, type PendingCheck } from "./release-checks.ts";
 import { restartUpgraded } from "./restarts.ts";
 import { type RunCtx, last, named } from "./run-ctx.ts";
@@ -180,7 +180,8 @@ export async function releaseChecksSection(rt: RunCtx) {
         },
         scan: (expect) => kegPids(rt, p.rack, expect),
       });
-      if (d.wait) await ownerWait(`its owner could not be restarted yet (${d.waitWhy ?? "busy"})`, d.waitWhy ?? "busy");
+      if (d.wait && d.failed && d.note) b.rcNotes.push(d.note);
+      if (d.wait) await ownerWait(`its owner could not be ${d.failed ? "restarted" : "restarted yet"} (${d.waitWhy ?? "busy"})`, d.waitWhy ?? "busy");
       else if (d.note) b.rcNotes.push(d.note);
       if (d.failed) {
         b.failed.push(d.failed);
@@ -282,6 +283,22 @@ async function ownerJobs(rt: RunCtx, jobs: QueuedOwner[]): Promise<{ kind: "ok" 
     else if (r.kind === "busy" && kind === "ok") kind = "busy";
   }
   return { kind, note: lines.join(", ") };
+}
+
+/**
+ * The release check's named owners (launchd labels) that are not running now: `launchctl print` of the
+ * job (the probe the owner restart uses) names no pid. Asked before the upgrade, so a formula whose
+ * check could never run is not upgraded at all.
+ */
+export async function ownersNotRunning(rt: RunCtx, labels: readonly string[]): Promise<string[]> {
+  const { x, fs } = rt;
+  const down: string[] = [];
+  for (const label of labels) {
+    const where = (await fs.exists(`/Library/LaunchDaemons/${label}.plist`)) ? "system" : (await fs.exists(`${fs.home}/Library/LaunchAgents/${label}.plist`)) ? `gui/${fs.uid}` : "system";
+    const r = await x(["launchctl", "print", `${where}/${label}`]);
+    if (r.rc !== 0 || !parsePrint(r.out).pid) down.push(label);
+  }
+  return down;
 }
 
 /**

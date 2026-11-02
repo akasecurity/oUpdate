@@ -836,6 +836,28 @@ function installedRanges(side: DepFields): { ranges: Map<string, string[]>; bad:
   return { ranges, bad };
 }
 
+// The package a key installs: itself, or the target of its `npm:` alias. undefined when unread.
+function installedName(side: DepFields, key: string): string | undefined {
+  const spec = winningSpec(side, key);
+  if (spec === undefined || spec === "unread") return undefined;
+  if (/^npm:/i.test(spec)) return parseAlias(spec)?.name;
+  return key;
+}
+
+// Keys on both sides whose installed package changed (an alias swap). The new package is a new
+// name to the floor rule, so the key is what ties the two together.
+function retargetedKeys(before: DepFields, after: DepFields): string[] {
+  const afterKeys = new Set(edgeKeys(after));
+  const out: string[] = [];
+  for (const key of edgeKeys(before)) {
+    if (!afterKeys.has(key)) continue;
+    const a = installedName(before, key);
+    const b = installedName(after, key);
+    if (a !== undefined && b !== undefined && a !== b) out.push(key);
+  }
+  return out;
+}
+
 function sameList(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
   const as = [...a].sort();
@@ -868,14 +890,19 @@ function floorSpan(ranges: string[]): { min: Floor; max: Floor } | "unread" {
 // Each key keeps the spec from its winning field. Keys that install the same
 // package all stay in the list. A lower minimum or a lower maximum holds, so
 // dropping one of two copies holds. A changed spec whose floor cannot be read
-// holds too. A new name, a rise, and a removal do not.
-function dependencyDowngrades(oldFiles: FileMap, newFiles: FileMap): string[] {
+// holds too. A key that now installs a different package (alias swap) holds.
+// A new name, a rise, and a removal do not: a new name has no floor to fall from,
+// and the surface scan and model review read what it is (OUP-57).
+export function dependencyDowngrades(oldFiles: FileMap, newFiles: FileMap): string[] {
   const names: string[] = [];
   const paths = [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter((p) => p.split("/").length <= 2 && basename(p) === "package.json" && !p.split("/").includes("node_modules"));
   for (const p of paths) {
-    const before = installedRanges(depFields(oldFiles.get(p)));
-    const after = installedRanges(depFields(newFiles.get(p)));
+    const oldSide = depFields(oldFiles.get(p));
+    const newSide = depFields(newFiles.get(p));
+    const before = installedRanges(oldSide);
+    const after = installedRanges(newSide);
     if (!sameList(before.bad, after.bad)) names.push("unreadable");
+    for (const key of retargetedKeys(oldSide, newSide)) names.push(`${key} (alias target changed)`);
     for (const [name, next] of after.ranges) {
       const prev = before.ranges.get(name);
       if (!prev) continue;
