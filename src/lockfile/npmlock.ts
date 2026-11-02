@@ -49,7 +49,8 @@ function addDescriptors(packages: Record<string, Entry>, byKey: Map<string, Lock
         const target = typeof range === "string" ? byKey.get(resolveDep(packages, key, name) ?? "") : undefined;
         if (!target) continue;
         const set = sets.get(target) ?? new Set<string>();
-        set.add(`${name}@${range}`);
+        // A workspace folder's ranges carry the folder, so two workspaces asking the same range stay separate.
+        set.add(key === "" || key.includes(NM) ? `${name}@${range}` : `${name}@${range} [${key}]`);
         sets.set(target, set);
       }
     }

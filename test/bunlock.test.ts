@@ -130,7 +130,7 @@ test("a workspace's dependencies resolve from the workspace's own nested copy be
     }
   }`;
   const got = Object.fromEntries(parseBunLock(lock).map((p) => [`${p.name}@${p.version}`, p.descriptors]));
-  expect(got).toEqual({ "dep@1.0.0": ["dep@^1.0.0"], "dep@2.0.0": ["dep@^2.0.0"] });
+  expect(got).toEqual({ "dep@1.0.0": ["dep@^1.0.0"], "dep@2.0.0": ["dep@^2.0.0 [packages/a]"] });
 });
 
 test("a workspace folder named like a package does not take that package's nested copy", () => {
@@ -148,6 +148,6 @@ test("a workspace folder named like a package does not take that package's neste
     }
   }`;
   const got = Object.fromEntries(parseBunLock(lock).map((p) => [`${p.name}@${p.version}`, p.descriptors]));
-  expect(got["json5@2.2.3"]).toEqual(["json5@^2.0.0"]);
+  expect(got["json5@2.2.3"]).toEqual(["json5@^2.0.0 [config]"]);
   expect(got["json5@1.0.2"]).toEqual(["json5@^1.0.0"]);
 });
