@@ -412,6 +412,10 @@ describe("shell classes: review of d2f6ddd", () => {
   test("node options with a separate value", () => {
     for (const f of ["--cpu-prof-dir x", "--heap-prof-dir x", "--report-filename x", "--max-http-header-size 9"]) expect(classes(`cat t > b.js && node ${f} b.js`), f).toEqual(["writer-exec"]);
   });
+  test("an unknown node option followed by a non-script word and another word hits", () => {
+    expect(classes("node --some-new-flag x b.js")).toEqual(F);
+    for (const c of ["node --no-warnings a.js", "node --some-new-flag b.js", "node --some-new-flag=x b.js", "node --some-new-flag x", "node --cpu-prof-dir x b.js", "node --f0 1 --f1 1 -e 1"]) expect(classes(c), c).toEqual([]);
+  });
   test("more loaders: node config and openssl files, and their variables", () => {
     expect(classes("node --experimental-config-file=./c.json a.js")).toEqual(F);
     expect(classes("node --openssl-config=./o.cnf a.js")).toEqual(F);

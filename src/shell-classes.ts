@@ -11,8 +11,9 @@
 //   cd-relative   a relative script, shell file or path command run after a `cd`
 //   writer-exec   a file this body wrote by a redirect, cp/mv/ln/install, tee, curl -o or wget -O is then run: by name,
 //                 by the name node resolves (`node b` for b.js, `node .` for index.js), or from inside a directory the
-//                 body wrote (`cp -r t lib && node lib/x.js`). Not covered: tar/unzip/patch/dd output (the files they
-//                 write are unknown; the existing scan holds those)
+//                 body wrote (`cp -r t lib && node lib/x.js`), or edited in place (`sed -i`, `perl -pi`, `ruby -i`). Not covered:
+//                 tar/unzip/patch/dd output and `ed`/`ex`/`awk -i inplace` edits (the files they write are unknown; the
+//                 existing scan holds those)
 //   program-file  `sed -f`, `awk -f`, `awk` with system/getline, `make -f`: the program is in a file
 //   env-assign    a NODE_OPTIONS, NODE_PATH, npm_config_*, BASH_ENV, PERL5OPT, RUBYOPT, PYTHONPATH, PYTHONSTARTUP,
 //                 LD_PRELOAD or DYLD_INSERT_LIBRARIES assignment (leading, after `env`, or `export`)
@@ -656,6 +657,10 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
           }
           if (NO_PROGRAM.test(a.text) || (kind === "php" && NO_PROGRAM_PHP.test(a.text))) noProgram = true;
           else if (valued.includes(a.text)) k++;
+          else if (kind === "node" && a.text.startsWith("--") && !a.text.includes("=") && rest[k + 1] && !rest[k + 1]!.text.startsWith("-") && k + 2 < rest.length && !rest.some((x) => INLINE.test(x.text)) && !/\.(?:[cm]?[jt]s|json)$|\//.test(rest[k + 1]!.text)) {
+            // An option this does not know, followed by a word that is not a script and another word: the first may take the second as its value, and which one is the script is unknown.
+            hit("interp-flag", `${b} ${a.text} with a value this does not know`);
+          }
           continue;
         }
         if (inline) { // the words after inline code are its arguments (the files, for perl -pi / ruby -i)
