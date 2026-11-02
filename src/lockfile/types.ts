@@ -76,9 +76,11 @@ export function npmPrivateRegistry(url: unknown): string | undefined {
 /**
  * The descriptor text for a range a dependent asks for: `name@range`, or `name@range [scope]` for a workspace. Backslash and
  * brackets in the range and scope are escaped, so no range can read as a scope and two different (range, scope) pairs never
- * give the same text.
+ * give the same text. An `@` inside a name (past the scope prefix of `@scope/pkg`) is escaped too, so a name cannot read as
+ * a shorter name plus a range; every valid package name comes out unchanged.
  */
 export function descriptorOf(name: string, range: string, scope = ""): string {
   const esc = (s: string) => s.replace(/[\\[\]]/g, "\\$&");
-  return scope ? `${name}@${esc(range)} [${esc(scope)}]` : `${name}@${esc(range)}`;
+  const n = name.slice(0, 1) + name.slice(1).replace(/[\\@]/g, "\\$&");
+  return scope ? `${n}@${esc(range)} [${esc(scope)}]` : `${n}@${esc(range)}`;
 }

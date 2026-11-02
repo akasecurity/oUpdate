@@ -3,6 +3,7 @@ import { diffLocks } from "../src/lockdiff.ts";
 import { parseBunLock } from "../src/lockfile/bunlock.ts";
 import { parseNpmLock } from "../src/lockfile/npmlock.ts";
 import { parsePnpmLock } from "../src/lockfile/pnpmlock.ts";
+import { descriptorOf } from "../src/lockfile/types.ts";
 
 const h = (n: number) => "sha512-" + Buffer.alloc(64, n).toString("base64");
 
@@ -65,8 +66,6 @@ test("npm: a workspace folder's ranges carry the folder", () => {
   expect(parseNpmLock(lock).find((p) => p.name === "dep")!.descriptors).toEqual(["dep@^1.0.0 [pkgs/a]"]);
 });
 
-import { descriptorOf } from "../src/lockfile/types.ts";
-
 const pnpm = (aVer: string, bVer: string, aDir = "packages/a") => `lockfileVersion: '9.0'
 importers:
   ${aDir}:
@@ -122,9 +121,11 @@ test("moving a workspace folder alone is no change", () => {
   expect(moved.filter((c) => c.name === "dep")).toEqual([]);
 });
 
-test("a descriptor is injective in name, range and scope", () => {
+test("a descriptor does not collide across the name, range and scope splits tried here", () => {
   expect(descriptorOf("d", "^1 [x", "y")).not.toBe(descriptorOf("d", "^1", "x [y"));
   expect(descriptorOf("d", "^1.0.0 [pkgs/a]")).not.toBe(descriptorOf("d", "^1.0.0", "pkgs/a"));
   expect(descriptorOf("d", "^1", "a")).toBe("d@^1 [a]");
   expect(descriptorOf("d", "^1")).toBe("d@^1");
+  expect(descriptorOf("a@b", "c")).not.toBe(descriptorOf("a", "b@c"));
+  expect(descriptorOf("@s/p", "^1")).toBe("@s/p@^1");
 });
