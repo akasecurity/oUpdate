@@ -91,3 +91,23 @@ test("a range that loses one same-version origin to another is still a swap", ()
   expect(diffLocks([Y, X], [{ ...Y }]).length).toBe(1);
   expect(diffLocks([Y, X], [{ ...Y }, { ...X }])).toEqual([]);
 });
+
+test("a range that stops resolving to one of its several versions is a swap", () => {
+  const a = [
+    { name: "dep", version: "1.0.0", descriptors: ["dep@^1"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@^1", "dep@~1.5"] },
+  ];
+  const b = [
+    { name: "dep", version: "1.0.0", descriptors: ["dep@^1"] },
+    { name: "dep", version: "1.5.0", descriptors: ["dep@~1.5"] },
+  ];
+  expect(diffLocks(a, b).length).toBe(1);
+});
+
+test("the swap report names the origin the range dropped", () => {
+  const mk = (v: string, s: string) => ({ name: "foo", version: v, source: `https://h.example/${s}`, digest: `sha512-${s}`, descriptors: ["foo@^1"] });
+  const [Z, Y, X] = [mk("1.5.0", "Z"), mk("1.0.0", "Y"), mk("1.0.0", "X")];
+  const d = diffLocks([Z, Y, X], [Z, Y]);
+  expect(d.length).toBeGreaterThan(0);
+  expect(d.every((c) => c.swapped!.from.includes("/X"))).toBe(true);
+});

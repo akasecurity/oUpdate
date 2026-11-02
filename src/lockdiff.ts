@@ -61,17 +61,17 @@ export function diffLocks(oldPkgs: LockedPackage[], newPkgs: LockedPackage[]): L
   for (const n of newPkgs) for (const d of n.descriptors ?? []) newTargetFull.set(d, (newTargetFull.get(d) ?? new Set<string>()).add(full(n)));
   for (const p of newPkgs) {
     if (oldFull.has(full(p))) {
-      // Same package, but a descriptor that used to resolve elsewhere now resolves here.
+      // Same package, but a range that used to resolve elsewhere now resolves here, or no longer resolves to an entry it used to.
+      let was: LockedPackage | undefined;
       const d = (p.descriptors ?? []).find((x) => {
         const olds = oldTarget.get(x);
         if (!olds) return false;
-        if (!olds.some((o) => full(o) === full(p))) return true;
-        // The range also resolved to another origin of this same name@version that the new lock no longer gives it.
-        return olds.some((o) => key(o) === key(p) && full(o) !== full(p) && !newTargetFull.get(x)?.has(full(o)));
+        was = olds.find((o) => !newTargetFull.get(x)?.has(full(o))) ?? (olds.some((o) => full(o) === full(p)) ? undefined : olds[0]);
+        return was !== undefined;
       });
-      if (d !== undefined) {
+      if (d !== undefined && was !== undefined) {
         const shown = (q: LockedPackage) => `${mask(d)} -> ${key(q)} ${where(q)}`.trimEnd();
-        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: shown(oldTarget.get(d)!.find((o) => full(o) !== full(p)) ?? oldTarget.get(d)![0]!), to: shown(p) } });
+        out.push({ name: p.name, from: p.version, to: p.version, swapped: { from: shown(was), to: shown(p) } });
       }
       continue;
     }
