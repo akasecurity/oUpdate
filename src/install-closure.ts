@@ -3317,8 +3317,12 @@ function moves(argv: string[], dirs: string[]): boolean {
     const a = argv[k]!;
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) {
       if (SPECIAL_ENV.test(a)) return true;
+    } else if (/^(?:!|then|do|else|elif|if|while|until|\{)$/.test(a)) {
+      // a shell reserved word before the command
     } else if (wrapped && a.startsWith("-")) {
-      // an option of env or time
+      // An option of env or time. `env -C dir` / `--chdir=dir` runs the command in another directory.
+      if (/^(?:-C|--chdir)$/.test(a) && argv[k + 1]) dirs.push(argv[k + 1]!);
+      if (/^(?:-C.+|-C|--chdir(?:=.*)?)$/.test(a)) return true;
     } else if (WRAPPERS.has(runnerName(a.replace(/^\\+/, "")))) wrapped = true;
     else break;
     k++;
@@ -3361,9 +3365,31 @@ function moves(argv: string[], dirs: string[]): boolean {
     // `-c` may sit anywhere among the options, after options that take a value (`-o pipefail`, `--rcfile x`).
     for (let j = 0; j < rest.length && (rest[j]!.startsWith("-") || rest[j]!.startsWith("+")); j++) {
       const o = rest[j]!;
-      if (/^-[A-Za-z]*c[A-Za-z]*$/.test(o)) return rest[j + 1] === undefined || movesRun(rest[j + 1]!, dirs);
+      if (/^-[A-Za-z]*c[A-Za-z]*$/.test(o)) {
+        // POSIX allows options between -c and the string (`sh -c -e '...'`, `bash -c -- '...'`, `sh -c -o pipefail '...'`).
+        let n = j + 1;
+        while (n < rest.length && (rest[n]!.startsWith("-") || rest[n]!.startsWith("+"))) {
+          if (rest[n] === "--") {
+            n++;
+            break;
+          }
+          n += /^[-+][A-Za-z]*[oO]$/.test(rest[n]!) ? 2 : 1;
+        }
+        return rest[n] === undefined || movesRun(rest[n]!, dirs);
+      }
       if (/^[-+][A-Za-z]*[oO]$/.test(o) || o === "--rcfile" || o === "--init-file") j++;
     }
+  }
+  // A command word not modeled here (nice, timeout, eval, xargs, a wrapper with value options) may run what
+  // follows it: read the first later cd, runner or workspace-tool word as the command, and any later word that
+  // holds a whole command line (`env -S '...'`, `eval '...'`) as a body. `tar -C dir` and `rm -rf` have none.
+  if (bin !== "echo" && bin !== "printf") {
+    const n = rest.findIndex((t) => {
+      const b = runnerName(t.replace(/^\\+/, ""));
+      return /^(?:cd|pushd|popd)$/.test(b) || RUNNERS.has(b) || WORKSPACE_TOOLS.has(b);
+    });
+    if (n >= 0 && moves(rest.slice(n), dirs)) return true;
+    if (rest.some((t) => /\s/.test(t) && movesRun(t, dirs))) return true;
   }
   return false;
 }
@@ -3388,9 +3414,14 @@ function execMoves(rest: string[], dirs: string[]): boolean {
 // A body is split into commands outside quotes, at `;`, `&`, `|`, newlines, parentheses and backticks.
 function movesRun(body: string, dirs: string[] = []): boolean {
   let hit = false;
+  const fed: string[] = [];
   for (const seg of shellSegments(body)) {
     const w = words(seg).filter((t) => !/^\d*[<>]/.test(t));
     if (moves(w, dirs)) hit = true;
+    // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
+    const b = runnerName((w[0] ?? "").replace(/^\\+/, ""));
+    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(b) && w.slice(1).every((t) => t.startsWith("-") || t.startsWith("+")) && fed.some((t) => movesRun(t, dirs))) hit = true;
+    fed.push(...w.slice(1).filter((t) => /\s/.test(t)));
   }
   return hit;
 }
@@ -3398,10 +3429,14 @@ function movesRun(body: string, dirs: string[] = []): boolean {
 // Extra arguments given to a package script reach the commands in its body: `npm run go -- -w sub` with
 // `go: "npm run build"` runs `npm run build -w sub`. When the body names a runner or workspace tool, widen.
 function scriptArgsMove(ctx: Ctx, argv: string[]): boolean {
-  const k = argv.findIndex((a) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(a));
+  const k = argv.findIndex((a) => RUNNERS.has(runnerName(a.replace(/^\\+/, ""))));
   if (k < 0) return false;
-  const bin = runnerName(argv[k]!);
-  if (bin !== "npm" && bin !== "yarn" && bin !== "pnpm" && bin !== "bun") return false;
+  const bin = runnerName(argv[k]!.replace(/^\\+/, ""));
+  if (bin === "npx" || bin === "bunx" || bin === "corepack") {
+    let n = k + 1;
+    while (n < argv.length && argv[n]!.startsWith("-")) n++;
+    return n < argv.length && scriptArgsMove(ctx, argv.slice(n));
+  }
   const rest = argv.slice(k + 1).filter((a) => !BOOL_FLAGS.has(a));
   let n = rest.findIndex((a) => !a.startsWith("-"));
   if (n < 0) return false;

