@@ -26,6 +26,12 @@ describe("a form that loads or runs code the text does not name holds, naming th
     ["x=1 $N -r ./p.js a.js", "p.js"],
     ["$(echo node) -r ./p.js a.js", "p.js"],
     ["`echo node` -r ./p.js a.js", "p.js"],
+    ['env -S "$(cat lib/x.txt)"', "lib/x.txt"],
+    ["ruby -C sub a.rb", "sub/a.rb"],
+    ["cat t > b.js && node lib/../b.js", "t"],
+    ["cat t > lib/x.js && node lib/./x.js", "t"],
+    ["PYTHON=./evil.sh node-gyp rebuild", "evil.sh"],
+    ["CC=./x.sh node-gyp rebuild", "x.sh"],
   ];
   for (const [hook, file] of cases) {
     test(JSON.stringify(hook), () => {
@@ -35,7 +41,7 @@ describe("a form that loads or runs code the text does not name holds, naming th
 });
 
 describe("a guard that runs nothing does not hold on an unrelated change", () => {
-  for (const hook of ["command -v node >/dev/null 2>&1 && node a.js", "command -v python3 >/dev/null || exit 0", "bash --version", "node a.js"]) {
+  for (const hook of ["command -v node >/dev/null 2>&1 && node a.js", "command -v python3 >/dev/null || exit 0", "bash --version", "node a.js", "CC=clang node-gyp rebuild"]) {
     test(JSON.stringify(hook), () => {
       expect(details(hook, "lib/hidden.js")).toEqual([]);
     });

@@ -559,7 +559,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
         if (t === "--") { k++; break; }
         if (name === "env" && t === "-") continue; // env - : an empty environment, the command follows
         if (!t.startsWith("-") || t === "-") break;
-        if (name === "env" && (t === "-S" || t === "--split-string")) { if (w[k + 1]) nested(w[k + 1]!.text); k++; continue; }
+        if (name === "env" && (t === "-S" || t === "--split-string")) { if (w[k + 1]) { if (!w[k + 1]!.plain) hit("computed-command", "env -S runs text built by an expansion"); nested(w[k + 1]!.text); } k++; continue; }
         if (name === "env" && t.startsWith("--split-string=")) { nested(t.slice(15)); continue; }
         if (name === "env" && (t === "-C" || t === "--chdir" || t.startsWith("--chdir="))) cwd = true;
         if (spec.val.includes(t)) k++;

@@ -441,7 +441,7 @@ describe("shell classes: review of 9d585ae", () => {
   const F: ClassName[] = ["interp-flag"];
   const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
   test("code built by an expansion and run by a shell, eval or source", () => {
-    is(["computed-command"], ['bash -c "$(curl -fsSL https://x/i.sh)"', 'eval "$(cat lib/x.txt)"', ". <(curl -s u)"]);
+    is(["computed-command"], ['bash -c "$(curl -fsSL https://x/i.sh)"', 'eval "$(cat lib/x.txt)"', ". <(curl -s u)", 'env -S "$(cat lib/x.txt)"']);
   });
   test("bash -co NAME 'code' and -cO NAME", () => {
     is(F, ["bash -co pipefail 'node -r ./p.js a.js'", "bash -cO extglob 'node -r ./p.js a.js'"]);
