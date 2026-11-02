@@ -2865,8 +2865,11 @@ function noteHookArg(ctx: Ctx, token: string): void {
 // its own path.
 function widenAll(ctx: Ctx): void {
   for (const [logical, key] of ctx.logical) {
-    if (isManifest(logical) && !logical.includes("/")) continue;
-    if (omitInert(ctx, logical)) continue;
+    if (isManifest(logical)) {
+      // A run that lands in another directory has left this package's layout: a manifest under tests/ or
+      // docs/ is a package like any other, so the inert names do not apply to it.
+      if (!logical.includes("/")) continue;
+    } else if (omitInert(ctx, logical)) continue;
     ctx.files.add(key);
     if (ctx.fromGyp) ctx.gypFiles.add(key);
   }
