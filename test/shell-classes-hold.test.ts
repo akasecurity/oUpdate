@@ -47,3 +47,15 @@ describe("a guard that runs nothing does not hold on an unrelated change", () =>
     });
   }
 });
+
+describe("a substitution that quotes a quote does not hide the command after it", () => {
+  const head = `x=$(echo "$(printf '"')")`;
+  const cases: [string, string][] = [["R=sh; $R evil.sh", "evil.sh"], ["${RUNNER:-sh} evil.sh", "evil.sh"], ["CC=$PWD/lib/x.sh node-gyp rebuild", "lib/x.sh"]];
+  for (const [t, file] of cases) {
+    for (const sep of ["; ", "\n"]) {
+      test(JSON.stringify(head + sep + t), () => {
+        expect(details(head + sep + t, file)).toContain(`file ${file}`);
+      });
+    }
+  }
+});
