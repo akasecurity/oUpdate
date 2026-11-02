@@ -395,10 +395,10 @@ const PM = /^(?:npm|yarn|pnpm|bun|npx|pnpx|bunx|corepack)$/;
 // (`python3 -Bm pkg`, `perl -wMFoo`, `ruby -wrfoo`), so the letter classes match inside a cluster.
 const LOADS: Record<string, RegExp> = {
   node: /^(?:-r|--require|--import|--loader|--experimental-loader|--env-file|--env-file-if-exists|--run|--preload|--test|--snapshot-blob|--experimental-config-file|--experimental-default-config-file|--openssl-config)(?:=|$)|^-r./,
-  python: /^-[A-Za-z]*m/,
+  python: /^-[BEIOPRSbdiqsuvx]*m/, // -m MODULE; not the value of -W or -X (-Wmodule)
   ruby: /^-[A-Za-z0-9]*[rI]/,
   perl: /^-[A-Za-z]*[MmI]/,
-  php: /^-f$|^-[cz]$|^-d(?:auto_(?:pre|ap)pend_file|extension|zend_extension|include_path)/,
+  php: /^-[cz]$|^-d(?:auto_(?:pre|ap)pend_file|extension|zend_extension|include_path)/,
   lua: /^-l/,
   deno: /^--(?:import-map|config|preload|import|cert|lock)(?:=|$)|^-c$/,
 };
@@ -429,7 +429,7 @@ const TOOL_VAR = /^(?:PYTHON|CC|CXX|CPP|LD|AR|MAKE|SHELL)=(.*)$/; // a compiler,
 function badEnv(t: string): boolean {
   if (BAD_ENV.test(t) || BAD_ENV2.test(t)) return true;
   const tv = TOOL_VAR.exec(t);
-  if (tv) return /\//.test(tv[1]!) && !/^[/~]/.test(tv[1]!) && !/^\$/.test(tv[1]!);
+  if (tv) return /\//.test(tv[1]!) && (!/^[/~]/.test(tv[1]!) && !/^\$(?!\{?PWD\b)/.test(tv[1]!) || /^\$\{?PWD\b/.test(tv[1]!) || tv[1]!.startsWith("\u0001")); // $PWD and a substitution are inside the package or unknown
   const m = /^(PATH|HOME)\+?=([\s\S]*)$/.exec(t);
   if (!m) return false;
   let es = m[2]!.split(":");
@@ -452,8 +452,9 @@ const norm = (f: string) => {
 // `;`, newline and braces, so an `e` inside a pattern with `;` is not seen; a miss there leaves the existing scan. A
 // script over SED_CAP characters is not read and counts as running one (fails closed).
 const SED_CAP = 4000;
-const RE_ADDR = "\\/(?:[^/\\\\]|\\\\.)*\\/[IM]*";
-const ADDR = new RegExp("^(?:\\d+(?:~\\d+)?|\\$|" + RE_ADDR + ")(?:,(?:\\d+|\\$|\\+\\d+|~\\d+|" + RE_ADDR + "))?!?\\s*");
+// A sed address regex: /re/ or \cREc with any delimiter c; `n` is the number of the capture group that holds the delimiter.
+const reAddr = (n: number): string => "(?:\\/(?:[^/\\\\]|\\\\.)*\\/|\\\\([^\\\\\\n])(?:(?!\\" + n + ").)*?\\" + n + ")[IM]*";
+const ADDR = new RegExp("^(?:\\d+(?:~\\d+)?|\\$|" + reAddr(1) + ")(?:,(?:\\d+|\\$|\\+\\d+|~\\d+|" + reAddr(2) + "))?!?\\s*");
 // The files a sed script writes: the `w file` command and the `w` flag of `s///`.
 function sedWrites(script: string): string[] {
   const out: string[] = [];
@@ -492,6 +493,10 @@ interface State { cwd: boolean; written: Set<string> }
 export function flagBody(text: string): Hit[] {
   const hits: Hit[] = [];
   FUEL = LIMITS.fuel;
+  if (text.includes("\u0001")) { // the placeholder this reader puts in a word: a body that holds it cannot be told apart
+    hits.push({ cls: "unparsed", why: "the body holds a control character this reader uses" });
+    return hits;
+  }
   try {
     walk(text, 0, hits, { cwd: false, written: new Set() });
   } catch (e) {
@@ -574,7 +579,11 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0]!.text)) { if (badEnv(w[0]!.text)) envHit(); w = w.slice(1); } // env -- NAME=v cmd: the assignment after -- is the first word
     if (lookup || !w.length) continue;
     const head = w[0]!;
-    if (!head.plain) { hit("computed-command", "the command word is an expansion (a variable, a substitution)"); continue; } // it can name any interpreter
+    if (!head.plain) {
+      // npm's own variables are resolved by the existing scan ($npm_execpath is the npm runner, ${npm_package_config_x} is a value of the manifest)
+      if (!/^\$\{?(?:npm_execpath|npm_node_execpath|npm_package_config_\w+)\}?$/.test(head.text)) hit("computed-command", "the command word is an expansion (a variable, a substitution)");
+      continue;
+    } // it can name any interpreter
     const b = BASE(head.text);
     const args = w.slice(1);
     const stdin = (what: string) => { if (!st.piped || st.heredoc || st.reads.length) hit(st.heredoc ? "heredoc" : "interp-stdin", `${what} reads its program from stdin`); };
@@ -596,19 +605,32 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (b === "cd" || b === "pushd" || b === "popd") { cwd = true; continue; }
     if (b === "make") { if (args.some((a) => badEnv(a.text))) envHit(); if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--(?:file|makefile)(?:=|$)/.test(a.text))) hit("program-file", "make -f"); continue; }
     if (/^(?:awk|gawk|mawk|nawk)$/.test(b)) {
-      const prog = args.find((a) => !a.text.startsWith("-"))?.text ?? ""; // the first operand is the program text (without -f)
+      let prog = ""; // the first operand is the program text (without -f), after the values of -F and -v
+      for (let k = 0; k < args.length; k++) {
+        const t = args[k]!.text;
+        if (t === "-F" || t === "-v" || t === "-W") { k++; continue; }
+        if (t.startsWith("-")) continue;
+        prog = t;
+        break;
+      }
       for (const m of prog.matchAll(/\bprintf?\b[^;}>]*>>?\s*"([^"]+)"/g)) copyTargets.add(norm(m[1]!)); // print > "file" writes a file
       if (args.some((a) => /^-f|^--file/.test(a.text) || /^-[iEl]$|^--(?:include|load|exec)/.test(a.text)) || /\bsystem\s*\(|\bgetline\b|\|\s*"|\|&|@include|@load/.test(prog)) hit("program-file", "awk program file, include or system()");
       continue;
     }
     if (b === "sed") {
-      const inplace = args.some((a) => /^-[A-Za-z]*i|^--in-place/.test(a.text) && !a.text.startsWith("--expression"));
+      // -i takes its suffix attached and -e its script: the letters after them are not flags (sed -ifoo, -nfoo).
+      const sedFlag = (a: string, letter: string): boolean => {
+        if (!a.startsWith("-") || a.startsWith("--")) return false;
+        for (const c of a.slice(1)) { if (c === letter) return true; if (c === "i" || c === "e" || c === "s" || c === "l") return false; }
+        return false;
+      };
+      const inplace = args.some((a) => sedFlag(a.text, "i") || /^--in-place/.test(a.text));
       if (inplace) { // sed -i rewrites the files it names; they are then run like a written file
         const files = args.filter((a) => !a.text.startsWith("-")).map((a) => a.text);
-        const viaFlag = args.some((a) => /^-[A-Za-z]*[ef]/.test(a.text) || /^--(?:expression|file)/.test(a.text));
+        const viaFlag = args.some((a) => sedFlag(a.text, "e") || sedFlag(a.text, "f") || /^--(?:expression|file)/.test(a.text));
         for (const f of viaFlag ? files : files.slice(1)) copyTargets.add(norm(f));
       }
-      if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--file/.test(a.text))) hit("program-file", "sed -f");
+      if (args.some((a) => sedFlag(a.text, "f") || /^--file/.test(a.text))) hit("program-file", "sed -f");
       else {
         const scripts: string[] = [];
         for (let k = 0; k < args.length; k++) {
@@ -616,7 +638,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
           if (/^-[A-Za-z]*e$/.test(t) || t === "--expression") { if (args[k + 1]) scripts.push(args[k + 1]!.text); k++; }
           else if (/^-[A-Za-z]*e./.test(t) && !t.startsWith("--")) scripts.push(t.replace(/^-[A-Za-z]*?e/, ""));
           else if (t.startsWith("--expression=")) scripts.push(t.slice(13));
-          else if (!t.startsWith("-")) scripts.push(t);
+          else if (!t.startsWith("-") && scripts.length === 0) scripts.push(t); // the first operand is the script (the rest are files)
         }
         for (const sc of scripts) for (const f of sedWrites(sc)) copyTargets.add(norm(f));
         if (scripts.some(sedExecs)) hit("program-file", "sed e command or s///e");
@@ -694,6 +716,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
         if (a.text === "-") { stdin(b); inline = true; break; }
         if (a.text.startsWith("-")) {
           if (!a.plain) { hit("interp-flag", `${b} flag is escaped or expanded`); continue; }
+          if (kind === "php" && a.text === "-f" && rest[k + 1]) { file = rest[k + 1]; break; } // php -f file: the script
           if (kind === "php" && a.text === "-d" && rest[k + 1] && PHP_INI.test(rest[k + 1]!.text)) { hit("interp-flag", "php -d " + rest[k + 1]!.text.split("=")[0]); k++; continue; }
           if (loads?.test(a.text)) {
             hit("interp-flag", `${b} ${a.text}`);
