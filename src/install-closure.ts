@@ -3567,7 +3567,7 @@ function movesCore(argv: string[], dirs: string[]): boolean {
 // runners it names are recorded on the context.
 // A file fed to a shell or interpreter (`sh < scripts/x.sh`, `cat scripts/list | xargs node`) is a surface file, and
 // a script that is fed runs as a body, so what it runs is read too; a list names files, which are read.
-function readFed(ctx: Ctx, path: string): void {
+function readFed(ctx: Ctx, path: string, shell = false): void {
   const logical = normalize(path);
   if (!logical || badPath(logical)) return;
   const key = findKey(ctx, logical);
@@ -3587,7 +3587,7 @@ function readFed(ctx: Ctx, path: string): void {
     widenAll(ctx);
     return;
   }
-  if (/\.(?:sh|bash|zsh|ksh|bats)$/i.test(logical) || /^#!.*\b(?:sh|bash|zsh|dash|ksh)\b/.test(text)) {
+  if (shell || /\.(?:sh|bash|zsh|ksh|bats)$/i.test(logical) || /^#!.*\b(?:sh|bash|zsh|dash|ksh)\b/.test(text)) {
     ctx.depth++;
     runBody(ctx, text);
     ctx.depth--;
@@ -3600,7 +3600,7 @@ function noteBody(ctx: Ctx, body: string): boolean {
   const dirs: string[] = [];
   const hit = movesRun(body, dirs);
   for (const d of dirs) {
-    if (d.startsWith(FED)) readFed(ctx, d.slice(1));
+    if (isFedMark(d)) readFed(ctx, d.slice(1), d.startsWith(FEDSH));
     else if (d === UNSURE) ctx.widenInert = true;
     else {
       const n = normalize(d);
@@ -3692,6 +3692,12 @@ function guarded<T>(dirs: string[] | undefined, over: T, f: () => T): T {
   }
   // One step budget per top-level scan, shared by every nested level.
   if (moveDepth === 0) scanSteps = 0;
+  // Every nested scan spends from the same budget; past it the scan is unsure.
+  scanSteps += 50;
+  if (scanSteps > SUB_STEPS) {
+    dirs?.push(UNSURE);
+    return over;
+  }
   moveDepth++;
   try {
     return f();
@@ -3727,7 +3733,7 @@ function pushDir(dirs: string[], d: string): void {
 }
 // The directory of a file that feeds a shell or interpreter: it may sit under test/ or docs/, so its directory is
 // read as moved into. A name with characters outside a plain path is unsure.
-function fedDir(dirs: string[], f: string): void {
+function fedDir(dirs: string[], f: string, shell = false): void {
   if (f === "" || f === "-" || f.startsWith("/dev/")) return;
   if (!/^[A-Za-z0-9._/-]+$/.test(f) || f.startsWith("/")) {
     dirs.push(UNSURE);
@@ -3737,10 +3743,13 @@ function fedDir(dirs: string[], f: string): void {
   // marker that the file is read and, when it is a script, run as a body.
   const k = f.lastIndexOf("/");
   if (k > 0) dirs.push(f.slice(0, k));
-  dirs.push(f, FED + f);
+  dirs.push(f, (shell ? FEDSH : FED) + f);
 }
 // A directory-list entry that names a file fed to a shell or interpreter.
 const FED = "\u0001";
+// The same, for a file fed to a shell: whatever its name, it is a shell body.
+const FEDSH = "\u0002";
+const isFedMark = (d: string): boolean => d.startsWith(FED) || d.startsWith(FEDSH);
 
 // A directory entry that means the scan was not sure: the widen then reads every file, inert paths included.
 const UNSURE = "\u0000";
@@ -4091,18 +4100,75 @@ function readsStdin(bin: string, w: string[]): boolean {
   return true;
 }
 
+// A body with its terminated heredoc bodies cut out, and those bodies keyed by the offset of the end of the line that
+// opened them. A heredoc with no terminator, or past the cap, is left in place and the result is unsure.
+function stripHeredocs(body: string): { text: string; docs: Map<number, string[]>; unsure: boolean } {
+  const docs = new Map<number, string[]>();
+  if (!/<<(?!<)/.test(body)) return { text: body, docs, unsure: false };
+  const lines = body.split("\n");
+  const out: string[] = [];
+  let pos = 0;
+  let count = 0;
+  let unsure = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    out.push(line);
+    const marks = [...line.matchAll(/(?<!<)<<(?!<)(-?)\s*(['"]?)([A-Za-z0-9_]+)\2/g)];
+    if (marks.length > 0) {
+      let j = i + 1;
+      const bodies: string[] = [];
+      let ok = true;
+      for (const m of marks) {
+        if (++count > 32) {
+          ok = false;
+          break;
+        }
+        const text: string[] = [];
+        let found = false;
+        for (; j < lines.length; j++) {
+          const t = m[1] ? lines[j]!.replace(/^\t+/, "") : lines[j]!;
+          if (t.trimEnd() === m[3]) {
+            found = true;
+            j++;
+            break;
+          }
+          text.push(lines[j]!);
+        }
+        if (!found) {
+          ok = false;
+          break;
+        }
+        bodies.push(text.join("\n"));
+      }
+      if (ok) {
+        docs.set(pos + line.length, bodies);
+        i = j - 1;
+      } else unsure = true;
+    }
+    pos += line.length + 1;
+  }
+  return { text: out.join("\n"), docs, unsure };
+}
+
 function movesRunCore(body: string, dirs: string[] = []): boolean {
   let hit = false;
   let cwd = "";
   // A fed or operand path is read as written and joined with the directory an earlier cd moved to.
+  // A fed file is a shell body unless the consumer is a known interpreter that is not a shell.
+  let fedShell = true;
   const fedBoth = (f: string): void => {
-    fedDir(dirs, f);
+    fedDir(dirs, f, fedShell);
     if (cwd && f && !f.startsWith("/") && !f.startsWith("-")) {
       const j = joinDir(cwd, f);
       if (j === undefined) dirs.push(UNSURE);
-      else fedDir(dirs, j);
+      else fedDir(dirs, j, fedShell);
     }
   };
+  // Terminated heredoc bodies are cut out before the text is split into commands, and read by their command.
+  const hd = stripHeredocs(body);
+  body = hd.text;
+  if (hd.unsure) dirs.push(UNSURE);
+  let pipeText: string | undefined;
   let fedHit = false;
   let prev: string | undefined;
   let prevArgs: string[] = [];
@@ -4116,7 +4182,6 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
   for (const inner of subs) if (movesRun(inner, dirs)) hit = true;
   let pos = 0;
   let pipeFiles: string[] = [];
-  let heredocs = 0;
   // Files a command wrote (`> build.js`, `tee build.js`) with the files that fed that stage, so a later command that
   // runs the written file reads the sources.
   const written = new Map<string, string[]>();
@@ -4158,7 +4223,10 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     const w = noRedir;
     // Every file named anywhere in a pipeline: arguments and `<` operands of each stage.
     // A lone closing word (`}`, `fi`, `done`) between a group and its pipe does not end the pipeline.
-    if (!piped && !/^(?:\}|fi|done|esac)$/.test(seg)) pipeFiles = [];
+    if (!piped && !/^(?:\}|fi|done|esac)$/.test(seg)) {
+      pipeFiles = [];
+      pipeText = undefined;
+    }
     for (let q = 0; q < raw.length; q++) {
       const m = /^\d*<(?!<)(.*)$/.exec(raw[q]!);
       if (m) pipeFiles.push(m[1] || raw[q + 1] || "");
@@ -4174,7 +4242,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       return true;
     }
     for (const d of local) {
-      if (d === UNSURE || d.startsWith(FED)) dirs.push(d);
+      if (d === UNSURE || isFedMark(d)) dirs.push(d);
       else {
         const j = joinDir(cwd, d);
         if (j === undefined) dirs.push(UNSURE);
@@ -4188,6 +4256,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     const un = unwrapSink(noRedir);
     const sb = runnerName((un.words[0] ?? "").replace(/^\\+/, ""));
     const isShell = /^(?:sh|bash|zsh|dash|ksh)$/.test(sb);
+    fedShell = isShell || !SINK_WORD.test(sb);
     // `... | xargs bash -c` runs the piped text as the command string.
     const bare =
       readsStdin(sb, un.words) ||
@@ -4220,6 +4289,13 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     // `tsx`, `lua -`, `tclsh`, `env -S 'sh -s'`): the consumer is treated as a sink instead of being named.
     const consumer = un.lead;
     const classSink = piped && prev !== undefined && !/^(?:echo|printf)$/.test(prev) && !bare && (un.words.length === 0 ? noRedir.length > 0 : !PLAIN_CMDS.has(consumer) && !(SINK_WORD.test(consumer) && un.words[0] !== undefined && runnerName(un.words[0]) === consumer));
+    if ((bare || classSink) && pipeText !== undefined) {
+      // The literal text a producer stage got from a here-string runs in the consumer.
+      hit = true;
+      if (isShell || !SINK_WORD.test(sb)) {
+        if (movesRun(pipeText, dirs)) hit = true;
+      } else textRefs(pipeText, dirs);
+    }
     if ((bare || classSink) && prev !== undefined) {
       if (!/^(?:echo|printf)$/.test(prev) || prevArgs.some((t) => /[$`]/.test(t))) {
         hit = true;
@@ -4235,6 +4311,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       // A here-string with an expansion on a stage that pipes on (`cat <<< "$(cat test/x.sh)" | sh`) is unsure.
       if (!redirSink) {
         if (/[$`]/.test(text) && at >= 0 && /^\s*\|(?!\|)/.test(body.slice(at + seg.length))) dirs.push(UNSURE);
+        else pipeText = text;
         continue;
       }
       hit = true;
@@ -4248,31 +4325,15 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       hit = true;
       textRefs(prevArgs.join(" "), dirs);
     }
-    // A heredoc fed to an interpreter: its text is program text.
-    if (SINK_WORD.test(sb) && /<<-?\s*['"]?\w+/.test(seg)) {
+    // A heredoc fed to a shell is commands, to an interpreter program text. Its body was cut out above.
+    if (SINK_WORD.test(sb) && /<<(?!<)/.test(seg)) {
       hit = true;
-      const d = /<<-?\s*(['"]?)(\w+)\1/.exec(seg);
-      // The terminator line is found from this segment's own offset, and the reads per body are capped.
-      const nl = at >= 0 ? body.indexOf("\n", at + seg.length) : -1;
-      if (d && ++heredocs <= 32 && nl >= 0) {
-        const text: string[] = [];
-        let found = false;
-        for (let cursor = nl + 1; cursor <= body.length; ) {
-          const e = body.indexOf("\n", cursor);
-          const line = body.slice(cursor, e < 0 ? undefined : e);
-          if (line.replace(/^\t+/, "").trimEnd() === d[2]) {
-            found = true;
-            break;
-          }
-          text.push(line);
-          if (e < 0) break;
-          cursor = e + 1;
-        }
-        if (!found) dirs.push(UNSURE);
-        else if (isShell) {
-          if (movesRun(text.join("\n"), dirs)) hit = true;
-        } else textRefs(text.join("\n"), dirs);
-      } else dirs.push(UNSURE);
+      const le = at >= 0 ? body.indexOf("\n", at) : -1;
+      const text = hd.docs.get(le < 0 ? body.length : le)?.shift();
+      if (text === undefined) dirs.push(UNSURE);
+      else if (isShell) {
+        if (movesRun(text, dirs)) hit = true;
+      } else textRefs(text, dirs);
     }
     // Flags that load a file, and the script operand, in an unsplit body.
     if (SINK_WORD.test(sb)) for (const f of flagFiles(sb, un.words)) fedBoth(f.replace(/^(?:\.\/)+/, ""));
@@ -4413,8 +4474,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
         ctx.widenInert = true;
         continue;
       }
-      if (d.startsWith(FED)) {
-        readFed(ctx, d.slice(1));
+      if (isFedMark(d)) {
+        readFed(ctx, d.slice(1), d.startsWith(FEDSH));
         continue;
       }
       const jr = joinDir(ctx.cwd, d);

