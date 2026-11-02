@@ -181,3 +181,25 @@ describe("third review round", () => {
     expect(prepass("npm", map(hook("1.0.0")), map(hook("1.0.1"))).hard.some((f) => f.kind === "install-script")).toBe(false);
   });
 });
+
+describe("a nested package's script file under a test or docs folder", () => {
+  const pkg = JSON.stringify({ name: "n", version: "1", scripts: { build: "node build.js" } });
+  const files = (dir: string, js: string) => ({ [`${dir}/package.json`]: pkg, [`${dir}/build.js`]: js });
+  const forms: [string, string][] = [
+    ["npm --prefix tests/pkg run build", "tests/pkg"],
+    ["pnpm -C tests/pkg build", "tests/pkg"],
+    ["yarn --cwd docs/pkg build", "docs/pkg"],
+    ["npm -w test/pkg run build", "test/pkg"],
+    ["cd __tests__/pkg && npm run build", "__tests__/pkg"],
+    ["npm --prefix sub run build", "sub"],
+  ];
+  test("a changed script file there holds", () => {
+    for (const [cmd, dir] of forms) {
+      expect(held({ postinstall: cmd, build: "echo ok" }, files(dir, "1"), files(dir, "require('child_process').execSync('id')")), cmd).toBe(true);
+    }
+  });
+  test("an unchanged one does not, and a folder with no nested manifest stays inert", () => {
+    expect(held({ postinstall: "npm --prefix tests/pkg run build", build: "echo ok" }, files("tests/pkg", "1"), files("tests/pkg", "1"))).toBe(false);
+    expect(held({ postinstall: "lerna run build", build: "echo ok" }, { "tests/helper.js": "1" }, { "tests/helper.js": "2" })).toBe(false);
+  });
+});

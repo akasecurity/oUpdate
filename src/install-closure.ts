@@ -2863,12 +2863,15 @@ function noteHookArg(ctx: Ctx, token: string): void {
 // package's manifest, so every non-root package.json joins the surface too. The root manifest is read on
 // its own path.
 function widenAll(ctx: Ctx): void {
+  // A directory that holds a nested manifest is another package: a run can land there, so its files are not
+  // inert whatever folder name they sit under (tests/pkg, docs/pkg).
+  const pkgDirs: string[] = [];
+  for (const logical of ctx.logical.keys()) if (isManifest(logical) && logical.includes("/")) pkgDirs.push(logical.slice(0, logical.lastIndexOf("/") + 1));
   for (const [logical, key] of ctx.logical) {
     if (isManifest(logical)) {
-      // A run that lands in another directory has left this package's layout: a manifest under tests/ or
-      // docs/ is a package like any other, so the inert names do not apply to it.
+      // The root manifest is read on its own path. A manifest under tests/ or docs/ is a package like any other.
       if (!logical.includes("/")) continue;
-    } else if (omitInert(ctx, logical)) continue;
+    } else if (omitInert(ctx, logical) && !pkgDirs.some((d) => logical.startsWith(d))) continue;
     ctx.files.add(key);
     if (ctx.fromGyp) ctx.gypFiles.add(key);
   }
