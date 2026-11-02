@@ -4068,6 +4068,10 @@ const WRAPPER_SPEC: Record<string, { value: RegExp; operands: number }> = {
   chrt: { value: /^$/, operands: 1 },
   arch: { value: /^$/, operands: 0 },
   exec: { value: /^-a$/, operands: 0 },
+  unbuffer: { value: /^$/, operands: 0 },
+  taskset: { value: /^-c$/, operands: 1 },
+  flock: { value: /^-[wE]$|^--(?:timeout|conflict-exit-code)$/, operands: 1 },
+  numactl: { value: /^$/, operands: 0 },
 };
 
 // The command a wrapper from WRAPPER_SPEC runs, or undefined when the first word is not one.
@@ -4075,9 +4079,14 @@ function stripWrapper(w: string[]): string[] | undefined {
   const spec = WRAPPER_SPEC[runnerName((w[0] ?? "").replace(/^\\+/, ""))];
   if (!spec) return undefined;
   let i = 1;
-  while (i < w.length && w[i]!.startsWith("-") && w[i] !== "--") i += spec.value.test(w[i]!) ? 2 : 1;
+  let operands = spec.operands;
+  while (i < w.length && w[i]!.startsWith("-") && w[i] !== "--") {
+    // taskset -c LIST names the CPUs by option, so no mask operand follows.
+    if (w[i] === "-c" && runnerName(w[0]!) === "taskset") operands = 0;
+    i += spec.value.test(w[i]!) ? 2 : 1;
+  }
   if (w[i] === "--") i++;
-  return w.slice(Math.min(w.length, i + spec.operands));
+  return w.slice(Math.min(w.length, i + operands));
 }
 
 const STDIN_PATH = /^(?:\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/self\/fd\/0|php:\/\/stdin)$/;
@@ -4681,7 +4690,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
   i++;
   // A wrapper (env, nohup, time, sudo, nice, timeout, ...) runs the command after its own options: that command is
   // dispatched too (`env bash -c 'node test/x.js'`, `/usr/bin/env sh -c ...`), and the wrapper's own reading goes on.
-  if ((WRAP_BINS.has(bin) || WRAPPER_SPEC[bin]) && ctx.depth < DEPTH) {
+  if ((WRAP_BINS.has(bin) || WRAPPER_SPEC[bin]) && argv.length > 1000) {
+    // A wrapper line this long is not unwrapped layer by layer (each layer would reparse it): every file is read.
+    ctx.widenInert = true;
+    widenAll(ctx);
+  } else if ((WRAP_BINS.has(bin) || WRAPPER_SPEC[bin]) && ctx.depth < DEPTH) {
     const un = unwrapSink(argv.slice(i - 1));
     const own = stripWrapper(argv.slice(i - 1));
     let inner = un.words;

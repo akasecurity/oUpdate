@@ -569,7 +569,8 @@ describe("round 12: unresolvable cd targets, npm exec flags after the command, b
     const t = Date.now();
     held({ postinstall: "env ".repeat(20000) + "x" }, {}, {});
     held({ postinstall: "sh -c ".repeat(5000) + "x" }, {}, {});
-    expect(Date.now() - t).toBeLessThan(30000);
+    // bun's default test timeout is 5 s: the chain must be read in a fraction of that.
+    expect(Date.now() - t).toBeLessThan(1500);
   });
 
   test("3c. thousands of directory changes are bounded and read every file", () => {
@@ -1403,7 +1404,7 @@ describe("round 36: sourced files after cd, xargs and env -S c-strings, wrappers
   });
 
   test("3. wrappers before a package runner", () => {
-    for (const w of ["timeout 300", "timeout -s KILL 5", "nice -n 5", "nice", "stdbuf -o0", "setsid", "ionice -c3", "chrt 1", "caffeinate -i", "arch -arm64", "exec -a name", "env --unset X", "env -u X", "nohup", "time", "sudo -u root"]) {
+    for (const w of ["taskset 1", "taskset -c 0", "unbuffer", "flock /tmp/l", "flock -w 5 /tmp/l", "nice timeout 300", "timeout 300", "timeout -s KILL 5", "nice -n 5", "nice", "stdbuf -o0", "setsid", "ionice -c3", "chrt 1", "caffeinate -i", "arch -arm64", "exec -a name", "env --unset X", "env -u X", "nohup", "time", "sudo -u root"]) {
       for (const r of ["npm run setup", "yarn run setup", "pnpm run setup", "bun run setup"]) expect(setupHeld(`${w} ${r}`), `${w} ${r}`).toBe(true);
     }
   });
