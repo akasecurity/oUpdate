@@ -724,3 +724,26 @@ describe("round 15: export assignments, cd past the root, root configs, piped te
     expect(Date.now() - t1).toBeLessThan(5000);
   });
 });
+
+describe("round 16: wrapped stdin sinks, node stdin, more library variables", () => {
+  const fed = (cmd: string) => held({ postinstall: cmd }, { "lib/setup.js": "1", "x.sh": "echo hi\n" }, { "lib/setup.js": "evil()", "x.sh": "echo hi\n" });
+
+  test("1. a wrapper in front of the shell sink", () => {
+    for (const cmd of ["cat x.sh | env sh", "cat x.sh | command sh", "cat x.sh | exec sh", "cat x.sh | sudo sh", "cat x.sh | sudo -u root bash", "cat x.sh | busybox sh", "cat x.sh | env -i FOO=1 sh", "cat x.sh | xargs -0 bash -c", "cat x.sh | nohup sh"]) {
+      expect(fed(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("2. node as a stdin interpreter", () => {
+    for (const cmd of ["cat x.js | node", "node < x.js", "node - < x.js", "cat x.js | env node", "cat x.js | node --require ./a.js"]) {
+      expect(fed(cmd), cmd).toBe(true);
+    }
+    expect(fed("echo hi | node -e 'console.log(1)'")).toBe(false);
+  });
+
+  test("3. library variables", () => {
+    for (const v of ["DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH", "LD_AUDIT"]) {
+      expect(fed(`${v}=lib node a.js`), v).toBe(true);
+    }
+  });
+});

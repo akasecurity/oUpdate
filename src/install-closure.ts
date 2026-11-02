@@ -3328,7 +3328,7 @@ function shellSegments(body: string): string[] {
 }
 
 const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS=|YARN_|PNPM_|BUN_|COREPACK_)/;
-const UNSAFE_ENV = /^(?:CDPATH|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|path|cdpath|fpath)=/;
+const UNSAFE_ENV = /^(?:CDPATH|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)=/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|-C)(?:=(.*))?$/;
@@ -3687,6 +3687,47 @@ function substitutions(body: string): string[] | null {
   return dq ? null : out;
 }
 
+// The words of a command with leading wrappers (env, command, exec, sudo, busybox, xargs and their flags and
+// assignments) removed, so the interpreter the line really runs is first.
+function unwrapSink(w: string[]): { words: string[]; xargs: boolean } {
+  let i = 0;
+  let xargs = false;
+  for (let guard = 0; i < w.length && guard < 64; guard++) {
+    const n = runnerName(w[i]!.replace(/^\\+/, ""));
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w[i]!)) i++;
+    else if (WRAPPERS.has(n) || n === "busybox") {
+      i++;
+      while (i < w.length && (w[i]!.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[i]!))) i += n === "env" && /^-[uCS]$/.test(w[i]!) ? 2 : 1;
+    } else if (n === "sudo" || n === "doas") {
+      i++;
+      while (i < w.length && w[i]!.startsWith("-")) i += /^-[ughpCDRTU]$/.test(w[i]!) ? 2 : 1;
+    } else if (n === "xargs") {
+      xargs = true;
+      i++;
+      while (i < w.length && w[i]!.startsWith("-")) i += /^-[IiLnPsdEaJ]$/.test(w[i]!) ? 2 : 1;
+    } else break;
+  }
+  return { words: w.slice(i), xargs };
+}
+
+// Whether node reads its program from stdin: no -e/-p, and no script file (or `-`).
+function nodeReadsStdin(bin: string, w: string[]): boolean {
+  if (!/^(?:node|nodejs)$/.test(bin)) return false;
+  const args = w.slice(1);
+  for (let j = 0; j < args.length; j++) {
+    const t = args[j]!;
+    if (t === "-") return true;
+    if (/^(?:-[A-Za-z]*[ep][A-Za-z]*|--eval|--print)(?:=|$)/.test(t)) return false;
+    if (/^(?:-r|--require|--import|--loader|--experimental-loader|--input-type|-C|--conditions)$/.test(t)) {
+      j++;
+      continue;
+    }
+    if (t.startsWith("-")) continue;
+    return false;
+  }
+  return true;
+}
+
 // Whether a shell command reads its script from stdin: no -c, and either -s, /dev/stdin, `-`, or no script file.
 function readsStdin(bin: string, w: string[]): boolean {
   if (!/^(?:sh|bash|zsh|dash|ksh)$/.test(bin)) return false;
@@ -3742,11 +3783,18 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     if (first && CD_WORD.test(runnerName(first.replace(/^\\+/, ""))) && local[0] !== undefined) cwd = joinDir(cwd, local[0]) ?? cwd;
     // A shell that reads its script from a pipe (`echo 'cd sub && npm run build' | sh`) runs the producer's text.
     const b = runnerName((w[0] ?? "").replace(/^\\+/, ""));
-    const bare = readsStdin(b, w);
+    const un = unwrapSink(w);
+    const sb = runnerName((un.words[0] ?? "").replace(/^\\+/, ""));
+    const isShell = /^(?:sh|bash|zsh|dash|ksh)$/.test(sb);
+    // `... | xargs bash -c` runs the piped text as the command string.
+    const bare =
+      readsStdin(sb, un.words) ||
+      nodeReadsStdin(sb, un.words) ||
+      (un.xargs && isShell && un.words.slice(1).some((t) => /^-[A-Za-z]*c[A-Za-z]*$/.test(t)));
     if (bare && fedHit) hit = true;
     // A shell fed from a file (`sh < x.sh`) or by a producer that is not echo or printf with literal words
     // (`cat x.sh | sh`, `echo "$X" | sh`, `... | base64 -d | sh`) runs text that is not read here: widen.
-    if (/^(?:sh|bash|zsh|dash|ksh)$/.test(b) && /<(?!<)/.test(seg)) hit = true;
+    if ((isShell || /^(?:node|nodejs)$/.test(sb)) && /<(?!<)/.test(seg)) hit = true;
     if (bare && prev !== undefined) {
       if (!/^(?:echo|printf)$/.test(prev) || prevArgs.some((t) => /[$`]/.test(t))) {
         hit = true;
