@@ -45,6 +45,12 @@ describe("unresolved package-manager runners hold", () => {
     }
   });
 
+  test("pnpm -C/--dir and -r/--recursive without --filter widen", () => {
+    for (const cmd of ["pnpm -C sub build", "pnpm -Csub build", "pnpm --dir sub build", "pnpm --dir=sub build", "pnpm -r build", "pnpm --recursive build", "pnpm -C sub run build", "pnpm --silent -r run build"]) {
+      expect(hardFor({ postinstall: cmd }).length, cmd).toBeGreaterThan(0);
+    }
+  });
+
   test("bun run <file> follows the file instead of looking up a script", () => {
     expect(hardFor({ postinstall: "bun run ./assets/x.js" }).length).toBeGreaterThan(0);
     expect(hardFor({ postinstall: "bun run ./assets/other.js" })).toEqual([]);

@@ -3223,12 +3223,12 @@ function dispatch(ctx: Ctx, cmd: string): void {
     return;
   }
   if (bin === "yarn" || bin === "pnpm" || bin === "bun") {
-    // `pnpm --filter <pkg> <script>` runs a script of another workspace package. That package's
-    // scripts are not modeled here, so the whole package surface is reached.
+    // `pnpm --filter <pkg> <script>`, `-C/--dir <path>` and `-r/--recursive` run scripts of other workspace
+    // packages. Those packages' scripts are not modeled here, so the whole package surface is reached.
     if (bin === "pnpm") {
-      // Every argument before a bare `--` is checked: a flag value such as `-C sub` must not hide a later filter.
+      // Every argument before a bare `--` is checked, so a flag value cannot hide a later widening flag.
       for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
-        if (/^(?:-F.*|--filter(?:=.*)?)$/.test(argv[j]!)) {
+        if (/^(?:-F.*|--filter(?:=.*)?|-C.*|--dir(?:=.*)?|-r|--recursive)$/.test(argv[j]!)) {
           widenAll(ctx);
           return;
         }
