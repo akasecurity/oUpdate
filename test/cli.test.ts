@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseReviewArgs, parseGateArgs, parseImageArgs, gateToken, gateForge, loadArtifacts, lockedFilesCheck, type ReviewArgs } from "../src/cli.ts";
+import { render, parseReviewArgs, parseGateArgs, parseImageArgs, gateToken, gateForge, loadArtifacts, lockedFilesCheck, type ReviewArgs } from "../src/cli.ts";
 import { pypiRegistry } from "../src/adapters/ecosystem/pypi.ts";
 import { prepass } from "../src/prepass.ts";
 
@@ -299,5 +299,14 @@ describe("lockedFilesCheck", () => {
     const down = { ...registry(), artifactFiles: async () => { throw new Error("pypi 503"); } };
     expect(await lockedFilesCheck(down, "demo", "1.0.1", [f(`sha256:${sha("a")}`)])).toMatchObject({ verdict: "error", detail: expect.stringContaining("pypi 503") });
     expect(await lockedFilesCheck(registry([]), "demo", "1.0.1", [f(`sha256:${sha("a")}`)])).toMatchObject({ verdict: "error" });
+  });
+});
+
+describe("render", () => {
+  test("a layer detail carrying escapes, bidi and zero-width characters is stripped", () => {
+    const detail = "ok\u001b[2J\u001b]0;pwn\u0007 \u202ereversed\u202c a\u200bb\u2066c\ufeffd\r";
+    const out = render({ eco: "npm", name: "demo", from: "1.0.0", to: "1.0.1", decision: "hold", layers: [{ layer: "reviewer", verdict: "stop", detail }] });
+    expect(out).toEndWith("reviewer  stop    ok[2J]0;pwn reversed abcd");
+    expect(out).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/);
   });
 });

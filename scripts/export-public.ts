@@ -169,12 +169,16 @@ export function writeExportTree(target: string): void {
   if (!existsSync(list)) throw new Error("HEAD has no .publish-exclude: nothing exported");
   for (const p of parseExclude(readFileSync(list, "utf8"))) rmSync(join(target, p), { recursive: true, force: true });
 
+  // A source already in public form (public main is the base) passes through unchanged: each edit applies only to the private form.
   const pj = join(target, "package.json");
-  writeFileSync(pj, replaceOnce(readFileSync(pj, "utf8"), '  "private": true,\n', '  "private": true,\n  "license": "MIT",\n', "package.json"));
+  const pjText = readFileSync(pj, "utf8");
+  if (!pjText.includes('"license"')) writeFileSync(pj, replaceOnce(pjText, '  "private": true,\n', '  "private": true,\n  "license": "MIT",\n', "package.json"));
   const ts = join(target, "tsconfig.json");
-  writeFileSync(ts, replaceOnce(readFileSync(ts, "utf8"), '"scripts", "replay", "acceptance"', '"scripts", "acceptance"', "tsconfig.json"));
+  const tsText = readFileSync(ts, "utf8");
+  if (tsText.includes('"replay"')) writeFileSync(ts, replaceOnce(tsText, '"scripts", "replay", "acceptance"', '"scripts", "acceptance"', "tsconfig.json"));
   const rd = join(target, "README.md");
-  writeFileSync(rd, publicReadme(readFileSync(rd, "utf8")));
+  const rdText = readFileSync(rd, "utf8");
+  if (!rdText.includes("Early release. The easiest way to install it")) writeFileSync(rd, publicReadme(rdText));
   writeFileSync(join(target, "LICENSE"), LICENSE);
 }
 

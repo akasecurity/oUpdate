@@ -211,6 +211,25 @@ describe("pin-bump leg", () => {
     expect(b).toMatchObject({ summary: "pins nothing to propose; error: cli (artifact review of @scope/cli@1.2.4: download 503); not checked: 1 pin (see log)", trouble: true });
   });
 
+  // OUP-66: model-produced text reaches the terminal raw, so escape sequences, bidi and zero-width characters are dropped.
+  const HOSTILE = "ok\u001b[2J\u001b]0;pwn\u0007 \u202ereversed\u202c a\u200bb\u2066c\ufeffd\r";
+  const CLEAN = "ok[2J]0;pwn reversed abcd";
+
+  test("a layer detail in the artifact-review hold line is stripped", async () => {
+    const stop: ReviewResult = { eco: "npm", name: "@scope/cli", from: "1.2.3", to: "1.2.4", decision: "hold", layers: [{ layer: "reviewer", verdict: "stop", detail: HOSTILE }] };
+    const r = await setup({ npmLatest: "1.2.4", npmReview: stop }).run();
+    const line = r.lines.find((l) => l.includes("artifact review of"))!;
+    expect(line).toEndWith(`reviewer stop: ${CLEAN}`);
+    expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/);
+  });
+
+  test("the pins review text and detail lines are stripped", async () => {
+    const r = await setup({ npmLatest: "1.2.4", answers: [`FLAG\n${HOSTILE}`] }).run();
+    const i = r.lines.findIndex((l) => l.startsWith("pins review: FLAG"));
+    expect(r.lines[i + 2]).toBe(`│ ${CLEAN}`);
+    expect(r.lines.slice(i).join("\n")).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/);
+  });
+
   // Review: the artifact review gets each changed tarball with the integrity the proposal pins for it.
   test("the artifact review covers every changed payload with its pinned integrity", async () => {
     const s = setup({ npmLatest: "1.2.4", platform: true });

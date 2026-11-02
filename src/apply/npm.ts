@@ -12,6 +12,7 @@ import { untrusted, type Reviewer } from "../review.ts";
 import type { Exec } from "./exec.ts";
 import { reviewChunk } from "./verdict.ts";
 import { VERDICT_CONTRACT } from "./formula.ts";
+import { dependencyDowngrades } from "../prepass.ts";
 
 /** The phase's record, owned by the caller and filled as the phase goes, so a stop part-way keeps it. */
 export interface NpmRun {
@@ -82,6 +83,51 @@ function parseScripts(text: string): Record<string, string> | undefined {
   }
 }
 
+type DepBlocks = { dependencies: Record<string, unknown>; optionalDependencies: Record<string, unknown> };
+
+/** `npm view … dependencies optionalDependencies --json`; "" is neither field; undefined when it is not that shape. */
+function parseDeps(text: string): DepBlocks | undefined {
+  try {
+    let j: unknown = JSON.parse(text.trim() || "{}");
+    // npm 12 wraps a single-version answer in a one-element array; older npm prints the object itself.
+    if (Array.isArray(j) && j.length === 1) j = j[0];
+    if (!j || typeof j !== "object" || Array.isArray(j)) return undefined;
+    // With only one of the two fields present npm prints that field's map bare, with no field name.
+    if (!("dependencies" in j) && !("optionalDependencies" in j)) j = { dependencies: j };
+    const out: DepBlocks = { dependencies: {}, optionalDependencies: {} };
+    for (const f of ["dependencies", "optionalDependencies"] as const) {
+      const b = (j as Record<string, unknown>)[f];
+      if (b == null) continue;
+      if (typeof b !== "object" || Array.isArray(b)) return undefined;
+      out[f] = b as Record<string, unknown>;
+    }
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The two versions as the package.json pair the prepass floor rule reads, so one copy of that rule decides. */
+function depFiles(d: DepBlocks): Map<string, Uint8Array> {
+  return new Map([["package/package.json", new TextEncoder().encode(JSON.stringify(d))]]);
+}
+
+/** Added (+), removed (-) and changed (~) dependency edges, for the reviewer to read. */
+function depDiff(before: DepBlocks, after: DepBlocks): string[] {
+  const out: string[] = [];
+  for (const f of ["dependencies", "optionalDependencies"] as const) {
+    const tag = f === "optionalDependencies" ? " (optional)" : "";
+    const a = after[f];
+    const b = before[f];
+    for (const [k, v] of Object.entries(a)) {
+      if (!Object.hasOwn(b, k)) out.push(`+ ${k} ${String(v)}${tag}`);
+      else if (String(b[k]) !== String(v)) out.push(`~ ${k} ${String(b[k])} -> ${String(v)}${tag}`);
+    }
+    for (const k of Object.keys(b)) if (!Object.hasOwn(a, k)) out.push(`- ${k} ${String(b[k])}${tag}`);
+  }
+  return out;
+}
+
 function fromRegistry(tarball: string, registry: string): boolean {
   try {
     return new URL(tarball).origin === new URL(registry).origin;
@@ -137,11 +183,14 @@ export async function npmSection(exec: Exec, r: Reviewer, o: NpmOptions): Promis
   const unread: string[] = [];
   const hooks: string[] = [];
   const runs: string[] = [];
+  const drops: string[] = [];
   for (const [pkg, v] of outdated) {
     // A failed view is not "no scripts": what could not be read cannot be reviewed.
     const sv = await exec([o.npm, "view", `${pkg}@${v.next}`, "scripts", "--json"]);
     const ov = await exec([o.npm, "view", `${pkg}@${v.current}`, "scripts", "--json"]);
     const tv = await exec([o.npm, "view", `${pkg}@${v.next}`, "dist.tarball"]);
+    const dn = await exec([o.npm, "view", `${pkg}@${v.next}`, "dependencies", "optionalDependencies", "--json"]);
+    const dv = await exec([o.npm, "view", `${pkg}@${v.current}`, "dependencies", "optionalDependencies", "--json"]);
     if (sv.rc !== 0) unread.push(`${pkg}@${v.next} scripts (npm view rc ${sv.rc})`);
     if (ov.rc !== 0) unread.push(`${pkg}@${v.current} scripts (npm view rc ${ov.rc})`);
     if (tv.rc !== 0) unread.push(`${pkg}@${v.next} tarball (npm view rc ${tv.rc})`);
@@ -154,10 +203,24 @@ export async function npmSection(exec: Exec, r: Reviewer, o: NpmOptions): Promis
     // An unchanged hook string can run a changed file (audit 0.2.3: same "node setup.js", new setup.js), and this
     // lane never reads the tarball, so any hook npm runs on install holds too.
     for (const k of RUN_HOOKS) if (after?.[k] !== undefined && after[k] === before?.[k]) runs.push(`${pkg}@${v.next} ${k}: ${after[k]!.slice(0, 200)}`);
+    // Transitive reach: a new or changed dependency is code this lane never sees either. A floor drop or an alias
+    // retarget holds through the prepass rule itself; additions and raises are shown to the reviewer.
+    if (dn.rc !== 0) unread.push(`${pkg}@${v.next} dependencies (npm view rc ${dn.rc})`);
+    if (dv.rc !== 0) unread.push(`${pkg}@${v.current} dependencies (npm view rc ${dv.rc})`);
+    const depAfter = dn.rc === 0 ? parseDeps(dn.out) : undefined;
+    const depBefore = dv.rc === 0 ? parseDeps(dv.out) : undefined;
+    if (dn.rc === 0 && !depAfter) unread.push(`${pkg}@${v.next} dependencies (unparseable)`);
+    if (dv.rc === 0 && !depBefore) unread.push(`${pkg}@${v.current} dependencies (unparseable)`);
+    let depLines: string[] = [];
+    if (depAfter && depBefore) {
+      depLines = depDiff(depBefore, depAfter);
+      for (const n of dependencyDowngrades(depFiles(depBefore), depFiles(depAfter))) drops.push(`${pkg}@${v.next} ${n}`);
+    }
     const scripts = sv.out.trim() || "(no scripts)";
     const tarball = tv.out.trim().split("\n")[0] || "unknown";
     const ok = fromRegistry(tarball, o.registry) ? "yes" : `NO — unexpected: ${tarball}`;
     details += `  ${pkg}: ${v.current} -> ${v.next}\n    tarball registry: ${ok}\n    scripts:\n${scripts.split("\n").map((l) => `      ${l}`).join("\n")}\n`;
+    if (depLines.length) details += `    dependency changes:\n${depLines.map((l) => `      ${l}`).join("\n")}\n`;
   }
   log.push("Pending npm upgrades:", details, "--- model npm review ---");
 
@@ -192,7 +255,7 @@ One-line reason if FLAG. 6 lines max.`;
     await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${reason}\nPackages: ${names.join(" ")}\nLog: ${o.logFile ?? "-"}`);
     return { status: `FLAGGED — ${reason}`, log };
   }
-  const hookHit = [hooks.length ? `new or changed install script: ${hooks.join(", ")}` : "", runs.length ? `install script runs unreviewed package files: ${runs.join(", ")}` : ""].filter(Boolean).join("; ");
+  const hookHit = [hooks.length ? `new or changed install script: ${hooks.join(", ")}` : "", runs.length ? `install script runs unreviewed package files: ${runs.join(", ")}` : "", drops.length ? `dependency floor dropped or alias retargeted: ${drops.join(", ")}` : ""].filter(Boolean).join("; ");
   const hard = npmHardHit(details) || hookHit;
   const v = await reviewChunk(r, prompt, { ground: () => "GROUNDED", box: "review npm" });
   log.push(...v.log);
