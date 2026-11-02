@@ -158,6 +158,73 @@ describe("shell classes", () => {
     expect(held("node a.js")).toBe(false);
   });
 
+  test("a backslash or a variable in a flag, and a double-quoted -c string with $ or a backslash", () => {
+    const P = "node -r ./p.js a.js";
+    for (const c of ["node \\-r ./p.js a.js", "node $F a.js", "node ${F} a.js", "node $@ a.js", 'sh -c "node -r ./p.js a.js; echo \\$HOME"', 'sh -c "node -r ./p.js a.js; echo $HOME"', `sh -c "${P}; echo $(date)"`]) {
+      expect(classes(c), c).toContain("interp-flag");
+    }
+    // a lone variable is the script, and a variable inside a longer word is not a flag
+    for (const c of ["node $npm_package_config_bin", 'node "$X"', "node $DIR/a.js", "node a.js $F"]) expect(classes(c), c).toEqual([]);
+  });
+
+  test("heredoc bodies: $(..) spans, apostrophes, multi-line spans, arithmetic", () => {
+    const P = "node -r ./p.js a.js";
+    for (const c of [`cat <<E\nit's $(${P})\nE\n`, `cat <<E\n$(echo a\n${P})\nE\n`, `cat <<E\nx \`${P}\`\nE\n`, `cat <<-E\n\tit's $(${P}) and "q"\n\tE\n`, `echo $((1+$(${P})))`, `echo $[1+$(${P})]`, `cat <<E\n$((1+$(${P})))\nE\n`]) {
+      expect(classes(c), c).toEqual(["interp-flag"]);
+    }
+    expect(classes("cat <<'E'\nit's $(node -r ./p.js a.js)\nE\n")).toEqual([]);
+    expect(classes("cat <<E\nit's fine\nE\n")).toEqual([]);
+    expect(classes("cat <<E\n$(node a.js\nE\n")).toEqual([]); // unclosed span: nothing to read
+  });
+
+  test("a backslash-escaped double quote inside a delimiter or a redirect target", () => {
+    const P = "node -r ./p.js a.js";
+    expect(classes(`cat > "a\\"b" && ${P}`)).toEqual(["interp-flag"]);
+    expect(classes(`cat <<"E\\"OF"\nx\nE"OF\n; ${P}`)).toEqual(["interp-flag"]);
+    expect(classes(`cat t > "a\\"b.js" && node 'a"b.js'`)).toEqual(["writer-exec"]);
+  });
+
+  test("interpreter flags with a separate value", () => {
+    const P = "./p.js a.js";
+    for (const c of [`python3 -W ignore -m pkg`, `python3 -X dev -m pkg`, `node --title foo -r ${P}`, `node -C dev -r ${P}`, `ruby -E utf-8 -r ./x a.rb`, `node --input-type module --require ${P}`, "php -d x=1 -f a.php", "deno run --config c.json a.ts", "node --test", "node --run setup"]) {
+      expect(classes(c), c).toEqual(["interp-flag"]);
+    }
+    for (const c of ["node --title foo a.js", "python3 -W ignore a.py", "ruby -E utf-8 a.rb", "deno run a.ts", "deno eval 1", "deno task x", "node --input-type module a.js"]) expect(classes(c), c).toEqual([]);
+    // the value of -r is not the script: a cd moves the script
+    expect(classes("cd sub && node -r ./p.js a.js")).toEqual(["cd-relative", "interp-flag"]);
+  });
+
+  test("a file fetched or sourced, then run", () => {
+    for (const c of ["curl -o b.js u && node b.js", "curl -ob.js u && node b.js", "curl --output b.js u && node b.js", "curl --output=b.js u; node b.js", "wget -O b.js u && node b.js", "wget -Ob.js u && node b.js", "wget --output-document=b.js u && node b.js", "cat t > r.sh && . ./r.sh", "cat t > r.sh && source r.sh"]) {
+      expect(classes(c), c).toEqual(["writer-exec"]);
+    }
+    expect(classes("curl -s u | tar x && node a.js")).toEqual([]);
+    expect(classes("node b.js > b.js")).toEqual([]); // the redirect empties b.js before node runs
+    expect(classes("cat t > b.js; node b.js > b.js")).toEqual(["writer-exec"]);
+  });
+
+  test("more assignments that load code", () => {
+    for (const c of ["BASH_ENV=./x.sh sh a.sh", "PERL5OPT=-Mx perl a.pl", "RUBYOPT=-rx ruby a.rb", "PYTHONPATH=. python3 a.py", "PYTHONSTARTUP=x python3 a.py", "NODE_PATH=. node a.js", "LD_PRELOAD=./x.so node a.js", "DYLD_INSERT_LIBRARIES=./x.dylib node a.js", "env PERL5LIB=. perl a.pl", "export LD_PRELOAD=./x.so"]) {
+      expect(classes(c), c).toEqual(["env-assign"]);
+    }
+    expect(classes("PATH=$PATH:bin node a.js")).toEqual([]);
+  });
+
+  test("program files with attached values, and sed commands that run", () => {
+    for (const c of ["make -fMk", "make -kf Mk", "sed -fp.sed x", "sed -nfp.sed x", "awk -fp.awk x", "sed '1e id' x", "sed 'e' x", "sed -e '$e id' x", "sed 's/a/b/e' x", "sed -n '/x/e echo'", "sed 's#a#b#ge' x"]) {
+      expect(classes(c), c).toEqual(["program-file"]);
+    }
+    for (const c of ["sed 's/a/b/g' x", "sed -n '1p' x", "sed 's/e/f/' x", "sed '/e/d' x", "awk -F: '{print $1}' x", "make -j4"]) expect(classes(c), c).toEqual([]);
+  });
+
+  test("no false hold: a pipe then a newline, CRLF heredocs, $[..], ((..))", () => {
+    for (const c of ["echo x |\nsh", "echo x | \n  sh", "cat <<E\r\nhi\r\nE\r\n", "echo $[1<<2]", "echo $((1<<2))", "((x=1<<2)); node a.js", "(( i = 1 << 2 ))"]) expect(classes(c), c).toEqual([]);
+    expect(classes("cat <<E\r\nhi\r\n")).toEqual(["heredoc"]); // still unterminated
+    expect(classes("sh <<E\r\nx\r\nE\r\n")).toEqual(["heredoc"]);
+    expect(classes("((x=1<<2)); sh")).toEqual(["interp-stdin"]);
+    expect(classes("((x=$(sh -c 'cd a && node b.js')))")).toEqual(["cd-relative"]);
+  });
+
   test("integration: a flagged body reads files the hook does not name", () => {
     for (const c of ["node --loader ./l.mjs lib/other.js", "node -r ./nope.js a.js", "python3 -m pkg", "sh <<EOF\nnode a.js\nEOF", "cd sub && node a.js", "cat t > b.js && node b.js", "sed -f p.sed x", "NODE_OPTIONS=--require=./p.js node a.js"]) {
       expect(held(c), c).toBe(true);
