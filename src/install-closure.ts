@@ -3112,6 +3112,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       // A node option this does not know (--no-warnings, --max-old-space-size=4096, --title foo, -C dev) may take
       // the next word as its value or load a file: widen, and keep reading the words that follow as files.
       widenAll(ctx);
+      if (inline) noteHookArgCwd(ctx, inline);
       i++;
       continue;
     }
@@ -3135,7 +3136,17 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(t)) {
       // The command string is a body: the options after -c that take a name come first, then the string.
       let n = j + 1 + (t.match(/[oO]/g) ?? []).length;
-      while (n < argv.length && /^[-+][A-Za-z]+$/.test(argv[n]!)) n += 1 + (argv[n]!.match(/[oO]/g) ?? []).length;
+      while (n < argv.length) {
+        const o = argv[n]!;
+        if (o === "--") {
+          n++;
+          break;
+        }
+        if (/^[-+][A-Za-z]+$/.test(o)) n += 1 + (o.match(/[oO]/g) ?? []).length;
+        else if (o === "--rcfile" || o === "--init-file") n += 2;
+        else if (/^--[A-Za-z-]+(?:=.*)?$/.test(o)) n++;
+        else break;
+      }
       const body = argv[n];
       if (body === undefined || ctx.depth >= DEPTH) {
         ctx.widenInert = true;
@@ -3146,6 +3157,8 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
       ctx.depth++;
       runBody(ctx, body);
       ctx.depth--;
+      // The words after the string are $0, $1, ...: they may name files the string runs (`sh -c 'node "$1"' _ x.js`).
+      for (let q = n + 1; q < argv.length; q++) noteHookArgCwd(ctx, argv[q]!);
       return;
     }
     if (/^[-+][A-Za-z]*s[A-Za-z]*$/.test(t) && t.startsWith("-")) sFlag = true;
@@ -3153,9 +3166,10 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
       // -o / +o / -O take an option name.
       j += (t.match(/[oO]/g) ?? []).length;
     } else if (t === "--rcfile" || t === "--init-file") {
-      if (argv[j + 1]) noteHookArg(ctx, argv[j + 1]!);
+      if (argv[j + 1]) noteHookArgCwd(ctx, argv[j + 1]!);
       j++;
-    } else if (!/^--(?:norc|noprofile|posix|login|restricted|verbose|noediting|debugger|version|help)$/.test(t)) widenAll(ctx);
+    } else if (/^--(?:rcfile|init-file)=/.test(t)) noteHookArgCwd(ctx, t.slice(t.indexOf("=") + 1));
+    else if (!/^--(?:norc|noprofile|posix|login|restricted|verbose|noediting|debugger|version|help)$/.test(t)) widenAll(ctx);
   }
   // With -s the script comes from stdin and every operand is a positional parameter.
   if (sFlag) {
@@ -3439,6 +3453,7 @@ const NODE_OPTS = /^NODE_OPTIONS\+?=/;
 const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS\+?=|YARN_|PNPM_|BUN_|COREPACK_)/;
 const UNSAFE_ENV = /^(?:CDPATH|IFS|GIT_SSH_COMMAND|GIT_SSH|GIT_EXTERNAL_DIFF|GIT_PAGER|GIT_EDITOR|GIT_ASKPASS|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|SSH_ASKPASS|EDITOR|VISUAL|PAGER|PYTHONPATH|PYTHONSTARTUP|PERL5LIB|PERL5OPT|RUBYOPT|RUBYLIB|ZDOTDIR|PATH|HOME|BASH_ENV|ENV|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|DYLD_FRAMEWORK_PATH|DYLD_FALLBACK_LIBRARY_PATH|DYLD_FALLBACK_FRAMEWORK_PATH|LD_AUDIT|path|cdpath|fpath)\+?=/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "yarnpkg", "bun", "bunx", "npx", "pnpx", "corepack"]);
+const WRAP_BINS = new Set(["env", "nohup", "time", "exec", "cross-env", "sudo", "doas", "nice", "ionice", "timeout", "stdbuf", "setsid", "caffeinate", "busybox", "chrt", "arch"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|--workspace|-C|-w)(?:=(.*))?$/;
 // npm reads any unique prefix of a long flag (`--prefi`, `--workspa`) and a short cluster ending in w or C
@@ -3600,7 +3615,13 @@ function movesCore(argv: string[], dirs: string[]): boolean {
           sourced = true;
         }
         const mv = rest[n] !== undefined && movesRun(rest[n]!, dirs);
-        return sourced || rest[n] === undefined || mv;
+        // The words after the string are $0, $1, ...: they may name files the string runs.
+        let params = false;
+        for (const t of rest.slice(n + 1)) if (!t.startsWith("-")) {
+          fedDir(dirs, t);
+          params = true;
+        }
+        return sourced || rest[n] === undefined || mv || params;
       }
       if (/^[-+][A-Za-z]+$/.test(o)) j += (o.match(/[oO]/g) ?? []).length;
       else if (o === "--rcfile" || o === "--init-file") {
@@ -3638,6 +3659,24 @@ function movesCore(argv: string[], dirs: string[]): boolean {
 // A file fed to a shell or interpreter (`sh < scripts/x.sh`, `cat scripts/list | xargs node`) is a surface file, and
 // a script that is fed runs as a body, so what it runs is read too; a list names files, which are read.
 function readFed(ctx: Ctx, path: string, shell = false): void {
+  const tag = path.indexOf("\u0003");
+  if (tag >= 0) {
+    const saved = ctx.cwd;
+    ctx.cwd = path.slice(tag + 1);
+    readFedAt(ctx, path.slice(0, tag), shell);
+    ctx.cwd = saved;
+    return;
+  }
+  // Resolved from the directory an earlier cd moved to as well as from the package root.
+  if (ctx.cwd && path && !path.startsWith("/")) {
+    const j = joinDir(ctx.cwd, path);
+    if (j === undefined) ctx.widenInert = true;
+    else if (j !== path) readFedAt(ctx, j, shell);
+  }
+  readFedAt(ctx, path, shell);
+}
+
+function readFedAt(ctx: Ctx, path: string, shell: boolean): void {
   const logical = normalize(path);
   if (!logical || badPath(logical)) return;
   const key = findKey(ctx, logical);
@@ -3803,7 +3842,7 @@ function pushDir(dirs: string[], d: string): void {
 }
 // The directory of a file that feeds a shell or interpreter: it may sit under test/ or docs/, so its directory is
 // read as moved into. A name with characters outside a plain path is unsure.
-function fedDir(dirs: string[], f: string, shell = false): void {
+function fedDir(dirs: string[], f: string, shell = false, cwd = ""): void {
   if (f === "" || f === "-" || f.startsWith("/dev/")) return;
   if (!/^[A-Za-z0-9._/-]+$/.test(f) || f.startsWith("/")) {
     dirs.push(UNSURE);
@@ -3813,7 +3852,8 @@ function fedDir(dirs: string[], f: string, shell = false): void {
   // marker that the file is read and, when it is a script, run as a body.
   const k = f.lastIndexOf("/");
   if (k > 0) dirs.push(f.slice(0, k));
-  dirs.push(f, (shell ? FEDSH : FED) + f);
+  // A fed file found through a cd carries that directory: the script runs from there.
+  dirs.push(f, (shell ? FEDSH : FED) + f + (cwd ? `\u0003${cwd}` : ""));
 }
 // A directory-list entry that names a file fed to a shell or interpreter.
 const FED = "\u0001";
@@ -4243,7 +4283,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     if (cwd && f && !f.startsWith("/") && !f.startsWith("-")) {
       const j = joinDir(cwd, f);
       if (j === undefined) dirs.push(UNSURE);
-      else fedDir(dirs, j, fedShell);
+      else fedDir(dirs, j, fedShell, cwd);
     }
   };
   // A body this large is not read command by command: every file is read.
@@ -4610,6 +4650,16 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (argv.some((a) => RUNNERS.has(runnerName(a)))) ctx.sawRunner = true;
   const bin = binName(argv[i]!);
   i++;
+  // A wrapper (env, nohup, time, sudo, nice, timeout, ...) runs the command after its own options: that command is
+  // dispatched too (`env bash -c 'node test/x.js'`, `/usr/bin/env sh -c ...`), and the wrapper's own reading goes on.
+  if (WRAP_BINS.has(bin) && ctx.depth < DEPTH) {
+    const un = unwrapSink(argv.slice(i - 1));
+    if (un.words.length > 0 && un.words.length < argv.length - (i - 1) && !un.xargs) {
+      ctx.depth++;
+      dispatch(ctx, un.words.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      ctx.depth--;
+    }
+  }
   // A directory change leaves this package whatever the target resolves to.
   if (bin === "cd" || bin === "pushd" || bin === "popd") {
     // Once the scan was unsure the widen already reads everything.

