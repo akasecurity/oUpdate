@@ -337,3 +337,16 @@ describe("structural rule: every command is checked for a move", () => {
     expect(held(hook, g("workspace=a"), g("workspace=b"))).toBe(false);
   });
 });
+
+describe("npm exec -p and NODE_ assignments", () => {
+  const h = (hook: string, files: Record<string, string> = {}) => held({ postinstall: hook, build: "echo ok" }, { ...files, ...subManifest("echo a"), "lib/a.js": "1" }, { ...files, ...subManifest("echo a"), "lib/a.js": "2" });
+  test("-p pkg with -c or -- widens, and -c alone stays on the call string", () => {
+    expect(h("npm exec -p evil-pkg -c 'node ./safe.js'", { "safe.js": "s" })).toBe(true);
+    expect(h("npm exec -p evil-pkg -- node ./safe.js", { "safe.js": "s" })).toBe(true);
+    expect(h("npm exec -c 'node ./safe.js'", { "safe.js": "s" })).toBe(false);
+  });
+  test("NODE_OPTIONS widens, another NODE_ name does not", () => {
+    expect(h("NODE_OPTIONS=--require=./sub/x.js npm run build")).toBe(true);
+    expect(h("NODE_ENV=production npm run build")).toBe(false);
+  });
+});

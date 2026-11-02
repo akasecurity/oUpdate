@@ -3235,6 +3235,11 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
   }
   if (call !== undefined) {
     runBody(ctx, call);
+    // `-p pkg -c '...'` runs with a fetched package on PATH, as `-p pkg -- cmd` does.
+    if (remote) {
+      widenAll(ctx);
+      fail(ctx, "unresolved: runner");
+    }
     return;
   }
   if (argv[k] === "--") k++;
@@ -3284,7 +3289,7 @@ function shellSegments(body: string): string[] {
   return out;
 }
 
-const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_|YARN_|PNPM_|BUN_|COREPACK_)/;
+const SPECIAL_ENV = /^(?:npm_|NPM_|NODE_OPTIONS=|YARN_|PNPM_|BUN_|COREPACK_)/;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "bun", "bunx", "npx", "corepack"]);
 const WRAPPERS = new Set(["command", "builtin", "exec", "nohup", "time", "env", "cross-env"]);
 const DIR_FLAG = /^(?:--prefix|--dir|--cwd|-C)(?:=(.*))?$/;
