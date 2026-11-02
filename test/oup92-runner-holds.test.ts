@@ -271,3 +271,14 @@ describe("fifth review round: false positives and the npm exec parser", () => {
     expect(h("npm exec -c 'node ./x.js'")).toBe(false);
   });
 });
+
+describe("an env prefix does not hide the command after it", () => {
+  const nested = (dir: string, js: string) => ({ [`${dir}/package.json`]: JSON.stringify({ name: "n", version: "1", scripts: { build: "node build.js" } }), [`${dir}/build.js`]: js });
+  test("a plain assignment is read like the bare command", () => {
+    for (const [cmd, dir] of [["FOO=1 npm --prefix sub run build", "sub"], ["FOO=1 cd sub && npm run build", "sub"], ["FOO=1 BAR=2 npm --prefix tests/pkg run build", "tests/pkg"], ["npm_config_x=1 npm --prefix tests/pkg run build", "tests/pkg"]] as const) {
+      expect(held({ postinstall: cmd, build: "echo ok" }, nested(dir, "1"), nested(dir, "evil()")), cmd).toBe(true);
+    }
+    expect(held({ postinstall: "FOO=1 node build.js" }, { "build.js": "1" }, { "build.js": "evil()" })).toBe(true);
+    expect(held({ postinstall: "FOO=1 npm run build", build: "echo ok" }, nested("sub", "1"), nested("sub", "evil()"))).toBe(false);
+  });
+});

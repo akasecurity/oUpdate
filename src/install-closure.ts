@@ -3324,7 +3324,9 @@ function dispatch(ctx: Ctx, cmd: string): void {
       if (/^(?:npm_|NPM_|NODE_|YARN_|PNPM_|BUN_|COREPACK_)/.test(argv[j]!)) widenAll(ctx);
       j++;
     }
-    fail(ctx, "unresolved: env");
+    // The command after the assignments is read exactly as without them (cd, workspace flags, runners).
+    if (j < argv.length) dispatch(ctx, argv.slice(j).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+    if (!ctx.hold) fail(ctx, "unresolved: env");
     return;
   }
   // `\cd`, `command cd` and `builtin cd` are the plain command.
