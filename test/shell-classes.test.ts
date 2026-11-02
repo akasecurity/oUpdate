@@ -576,6 +576,45 @@ describe("shell classes: review of d6a40bd", () => {
   });
 });
 
+describe("shell classes: review of 04ced3f", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  const F: ClassName[] = ["interp-flag"];
+  test("Q1/Q2: a case subject and pattern that run code, and a (pattern) item with a pipeline", () => {
+    is(F, ["case $(node -r ./p.js a.js) in *) :;; esac", "case x in $(node -r ./p.js a.js)) :;; esac", "case x in (a) echo hi | node -r ./p.js a.js;; esac", "case x in (a) false || node --loader ./l.mjs a.js;; esac"]);
+    is([], ['case "$1" in a) ;; sh) echo;; esac']);
+  });
+  test("Q3: time ( ) and coproc ( ) are subshells", () => {
+    is(F, ["time (node -r ./p.js a.js)", "coproc (node -r ./p.js a.js)"]);
+  });
+  test("Q4: $npm_node_execpath is node", () => {
+    is(F, ["$npm_node_execpath -r ./p.js a.js", "${npm_node_execpath} --loader ./l.mjs a.js"]);
+    is(["cd-relative"], ["cd sub && $npm_node_execpath a.js"]);
+    is([], ["$npm_node_execpath a.js"]);
+  });
+  test("Q5: /dev/stdin and its aliases are a program read from stdin", () => {
+    is(["heredoc"], ["node /dev/stdin <<'EOF'\nrequire('./lib/hidden.js')\nEOF", "bash /dev/stdin <<'EOF'\nnode -r ./p.js a.js\nEOF", ". /dev/stdin <<'EOF'\nnode -r ./p.js a.js\nEOF"]);
+    is(["interp-stdin"], ["node /dev/stdin < lib/x.js", "node /dev/fd/0 < lib/x.js", "node /proc/self/fd/0 < lib/x.js"]);
+  });
+  test("Q6: curl -J fails closed; --output-dir is the directory of the output", () => {
+    is(["writer-exec"], ["curl -OJ https://h/dl && node b.js", "curl --output-dir lib -O https://h/b.js && node lib/b.js", "curl --output-dir=lib -o b.js https://h/x && node lib/b.js"]);
+  });
+  test("Q7: awk print piped to a command held in a variable", () => {
+    is(["program-file"], ['awk \'BEGIN{c="sh"; print "id" | c}\'']);
+    is([], ["awk 'BEGIN{ if (a || b) print 1 }'"]);
+  });
+  test("Q8: trap -- 'code' EXIT", () => {
+    is(F, ["trap -- 'node -r ./p.js a.js' EXIT"]);
+  });
+  test("Q9: an alias whose value holds an expansion", () => {
+    is(F, ['X=-r\nalias n="node $X ./p.js"\nn a.js']);
+  });
+  test("Q12: ruby -C and env -C move one command, not the rest of the body", () => {
+    is(["cd-relative"], ["ruby -C sub a.rb"]);
+    is([], ["env -C sub true && node a.js"]);
+    expect(flagBody("ruby -C sub a.rb && node a.js").map((h) => h.why)).toEqual(["ruby script after cd"]); // not also "node script after cd"
+  });
+});
+
 describe("shell classes: bounded work", () => {
   const rep = (s: string, n: number) => s.repeat(n);
   const inputs: [string, string, ClassName[]][] = [

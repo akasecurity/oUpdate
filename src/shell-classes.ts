@@ -302,7 +302,7 @@ function parse(text: string, depth: number): Stage[] {
         const found = extractSubs(text.slice(i + 2, e - 1), spend0); st.subs.push(...found);
         st.words = []; i = e; continue;
       }
-      if (!cur && st.words.length && st.words[st.words.length - 1]!.text === "in") { endStage(); i = matchClose(i + 1, "(", ")"); continue; } // case (pattern)
+      if (!cur && st.words.length && st.words[st.words.length - 1]!.text === "in") { endStage(); casePat = false; i = matchClose(i + 1, "(", ")"); continue; } // case (pattern)
       if (cur && /^[@?*+!]$/.test(cur.text.slice(-1))) { // extglob @(a|b) in a word or a case pattern
         const e = matchClose(i + 1, "(", ")");
         cur.text += text.slice(i, e + 1); cur.plain = false; i = e; continue;
@@ -312,6 +312,7 @@ function parse(text: string, depth: number): Stage[] {
         for (const sub of extractSubs(text.slice(i + 1, e), () => { if (--FUEL < 0) fail("parse budget used up", "unparsed"); })) st.subs.push(sub);
         cur.text += "(" + text.slice(i + 1, e) + ")"; cur.plain = false; i = e; continue;
       }
+      if (!cur && st.words.length && st.words.every((w) => w.plain && /^(?:time|coproc|!)$/.test(w.text))) st.words = []; // time ( cmd ), coproc ( cmd ): a subshell
       if (cur || st.words.length) {
         // `name() { ... }` defines a function: drop the name, the body is read as the stages that follow.
         let j = i + 1; while (text[j] === " " || text[j] === "\t") j++;
@@ -327,7 +328,13 @@ function parse(text: string, depth: number): Stage[] {
       i = e; continue;
     }
     if (c === ")") { // a case pattern `x)` ends the pattern: its words are not a command
-      if (casePat) { cur = undefined; st = fresh(); casePat = false; continue; }
+      if (casePat) { // keep the substitutions of the subject and the pattern: they run
+        cur = undefined;
+        const keep = st.subs;
+        st = fresh();
+        if (keep.length) { st.subs.push(...keep); endStage(); }
+        casePat = false; continue;
+      }
       endStage(); continue;
     }
     if (c === "<" && text[i + 1] === "<" && text[i + 2] !== "<") {
@@ -444,6 +451,7 @@ const NODE_BOOL = /^--(?:no-|experimental-|enable-|disable-|trace-|abort-|expose
 const PHP_INI = /^(?:auto_(?:pre|ap)pend_file|extension|zend_extension|include_path|user_ini\.\w+)/;
 // Loading flags whose value is the next word.
 const VALUE_AFTER = new Set(["-l", "-c", "-z", "-r", "--require", "--import", "--loader", "--experimental-loader", "--env-file", "--env-file-if-exists", "--preload", "-I"]);
+const STDIN_PATH = /^(?:\/dev\/stdin|\/dev\/fd\/0|\/proc\/self\/fd\/0)$/;
 const NO_PROGRAM = /^(?:-v|-V|-VV|--version|-h|--help|--v8-options|--check|-\?)$/;
 const NO_PROGRAM_PHP = /^(?:-m|-i|--modules|--info|--ini)$/; // php -m lists modules, php -i prints the configuration
 const BAD_ENV = /^(?:NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|BASH_ENV|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|OPENSSL_CONF|OPENSSL_MODULES|PHP_INI_SCAN_DIR|PHPRC|GCONV_PATH|LD_AUDIT|npm_config_\w+)\+?=/i;
@@ -563,6 +571,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
   let later: string[] = [];
   const aliases = new Map<string, string>();
   for (const st of stages) {
+    let stageCwd = false; // env -C and ruby -C move one command, not the rest of the body
     // A redirect empties its target before the command runs, so a stage does not run its own output file.
     for (const t of later) copyTargets.add(t);
     later = st.writes;
@@ -579,7 +588,6 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     for (let n = 0; w.length; n++) {
       const spec = WRAP[BASE(w[0]!.text)];
       if (!spec || !w[0]!.plain || (w[0]!.text.includes("/") && !w[0]!.text.startsWith("/"))) break; // ./timeout is a file of the package, not the wrapper
-      if (w[0]!.text.includes("/") && !w[0]!.text.startsWith("/") && written(w[0]!.text)) hit("writer-exec", `runs ${w[0]!.text}, written or copied by this body`);
       if (n >= 8) { hit("unparsed", "more than 8 wrappers before the command"); break; }
       const name = BASE(w[0]!.text);
       let k = 1;
@@ -593,10 +601,10 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
         if (!t.startsWith("-") || t === "-") break;
         if (name === "env" && (t === "-S" || t === "--split-string")) { if (w[k + 1]) { if (!w[k + 1]!.plain) hit("computed-command", "env -S runs text built by an expansion"); nested(w[k + 1]!.text); } k++; continue; }
         if (name === "env" && t.startsWith("--split-string=")) { nested(t.slice(15)); continue; }
-        if (name === "env" && (t === "-C" || t === "--chdir" || t.startsWith("--chdir="))) cwd = true;
+        if (name === "env" && (t === "-C" || t === "--chdir" || t.startsWith("--chdir="))) stageCwd = true;
         if (spec.val.includes(t)) k++;
         else if (name === "env" && t.startsWith("-S") && t.length > 2) nested(t.slice(2));
-        else if (name === "env" && t.startsWith("-C") && t.length > 2) cwd = true;
+        else if (name === "env" && t.startsWith("-C") && t.length > 2) stageCwd = true;
       }
       if (spec.dur && k < w.length) k++;
       w = w.slice(k);
@@ -605,6 +613,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     }
     while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0]!.text)) { if (badEnv(w[0]!.text)) envHit(); w = w.slice(1); } // env -- NAME=v cmd: the assignment after -- is the first word
     if (lookup || !w.length) continue;
+    if (!w[0]!.plain && /^\$\{?npm_node_execpath\}?$/.test(w[0]!.text)) w = [{ text: "node", plain: true }, ...w.slice(1)]; // it is node itself
     const head = w[0]!;
     if (!head.plain) {
       // npm's own variables are resolved by the existing scan ($npm_execpath is the npm runner, ${npm_package_config_x} is a value of the manifest)
@@ -614,7 +623,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     const b = BASE(head.text);
     const args = w.slice(1);
     // dash (and any POSIX sh) expands an alias defined earlier in the script: its text is read as the command
-    if (b === "alias") { for (const a of args) { const m = /^([A-Za-z_][\w.-]*)=([\s\S]*)$/.exec(a.text); if (m && a.plain) aliases.set(m[1]!, m[2]!); } continue; }
+    if (b === "alias") { for (const a of args) { const m = /^([A-Za-z_][\w.-]*)=([\s\S]*)$/.exec(a.text); if (m) aliases.set(m[1]!, m[2]!); } continue; }
     const al = aliases.get(b);
     if (al !== undefined && head.plain) { nested(al + " " + args.map((a) => a.text).join(" ")); continue; }
     const stdin = (what: string) => { if (st.reads.length && !st.heredoc && st.reads.every((r) => r === "/dev/null")) return; if (!st.piped || st.heredoc || st.reads.length) hit(st.heredoc ? "heredoc" : "interp-stdin", `${what} reads its program from stdin`); };
@@ -632,7 +641,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       if (args.some((a) => !a.plain)) hit("computed-command", "eval runs text built by an expansion");
       const t = args.map((a) => a.text).join(" "); if (t) nested(t); continue;
     }
-    if (b === "trap") { if (args[0] && !args[0].text.startsWith("-")) nested(args[0].text); continue; } // trap 'code' EXIT runs code // eval joins its words and runs them as shell
+    if (b === "trap") { const code = args[0]?.text === "--" ? args[1] : args[0]; if (code && !code.text.startsWith("-")) nested(code.text); continue; } // trap 'code' EXIT runs code // eval joins its words and runs them as shell
     if (b === "cd" || b === "pushd" || b === "popd") { cwd = true; continue; }
     if (b === "make") { if (args.some((a) => badEnv(a.text))) envHit(); if (args.some((a) => /^-[A-Za-z]*f/.test(a.text) || /^--(?:file|makefile)(?:=|$)/.test(a.text))) hit("program-file", "make -f"); continue; }
     if (/^(?:awk|gawk|mawk|nawk)$/.test(b)) {
@@ -647,7 +656,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
         break;
       }
       for (const m of prog.matchAll(/\bprintf?\b[^;}>]*>>?\s*"([^"]+)"/g)) copyTargets.add(norm(m[1]!)); // print > "file" writes a file
-      if (args.some((a) => /^-f|^--file/.test(a.text) || /^-[iEl]$|^--(?:include|load|exec)/.test(a.text)) || /\bsystem\s*\(|\bgetline\b|\|\s*"|\|&|@include|@load/.test(prog)) hit("program-file", "awk program file, include or system()");
+      if (args.some((a) => /^-f|^--file/.test(a.text) || /^-[iEl]$|^--(?:include|load|exec)/.test(a.text)) || /\bsystem\s*\(|\bgetline\b|\|\s*"|(?<!\|)\|(?!\|)\s*[A-Za-z_]|\|&|@include|@load/.test(prog)) hit("program-file", "awk program file, include or system()");
       continue;
     }
     if (b === "sed") {
@@ -681,12 +690,15 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (b === "curl" || b === "wget") {
       const urlName = (u: string) => u.replace(/[?#].*$/, "").replace(/\/+$/, "").replace(/^.*\//, "");
       let named = false; // an output name was given
-      let prefix = ""; // wget -P dir
+      let prefix = ""; // wget -P dir, curl --output-dir dir
       const urls: string[] = [];
       for (let k = 0; k < args.length; k++) {
         const t = args[k]!.text;
-        const out = (v: string | undefined) => { if (v) { copyTargets.add(norm(v)); named = true; } };
+        const out = (v: string | undefined) => { if (v) { copyTargets.add((prefix ? norm(prefix) + "/" : "") + norm(v)); named = true; } };
         if (b === "curl" ? /^--output$|^-[A-Za-z]*o$/.test(t) : /^--output-document$|^-[A-Za-z]*O$/.test(t)) { out(args[k + 1]?.text); k++; }
+        else if (b === "curl" && (t === "--output-dir")) { prefix = args[k + 1]?.text ?? ""; k++; }
+        else if (b === "curl" && t.startsWith("--output-dir=")) prefix = t.slice(13);
+        else if (b === "curl" && (/^-[A-Za-z]*J[A-Za-z]*$/.test(t) || t === "--remote-header-name")) hit("writer-exec", "curl -J: the server picks the file name");
         else if (b === "curl" && /^--output=./.test(t)) out(t.slice(9));
         else if (b === "curl" && /^-[A-Za-z]*o./.test(t) && !/^--/.test(t)) out(t.replace(/^-[A-Za-z]*?o/, ""));
         else if (b === "wget" && /^--output-document=./.test(t)) out(t.slice(18));
@@ -701,7 +713,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       if (!named && (b === "wget" || urls.includes("\0remote"))) for (const u of urls) if (u !== "\0remote" && urlName(u)) copyTargets.add((prefix ? norm(prefix) + "/" : "") + urlName(u));
       continue;
     }
-    if (b === "source" || b === ".") { if (args[0] && !args[0].plain) hit("computed-command", "a sourced file named by an expansion"); if (args[0]?.plain) { if (cwd && !args[0].text.startsWith("/")) hit("cd-relative", "sourced file after cd"); ranWritten(args[0].text); } continue; }
+    if (b === "source" || b === ".") { if (args[0] && !args[0].plain) hit("computed-command", "a sourced file named by an expansion"); if (args[0]?.plain && STDIN_PATH.test(args[0].text)) { stdin(b); continue; } if (args[0]?.plain) { if ((cwd || stageCwd) && !args[0].text.startsWith("/")) hit("cd-relative", "sourced file after cd"); ranWritten(args[0].text); } continue; }
     if (SHELL.test(b)) {
       const rest: Word[] = [];
       let code: Word | undefined; let wantCode = false; let stdinFlag = false; let noProgram = false;
@@ -723,8 +735,9 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       if (rest.length === 0 || stdinFlag) { stdin(b); continue; }
       const f = rest[0]!;
       if (!f.plain) continue;
+      if (STDIN_PATH.test(f.text)) { stdin(b); continue; }
       if (f.text.startsWith("/")) { ranWritten(f.text); continue; }
-      if (cwd) hit("cd-relative", `${b} file after cd`);
+      if (cwd || stageCwd) hit("cd-relative", `${b} file after cd`);
       ranWritten(f.text);
       continue;
     }
@@ -774,7 +787,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
             if (rest[k + 1] && !rest[k + 1]!.text.startsWith("-")) k++;
             continue;
           }
-          if (kind === "ruby" && a.text.startsWith("-C")) cwd = true; // ruby -C dir runs the script from there
+          if (kind === "ruby" && a.text.startsWith("-C")) stageCwd = true; // ruby -C dir runs the script from there
           if ((NO_PROGRAM.test(a.text) && !(kind === "python" && a.text === "-v")) || (kind === "php" && NO_PROGRAM_PHP.test(a.text))) noProgram = true;
           else if (valued.includes(a.text) || (kind === "node" && /^--max-[a-z-]+$/.test(a.text))) k++;
           else if (kind === "node" && a.text.startsWith("--") && !NODE_BOOL.test(a.text) && !a.text.includes("=") && rest[k + 1] && !rest[k + 1]!.text.startsWith("-") && k + 2 < rest.length && !rest.some((x) => INLINE.test(x.text)) && !/\.(?:[cm]?[jt]s|json)$|\//.test(rest[k + 1]!.text)) {
@@ -793,14 +806,15 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       if (inline) continue;
       if (!file) { if (viaXargs && !noProgram) hit("interp-stdin", `xargs ${b}: the script comes from stdin`); else if (!noProgram) stdin(b); continue; }
       if (!file.plain) continue;
+      if (STDIN_PATH.test(file.text)) { stdin(b); continue; } // node /dev/stdin reads the program from stdin
       if (file.text.startsWith("/")) { ranWritten(file.text); continue; }
-      if (cwd) hit("cd-relative", `${b} script after cd`);
+      if (cwd || stageCwd) hit("cd-relative", `${b} script after cd`);
       ranWritten(file.text);
       continue;
     }
     if (head.text.includes("/") && !PM.test(b)) {
-      if (head.text.startsWith("/") || (head.text.startsWith("../") && !cwd)) continue; // after a cd, ../x is not the package's
-      if (cwd) hit("cd-relative", "path command after cd");
+      if (head.text.startsWith("/") || (head.text.startsWith("../") && !(cwd || stageCwd))) continue; // after a cd, ../x is not the package's
+      if (cwd || stageCwd) hit("cd-relative", "path command after cd");
       ranWritten(head.text);
     }
   }

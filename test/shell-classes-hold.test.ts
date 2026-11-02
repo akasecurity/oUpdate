@@ -27,6 +27,7 @@ describe("a form that loads or runs code the text does not name holds, naming th
     ["$(echo node) -r ./p.js a.js", "p.js"],
     ["`echo node` -r ./p.js a.js", "p.js"],
     ['env -S "$(cat lib/x.txt)"', "lib/x.txt"],
+    ["$npm_node_execpath -r ./p.js a.js", "p.js"],
     ["ruby -C sub a.rb", "sub/a.rb"],
     ["cat t > b.js && node lib/../b.js", "t"],
     ["cat t > lib/x.js && node lib/./x.js", "t"],
