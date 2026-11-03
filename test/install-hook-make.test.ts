@@ -30,6 +30,10 @@ describe("make in a body that is not split into commands is still read", () => {
     `V=1 ${P} > log`,
     `gmake -C sub > log`,
     `echo ok\n${P} > log\necho done`,
+    "ma\\ke -C sub > log",
+    "m''ake -C sub > log",
+    "m\"a\"ke -C sub > log",
+    "m\\ake -C sub > log",
     `nice ${P} > log`,
     `nice -n 5 ${P} > log`,
     `env V=1 ${P} > log`,
@@ -50,7 +54,7 @@ describe("make in a body that is not split into commands is still read", () => {
   for (const f of forms) {
     test(JSON.stringify(f) + ": the payload is read, the twin and an unchanged package are quiet", () => {
       expect(details(f)).toContain("file sub/x.js");
-      const twin = f.replace(/\$\{MAKE(?::-make)?\} -C sub|g?make -C sub/, "echo ok");
+      const twin = f.replace(/(?:\$\{MAKE(?::-make)?\}|g?m[\\'"]*a[\\'"]*k[\\'"]*e) -C sub/, "echo ok");
       expect(details(twin)).toEqual([]);
       expect(details(f, [])).toEqual([]);
     });
@@ -60,5 +64,38 @@ describe("make in a body that is not split into commands is still read", () => {
   });
   test("make inside quotes, a heredoc or a comment is not a command", () => {
     for (const f of ['echo "make -C sub" > log', "cat <<EOF > log\nmake -C sub\nEOF", "echo ok > log # make -C sub", "echo 'make' > log"]) expect(details(f), f).toEqual([]);
+  });
+});
+
+describe("a run target in the working directory spelled ~0 or ~+", () => {
+  test("node ~0/sub/x.js and node ~+/sub/x.js name the file", () => {
+    for (const f of ["node ~0/sub/x.js", "node ~+/sub/x.js", "node ~+0/sub/x.js", "node ~-0/sub/x.js"]) {
+      expect(details(f), f).toContain("file sub/x.js");
+      expect(details(f, ["other/y.js"]), f).toEqual([]);
+    }
+  });
+});
+
+describe("a quoted tilde prefix is a literal file name", () => {
+  const forms = ['node "~+/sub/x.js"', "node '~0/sub/x.js'", 'node "~+"/sub/x.js', 'node ~"+"/sub/x.js', 'node ~+"/sub/x.js"', "node ~'0'/sub/x.js", "node ~\\+/sub/x.js", "node \\~+/sub/x.js"];
+  test("the file ~+/sub/x.js changed: held; sub/x.js changed alone: quiet", () => {
+    for (const f of forms) {
+      const lit = f.includes("~0") || f.includes("'0'") ? "~0/sub/x.js" : "~+/sub/x.js";
+      expect(details(f, [lit]), f).toContain("file " + lit);
+      expect(details(f, ["sub/x.js"]), f).toEqual([]);
+    }
+  });
+});
+
+describe("an empty quote before a ~ and repeated slashes after a tilde prefix", () => {
+  test("''~+/sub/x.js is the file ~+; ~+//sub/x.js is sub/x.js", () => {
+    for (const f of ["node ''~+/sub/x.js", 'node ""~+/sub/x.js']) {
+      expect(details(f, ["~+/sub/x.js"]), f).toContain("file ~+/sub/x.js");
+      expect(details(f, ["sub/x.js"]), f).toEqual([]);
+    }
+    for (const f of ["node ~+//sub/x.js", "node ~0//sub/x.js", "node ~+///sub/x.js"]) {
+      expect(details(f, ["sub/x.js"]), f).toContain("file sub/x.js");
+      expect(details(f, ["other/y.js"]), f).toEqual([]);
+    }
   });
 });

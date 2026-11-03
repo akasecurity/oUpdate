@@ -239,12 +239,14 @@ describe("shell classes", () => {
 
   test("valid one-line shell the parser reads: expansions in redirect targets, arrays, [[ ]], comments, escaped quotes", () => {
     const P = "node -r ./p.js a.js";
-    for (const c of [`${P} > $(echo log)`, `${P} > \`echo log\``, `${P} 2> "$(echo log)"`, `arr=(x y); ${P}`, `arr=($(echo x)); ${P}`, `[[ a =~ (a) ]] && ${P}`, `[[ -n $(true) ]] && ${P}`, `if [[ a == b* ]]; then ${P}; fi`, `echo $(true # it's\n); ${P}`, `echo $(cat <<E\nit's\nE\n); ${P}`, `echo $(cat <<-'E'\n\tit's\n\tE\n); ${P}`, `echo "x\\"y"; ${P}`, `echo "a \\" b" && ${P}`]) {
+    for (const c of [`arr=(x y); ${P}`, `arr=($(echo x)); ${P}`, `[[ a =~ (a) ]] && ${P}`, `[[ -n $(true) ]] && ${P}`, `if [[ a == b* ]]; then ${P}; fi`, `echo $(true # it's\n); ${P}`, `echo $(cat <<E\nit's\nE\n); ${P}`, `echo $(cat <<-'E'\n\tit's\n\tE\n); ${P}`, `echo "x\\"y"; ${P}`, `echo "a \\" b" && ${P}`]) {
       expect(classes(c), c).toEqual(["interp-flag"]);
     }
+    // a redirect target built by a substitution is a write to a name the body cannot tell
+    for (const c of [`${P} > $(echo log)`, `${P} > \`echo log\``, `${P} 2> "$(echo log)"`]) expect(classes(c), c).toEqual(["interp-flag", "writer-exec"]);
     expect(classes("arr=($(sh -c 'cd a && node b.js'))")).toEqual(["cd-relative"]);
     expect(classes("[[ $(sh -c 'cd a && node b.js') ]]")).toEqual(["cd-relative"]);
-    expect(classes("echo > $(sh -c 'cd a && node b.js')")).toEqual(["cd-relative"]);
+    expect(classes("echo > $(sh -c 'cd a && node b.js')")).toEqual(["cd-relative", "writer-exec"]);
   });
 
   test("a backslash only quotes: \\node, \\cd, node -\\r", () => {
@@ -295,8 +297,8 @@ describe("shell classes: review part 2", () => {
   test("a command substitution in a here-string or redirect target is walked", () => {
     expect(classes('cat <<< "$(node -r ./p.js a.js)"')).toEqual(["interp-flag"]);
     expect(classes("cat <<< $(node -r ./p.js a.js)")).toEqual(["interp-flag"]);
-    expect(classes('echo > "$(node -r ./p.js a.js)"')).toEqual(["interp-flag"]);
-    expect(classes('echo >& "$(node -r ./p.js a.js)"')).toEqual(["interp-flag"]);
+    expect(classes('echo > "$(node -r ./p.js a.js)"')).toEqual(["interp-flag", "writer-exec"]);
+    expect(classes('echo >& "$(node -r ./p.js a.js)"')).toEqual(["interp-flag", "writer-exec"]);
     expect(classes("echo hi > \"$(echo log)\"")).toEqual([]);
   });
   test("more than 8 wrappers fails closed", () => {
@@ -352,7 +354,7 @@ describe("shell classes: review of fcdb6a0", () => {
     expect(classes("(( x = (1 + 2) * 3 )); node a.js")).toEqual([]);
   });
   test("valid bash the parser used to stop on", () => {
-    for (const c of ["declare -a a=(1)", "local -a a=(1)", "export a=(1)", "time [[ a =~ (b) ]]", "[[ a == \" ]] \" ]]", "echo `echo \\`date\\``", "echo > $'a\\'b'", 'echo > "$(echo "x")"', "echo $(# it's\ncat <<EOF\nx\nEOF\n)", "echo $( echo $(( 1 << 2 )) )", "case x in @(a)) echo;; esac", "cmd &>> log", "while read x; do :; done < <(cmd)", "echo > >(cmd)"]) {
+    for (const c of ["declare -a a=(1)", "local -a a=(1)", "export a=(1)", "time [[ a =~ (b) ]]", "[[ a == \" ]] \" ]]", "echo `echo \\`date\\``", "echo > $'a\\'b'", "echo $(# it's\ncat <<EOF\nx\nEOF\n)", "echo $( echo $(( 1 << 2 )) )", "case x in @(a)) echo;; esac", "cmd &>> log", "while read x; do :; done < <(cmd)", "echo > >(cmd)"]) {
       expect(classes(c + "; node -r ./p.js a.js"), c).toEqual(F);
       expect(classes(c), c).toEqual([]);
     }
@@ -638,6 +640,311 @@ describe("shell classes: review of 47a705c", () => {
   });
 });
 
+describe("shell classes: follow-up round first", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  test("F1: only ;; ends a case item; a lone ; does not turn | and || into case separators", () => {
+    is(["interp-flag"], ["echo build; node-gyp rebuild || node --loader ./l.mjs fallback.js"]);
+    is(["cd-relative"], ["cd sub; test -f x || node a.js"]);
+    is(["interp-flag"], ['case x in a) :;; b) true || node -r ./p.js a.js;; esac']);
+  });
+  test("F2: a heredoc or here-string on descriptor 0", () => {
+    is(["heredoc"], ["node 0<<EOF\nrequire('./lib/hidden.js')\nEOF", "sh 0<<< 'node -r ./p.js a.js'"]);
+  });
+  test("F3: env -C and sudo -D carry their directory into a nested shell", () => {
+    is(["cd-relative"], ["env -C sub sh -c 'node a.js'", "sudo -D sub bash -c 'node a.js'"]);
+    is([], ["env sh -c 'node a.js'"]);
+  });
+  test("F4: bun run FILE", () => {
+    is(["writer-exec"], ["cat lib/hidden.js > b.js && bun run b.js"]);
+    is(["cd-relative"], ["cd sub && bun run a.js"]);
+    is([], ["bun run build", "bun run a.js"]);
+  });
+  test("F5: xargs -I{} / -i hands the script from stdin", () => {
+    is(["interp-stdin"], ["printf lib/setup.js | xargs -I{} node {}", "printf lib/setup.js | xargs -i node {}"]);
+  });
+  test("F6: a program from a descriptor other than 0", () => {
+    is(["interp-stdin"], ["node /dev/fd/3 3<lib/hidden.js", "bash /proc/self/fd/4 4<lib/x.sh"]);
+    is(["computed-command"], ["bash <(cat lib/x.sh)", "node <(cat lib/hidden.js)"]);
+  });
+  test("node flag clusters and an export whose name holds an expansion", () => {
+    is(["interp-flag"], ["node -ep 1 -r ./p.js a.js", "node -ie 1 -r ./p.js a.js", "node -pe 1 -r ./p.js"]);
+    is(["env-assign"], ['export ""$(cat lib/x.env)', 'export "a b"$(cat lib/x.env)', 'export "$(cat lib/x.env)=1"']);
+    is([], ["export FOO=$(pwd)", 'export "FOO=$(pwd)"']);
+  });
+  test("F7: export of names or values built by a substitution", () => {
+    is(["env-assign"], ["export $(cat lib/x.env) && node a.js", "declare -x $(cat lib/x.env)"]);
+    is([], ["export FOO=$(pwd)", "export $npm_config_x"]);
+  });
+  test("F8: perl -E and --eval=, and no over-hold after a cd", () => {
+    is(["interp-flag"], ["perl -E 1 -MEvil"]);
+    is(["cd-relative"], ["cd sub && perl a.pl"]);
+    is([], ["cd sub && perl -E 'say 1'", "node --eval=1 x"]);
+  });
+  test("F9: a read-write redirect <> writes", () => {
+    is(["writer-exec"], ["cat lib/hidden.js 1<>b.js && node b.js"]);
+  });
+  test("F10: time -p ( )", () => {
+    is(["interp-flag"], ["time -p (node -r ./p.js a.js)"]);
+  });
+  test("F11: cp -t DIR, -tDIR and --target-directory", () => {
+    is(["writer-exec"], ["cp --target-directory=lib evil.js && node lib/evil.js", "cp --target-directory lib evil.js && node lib/evil.js", "cp -tlib evil.js && node lib/evil.js", "cp -t lib evil.js && node lib/evil.js"]);
+    is([], ["cp -t lib evil.js && node a.js"]);
+  });
+  test("F12: ~+ and ~- are the working directory, not a home", () => {
+    is(["env-assign"], ["PATH=~+/bin:$PATH node a.js", "CC=~+/x.sh node-gyp rebuild"]);
+    is([], ["PATH=~/bin:$PATH node a.js", "CC=~/x.sh make"]);
+  });
+  test("W1: a regex with | in an awk program is not a pipe", () => {
+    is([], ["awk '/foo|bar/ {print}' f", "awk '{gsub(/a|b/,\"\")}' f"]);
+    is(["program-file"], ["awk 'BEGIN{c=\"sh\"; print \"id\" | c}'", "awk '/a|b/ {print \"id\" | \"sh\"}'"]);
+  });
+});
+
+describe("shell classes: follow-up round second", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  const F: ClassName[] = ["interp-flag"];
+  test("C1: a (pattern) item after the first, and (sh) as a pattern", () => {
+    is(F, ['case "$1" in\n (a) true | node -r ./p.js a.js;;\nesac', "case x in (a) :;; (b) true || node --loader ./l.mjs a.js;; esac"]);
+    is([], ['case "$1" in\n(sh) echo;;\nesac', "case x in (a) :;; (sh) echo;; esac"]);
+  });
+  test("C2: a word that expands to several words, flags among them", () => {
+    is(F, ['set -- -r ./p.js a.js; node "$@"', "sh -c 'node \"$@\"' sh -r ./p.js a.js", 'A=(-r ./p.js a.js); node "${A[@]}"', "node ${X:--r ./p.js a.js}", "X='-r ./p.js a.js'; sh -c \"node $X\"", "X='-r ./p.js a.js'; node $X"]);
+    is([], ["node ${npm_package_config_e:-a.js}", "node $npm_package_config_bin"]);
+  });
+  test("C3: brace expansion in a command or its flags", () => {
+    is(F, ["node {-r,./p.js} a.js"]);
+    is(["computed-command"], ["{node,-r,./p.js} a.js"]);
+    is([], ["echo {a,b}"]);
+    // a brace in the script operand names files the existing scan cannot (node a{1,2}.js runs a1.js)
+    is(["computed-command"], ["node a{1,2}.js", "node --max-old-space-size=4096 a{1,2}.js", "node {a,b}.js", "node {,}lib/hidden.js", "sh {,}lib/x.sh"]);
+    is(F, ["node --{require=./p.js,inspect} a.js", "node {--require,--inspect} ./p.js a.js"]);
+  });
+  test("C4: a subshell and a -c string see the variables, aliases and unknown writes of the body", () => {
+    is(["writer-exec"], ['N=b.js; (cat lib/hidden.js > "$N"); node b.js', 'M=$(echo b.js); sh -c \'cat lib/hidden.js > "$M"\'; node b.js']);
+    is(F, ["alias node='node -r ./p.js'\n(node a.js)"]);
+    is([], ["alias node='node -r ./p.js'\nsh -c 'node a.js'"]); // a new shell has no aliases
+  });
+  test("C5: a script on a descriptor opened earlier", () => {
+    is(["interp-stdin"], ["exec 3<lib/x.sh; sh /dev/fd/3"]);
+  });
+  test("C7: for and read of a loader variable", () => {
+    is(["env-assign"], ["for PATH in ./bin; do node a.js; done", "read PATH <<< ./bin; node a.js", "read -r NODE_OPTIONS", "for NODE_OPTIONS in --require=./x.js; do node a.js; done"]);
+    is([], ["for f in a b; do echo $f; done", "read line", "for PATH in /usr/bin; do node a.js; done"]);
+  });
+  test("C9: printf | xargs sh", () => {
+    is(["interp-stdin"], ["printf lib/x.sh | xargs sh", "printf lib/x.sh | xargs bash"]);
+    is([], ["printf x | xargs echo", "printf x | xargs sh -c 'echo ok'"]);
+  });
+  test("C11: -r is deno --reload and -p is a perl loop flag, not inline code", () => {
+    is(["writer-exec"], ["cat t > a.ts && deno run -r a.ts", "cat t > x.pl && perl -p x.pl f", "cat t > x.pl && perl -c x.pl"]);
+    is(F, ["perl -E 1 -MEvil", "node -p 1 -r ./p.js"]);
+    is([], ["python3 -c 'print(1)'", "cd sub && python3 -c 'print(1)'", "python3 -Bc 'x'"]);
+    is(F, ["python3 -m pkg"]);
+    is([], ["python3 -c 'x' -m y"]); // after -c CODE the rest is sys.argv
+  });
+  test("C12: PERL5DB", () => {
+    is(["env-assign"], ["PERL5DB='require \"./lib/x.pl\"' perl -d a.pl", "export PERL5DB"]);
+  });
+});
+
+describe("shell classes: follow-up V1-V3 (variables the body sets in ways that are not literal)", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  // N was a.js; each form may set it to something else, so the write through "$N" is to a name the body cannot tell
+  const stale = (f: string) => `N=a.js\n${f}\ncat h > $N; node b.js`;
+  test("V1: an assignment that may not run, runs elsewhere, or a builtin that sets N makes N unknown", () => {
+    for (const f of ["if true; then N=b.js; fi", "true && N=b.js || N=c.js", "f() { N=b.js; }; f", "N=b.js | true", "printf -v N b.js", "let N=1", "((N++))", "unset N", ": ${N:=b.js}", "(N=b.js)", "x=$(N=b.js)", "for N in a b; do :; done", "read N <<< b.js", "N=$(echo b.js)", "case x in x) N=b.js;; esac", "while false; do N=b.js; done"]) {
+      expect(classes(stale(f)), f).toEqual(["writer-exec"]);
+    }
+  });
+  test("V1: a prefix assignment is that command's environment: N keeps its value", () => {
+    is([], ["N=a.js\nN=b.js true\ncat h > $N; node b.js"]); // N is still a.js: the write is to a.js, and node b.js is not that file
+    is(["writer-exec"], ["N=a.js\nN=b.js true\ncat h > $N; node a.js"]);
+  });
+  test("V1: a known value is still known", () => {
+    is(["writer-exec"], ["N=b.js\ncat h > $N; node b.js", "N=b.js; eval N=c.js; cat h > $N; node c.js"]);
+    is([], ["N=b.js\ncat h > $N; node a.js", "N=a.js; eval N=b.js; cat h > $N; node a.js"]);
+  });
+  test("V2: more writes to a name the body cannot tell", () => {
+    for (const f of ["(cat h > $N)", "x=$(cat h > $N)", "cat h | tee $N", "dd of=$N", "cat h <> $N", "cat h 1<>b.js", "cp h $N", "mv h \"$N\"", "install h $N"]) expect(classes(`${f}; node b.js`), f).toEqual(["writer-exec"]);
+  });
+  test("V2: a write outside the package, or a program's own output, is not an unknown write", () => {
+    is([], ['echo x > "$TMPDIR/o"; node a.js', 'echo x > "$HOME/o"; node a.js', "echo x > /tmp/o.js; node a.js", "echo x > ${LOG:-/dev/null}; node a.js", "dd of=/tmp/o; node b.js"]);
+    // no program's own output is trusted: npx, npm exec, npm run, make, node SCRIPT, php -r can print any file of the package
+    is(["writer-exec"], ["node a.js > $OUT; node b.js", "make > $OUT; node b.js", "npm run build > $OUT; node b.js", "npx cat lib/hidden.js > $npm_package_config_out; node b.js", "npm exec -- cat lib/hidden.js > $npm_package_config_out; node b.js", "pnpm dlx cat lib/hidden.js > $npm_package_config_out; node b.js", "php -r 'readfile(\"lib/hidden.js\");' > $npm_package_config_out; node b.js", "set -- b.js; npx cat lib/hidden.js > $1; node b.js", "f() { npx cat lib/hidden.js > $1; }; f b.js; node b.js", "getopts o N; cat lib/hidden.js > $N; node b.js", "cat lib/hidden.js > ${npm_package_config_out:-/tmp/x}; node b.js", "npx cat lib/hidden.js > $npm_package_name.js; node x.js"]);
+  });
+  test("V3: a script path built from a variable the body assigned something it cannot read", () => {
+    is(["computed-command"], ["D=$(echo sub); node $D/a.js", "D=sub; node $D/a.js", "if true; then D=sub; fi; node $D/a.js"]);
+    is([], ["node $D/a.js"]);
+  });
+});
+
+describe("shell classes: follow-up round third", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  const F: ClassName[] = ["interp-flag"];
+  test("1: division in an awk program does not hide system(), getline or a pipe", () => {
+    is(["program-file"], [`awk '{x=$1 / 2; system("sh lib/x.sh"); y=$2 / 3}'`, `awk '{x=$1 / 2; print "id" | "sh"; y=$2 / 3}'`, `awk '{x=$1 / 2; "date" | getline d; y=$2 / 3}'`]);
+    is([], ["awk '/foo|bar/ {print}' f", "awk '{x=$1 / 2; y=$2 / 3; print x}' f"]);
+  });
+  test("2: a flag held in a variable is an interp-flag", () => {
+    is(F, ["X=-e; node $X \"require('./lib/hidden.js')\"", "X=-r; node $X ./p.js a.js"]);
+  });
+  test("3: a subshell or pipe after esac is not a case pattern", () => {
+    is(F, ["case x in a) :;; esac; (node -r ./p.js a.js)", "case x in a) :;; esac | node -r ./p.js a.js"]);
+  });
+  test("4: every item of a for list is checked", () => {
+    is(["env-assign"], ["for PATH in /usr/bin ./bin; do node a.js; done", "for CC in gcc ./cc; do make; done"]);
+    is([], ["for PATH in /usr/bin /opt/bin; do node a.js; done"]);
+  });
+  test("5: interpreters it does not list are not examined", () => {
+    is([], ["tsx -e 'console.log(1)'", "cd sub && tsx -e 'x'", "cd sub && Rscript -e 'x'"]);
+  });
+  test("6: cp and ln -t in clusters; rsync is not cp", () => {
+    is(["writer-exec"], ["cp -vt lib a.js && node lib/a.js", "ln -sft lib x.js && node lib/x.js"]);
+    is([], ["rsync -rtv a.js lib/ && node lib/a.js"]);
+  });
+  test("8: xargs -I STR and -J STR", () => {
+    is(["interp-stdin"], ["printf lib/x.js | xargs -I % node %", "printf lib/x.sh | xargs -I@ sh @", "printf lib/x.js | xargs -J % node %"]);
+    is([], ["printf lib/x.js | xargs -I % node a.js %"]);
+  });
+  test("9/10: a default value without spaces or a leading dash is one word", () => {
+    is([], ['export "$npm_config_x"', "node ${npm_package_config_e:-a.js}"]);
+    // the default is the script when nothing sets the variable: a file the existing scan cannot name (node ${X:-./lib/hidden.js} runs lib/hidden.js)
+    is(["computed-command"], ["node ${SCRIPT:-index.js}", 'node "${SCRIPT:-index.js}"', "node ${X:-./lib/hidden.js}", "node ${X-./lib/hidden.js}", "node ${X:=./lib/hidden.js}"]);
+    is(F, ["node ${X:--r} ./p.js a.js", "node ${X:-a b}"]);
+  });
+  test("11: <> opens the file for reading too", () => {
+    is(["interp-stdin"], ["printf x | node 0<>lib/x.js"]);
+  });
+  test("12: aliases stay in this shell; a subshell's assignment is not kept", () => {
+    is(["writer-exec"], ['N=b.js; (N=safe.js); cat x > "$N"; node b.js']);
+  });
+  test("13: ;& and ;;& end a case item", () => {
+    is([], ["case x in a) :;& sh) echo;; esac", "case x in a) :;;& sh) echo;; esac"]);
+  });
+  test("14: a heredoc on another descriptor is not stdin", () => {
+    is([], ["node a.js 3<<EOF\nx\nEOF"]);
+    is(["heredoc"], ["node 0<<EOF\nx\nEOF", "node <<EOF\nx\nEOF"]);
+  });
+  test("15: bun run --cwd DIR script; a package script with a dot is not a file", () => {
+    is([], ["cd sub && bun run build.prod", "bun run build.prod"]);
+    is(F, ["bun run --cwd sub build"]); // --cwd is read as a load flag; sub is not taken for the script
+    is(["cd-relative"], ["cd sub && bun run a.js"]);
+  });
+});
+
+describe("shell classes: review of 7960377 (H1-H10, N1-N7)", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  const F: ClassName[] = ["interp-flag"];
+  test("H1: a program that can print any file does not make its redirect target an outside write", () => {
+    is(["writer-exec"], ['read OUT <<< b.js; sh -c "cat lib/hidden.js" > "$OUT"; node b.js', "node -p \"fs.readFileSync('lib/hidden.js','utf8')\" > $OUT; node b.js", "git show :lib/hidden.js > $N; node b.js", "N=$(echo b.js); sh -c 'cat lib/hidden.js' > $N; node b.js"]);
+  });
+  test("H2: a block that ended does not leave later assignments unknown", () => {
+    is([], ["if [ -f x ]; then :; fi; OUT=dist/x.js; cat a > $OUT; node other.js", "for d in a; do :; done; OUT=dist/x.js; cat a > $OUT; node other.js", "{ :; }; OUT=dist/x.js; cat a > $OUT; node other.js", "case x in a) :;; esac; OUT=dist/x.js; cat a > $OUT; node other.js", "while false; do :; done; OUT=dist/x.js; cat a > $OUT; node other.js", "f() { :; }; OUT=dist/x.js; cat a > $OUT; node other.js"]);
+    is(["writer-exec"], ["if [ -f x ]; then OUT=dist/x.js; fi; cat a > $OUT; node other.js", "for d in a; do OUT=dist/x.js; done; cat a > $OUT; node other.js", "N=b.js; for N in x y; do :; done; cat a > $N; node b.js"]);
+  });
+  test("H3/H4: a background command and a newline after && or ||", () => {
+    is(["writer-exec"], ["N=b.js; N=a.js & cat lib/hidden.js > $N; node b.js", "N=b.js; false &&\nN=a.js\ncat lib/hidden.js > $N; node b.js", "N=b.js; false ||\nN=a.js\ncat lib/hidden.js > $N; node b.js"]);
+  });
+  test("H5: a name the body reassigned is not an outside place", () => {
+    is(["writer-exec"], ["N=$(echo b.js); cat lib/hidden.js > ${N:-/tmp/x}; node b.js"]);
+    expect(classes("HOME=$(pwd); cat lib/hidden.js > $HOME/b.js; node b.js")).toContain("writer-exec");
+    is([], ['echo x > "$TMPDIR/o"; node a.js', "echo x > ${LOG:-/dev/null}; node a.js"]);
+  });
+  test("a prefix assignment whose value is not read taints the code the command runs", () => {
+    is(["writer-exec"], ["N=$(echo b.js) sh -c 'cat lib/hidden.js > $N'; node b.js", "N=$(echo b.js) bash -c 'cat lib/hidden.js > $N'; node b.js", "N=$(echo b.js) eval 'cat lib/hidden.js > $N'; node b.js"]);
+    is(["computed-command"], ["D=$(echo sub) sh -c 'node $D/a.js'"]);
+    expect(classes("HOME=$(pwd) sh -c 'cat lib/hidden.js > $HOME/b.js'; node b.js")).toContain("writer-exec");
+    is([], ["N=a.js; N=$(echo b.js) true; cat h > $N; node c.js"]); // the prefix assignment does not leak to the next command
+  });
+  test("with -t every operand is a source", () => {
+    is(["writer-exec"], ["cp -t lib $SRC a.js; node b.js", "cp -t . $SRC; node b.js", "cp --target-directory=lib $SRC a.js; node b.js", "mv -t lib $SRC a.js; node b.js"]);
+    is([], ["cp -t lib a.js; node b.js", "cp -t /tmp $SRC; node b.js"]);
+  });
+  test("a variable holding flags, before the script; after the script it is an argument", () => {
+    is(["computed-command"], ["X=$(cat flags); node $X"]);
+    is(["interp-flag"], ['X="-r ./p.js"; node $X a.js']);
+    is([], ["X=$(cat flags); node a.js $X"]);
+  });
+  test("a function body keyword form closes: a later plain group is not a function body", () => {
+    is([], ["function f { :; }; { N=b.js; }; cat h > $N; node c.js", "f() { :; }; { N=b.js; }; cat h > $N; node c.js"]);
+    is(["writer-exec"], ["function f { N=b.js; }; f; cat h > $N; node b.js"]);
+  });
+  test("H6: ;;& ends a case item", () => {
+    is([], ["case x in a) :;;& sh) echo;; esac"]);
+  });
+  test("H7: cp --target-directory and -t with a directory held in a variable", () => {
+    is(["writer-exec"], ['cp --target-directory="$DIR" lib/hidden.js; node b.js', 'cp -t"$DIR" lib/hidden.js; node b.js', 'cp -t $DIR lib/hidden.js; node b.js']);
+    is([], ['cp -t "$TMPDIR" lib/hidden.js; node b.js']);
+  });
+  test("H8/N3: xargs replacement strings, inside a path, and a replacement token that looks like an option", () => {
+    is(["interp-stdin"], ["printf x | xargs -I{} node lib/{}.js", "printf x | xargs -I{} node ./{}", "printf x | xargs -iR sh R", "printf x | xargs --replace=R node R", "printf lib/setup.js | xargs -I -i node -i"]);
+  });
+  test("H9: rsync -t is not cp -t", () => {
+    is([], ["rsync -avtz hidden.js b.js && node b.js"]);
+  });
+  test("H10: a spaced division does not hide a pipe", () => {
+    is(["program-file"], ["awk '{print $1 /2; print \"id\" | cmd; x = 4 /2}'"]);
+  });
+  test("N1: a prefix assignment is seen by the code the command runs", () => {
+    is(["writer-exec"], ["N=b.js eval 'cat lib/hidden.js > $N'; node b.js", "N=b.js sh -c 'cat lib/hidden.js > $N'; node b.js"]);
+  });
+  test("N2: cp into a directory held in a variable", () => {
+    is(["writer-exec"], ["D=lib; cp evil.js $D; node lib/evil.js", "D=lib; cp evil.js $D/; node lib/evil.js"]);
+  });
+  test("N4: nested braces and a path before the brace", () => {
+    is(["computed-command"], ["./{bin,sub}/sh"]);
+    is(F, ["node {a,{b,c}}", "node {-r,{./p.js,a.js}}"]);
+    is(["computed-command"], ["node {a,b}.js"]);
+    is([], ["echo {a,{b,c}}"]);
+  });
+  test("N5: bun run with a script held in a variable, and load flags after run", () => {
+    is(["computed-command", "writer-exec"], ["N=b.js; cp lib/hidden.js b.js; bun run $N"]);
+    is(F, ["bun run --preload ./p.js a.js", "bun run --import=./p.js a.js", "bun run -r ./p.js a.js"]);
+  });
+  test("N6: --eval=CODE does not consume the next word", () => {
+    is(F, ["node --eval=1 -r ./p.js a.js"]);
+    is([], ["node --eval=1 a.js"]);
+  });
+  test("N7 and the low items: here-string on fd 3, ${X:-k=v}, <<=, printf -vN, mapfile, for N;", () => {
+    is([], ["node a.js 3<<<x"]);
+    // ${X:-k=v} and ${X//a=b/} do not assign: N stays known, so the write is b.js and node c.js is not that file
+    is([], ["echo ${X:-k=v}; N=b.js; cat h > $N; node c.js", "echo ${X//a=b/}; N=b.js; cat h > $N; node c.js"]);
+    is(["writer-exec"], ["N=a.js; ((N<<=1)); cat h > $N; node b.js", "N=a.js; printf -vN b.js; cat h > $N; node b.js", "N=a.js; mapfile N < f; cat h > $N; node b.js", "N=a.js; for N; do :; done; cat h > $N; node b.js", "N=a.js; readarray -t N < f; cat h > $N; node b.js"]);
+  });
+  test("a default that is a path is the script", () => {
+    is(["computed-command"], ["node ${X:-./lib/hidden.js}", "node ${X-./lib/hidden.js}"]);
+  });
+});
+
+describe("shell classes: long words stay linear", () => {
+  test("arithmetic, let, braces and ${ } over 20 000 characters", () => {
+    const t = performance.now();
+    for (const b of ["((" + "a".repeat(19996) + "))", "let " + "a".repeat(19990), "node " + "{{a".repeat(6000), "node " + "${x:-" + "a".repeat(19990) + "}", "x=$((" + "a+".repeat(9990) + "1))", "echo " + "a=".repeat(9990)]) {
+      expect(flagBody(b).some((h) => h.why.startsWith("the reader failed"))).toBe(false);
+    }
+    expect(performance.now() - t).toBeLessThan(1000);
+  });
+});
+
+describe("shell classes: review of 32f9b2f (C1-C3 and the low items)", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  test("C1: a { after time or function opens a group that its } closes", () => {
+    is(["writer-exec"], ["N=b.js; if false; then time { :; }; N=a.js; fi; cat lib/hidden.js > $N; node b.js", "N=b.js; if false; then function f { :; }; N=a.js; fi; cat lib/hidden.js > $N; node b.js", "N=b.js; if false; then f() { :; }; N=a.js; fi; cat lib/hidden.js > $N; node b.js"]);
+    is([], ["N=b.js; time { :; }; cat lib/hidden.js > $N; node c.js"]);
+  });
+  test("C2: calling a function forgets the names its body assigns", () => {
+    is(["writer-exec"], ["f(){ N=b.js; }; N=a.js; f; cat lib/hidden.js > $N; node b.js", "function f { N=b.js; }; N=a.js; f; cat lib/hidden.js > $N; node b.js", "f() { read N; }; N=a.js; f; cat lib/hidden.js > $N; node b.js"]);
+    is([], ["f(){ N=b.js; }; N=a.js; cat lib/hidden.js > $N; node c.js"]); // f is never called: N is still a.js
+  });
+  test("C3: a script word with an empty alternative", () => {
+    is(["computed-command"], ["node {,}lib/hidden.js"]);
+  });
+  test("a prefix assignment built from a known variable is that value in nested code; ~+ is the working directory", () => {
+    is(["computed-command"], ["X=lib/hidden.js; N=$X sh -c 'node $N'"]);
+    is(["writer-exec"], ["cat lib/hidden.js > ~+/b.js; node b.js"]);
+  });
+});
+
 describe("shell classes: O5, O10, O12", () => {
   const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
   test("O5: a redirect target held in a variable the body assigned a literal", () => {
@@ -701,5 +1008,174 @@ describe("shell classes: bounded work", () => {
       expect(flagBody(s).some((h) => h.why.startsWith("the reader failed")), JSON.stringify(s)).toBe(false); // flagBody catches everything, so a failure shows as this hit
       expect(performance.now() - t, JSON.stringify(s)).toBeLessThan(1000);
     }
+  });
+});
+
+describe("shell classes: an outside write is the whole word, a prefix plus a literal tail", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toContain("writer-exec"); };
+  test("a tail after ${V:-/dev/null}, an expansion that names the package, or a .. segment is not outside", () => {
+    held(["cat lib/hidden.js > ${PWD:-/dev/null}/b.js; node b.js", "cat lib/hidden.js > ${PWD:=/dev/null}/b.js; node b.js", "cat lib/hidden.js > ${INIT_CWD:-/dev/null}/b.js; node b.js",
+      "node -p 'x' > ${PWD:-/dev/null}/b.js; node b.js", "cat lib/hidden.js > $TMPDIR/../../../../../../../../$PWD/b.js; node b.js", "cat lib/hidden.js > $HOME/../../$PWD/b.js; node b.js",
+      "cat lib/hidden.js > /$PWD/b.js; node b.js", "cat lib/hidden.js > //$PWD/b.js; node b.js", "npm run x > /$PWD/b.js; node b.js", "cat lib/hidden.js > ~/../../../$PWD/b.js; node b.js", "echo x > /tmp/$N; node a.js"]);
+  });
+  test("a literal place outside stays quiet", () => {
+    for (const c of ["echo x > /tmp/o.js; node a.js", "echo x > $TMPDIR/o.js; node a.js", "echo x > ~/o.js; node a.js", "echo x > ${LOG:-/dev/null}; node a.js"]) expect(classes(c), c).toEqual([]);
+  });
+});
+
+describe("shell classes: eval and special builtins change the names of the body only where they run", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toContain("writer-exec"); };
+  test("an eval that may not run, or runs in a pipeline or function, leaves the name unknown", () => {
+    held(["N=a.js; false && eval N=b.js; cat lib/hidden.js > $N; node a.js", "N=a.js; f() { eval N=b.js; }; cat lib/hidden.js > $N; node a.js",
+      "N=a.js; eval N=b.js | true; cat lib/hidden.js > $N; node a.js", "N=a.js; if false; then eval N=b.js; fi; cat lib/hidden.js > $N; node a.js"]);
+  });
+  test("a prefix assignment of a special builtin persists, so the name is unknown", () => {
+    held(["N=a.js; N=b.js :; cat lib/hidden.js > $N; node b.js", "N=a.js; N=b.js export X; cat lib/hidden.js > $N; node b.js", "N=a.js; N=b.js set --; cat lib/hidden.js > $N; node b.js"]);
+    expect(classes("N=a.js; N=b.js true; cat lib/hidden.js > $N; node b.js")).toEqual([]);
+  });
+});
+
+describe("shell classes: a group in a pipe or the background, and exec with only redirections", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toContain("writer-exec"); };
+  test("a { } group followed by | or & runs in a subshell", () => {
+    held(["N=a.js; { eval N=b.js; } | cat; cat lib/hidden.js > $N; node a.js", "N=a.js; { N=b.js; } | cat; cat lib/hidden.js > $N; node a.js", "N=a.js; { N=b.js; } & wait; cat lib/hidden.js > $N; node a.js"]);
+    expect(classes("N=a.js; { :; }; cat lib/hidden.js > $N; node b.js")).toEqual([]);
+  });
+  test("exec with only redirections keeps its prefix assignment", () => {
+    held(["N=a.js; N=b.js exec 3>/dev/null; cat lib/hidden.js > $N; node b.js"]);
+  });
+});
+
+describe("shell classes: a group after &&, || or a pipe, and ~N", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toContain("writer-exec"); };
+  test("a { } group that may not run does not make its assignments unconditional", () => {
+    held(["N=b.js; false && { :; N=a.js; }; cat lib/hidden.js > $N; node b.js", "N=b.js; true || { :; N=a.js; }; cat lib/hidden.js > $N; node b.js", "N=b.js; echo | { :; N=a.js; }; cat lib/hidden.js > $N; node b.js"]);
+  });
+  test("~0 and ~+0 are the working directory", () => {
+    held(["cat lib/hidden.js > ~0/b.js; node b.js", "cat lib/hidden.js > ~+0/b.js; node b.js"]);
+    for (const c of ["CC=~0/x.sh node-gyp rebuild", "PATH=~0/bin:$PATH node a.js"]) expect(classes(c), c).toEqual(["env-assign"]);
+  });
+});
+
+describe("shell classes: a called function forgets the names its body sets, however it is called", () => {
+  const H = "cat lib/hidden.js > $N; node b.js";
+  test("a call inside a function, through eval, and a body that evals an assignment", () => {
+    for (const c of ["g() { N=b.js; }; f() { g; }; N=a.js; f; " + H, "f() { N=b.js; }; N=a.js; eval f; " + H, "f() { N=b.js; }; N=a.js; eval 'f'; " + H,
+      "f() { eval N=b.js; }; N=a.js; f; " + H, 'f() { eval "N=b.js"; }; N=a.js; f; ' + H]) expect(classes(c), c).toContain("writer-exec");
+  });
+});
+
+describe("shell classes: prefix assignments of a function call, time { }, and callees defined later", () => {
+  const H = "cat lib/hidden.js > $N; node b.js";
+  test("a prefix assignment on a call of a function persists; command exec does not", () => {
+    expect(classes("f() { :; }; N=a.js; N=b.js f; " + H)).toContain("writer-exec");
+    expect(classes("N=a.js; N=b.js command exec 3>/dev/null; cat lib/hidden.js > $N; node b.js")).toEqual([]);
+  });
+  test("an assignment after time { is an assignment", () => {
+    expect(classes("N=a.js; time { N=b.js; } 2>/dev/null; " + H)).toContain("writer-exec");
+  });
+  test("a function that calls one defined after it forgets what that one sets", () => {
+    for (const c of ["g() { f; }; f() { N=b.js; }; N=a.js; g; " + H, "g() { eval f; }; f() { N=b.js; }; N=a.js; g; " + H]) expect(classes(c), c).toContain("writer-exec");
+  });
+});
+
+describe("shell classes: a function with a subshell body, deep call chains, time groups, eval prefixes, substitutions in a target", () => {
+  const H = "cat lib/hidden.js > $N; node b.js";
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toContain("writer-exec"); };
+  test("S3b: f() ( : ) is a function and its call keeps the prefix assignment", () => {
+    held(["f() ( : ); N=a.js; N=b.js f; " + H]);
+  });
+  test("a chain of calls reaches the names the last function sets", () => {
+    held(["h() { g; }; g() { f; }; f() { N=b.js; }; N=a.js; h; " + H]);
+  });
+  test("a substitution in an outside target is not outside", () => {
+    held(["cat lib/hidden.js > $TMPDIR/$(echo ../../../..)$(pwd)/b.js; node b.js", "cat lib/hidden.js > ~/$(echo ..)$(pwd)/b.js; node b.js", "cat lib/hidden.js > /tmp/`echo ..``pwd`/b.js; node b.js", "echo x > $(echo b.js); node b.js"]);
+  });
+  test("a time group after && and time -p { } track their blocks", () => {
+    held(["N=b.js; false && time { :; N=a.js; } 2>/dev/null; " + H, "N=a.js; if false; then time -p { :; } 2>/dev/null; N=b.js; fi; cat lib/hidden.js > $N; node a.js",
+      "N=a.js; while false; do time -p { :; }; N=b.js; done; cat lib/hidden.js > $N; node a.js", "N=a.js; time -p { N=b.js; } 2>/dev/null; " + H]);
+  });
+  test("an eval with a prefix assignment changes the names of this shell", () => {
+    held(["N=a.js; X=1 eval 'N=b.js'; " + H, "N=a.js; X=1 eval N=b.js; " + H]);
+  });
+  test("export of a name built from an npm variable and a substitution is an env-assign", () => {
+    expect(classes("export $npm_config_a$(cat lib/x.env); node a.js")).toContain("env-assign");
+  });
+  test("a write to ~/ is outside the package and does not name a file in it", () => {
+    expect(classes("echo x > ~/a.js; node a.js")).toEqual([]);
+  });
+  test("a function is recorded whatever its body: case, if, for, while, function f case", () => {
+    held(["f() case x in *) :;; esac; N=a.js; N=b.js f; " + H, "function f case x in *) :;; esac; N=a.js; N=b.js f; " + H,
+      "f() case x in *) N=b.js;; esac; N=a.js; f; " + H, "f() if :; then N=b.js; fi; N=a.js; f; " + H,
+      "f() for i in a; do N=b.js; done; N=a.js; f; " + H, "f() while :; do N=b.js; break; done; N=a.js; f; " + H]);
+  });
+  test("a call chain deeper than the fixpoint rounds is held, not quiet", () => {
+    const deep = (n: number): string => { const nm = "abcdefghij".split(""); let t = ""; for (let i = 0; i < n; i++) t += `${nm[i]}(){ ${i < n - 1 ? nm[i + 1] + ";" : "N=b.js;"} }; `; return t + "N=a.js; a; " + H; };
+    held([deep(5), deep(6), deep(8)]);
+    expect(classes(deep(10)).length, "past the cap: widened").toBeGreaterThan(0);
+  });
+  test("export and declare -x of an npm_package_* name are env-assigns (the author sets them)", () => {
+    expect(classes("export $npm_package_config_x; node a.js")).toContain("env-assign");
+    expect(classes("declare -x $npm_package_config_x; node a.js")).toContain("env-assign");
+    expect(classes("export $npm_config_foo; node a.js")).toEqual([]);
+  });
+  test("OP-4: ${N:=v} inside double quotes sets N", () => {
+    held(['N=; : "${N:=b.js}"; ' + H, 'N=; : "${N:=b.js}"\n' + H, 'N=; echo "x${N:=b.js}y"; ' + H]);
+  });
+  test("OP-5: a write target default is not taken for a name the package manager or environment sets", () => {
+    held(["cat lib/hidden.js > ${PNPM_SCRIPT_SRC_DIR:-/tmp}/b.js; node b.js", "cat lib/hidden.js > ${npm_config_x:-/tmp}/b.js; node b.js",
+      "cat lib/hidden.js > ${INIT_CWD:-/tmp}/b.js; node b.js", "cat lib/hidden.js > ${TMPDIR:-/tmp}/b.js; node b.js"]);
+    expect(classes("cat lib/hidden.js > ${LOGDIR:-/tmp}/b.js; node b.js")).toEqual([]);
+  });
+  test("OP-6: let ++N and $[N=2] set N; a brace sequence makes a file name", () => {
+    held(["N=1; let ++N; cat lib/hidden.js > $N.js; node 2.js", "N=1; : $[N=2]; cat lib/hidden.js > $N.js; node 2.js", 'N=1; : "$[N=2]"; cat lib/hidden.js > $N.js; node 2.js']);
+    expect(classes("node lib/hidde{n..n}.js")).toContain("computed-command");
+  });
+  test("OP-7: a single-quoted sh -c body does not see names this shell did not export", () => {
+    held(["N=a.js; sh -c 'cat lib/hidden.js > ${N:-b.js}'; node b.js"]);
+  });
+  test("B1: a quoted tilde is a file name, not an expansion; an unquoted ~N/ still names the file", () => {
+    held(['mkdir -p sub; cat lib/hidden.js > "~+/sub/x.js"; node "~+/sub/x.js"', "cat lib/hidden.js > '~+/sub/x.js'; node '~+/sub/x.js'",
+      "cat lib/hidden.js > sub/x.js; node ~+/sub/x.js", "cat lib/hidden.js > sub/x.js; node ~1/sub/x.js", "cat lib/hidden.js > sub/x.js; node ~-1/sub/x.js"]);
+    expect(classes('cat lib/hidden.js > sub/x.js; node "~+/sub/x.js"')).toEqual([]);
+    expect(classes("cat lib/hidden.js > sub/x.js; node '~0/sub/x.js'")).toEqual([]);
+    held(["cat lib/hidden.js > '~+/sub/x.js'; node ~\\+/sub/x.js", 'cat lib/hidden.js > "~+"/sub/x.js; node ~"+"/sub/x.js']);
+  });
+  test("B2: a default is not taken for a shell, CI or package-manager name", () => {
+    held(["echo b.js; cat lib/hidden.js > ${_:-/dev/null}; node b.js", "read REPLY <<< b.js; cat lib/hidden.js > ${REPLY:-/dev/null}; node b.js",
+      "getopts a: o -a b.js; cat lib/hidden.js > ${OPTARG:-/dev/null}; node b.js", "cat lib/hidden.js > ${GITHUB_WORKSPACE:-/tmp}/b.js; node b.js"]);
+    expect(classes("cat lib/hidden.js > ${logdir:-/tmp}/b.js; node b.js")).toEqual([]);
+    expect(classes("cat lib/hidden.js > ${LOG:-/dev/null}; node b.js")).toEqual([]);
+  });
+  test("F1: $[ ] is closed by its own bracket, not the first ]", () => {
+    held(["N=1; : $[x[0]=1,N=2]; cat lib/hidden.js > $N.js; node 2.js", 'N=1; : "$[x[0]=1,N=2]"; cat lib/hidden.js > $N.js; node 2.js']);
+  });
+  test("B3: quote removal applies to a default word", () => {
+    held(['cat lib/hidden.js > ${out:-"b.js"}; node b.js', "cat lib/hidden.js > ${out:-'b.js'}; node b.js", 'cat lib/hidden.js > ${out:-b\\.js}; node b.js', 'cp lib/hidden.js ${d:-"b.js"}; node b.js']);
+  });
+  test("B4: := in any redirect target sets the name; words expand before the targets", () => {
+    held(['N=; true 2>sub/${N:=b.js}; cat lib/hidden.js > $N; node b.js', 'N=; true 2> "${N:=b.js}"; cat lib/hidden.js > $N; node b.js',
+      'N=; cat lib/hidden.js > $N ${N:=b.js}; node b.js']);
+  });
+  test("B5: an empty quote in front of a ~ makes it literal; the other quoted-prefix spellings stay held", () => {
+    const W = "cat lib/hidden.js > sub/x.js; ";
+    for (const c of [W + "node ''~+/sub/x.js", W + 'node ""~+/sub/x.js', W + "sh -c \"node ''~+/sub/x.js\""]) expect(classes(c), c).toEqual([]);
+    held([W + "node ~+/sub/x.js", "cat lib/hidden.js > ~\\+/b.js; node ~\\+/b.js", "cat lib/hidden.js > ''~+/b.js; node ''~+/b.js"]);
+  });
+  test("B6: a default word with quotes beside a backslash or $ is not read (held), a plain one still is", () => {
+    for (const c of ["cat lib/hidden.js > ${out:-'b\\.js'}; node 'b\\.js'", "N=b.js; cat lib/hidden.js > ${out:-'$N'}; node '$N'", 'cat lib/hidden.js > ${out:-"b\\.js"}; node b.js'])
+      expect(classes(c).length, c).toBeGreaterThan(0);
+    held(['cat lib/hidden.js > ${out:-"b.js"}; node b.js']);
+  });
+  test("B7: a quoted ~ in an assignment value is the same literal name on the write and on the run", () => {
+    held(["N='~+/b.js'; cat lib/hidden.js > \"$N\"; node \"~+/b.js\"", "N=~+/b.js; cat lib/hidden.js > \"$N\"; node b.js", "N=~'+'/b.js; cat lib/hidden.js > \"$N\"; node \"~+/b.js\""]);
+  });
+  test("~+//b.js: every slash after the tilde prefix is dropped", () => {
+    held(["cat lib/hidden.js > b.js; node ~+//b.js", "cat lib/hidden.js > sub/x.js; node ~0//sub/x.js", "cat lib/hidden.js > sub/x.js; node ~+///sub/x.js"]);
+  });
+  test("B8: an empty quote between = and ~ in an assignment value makes the ~ literal", () => {
+    held(["N=''~+/b.js; cat lib/hidden.js > \"$N\"; node \"~+/b.js\"", 'N=""~+/b.js; cat lib/hidden.js > "$N"; node "~+/b.js"',
+      "export N=''~+/b.js; cat lib/hidden.js > \"$N\"; node \"~+/b.js\"", "declare N=''~+/b.js; cat lib/hidden.js > \"$N\"; node \"~+/b.js\"",
+      "N=~+/b.js; cat lib/hidden.js > \"$N\"; node b.js"]);
   });
 });

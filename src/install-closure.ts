@@ -122,21 +122,30 @@ function words(cmd: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quote: string | undefined;
-  for (const c of cmd) {
+  let started = false; // a quote has opened in this word: an unquoted ~ after empty quotes is not at the start of the word
+  // A quote or backslash inside the tilde prefix (up to the first /) makes the prefix literal: ./~+ names a file called ~+.
+  const tildePrefix = (next: string): boolean => /^~[^/]*$/.test(cur) || (cur === "" && next === "~");
+  for (let ci = 0; ci < cmd.length; ci++) {
+    const c = cmd[ci]!;
     if (quote) {
       if (c === quote) quote = undefined;
       else cur += c;
       continue;
     }
     if (c === "'" || c === '"') {
+      if (tildePrefix(cmd[ci + 1] ?? "")) cur = "./" + cur;
+      started = true;
       quote = c;
       continue;
     }
+    if (c === "\\" && tildePrefix(cmd[ci + 1] ?? "")) { cur = "./" + cur + (cmd[ci + 1] ?? ""); ci++; continue; }
     if (/\s/.test(c)) {
       if (cur) out.push(cur);
       cur = "";
+      started = false;
       continue;
     }
+    if (c === "~" && started && cur === "") cur = "./";
     cur += c;
   }
   if (cur) out.push(cur);
@@ -144,7 +153,7 @@ function words(cmd: string): string[] {
 }
 
 function normalize(token: string): string {
-  let t = token;
+  let t = token.replace(/^~(?:[+-]\d*|\d+)\/+/, ""); // ~0/x and ~+/x are x in the working directory
   while (t.startsWith("./")) t = t.slice(2);
   return t;
 }
@@ -333,6 +342,8 @@ function skipHeredocs(t: string, i: number, pend: { delim: string; strip: boolea
 // Replaces `${npm_package_config_x}` forms by their value. An expansion it cannot resolve makes the text unreadable
 // (null), or, when `loose`, is replaced by UNRESOLVED so that the commands around it can still be read.
 function subst(ctx: Ctx, body: string, loose = false): string | null {
+  // A backslash in the tilde prefix (~\+/x, \~+/x) makes it a literal name: ./~+/x. Said here so the later scans see no backslash.
+  body = body.replace(/(^|[\s;&|(])\\~/g, "$1./~").replace(/(^|[\s;&|(])(~[^\s/\\'"$`]*)\\([^\s/\\])/g, "$1./$2$3");
   let out = "";
   let inDq = false;
   let escAt = -1; // the index of the last escaped character
@@ -1209,7 +1220,7 @@ type ArgHit =
   | { t: "code"; text: string };
 
 function stripDot(p: string): string {
-  let t = p.trim();
+  let t = p.trim().replace(/^~(?:[+-]\d*|\d+)\/+/, "");
   while (t.startsWith("./")) t = t.slice(2);
   return t;
 }
@@ -2980,7 +2991,7 @@ function quotedTokens(text: string): string[] {
 }
 
 function addLiteralToken(ctx: Ctx, token: string): void {
-  let t = token;
+  let t = token.replace(/^~(?:[+-]\d*|\d+)\/+/, "");
   while (t.startsWith("./")) t = t.slice(2);
   if (t.startsWith("/")) t = t.slice(1);
   if (t.startsWith("../")) t = t.slice(3);
@@ -3177,10 +3188,10 @@ function opensQuote(l: string): boolean {
 }
 const REDIRECT_TOKEN = /^(?:[0-9]*(?:>>?|<|>\||>&|<&)|&>>?)/;
 function noteUnparsedMake(ctx: Ctx, text: string): void {
-  if (ctx.hold || !/\b(?:make|gmake)\b/.test(text)) return;
+  if (ctx.hold || !/\b(?:make|gmake)\b/.test(text.replace(/[\\"']/g, ""))) return; // `ma\ke` is make
   for (const seg of logicalLines(text).filter((l) => !opensQuote(l)).flatMap((l) => shellSegments(l))) { // heredoc text, comments and a line that never closes a quote are not commands
     const argv: string[] = [];
-    const toks = words(seg);
+    const toks = words(seg).map((t) => t.replace(/\\(.)/g, "$1")); // ma\ke is make
     for (let k = 0; k < toks.length; k++) {
       const t = toks[k]!;
       if (REDIRECT_TOKEN.test(t)) {
