@@ -6,7 +6,7 @@
 import { benignBinary } from "./benign-binary.ts";
 import { cooldownVerdict } from "./cooldown.ts";
 import { shown } from "./ident.ts";
-import { prepass, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, expandNpmScripts, npmHookFileArgs, starMatch, bindingRunsGyp, gypCommands, hookEnvPaths, STAR_PATTERN_MAX, STAR_KEY_MAX, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
+import { prepass, SOFT_PATTERNS, LARGE_FILE_BYTES, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, expandNpmScripts, npmHookFileArgs, starMatch, bindingRunsGyp, gypCommands, hookEnvPaths, STAR_PATTERN_MAX, STAR_KEY_MAX, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
 import { installView, otherInstallEntry, prepareInert } from "./install-closure.ts";
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
@@ -559,10 +559,12 @@ interface ParsedCode {
   fallback: string[];
   urls: string[];
   strings: string[];
+  /** The transformed source: comments removed, literal concatenations joined, template and regex text kept. */
+  code: string;
   rejected: boolean;
 }
 const parsedCache = new WeakMap<Uint8Array, ParsedCode>();
-const EMPTY_PARSED: ParsedCode = { specs: [], requireSpecs: [], importSpecs: [], fallback: [], urls: [], strings: [], rejected: false };
+const EMPTY_PARSED: ParsedCode = { specs: [], requireSpecs: [], importSpecs: [], fallback: [], urls: [], strings: [], code: "", rejected: false };
 
 function parseCode(path: string, bytes: Uint8Array, forceJs = false): ParsedCode {
   // The skip is not cached: the same bytes can be a real script, or a declaration a load names.
@@ -627,6 +629,7 @@ function parseCode(path: string, bytes: Uint8Array, forceJs = false): ParsedCode
     fallback: [...new Set(fallback)],
     urls: [...new Set(scanned.urls)],
     strings: scanned.strings,
+    code: folded,
     rejected,
   };
   parsedCache.set(bytes, parsed);
@@ -1859,9 +1862,24 @@ const MAP_KEYS = new Set(["version", "file", "sourceRoot", "sources", "sourcesCo
 const strings = (v: unknown, nullable = false) => Array.isArray(v) && v.every((x) => typeof x === "string" || (nullable && x === null));
 const integers = (v: unknown) => Array.isArray(v) && v.every((x) => Number.isInteger(x));
 
-/** The hashed summary of a strict source map, or undefined when it is anything else. */
+const STRICT_MAPS = new WeakMap<Uint8Array, { summary: string; map: Record<string, unknown> } | null>();
+const MAP_CLASS = new WeakMap<Uint8Array, "clean" | "strings" | "mappings">();
+
+/** The hashed summary of a strict source map, or undefined when it is anything else. Cached per file: a big map is parsed once. */
 function strictMap(path: string, bytes: Uint8Array): string | undefined {
   if (!path.endsWith(".map")) return undefined;
+  return strictMapOf(bytes)?.summary;
+}
+
+function strictMapOf(bytes: Uint8Array): { summary: string; map: Record<string, unknown> } | undefined {
+  const hit = STRICT_MAPS.get(bytes);
+  if (hit !== undefined) return hit ?? undefined;
+  const parsed = parseStrictMap(bytes);
+  STRICT_MAPS.set(bytes, parsed ?? null);
+  return parsed;
+}
+
+function parseStrictMap(bytes: Uint8Array): { summary: string; map: Record<string, unknown> } | undefined {
   let m: Record<string, unknown>;
   try {
     m = JSON.parse(dec.decode(bytes));
@@ -1871,10 +1889,67 @@ function strictMap(path: string, bytes: Uint8Array): string | undefined {
   if (!m || typeof m !== "object" || Array.isArray(m) || Object.keys(m).some((k) => !MAP_KEYS.has(k))) return undefined;
   if (m.version !== 3 || typeof m.mappings !== "string" || !/^[A-Za-z0-9+/,;]*$/.test(m.mappings)) return undefined;
   if (!strings(m.sources) || (m.names !== undefined && !strings(m.names)) || (m.sourcesContent !== undefined && !strings(m.sourcesContent, true))) return undefined;
+  // A sourcesContent entry past the end of sources belongs to no source, so no diff or hash line would cover it: such a map is not strict and is shown in full.
+  if (Array.isArray(m.sourcesContent) && m.sourcesContent.length > (m.sources as unknown[]).length) return undefined;
   if ((m.file !== undefined && typeof m.file !== "string") || (m.sourceRoot !== undefined && typeof m.sourceRoot !== "string")) return undefined;
   if ((m.ignoreList !== undefined && !integers(m.ignoreList)) || (m.x_google_ignoreList !== undefined && !integers(m.x_google_ignoreList))) return undefined;
   const content = ((m.sourcesContent ?? []) as (string | null)[]).map((x) => x ?? "").join("\0");
-  return `sourcesContent ${new TextEncoder().encode(content).length} bytes sha256 ${new Bun.CryptoHasher("sha256").update(content).digest("hex").slice(0, 16)}`;
+  return { summary: `sourcesContent ${new TextEncoder().encode(content).length} bytes sha256 ${new Bun.CryptoHasher("sha256").update(content).digest("hex").slice(0, 16)}`, map: m };
+}
+
+/** The longest segment between "," and ";" a real VLQ mappings string has is a few characters (11 on the largest maps measured); a long run is data hidden in it. */
+const MAX_MAP_SEGMENT = 64;
+
+/**
+ * How a padded strict map reads against what a small map of the same strings would raise. The pre-pass skips a big file, so the same check is made here.
+ * "mappings": a segment of the mappings (between , and ;) is longer than MAX_MAP_SEGMENT: the map is shown as a small map is, in full.
+ * "strings": a pre-pass soft pattern (every one, process-spawn included) matches the names (also joined as a loader joins them), the file, the sourceRoot,
+ * the sources or the sourcesContent: the mappings stay a hash line and those strings are shown. Otherwise "clean".
+ */
+function mapStringsClass(bytes: Uint8Array): "clean" | "strings" | "mappings" {
+  const hit = MAP_CLASS.get(bytes);
+  if (hit) return hit;
+  const c = mapStringsClassOf(bytes);
+  MAP_CLASS.set(bytes, c);
+  return c;
+}
+
+function mapStringsClassOf(bytes: Uint8Array): "clean" | "strings" | "mappings" {
+  const m = strictMapOf(bytes)?.map;
+  if (!m) return "clean";
+  if (typeof m.mappings === "string") for (const seg of m.mappings.split(/[,;]/)) if (seg.length > MAX_MAP_SEGMENT) return "mappings";
+  return mapStringTexts(m).some((t) => t.split("\n").some((line) => SOFT_PATTERNS.some(({ re }) => re.test(line)))) ? "strings" : "clean";
+}
+
+/** The strings of a strict map a loader could run, with the names also joined. */
+function mapStringTexts(m: Record<string, unknown>): string[] {
+  const str = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : typeof v === "string" ? [v] : []);
+  const names = str(m.names);
+  return [...names, names.join(""), ...str(m.file), ...str(m.sourceRoot), ...str(m.sources), ...str(m.sourcesContent)];
+}
+
+/** What a "strings" map shows beside its hash line: the changed sources' contents (in full where a soft pattern matches a line, else one hash line), and the names, file and sourceRoot when they changed. */
+function mapStringPieces(path: string, before: Uint8Array | undefined, after: Uint8Array): string[] {
+  const now = strictMapOf(after)?.map;
+  const was = before ? strictMapOf(before)?.map : undefined;
+  const list = (m: Record<string, unknown> | undefined, k: string) => (Array.isArray(m?.[k]) ? (m![k] as (string | null)[]) : []);
+  const enc = new TextEncoder();
+  const out: string[] = [];
+  const oldSources = list(was, "sources"), oldContent = list(was, "sourcesContent");
+  list(now, "sources").forEach((src, i) => {
+    const c = list(now, "sourcesContent")[i] ?? "";
+    // An entry is unchanged only when the old entry at the SAME index has the same name and the same text. A moved, shifted or renamed entry is a change: matching a name alone lets a payload that moved to another index (duplicate names, a reorder) look unchanged.
+    const o = oldSources[i] === src ? oldContent[i] ?? "" : undefined;
+    if (o === c) return;
+    // A changed entry with a line a soft pattern matches is shown as a diff; any other changed entry is one line (path, bytes, sha256), as a clean big map hides it anyway.
+    if (c.split("\n").some((line) => SOFT_PATTERNS.some(({ re }) => re.test(line)))) out.push(...fileDiff(`${path} sourcesContent ${src}`, o === undefined ? undefined : enc.encode(o), enc.encode(c), o === undefined ? "added" : "changed"));
+    else out.push(`=== ${path} sourcesContent ${src} (${o === undefined ? "added" : "changed"}) ===\n[source text, ${enc.encode(c).length} bytes, sha256 ${new Bun.CryptoHasher("sha256").update(c).digest("hex")}]\n`);
+  });
+  for (const k of ["sources", "names", "file", "sourceRoot"]) {
+    const a = JSON.stringify(was?.[k] ?? null), b = JSON.stringify(now?.[k] ?? null);
+    if (a !== b) out.push(...fileDiff(`${path} ${k}`, enc.encode(a), enc.encode(b), "changed"));
+  }
+  return out;
 }
 
 /**
@@ -1930,16 +2005,25 @@ function quotedNames(newFiles: FileMap): { names: Set<string>; stems: Set<string
     for (const m of text.matchAll(/[A-Za-z0-9_.\/@-]+/g)) {
       const low = m[0].toLowerCase();
       if (!low.endsWith(".map") || text[m.index! + m[0].length] === "(") continue;
+      // The bare ".map" is a loader's name tail only as a string of code (below): in a comment or prose it is not a load.
+      if (low === ".map") continue;
       // The //# sourceMappingURL= directive is how every bundle names its own map; debuggers read it, code does not.
       if (text.slice(Math.max(0, m.index! - 17), m.index!) === "sourceMappingURL=") continue;
       names.add(low);
       names.add(low.slice(low.lastIndexOf("/") + 1));
     }
     // Folded strings come from the parser (comments stripped, escapes cooked, literal concatenations joined).
-    const folded = loaderFor(q) && !isLink(b) ? parseCode(q, b).strings : [];
-    for (const str of [...scanQuoted(text), ...folded]) {
+    const parsed = loaderFor(q) && !isLink(b) ? parseCode(q, b) : undefined;
+    const folded = parsed?.strings ?? [];
+    // A bare ".map" is the tail of a name built at run time (a string, template text, a regex source). It counts in the code of a code file, where comments are already removed.
+    // A file the parser rejects has no transformed source: its raw text is scanned.
+    const codeText = parsed ? (parsed.rejected ? text : parsed.code) : "";
+    if (parsed) for (const m of codeText.matchAll(/[A-Za-z0-9_.\/@-]+/g)) if (m[0].toLowerCase() === ".map" && codeText[m.index! + 4] !== "(") names.add(".map");
+    // In a code file the parser's strings are the strings of the code (a quote inside a comment is not one); a file the parser rejects, and any other file, is scanned raw.
+    for (const str of [...(parsed && !parsed.rejected ? [] : scanQuoted(text)), ...folded]) {
       if (!str) continue;
       const low = str.toLowerCase();
+      if (low === ".map" && !loaderFor(q)) continue; // a ".map" in a README or other text file is not a loader
       names.add(low);
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
       if (seg.endsWith(".map")) names.add(seg);
@@ -1967,7 +2051,7 @@ function hashedMaps(oldFiles: FileMap, newFiles: FileMap, paths: string[], entri
     const b = newFiles.get(p) ?? oldFiles.get(p)!;
     if (isLink(b)) continue;
     const base = p.slice(p.lastIndexOf("/") + 1).toLowerCase();
-    if (newFiles.has(p) && (named.names.has(base) || named.stems.has(base.slice(0, -".map".length)))) continue;
+    if (newFiles.has(p) && (named.names.has(base) || named.names.has(".map") || named.stems.has(base.slice(0, -".map".length)))) continue; // the bare ".map" is the tail of a name built at run time (__filename + '.map')
     const summary = strictMap(p, b);
     if (summary !== undefined) out.set(p, summary);
   }
@@ -2075,6 +2159,8 @@ export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, onl
     if (generated.has(p)) {
       const h = b ? new Bun.CryptoHasher("sha256").update(b).digest("hex") : "-";
       push(`=== ${p} (${!a ? "added" : !b ? "removed" : "changed"}) ===\n[source map, strict v3 data, ${b?.length ?? 0} bytes, sha256 ${h}, ${generated.get(p)}]\n`);
+      // A padded map (the pre-pass did not scan it) whose strings raise a soft pattern: the strings are shown, as a small map's would be, the mappings stay a hash.
+      if (b && b.length > LARGE_FILE_BYTES && mapStringsClass(b) === "strings") for (const piece of mapStringPieces(p, a, b)) push(piece);
       continue;
     }
     for (const piece of fileDiff(p, a, b)) push(piece);
@@ -2302,7 +2388,11 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       const realPaths = (ps: string[]) => ps.filter((q) => artifacts!.old.has(q) || artifacts!.new.has(q));
       let scope: Scope = "all";
       // A path with any pre-pass or scanner signal is shown in full, never as a hash line.
-      const signalled = new Set([...pre.hard, ...pre.soft].map((x) => x.path));
+      // A strict source map is data that only a loader naming it can run, and a big one is not scanned only because of its size: that alone does not make it show in full
+      // (the bundler's own mappings text is not code and a model flags it as obfuscation). Its own strings are checked here instead (mapStringsClass). Any other signal on it,
+      // a hard one or a scanner hit, still shows it in full.
+      const bigMapOk = (x: { kind: string; path: string }) => x.kind === "large-file" && x.path.endsWith(".map") && strictMapOf(artifacts.new.get(x.path)!) !== undefined && mapStringsClass(artifacts.new.get(x.path)!) !== "mappings";
+      const signalled = new Set([...pre.hard, ...pre.soft.filter((x) => !bigMapOk(x))].map((x) => x.path));
       let chunks = chunkDiff(artifacts.old, artifacts.new, cap, undefined, false, signalled);
       // More than one stage of parts: read the ranked files first (the first FLAG ends the review), then the rest, every part.
       // (Over the limit the narrowing below ranks the files itself, so the diff is not cut twice.)

