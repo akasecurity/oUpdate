@@ -3159,6 +3159,46 @@ function noteUnparsedCompile(ctx: Ctx, body: string): void {
   if (/(?:^|&&|\|\||[;&\n])\s*node-gyp(?![\w-])/.test(body)) ctx.sawNodeGyp = true;
 }
 
+// A redirect, a backslash or a parenthesis keeps a text from being split into commands, and a command in it is then not
+// dispatched. `make` is such a command: with no file to name it reads every file, so it is dispatched from the
+// tolerant segments (the commands split outside quotes), with its redirects dropped.
+// Does the line end inside a quote? (The shell would not run it.)
+function opensQuote(l: string): boolean {
+  let q: string | undefined;
+  for (let i = 0; i < l.length; i++) {
+    const c = l[i]!;
+    if (q) {
+      if (c === "\\" && q === '"') i++;
+      else if (c === q) q = undefined;
+    } else if (c === "\\") i++;
+    else if (c === "'" || c === '"') q = c;
+  }
+  return q !== undefined;
+}
+const REDIRECT_TOKEN = /^(?:[0-9]*(?:>>?|<|>\||>&|<&)|&>>?)/;
+function noteUnparsedMake(ctx: Ctx, text: string): void {
+  if (ctx.hold || !/\b(?:make|gmake)\b/.test(text)) return;
+  for (const seg of logicalLines(text).filter((l) => !opensQuote(l)).flatMap((l) => shellSegments(l))) { // heredoc text, comments and a line that never closes a quote are not commands
+    const argv: string[] = [];
+    const toks = words(seg);
+    for (let k = 0; k < toks.length; k++) {
+      const t = toks[k]!;
+      if (REDIRECT_TOKEN.test(t)) {
+        if (/^(?:[0-9]*(?:>>?|<|>\||>&|<&)|&>>?)$/.test(t)) k++; // the target is the next word
+        continue;
+      }
+      argv.push(t);
+    }
+    let h = 0;
+    while (h < argv.length && ASSIGN.test(argv[h]!)) h++;
+    if (h < argv.length && /^g?make$/.test(binName(argv[h]!)) && ctx.depth < DEPTH) {
+      ctx.depth++;
+      dispatch(ctx, argv.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      ctx.depth--;
+    }
+  }
+}
+
 // The logical lines of a body: what the shell reads as one command line. A newline inside quotes, a substitution or
 // after a backslash does not end one; a comment is dropped; the text of a heredoc is skipped up to its terminator.
 // An unclosed quote, substitution or heredoc takes the rest of the body.
@@ -3274,6 +3314,7 @@ function noteUnreadable(ctx: Ctx, text: string): void {
     widenAll(ctx);
   }
   noteUnparsedCompile(ctx, text);
+  noteUnparsedMake(ctx, text);
 }
 
 // The command word of a command (after variable assignments) holds an expansion that could not be resolved.
