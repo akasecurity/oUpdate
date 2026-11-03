@@ -159,47 +159,254 @@ function configVal(ctx: Ctx, key: string): string | undefined {
   return undefined;
 }
 
-function subst(ctx: Ctx, body: string): string | null {
+// Stands where an expansion the scan cannot resolve was, when a body is read leniently.
+const UNRESOLVED = "\u0005"; // not a character the closure uses elsewhere (\u0001-\u0003 mark fed files)
+
+// The index just past the `)` that closes a construct opened before `i`, with quotes, escapes, comments, heredocs and
+// nested parentheses followed; -1 when it is not closed. The same for a backtick span (endTick) and for `${` (endBrace).
+// The scans below call each other for nested spans: past this depth a span counts as not closed.
+const SPAN_DEPTH = 64;
+let spanDepth = 0;
+function bounded(f: () => number): number {
+  if (spanDepth >= SPAN_DEPTH) return -1;
+  spanDepth++;
+  try {
+    return f();
+  } finally {
+    spanDepth--;
+  }
+}
+function endParen(t: string, i: number): number {
+  return bounded(() => endParenCore(t, i));
+}
+function endParenCore(t: string, i: number): number {
+  let d = 1;
+  let esc = false;
+  const pend: { delim: string; strip: boolean }[] = [];
+  for (let j = i; j < t.length; j++) {
+    const c = t[j]!;
+    const wasEsc = esc;
+    esc = false;
+    if (c === "\\") {
+      j++;
+      esc = true;
+    } else if (c === "#" && (j === i || (/[\s;&|(]/.test(t[j - 1]!) && !wasEsc))) {
+      while (j < t.length && t[j] !== "\n") j++; // a comment: its quotes and parentheses mean nothing
+      j--;
+    } else if (c === "'") {
+      const e = t.indexOf("'", j + 1);
+      if (e < 0) return -1;
+      j = e;
+    } else if (c === "$" && t[j + 1] === "'") j = endAnsi(t, j + 1);
+    else if (c === "$" && t[j + 1] === "{") {
+      const e = endBrace(t, j + 2);
+      if (e < 0) return -1;
+      j = e - 1;
+    } else if (c === '"') j = endDq(t, j);
+    else if (c === "`") {
+      const e = endTick(t, j);
+      if (e < 0) return -1;
+      j = e - 1;
+    } else if (c === "<" && t[j + 1] === "<" && t[j + 2] === "<") j += 2; // a here-string
+    else if (c === "<" && t[j + 1] === "<") {
+      const h = heredocWord(t, j + 2);
+      if (h.delim && !/^\d+$|^=/.test(h.delim)) pend.push(h); // `1 << 2` and `n <<= 1` are shifts
+      j = h.end - 1;
+    } else if (c === "\n" && pend.length) {
+      j = skipHeredocs(t, j + 1, pend) - 1;
+      pend.length = 0;
+    } else if (c === "(") d++;
+    else if (c === ")" && --d === 0) return j + 1;
+  }
+  return -1;
+}
+function endTick(t: string, i: number): number {
+  for (let j = i + 1; j < t.length; j++) {
+    if (t[j] === "\\") j++;
+    else if (t[j] === "`") return j + 1;
+  }
+  return -1;
+}
+function endBrace(t: string, i: number): number {
+  return bounded(() => endBraceCore(t, i));
+}
+function endBraceCore(t: string, i: number): number {
+  let d = 1;
+  for (let j = i; j < t.length; j++) {
+    const c = t[j]!;
+    if (c === "\\") j++;
+    else if (c === "'") {
+      const e = t.indexOf("'", j + 1);
+      if (e < 0) return -1;
+      j = e;
+    } else if (c === "$" && t[j + 1] === "'") j = endAnsi(t, j + 1);
+    else if (c === "$" && t[j + 1] === "(") {
+      const e = endParen(t, j + 2);
+      if (e < 0) return -1;
+      j = e - 1;
+    } else if (c === "`") {
+      const e = endTick(t, j);
+      if (e < 0) return -1;
+      j = e - 1;
+    } else if (c === '"') j = endDq(t, j);
+    else if (c === "{") d++;
+    else if (c === "}" && --d === 0) return j + 1;
+  }
+  return -1;
+}
+// ANSI-C `$'..'` (i is the opening quote): the index of the closing quote; a backslash escapes the next character.
+function endAnsi(t: string, i: number): number {
+  let j = i + 1;
+  for (; j < t.length && t[j] !== "'"; j++) if (t[j] === "\\") j++;
+  return j;
+}
+// A double-quoted string opened at t[i]: the index of its closing quote. Substitutions and `${ }` inside it can hold quotes.
+function endDq(t: string, i: number): number {
+  const r = bounded(() => endDqCore(t, i));
+  return r < 0 ? t.length : r;
+}
+function endDqCore(t: string, i: number): number {
+  let j = i + 1;
+  for (; j < t.length && t[j] !== '"'; j++) {
+    const c = t[j]!;
+    if (c === "\\") j++;
+    else if (c === "$" && t[j + 1] === "(") {
+      const e = endParen(t, j + 2);
+      if (e < 0) return t.length;
+      j = e - 1;
+    } else if (c === "$" && t[j + 1] === "{") {
+      const e = endBrace(t, j + 2);
+      if (e < 0) return t.length;
+      j = e - 1;
+    } else if (c === "`") {
+      const e = endTick(t, j);
+      if (e < 0) return t.length;
+      j = e - 1;
+    }
+  }
+  return j;
+}
+// The delimiter word of a heredoc (i is just after `<<`): quotes and backslashes removed as the shell does.
+function heredocWord(t: string, i: number): { delim: string; strip: boolean; end: number } {
+  let j = i;
+  const strip = t[j] === "-";
+  if (strip) j++;
+  while (t[j] === " " || t[j] === "\t") j++;
+  let delim = "";
+  let k = j;
+  for (; k < t.length && !/[\s;&|()<>]/.test(t[k]!); k++) {
+    const d = t[k]!;
+    if (d === "'") {
+      const e = t.indexOf("'", k + 1);
+      const stop = e < 0 ? t.length : e;
+      delim += t.slice(k + 1, stop);
+      k = stop;
+    } else if (d === '"') {
+      let e = k + 1;
+      while (e < t.length && t[e] !== '"') {
+        if (t[e] === "\\") e++;
+        e++;
+      }
+      delim += t.slice(k + 1, Math.min(e, t.length)).replace(/\\([$`"\\])/g, "$1"); // in double quotes a backslash escapes only $ ` " \\
+      k = e;
+    } else if (d === "\\") {
+      delim += t[k + 1] ?? "";
+      k++;
+    } else delim += d;
+  }
+  return { delim, strip, end: Math.min(k, t.length) };
+}
+// The index after the heredoc texts that start at i (each runs up to its terminator line).
+function skipHeredocs(t: string, i: number, pend: { delim: string; strip: boolean }[]): number {
+  for (const h of pend) {
+    while (i < t.length) {
+      const nl = t.indexOf("\n", i);
+      const l = t.slice(i, nl < 0 ? t.length : nl).replace(/\r$/, "");
+      i = nl < 0 ? t.length : nl + 1;
+      if ((h.strip ? l.replace(/^\t+/, "") : l) === h.delim) break;
+    }
+  }
+  return i;
+}
+
+// Replaces `${npm_package_config_x}` forms by their value. An expansion it cannot resolve makes the text unreadable
+// (null), or, when `loose`, is replaced by UNRESOLVED so that the commands around it can still be read.
+function subst(ctx: Ctx, body: string, loose = false): string | null {
   let out = "";
+  let inDq = false;
+  let escAt = -1; // the index of the last escaped character
   for (let i = 0; i < body.length; ) {
     const c = body[i]!;
-    if (c === "`") {
-      fail(ctx, "unresolved: shell");
-      return null;
+    if (loose) {
+      if (c === "\\") { // an escaped character is not an expansion or a quote
+        out += c + (body[i + 1] ?? "");
+        escAt = i + 1;
+        i += 2;
+        continue;
+      }
+      if (c === '"') inDq = !inDq;
+      else if (!inDq && c === "'") { // nothing expands inside single quotes (a backslash escapes in $'..')
+        const e = body[i - 1] === "$" && escAt !== i - 1 ? endAnsi(body, i) : body.indexOf("'", i + 1);
+        const end = e < 0 ? body.length : Math.min(e + 1, body.length);
+        out += body.slice(i, end);
+        i = end;
+        continue;
+      }
     }
-    if (c === "$" && body[i + 1] === "(") {
-      fail(ctx, "unresolved: shell");
-      return null;
+    if (c === "`" || (c === "$" && body[i + 1] === "(")) {
+      if (!loose) {
+        fail(ctx, "unresolved: shell");
+        return null;
+      }
+      const e = c === "`" ? endTick(body, i) : endParen(body, i + 2);
+      out += UNRESOLVED;
+      i = e < 0 ? body.length : e;
+      continue;
     }
     if (c === "$") {
       let key: string | undefined;
       let next = i + 1;
       if (body[next] === "{") {
         const end = body.indexOf("}", next + 1);
-        if (end < 0) {
-          fail(ctx, "unresolved: env");
-          return null;
+        const m = end < 0 ? null : /^npm_package_config_([A-Za-z0-9_]+)$/.exec(body.slice(next + 1, end));
+        if (m) {
+          key = m[1];
+          next = end + 1;
+        } else {
+          if (!loose) {
+            fail(ctx, "unresolved: env");
+            return null;
+          }
+          out += UNRESOLVED;
+          const eb = endBrace(body, i + 2);
+          i = eb < 0 ? body.length : eb;
+          continue;
         }
-        const m = /^npm_package_config_([A-Za-z0-9_]+)$/.exec(body.slice(next + 1, end));
-        if (!m) {
-          fail(ctx, "unresolved: env");
-          return null;
-        }
-        key = m[1];
-        next = end + 1;
       } else {
         const m = /^npm_package_config_([A-Za-z0-9_]+)/.exec(body.slice(next));
-        if (!m) {
-          fail(ctx, "unresolved: env");
-          return null;
+        if (m) {
+          key = m[1];
+          next += m[0]!.length;
+        } else {
+          if (!loose) {
+            fail(ctx, "unresolved: env");
+            return null;
+          }
+          const t = /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/.exec(body.slice(next));
+          out += UNRESOLVED;
+          i = next + (t ? t[0].length : 0);
+          continue;
         }
-        key = m[1];
-        next += m[0]!.length;
       }
       const val = configVal(ctx, key!);
       if (val === undefined || !TOKEN.test(val) || val.split("/").includes("..")) {
-        fail(ctx, "unresolved: env");
-        return null;
+        if (!loose) {
+          fail(ctx, "unresolved: env");
+          return null;
+        }
+        out += UNRESOLVED;
+        i = next;
+        continue;
       }
       out += val;
       i = next;
@@ -2919,6 +3126,8 @@ function closeUnknownRunner(ctx: Ctx, argv: string[], i: number): void {
   for (let j = i; j < argv.length; j++) {
     const arg = argv[j]!;
     if (arg.startsWith("-")) continue;
+    // `printf -v N[0] ..` and `read -a N[0]` assign to a variable: the word after the flag is a name, not a file or a glob
+    if ((binName(argv[i - 1] ?? "") === "printf" && argv[j - 1] === "-v") || (binName(argv[i - 1] ?? "") === "read" && /^-[A-Za-z]*a$/.test(argv[j - 1] ?? ""))) continue; // read -a N, read -ra N
     noteHookArgCwd(ctx, arg);
     const logical = normalize(arg);
     if (!logical || badPath(logical)) continue;
@@ -2949,6 +3158,159 @@ function noteUnparsedCompile(ctx: Ctx, body: string): void {
   if (/(?:^|&&|\|\||[;&\n])\s*node-gyp(?![\w-])/.test(body)) ctx.sawNodeGyp = true;
 }
 
+// The logical lines of a body: what the shell reads as one command line. A newline inside quotes, a substitution or
+// after a backslash does not end one; a comment is dropped; the text of a heredoc is skipped up to its terminator.
+// An unclosed quote, substitution or heredoc takes the rest of the body.
+function logicalLines(text: string): string[] {
+  const out: string[] = [];
+  // The line so far, as parts and its last 12 characters: indexing into a long string being appended to is quadratic.
+  const parts: string[] = [];
+  let tail = "";
+  let blank = true;
+  let i = 0;
+  let esc = false;
+  const pend: { delim: string; strip: boolean }[] = [];
+  const put = (x: string): void => {
+    if (!x) return;
+    parts.push(x);
+    tail = (tail + x).slice(-12);
+    if (blank && x.trim()) blank = false;
+  };
+  const flush = (): void => {
+    if (!blank) out.push(parts.join(""));
+    parts.length = 0;
+    tail = "";
+    blank = true;
+  };
+  const span = (end: number): void => {
+    put(text.slice(i, Math.min(end, text.length)));
+    i = Math.min(end, text.length);
+  };
+  while (i < text.length) {
+    const c = text[i]!;
+    const wasEsc = esc;
+    esc = false;
+    if (c === "\\") {
+      if (text[i + 1] === "\n") i += 2;
+      else {
+        put(c + (text[i + 1] ?? ""));
+        i += 2;
+        esc = true;
+      }
+      continue;
+    }
+    if (c === "'") {
+      const e = text.indexOf("'", i + 1);
+      span(e < 0 ? text.length : e + 1);
+      continue;
+    }
+    if (c === "$" && text[i + 1] === "'") {
+      span(endAnsi(text, i + 1) + 1);
+      continue;
+    }
+    if (c === "$" && text[i + 1] === "[") { // legacy arithmetic: a << inside is a shift
+      const e = text.indexOf("]", i + 2);
+      span(e < 0 ? text.length : e + 1);
+      continue;
+    }
+    if (c === "$" && text[i + 1] === "{") {
+      const e = endBrace(text, i + 2);
+      span(e < 0 ? text.length : e);
+      continue;
+    }
+    if (c === "(" && text[i + 1] === "(" && (blank || /[;&|!{]\s*$|(?:^|[\s;&|(])(?:if|while|until|elif|then|do|else|time)\s*$/.test(tail))) { // `(( n <<= 1 ))`: arithmetic, not a heredoc
+      const e = endParen(text, i + 1);
+      span(e < 0 ? text.length : e);
+      continue;
+    }
+    if (c === '"') {
+      span(endDq(text, i) + 1);
+      continue;
+    }
+    if (c === "`" || (c === "$" && text[i + 1] === "(")) {
+      const e = c === "`" ? endTick(text, i) : endParen(text, i + 2);
+      span(e < 0 ? text.length : e);
+      continue;
+    }
+    if (c === "#" && (parts.length === 0 || (/[\s;&|(]/.test(tail.slice(-1)) && !wasEsc))) {
+      while (i < text.length && text[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "<" && text[i + 1] === "<") {
+      if (text[i + 2] === "<") {
+        put("<<<");
+        i += 3;
+        continue;
+      }
+      const h = heredocWord(text, i + 2);
+      span(h.end);
+      if (h.delim && !/^\d+$|^=/.test(h.delim)) pend.push(h); // `1 << 2` and `n <<= 1` are shifts
+      continue;
+    }
+    if (c === "\n") {
+      flush();
+      i = skipHeredocs(text, i + 1, pend);
+      pend.length = 0;
+      continue;
+    }
+    put(c);
+    i++;
+  }
+  flush();
+  return out;
+}
+
+// A body that does not read whole is read one logical line at a time, as the shell runs it: the commands of a line
+// that reads are scanned; a line that does not read is noted like an unreadable body, and the commands of it that
+// hold no expansion the scan cannot resolve are still scanned (`make -C sub && echo $(date)`).
+function noteUnreadable(ctx: Ctx, text: string): void {
+  // The text was not split, so a `cd` or a workspace flag inside a redirect, pipe or subshell may be moving a
+  // run to another package. A body that stays in place (`node safe.js > out`) is not widened.
+  if (noteBody(ctx, text)) widenAll(ctx);
+  // A sourced file runs in this shell and may sit under test/ or docs/: read every file.
+  if (/(?:^|[\s;&|({])(?:source|\.)\s+[^\s;&|)]/.test(text)) {
+    ctx.widenInert = true;
+    widenAll(ctx);
+  }
+  noteUnparsedCompile(ctx, text);
+}
+
+// The command word of a command (after variable assignments) holds an expansion that could not be resolved.
+function headUnresolved(cmd: string): boolean {
+  for (const w of cmd.split(/\s+/)) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) continue;
+    return w.includes(UNRESOLVED);
+  }
+  return false;
+}
+
+function readParts(ctx: Ctx, body: string): void {
+  if (body.includes(UNRESOLVED)) {
+    // The placeholder is a character the body itself holds: a command could not be told from an unresolved one. Read every file.
+    ctx.widenInert = true;
+    widenAll(ctx);
+    return;
+  }
+  const lines = logicalLines(body);
+  for (const line of lines) {
+    if (ctx.hold) return;
+    const whole = subst(ctx, line);
+    if (whole !== null && splitCommands(ctx, whole)) {
+      runBody(ctx, line);
+      continue;
+    }
+    const loose = subst(ctx, line, true);
+    const cmds = loose === null ? null : splitCommands(ctx, loose);
+    if (cmds && ctx.depth < DEPTH) {
+      ctx.depth++;
+      for (const cmd of cmds) if (!headUnresolved(cmd)) dispatch(ctx, cmd); // an unresolved argument is dispatched as an argument
+      ctx.depth--;
+    }
+    if (ctx.hold) return;
+    if (lines.length > 1) noteUnreadable(ctx, line); // a body of one line is noted whole by the caller
+  }
+}
+
 function runBody(ctx: Ctx, body: string): void {
   if (ctx.hold) return;
   if (ctx.depth >= DEPTH) {
@@ -2968,21 +3330,15 @@ function runBody(ctx: Ctx, body: string): void {
   }
   const sub = subst(ctx, body);
   if (sub === null || ctx.hold) {
+    if (sub === null && !ctx.hold) readParts(ctx, body);
     // An expansion that cannot be resolved may name another directory: widen when the body moves the run.
     if (sub === null && noteBody(ctx, body)) widenAll(ctx);
     return;
   }
   const cmds = splitCommands(ctx, sub);
   if (!cmds) {
-    // The body was not split, so a `cd` or a workspace flag inside a redirect, pipe or subshell may be moving a
-    // run to another package. A body that stays in place (`node safe.js > out`) is not widened.
-    if (noteBody(ctx, sub)) widenAll(ctx);
-    // A sourced file runs in this shell and may sit under test/ or docs/: read every file.
-    if (/(?:^|[\s;&|({])(?:source|\.)\s+[^\s;&|)]/.test(sub)) {
-      ctx.widenInert = true;
-      widenAll(ctx);
-    }
-    noteUnparsedCompile(ctx, sub);
+    readParts(ctx, body);
+    noteUnreadable(ctx, sub);
     return;
   }
   if (ctx.hold) return;
@@ -3422,6 +3778,15 @@ const WORKSPACE_TOOLS = new Set(["lerna", "turbo", "nx", "rush", "wsrun"]);
 function shellSegments(body: string): string[] {
   const out: string[] = [];
   let cur = "";
+  let last = ""; // the last character of cur: indexing into a long string that is being appended to is quadratic
+  const add = (x: string): void => {
+    cur += x;
+    last = x[x.length - 1]!;
+  };
+  const reset = (): void => {
+    cur = "";
+    last = "";
+  };
   let quote: string | undefined;
   let escEnd = false;
   for (let i = 0; i < body.length; i++) {
@@ -3429,28 +3794,28 @@ function shellSegments(body: string): string[] {
     const wasEsc = escEnd;
     escEnd = false;
     if (quote) {
-      cur += c;
+      add(c);
       // A backslash escapes inside double quotes only.
-      if (c === "\\" && quote === '"' && i + 1 < body.length) cur += body[++i]!;
+      if (c === "\\" && quote === '"' && i + 1 < body.length) add(body[++i]!);
       else if (c === quote) quote = undefined;
     } else if (c === "\\") {
       // An escaped character is a plain character: it opens no quote and ends no command.
-      cur += c;
-      if (i + 1 < body.length) cur += body[++i]!;
+      add(c);
+      if (i + 1 < body.length) add(body[++i]!);
       escEnd = true;
-    } else if (c === "#" && (cur === "" || (/\s$/.test(cur) && !wasEsc))) {
+    } else if (c === "#" && (last === "" || (/\s/.test(last) && !wasEsc))) {
       // A comment runs to the end of the line.
       while (i + 1 < body.length && body[i + 1] !== "\n") i++;
     } else if (c === "'" || c === '"') {
       quote = c;
-      cur += c;
-    } else if ((c === "&" && (/[<>]$/.test(cur) || (body[i + 1] === ">" && body[i - 1] !== "&"))) || (c === "|" && /[<>]$/.test(cur) && cur.endsWith(">"))) {
+      add(c);
+    } else if ((c === "&" && (last === "<" || last === ">" || (body[i + 1] === ">" && body[i - 1] !== "&"))) || (c === "|" && last === ">")) {
       // `2>&1`, `>&2`, `&>file` and `>|file` are redirects, not command separators.
-      cur += c;
+      add(c);
     } else if (";&|\n()`".includes(c)) {
       if (cur.trim()) out.push(cur.trim());
-      cur = "";
-    } else cur += c;
+      reset();
+    } else add(c);
   }
   // An unterminated quote is a shell error, but nothing after it is trusted: read it split without quotes too.
   if (quote) out.push(...cur.split(/[;&|\n()`]+/).map((t) => t.trim()).filter(Boolean));
@@ -4669,7 +5034,25 @@ function dispatch(ctx: Ctx, cmd: string): void {
     if (argv[i]!.startsWith("\\")) argv[i] = argv[i]!.slice(1);
     else i++;
   }
-  if (i >= argv.length) return;
+  // A compound command's keywords (`if`, `then`, `do`, `fi` ...) are not commands: the command after one is read, and a bare
+  // closing keyword runs nothing. Without this each of them was an unknown runner that widened and, with `[ -f x ]`
+  // after `if`, held on the glob cap whatever changed.
+  while (i < argv.length && /^(?:if|then|elif|else|do|while|until|!|\{)$/.test(argv[i]!)) i++;
+  if (i >= argv.length || /^(?:fi|done|esac|\})$/.test(argv[i]!)) return;
+  if (argv[i] === "[" || argv[i] === "test") return; // the test builtin runs nothing
+  if (/^(?:export|declare|typeset|local|readonly)$/.test(argv[i]!)) {
+    // An assignment builtin runs nothing: only the variables that change how a later command runs matter.
+    for (let j = i + 1; j < argv.length; j++) {
+      const a = argv[j]!.includes("=") ? argv[j]! : argv[j]! + "="; // `export LD_PRELOAD` marks an earlier assignment for export: the same name
+      if (UNSAFE_ENV.test(a)) {
+        ctx.widenInert = true;
+        widenAll(ctx);
+      }
+      if (NODE_OPTS.test(a)) ctx.widenInert = true;
+      if (SPECIAL_ENV.test(a)) widenAll(ctx);
+    }
+    return;
+  }
   // One structural check on every command: a move or a script argument that may carry one widens first.
   const moved: string[] = [];
   // Once the scan was unsure the widen already reads everything: later commands need not be rescanned.
