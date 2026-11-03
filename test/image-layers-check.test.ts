@@ -47,7 +47,7 @@ function source(oldImg: ImageLayers, newImg: ImageLayers, withLayers = true): Oc
 
 const OLD_LAYERS = ["base.tar", "old-top.tar"];
 
-async function run(newNames: string[], opts: { first?: string; second?: string; layers?: boolean; limits?: typeof LIMITS; budget?: { chunkChars: number; maxParts: number }; newOpts?: Parameters<typeof fakeLayers>[1]; withLayers?: boolean } = {}) {
+async function run(newNames: string[], opts: { first?: string; second?: string; layers?: boolean; limits?: typeof LIMITS; budget?: { chunkChars: number; maxParts: number; maxStages?: number }; newOpts?: Parameters<typeof fakeLayers>[1]; withLayers?: boolean } = {}) {
   const src = source(fakeLayers(OLD_LAYERS), fakeLayers(newNames, opts.newOpts), opts.withLayers);
   const r = fakeReviewer("first-m", opts.first ?? APPROVE);
   const o = opts.second === undefined ? undefined : fakeReviewer("second-m", opts.second);
@@ -167,13 +167,20 @@ describe("checkImage with layers", () => {
   });
 
   test("a diff over the part budget stops for a human and never lands, even on APPROVE", async () => {
-    const { res } = await run([...OLD_LAYERS, "new-setuid.tar", "new-cacert.tar"], { budget: { chunkChars: 40, maxParts: 1 }, second: APPROVE });
+    const { res } = await run([...OLD_LAYERS, "new-setuid.tar", "new-cacert.tar"], { budget: { chunkChars: 40, maxParts: 1, maxStages: 1 }, second: APPROVE });
     expect(res.decision).toBe("hold");
     expect(res.hits.length).toBeGreaterThan(0);
   });
 
+  test("a diff over one stage is read in full under the staged budget, one prompt per part, and lands", async () => {
+    const { res, r } = await run([...OLD_LAYERS, "new-cacert.tar", "new-run.tar.gz"], { budget: { chunkChars: 40, maxParts: 2 }, second: APPROVE });
+    expect(r.prompts.length).toBeGreaterThan(3);
+    expect(res.why).toBe("approved");
+    expect(res.decision).toBe("land");
+  });
+
   test("an over-budget diff with no hits holds with the budget as the reason", async () => {
-    const { res } = await run([...OLD_LAYERS, "new-cacert.tar", "new-run.tar.gz"], { budget: { chunkChars: 40, maxParts: 1 } });
+    const { res } = await run([...OLD_LAYERS, "new-cacert.tar", "new-run.tar.gz"], { budget: { chunkChars: 40, maxParts: 1, maxStages: 1 } });
     expect(res.decision).toBe("hold");
     expect(res.why).toMatch(/^too large for model review: .*needs a human$/);
   });

@@ -710,7 +710,7 @@ describe("review budget", () => {
 
   test("a changed prose file over budget is a file left out, so the priority APPROVE holds", async () => {
     const big = (s: string) => Array.from({ length: 400 }, (_, i) => `${s} ${i}`).join("\n");
-    const r = await reviewUpdate(base({ chunkChars: 1000, maxParts: 3, loadArtifacts: async () => ({ old: files({ "a.py": "x = 1\n", "README.md": big("old") }), new: files({ "a.py": "x = 1\n", "b.py": "y = 1\n", "README.md": big("new") }) }) }));
+    const r = await reviewUpdate(base({ chunkChars: 1000, maxParts: 3, maxStages: 1, loadArtifacts: async () => ({ old: files({ "a.py": "x = 1\n", "README.md": big("old") }), new: files({ "a.py": "x = 1\n", "b.py": "y = 1\n", "README.md": big("new") }) }) }));
     const rev = r.layers.find((l) => l.layer === "reviewer")!;
     expect(rev.detail).toMatch(/^too large for model review: \d+ parts > 3 \(full diff\); fake APPROVE on the priority files .*1 lower-priority file\(s\) not reviewed; needs a human$/);
     expect(r.decision).toBe("hold");
@@ -734,7 +734,7 @@ describe("review budget", () => {
   test("a diff over maxParts is a reviewer stop that needs a human, and the reviewer is not called", async () => {
     let calls = 0;
     const big = { old: files({}), new: files({ "a.py": "x = 1\n".repeat(400) }) };
-    const r = await reviewUpdate(base({ loadArtifacts: async () => big, chunkChars: 100, maxParts: 3, reviewer: { name: "fake", review: async () => (calls++, "APPROVE") } }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => big, chunkChars: 100, maxParts: 3, maxStages: 1, reviewer: { name: "fake", review: async () => (calls++, "APPROVE") } }));
     expect(calls).toBe(0);
     expect(r.layers.find((l) => l.layer === "reviewer")).toMatchObject({ verdict: "stop" });
     expect(r.layers.find((l) => l.layer === "reviewer")!.detail).toMatch(/too large for model review: \d+ parts > 3/);
@@ -750,7 +750,7 @@ describe("review budget", () => {
 
   test("over maxParts, the reviewer sees only priority files and the detail names what it left out", async () => {
     const prompts: string[] = [];
-    const r = await reviewUpdate(base({ loadArtifacts: async () => wide, chunkChars: 200, maxParts: 3, reviewer: { name: "fake", review: async (p) => (prompts.push(p), "APPROVE\nno attack indicators found") } }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => wide, chunkChars: 200, maxParts: 3, maxStages: 1, reviewer: { name: "fake", review: async (p) => (prompts.push(p), "APPROVE\nno attack indicators found") } }));
     const seen = prompts.join("");
     for (const p of ["setup.py", "lib/net.py", "lib/new.py"]) expect(seen).toContain(p);
     expect(seen).not.toContain("lib/m0.py");
@@ -761,7 +761,7 @@ describe("review budget", () => {
   // xrpl 4.2.1 landed this way: an APPROVE on the priority files never lands the update while
   // files were left unread; it is held for a human, like the signal and ranked tiers.
   test("an APPROVE on priority files with files left out is held for a human, not landed", async () => {
-    const r = await reviewUpdate(base({ loadArtifacts: async () => wide, chunkChars: 200, maxParts: 3, reviewer: approve }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => wide, chunkChars: 200, maxParts: 3, maxStages: 1, reviewer: approve }));
     const rev = r.layers.find((l) => l.layer === "reviewer")!;
     expect(rev.verdict).toBe("stop");
     expect(rev.detail).toMatch(/^too large for model review: \d+ parts > 3 \(full diff\); fake APPROVE on the priority files/);
@@ -775,7 +775,7 @@ describe("review budget", () => {
       old: files({ "setup.py": "v = 1\n", "lib/gone.py": "g = 1\n".repeat(400) }),
       new: files({ "setup.py": "v = 2\n", "lib/new.py": "y = 1\n" }),
     };
-    const r = await reviewUpdate(base({ loadArtifacts: async () => removedOnly, chunkChars: 200, maxParts: 3, reviewer: approve }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => removedOnly, chunkChars: 200, maxParts: 3, maxStages: 1, reviewer: approve }));
     const rev = r.layers.find((l) => l.layer === "reviewer")!;
     expect(rev.detail).toContain("priority files only, 0 lower-priority file(s) not reviewed");
     expect(rev.verdict).toBe("pass");
@@ -784,7 +784,7 @@ describe("review budget", () => {
   test("over maxParts with no priority files at all, it holds for a human without calling the reviewer", async () => {
     let calls = 0;
     const plainOnly = { old: files(plain(10, "1")), new: files(plain(10, "2")) };
-    const r = await reviewUpdate(base({ loadArtifacts: async () => plainOnly, chunkChars: 200, maxParts: 3, reviewer: { name: "fake", review: async () => (calls++, "APPROVE") } }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => plainOnly, chunkChars: 200, maxParts: 3, maxStages: 1, reviewer: { name: "fake", review: async () => (calls++, "APPROVE") } }));
     const rev = r.layers.find((l) => l.layer === "reviewer")!;
     expect(calls).toBe(0);
     expect(rev.detail).toMatch(/^too large for model review: \d+ parts > 3 \(full diff\); no priority files to review/);
@@ -792,7 +792,7 @@ describe("review budget", () => {
   });
 
   test("a FLAG on a priority part still stops", async () => {
-    const r = await reviewUpdate(base({ loadArtifacts: async () => wide, chunkChars: 200, maxParts: 3, reviewer: flag }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => wide, chunkChars: 200, maxParts: 3, maxStages: 1, reviewer: flag }));
     expect(r.layers.find((l) => l.layer === "reviewer")).toMatchObject({ verdict: "stop" });
     expect(r.decision).toBe("hold");
   });
@@ -804,7 +804,7 @@ describe("review budget", () => {
 
   test("priority files alone over maxParts: the reviewer sees only the signal files; APPROVE is still held for a human", async () => {
     const prompts: string[] = [];
-    const r = await reviewUpdate(base({ loadArtifacts: async () => bigNew, chunkChars: 200, maxParts: 3, reviewer: { name: "fake", review: async (p) => (prompts.push(p), "APPROVE") } }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => bigNew, chunkChars: 200, maxParts: 3, maxStages: 1, reviewer: { name: "fake", review: async (p) => (prompts.push(p), "APPROVE") } }));
     const seen = prompts.join("");
     for (const p of ["lib/net.py", "setup.py"]) expect(seen).toContain(p);
     for (const p of ["lib/big.py", "lib/new.py", "lib/m0.py"]) expect(seen).not.toContain(p);
@@ -816,7 +816,7 @@ describe("review budget", () => {
   });
 
   test("a FLAG on the signal files stops automatically", async () => {
-    const r = await reviewUpdate(base({ loadArtifacts: async () => bigNew, chunkChars: 200, maxParts: 3, reviewer: flag }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => bigNew, chunkChars: 200, maxParts: 3, maxStages: 1, reviewer: flag }));
     const rev = r.layers.find((l) => l.layer === "reviewer")!;
     expect(rev.verdict).toBe("stop");
     expect(rev.detail).toMatch(/^fake FLAG on signal part\(s\) 1 of \d+; 12 file\(s\) not reviewed$/);
@@ -850,7 +850,7 @@ describe("review budget", () => {
 
   test("signal files alone over maxParts: the reviewer reads the top-ranked parts in rank order; APPROVE is held for a human", async () => {
     const prompts: string[] = [];
-    const r = await reviewUpdate(base({ loadArtifacts: async () => loud, scanner: gd, only: ["scan", "reviewer"], chunkChars: 200, maxParts: 3, reviewer: { name: "fake", review: async (p) => (prompts.push(p), "APPROVE\nno attack indicators found") } }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => loud, scanner: gd, only: ["scan", "reviewer"], chunkChars: 200, maxParts: 3, maxStages: 1, reviewer: { name: "fake", review: async (p) => (prompts.push(p), "APPROVE\nno attack indicators found") } }));
     expect(prompts.length).toBe(3);
     const first = prompts.map((p) => p.slice(p.indexOf("<<<BEGIN UNTRUSTED DATA: diff part")));
     expect(first[0]).toContain("zz/hook.pth");
@@ -867,10 +867,10 @@ describe("review budget", () => {
 
   test("signal files alone over maxParts: a FLAG on a ranked part stops as a model detection", async () => {
     let calls = 0;
-    const r = await reviewUpdate(base({ loadArtifacts: async () => loud, scanner: gd, only: ["scan", "reviewer"], chunkChars: 200, maxParts: 3, reviewer: { name: "fake", review: async () => (calls++ === 1 ? "FLAG\nfetch and run" : "APPROVE\nno attack indicators found") } }));
+    const r = await reviewUpdate(base({ loadArtifacts: async () => loud, scanner: gd, only: ["scan", "reviewer"], chunkChars: 200, maxParts: 3, maxStages: 1, reviewer: { name: "fake", review: async () => (calls++ === 1 ? "FLAG\nfetch and run" : "APPROVE\nno attack indicators found") } }));
     const rev = r.layers.find((l) => l.layer === "reviewer")!;
     expect(rev.verdict).toBe("stop");
-    expect(rev.detail).toMatch(/^fake FLAG on ranked part\(s\) 2 of 3 reviewed; \d+ parts not reviewed, \d+ file\(s\) not reviewed$/);
+    expect(rev.detail).toMatch(/^fake FLAG on ranked part\(s\) 2 of 2 reviewed; \d+ parts not reviewed, \d+ file\(s\) not reviewed$/);
     expect(classifyOutcome(r)).toBe("stopped");
   });
 
@@ -1082,7 +1082,7 @@ describe("newly reached files", () => {
     const held = await run(
       new Map([["package.json", enc(pj({ main: "index.js" }))], ["index.js", enc("a()\n")], ["stage.js", link], ["payload.js", enc(big)]]),
       new Map([["package.json", enc(pj({ version: "1.0.1", main: "index.js" }))], ["index.js", enc("require('./stage.js')\n")], ["stage.js", link], ["payload.js", enc(big)]]),
-      { chunkChars: 1000, maxParts: 1 },
+      { chunkChars: 1000, maxParts: 1, maxStages: 1 },
     );
     expect(held.r.decision).toBe("hold");
     expect(held.rev.detail).toMatch(/too large for model review|not model-reviewable/);
@@ -1104,7 +1104,7 @@ describe("newly reached files", () => {
     expect(into.new.has("second/index.js")).toBe(true);
     expect(into.new.has("payload.js")).toBe(true);
     expect(into.new.has("second/payload.js")).toBe(false);
-    const { r, text } = await run(into.old, into.new, { chunkChars: 800, maxParts: 1 });
+    const { r, text } = await run(into.old, into.new, { chunkChars: 800, maxParts: 1, maxStages: 1 });
     expect(text).not.toContain("steal_folded_payload()");
     expect(r.decision).toBe("land");
   });
