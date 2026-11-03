@@ -615,6 +615,22 @@ describe("shell classes: review of 04ced3f", () => {
   });
 });
 
+describe("shell classes: O5, O10, O12", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  test("O5: a redirect target held in a variable the body assigned a literal", () => {
+    is(["writer-exec"], ['N=b.js; cat lib/hidden.js > "$N"; node b.js', "N=b.js\ncat lib/hidden.js > $N\nnode b.js", 'cat t > "$PWD/b.js" && node b.js', 'N=b.js\ncat t >> "${N}"\nnode b.js']);
+    is([], ['echo x > "$LOG"; node a.js', 'N=b.js; echo x > "$M"; node b.js', 'N=b.js; echo x > "$N"; node a.js']);
+  });
+  test("O10: node-gyp tool variables, compiler flags that load a file, PYTHONUSERBASE", () => {
+    is(["env-assign"], ["NODE_GYP_FORCE_PYTHON=./tools/py.sh node-gyp rebuild", "LINK=./x.sh node-gyp rebuild", "CC_host=./c node-gyp rebuild", "CXX_target=./c node-gyp rebuild", "CXXFLAGS=-B./bin node-gyp rebuild", "CFLAGS=-fplugin=./p.so node-gyp rebuild", "LDFLAGS=-fuse-ld=./ld node-gyp rebuild", "PYTHONUSERBASE=. python3 a.py"]);
+    is([], ["CFLAGS=-O2 node-gyp rebuild", "CFLAGS=-B/usr/bin make", "CC=clang make", "PYTHONUSERBASE=/opt/x python3 a.py", "CFLAGS=-fplugin=/usr/lib/p.so make"]);
+  });
+  test("O12: sudo -D and --chdir move that command", () => {
+    is(["cd-relative"], ["sudo -D sub node a.js", "sudo --chdir=sub node a.js"]);
+    is([], ["sudo node a.js", "sudo -D sub true && node a.js"]);
+  });
+});
+
 describe("shell classes: bounded work", () => {
   const rep = (s: string, n: number) => s.repeat(n);
   const inputs: [string, string, ClassName[]][] = [
@@ -623,7 +639,8 @@ describe("shell classes: bounded work", () => {
     ["heredocs", rep("cat <<E\n", MAX_LEN / 8 - 1), ["heredoc"]],
     ["parens", rep("(", MAX_LEN - 1), []],
     ["backticks", rep("`", MAX_LEN - 1), []],
-    ["nested subshell", rep("sh -c '", 400) + "x" + rep("'", 400), ["interp-stdin"]],
+    ["flat sh -c (single quotes do not nest)", rep("sh -c '", 400) + "x" + rep("'", 400), ["interp-stdin"]],
+    ["nested substitutions past the depth cap", rep("echo $(", 400) + "x" + rep(")", 400), ["unparsed"]],
     ["many stages", rep("node a.js | ", MAX_LEN / 12 - 1) + "sh", []],
     ["many redirects", rep("cat >a ", MAX_LEN / 7 - 1), []],
     ["long word", "node " + rep("a", MAX_LEN - 10), []],

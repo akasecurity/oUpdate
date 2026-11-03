@@ -31,7 +31,7 @@ export type ClassName = "over-cap" | "unparsed" | "interp-flag" | "interp-stdin"
 export interface Hit { cls: ClassName; why: string }
 
 interface Word { text: string; plain: boolean } // plain: no $ or backtick expansion (a backslash only quotes)
-interface Stage { words: Word[]; assigns: string[]; writes: string[]; reads: string[]; subs: string[]; hereSubs: string[]; heredoc: boolean; piped: boolean }
+interface Stage { words: Word[]; assigns: string[]; writes: string[]; varWrites: string[]; reads: string[]; subs: string[]; hereSubs: string[]; heredoc: boolean; piped: boolean }
 
 export const MAX_LEN = 20000;
 export const LIMITS = { fuel: 200000 }; // a test lowers it
@@ -110,7 +110,7 @@ function parse(text: string, depth: number): Stage[] {
   if (depth > MAX_DEPTH) fail("nesting is deeper than " + MAX_DEPTH, "unparsed");
   if (text.length > MAX_LEN) fail("body is over the " + MAX_LEN + " character cap", "over-cap");
   const stages: Stage[] = [];
-  const fresh = (): Stage => ({ words: [], assigns: [], writes: [], reads: [], subs: [], hereSubs: [], heredoc: false, piped: false });
+  const fresh = (): Stage => ({ words: [], assigns: [], writes: [], varWrites: [], reads: [], subs: [], hereSubs: [], heredoc: false, piped: false });
   let st: Stage = fresh();
   let cur: Word | undefined;
   const pendingHere: { delim: string; strip: boolean; active: boolean; st: Stage }[] = [];
@@ -360,7 +360,7 @@ function parse(text: string, depth: number): Stage[] {
       const { w, next } = readWordAt(j);
       st.subs.push(...wordSubs);
       if (!w.text && wordSubs.length === 0) fail("redirect target", "unparsed");
-      if (c === ">") { if (w.text && w.text !== "/dev/null" && w.plain) st.writes.push(w.text); } else st.reads.push(w.text);
+      if (c === ">") { if (w.text && w.text !== "/dev/null" && w.plain) st.writes.push(w.text); else if (w.text && !w.plain) st.varWrites.push(w.text); } else st.reads.push(w.text);
       i = next - 1; continue;
     }
     if (c === "&" && text[i + 1] === ">") { endWord(); const { w, next } = readWordAt(text[i + 2] === ">" ? i + 3 : i + 2); st.subs.push(...wordSubs); if (!w.text && wordSubs.length === 0) fail("redirect target", "unparsed"); if (w.text !== "/dev/null" && w.plain) st.writes.push(w.text); i = next - 1; continue; }
@@ -459,11 +459,16 @@ const BAD_NAME = new RegExp(BAD_ENV.source.replace(/\\\+\?=$/, "$"), "i");
 // More loaders: shell startup files, Lua and Perl library paths, the prompt string (run by `sh -x`), and a PATH or
 // HOME with an entry that is not absolute and comes before the system ones (it points inside the package or at the working directory).
 const BAD_ENV2 = /^(?:ZDOTDIR|ENV|LUA_INIT\w*|LUA_PATH|LUA_CPATH|PERLLIB|PS4|PROMPT_COMMAND|SHELLOPTS|BASH_XTRACEFD|MAKEFILES|BASH_FUNC_[^=]*)\+?=/;
-const TOOL_VAR = /^(?:PYTHON|CC|CXX|CPP|LD|AR|MAKE|SHELL)=(.*)$/; // a compiler, interpreter or shell named by a relative path runs from the package
+const TOOL_VAR = /^(?:PYTHON|CC|CXX|CPP|LD|AR|MAKE|SHELL|NODE_GYP_FORCE_PYTHON|LINK|(?:CC|CXX|LINK|LD|AR)_(?:host|target))=(.*)$/; // a compiler, interpreter or shell named by a relative path runs from the package
 function badEnv(t: string): boolean {
   if (BAD_ENV.test(t) || BAD_ENV2.test(t)) return true;
   const tv = TOOL_VAR.exec(t);
   if (tv) return /\//.test(tv[1]!) && (!/^[/~]/.test(tv[1]!) && !/^\$(?!\{?PWD\b)/.test(tv[1]!) || /^\$\{?PWD\b/.test(tv[1]!) || tv[1]!.startsWith("\u0001")); // $PWD and a substitution are inside the package or unknown
+  // compiler flags that run or load a file from a path (-B dir, -fplugin=, -specs=, -fuse-ld=), and a Python user base: not absolute
+  const fl = /^(?:C|CXX|CPP|LD)FLAGS=([\s\S]*)$/.exec(t);
+  if (fl) return /(?:^|\s)(?:-B|-fplugin=|-specs=|-fuse-ld=)(?![/~])\S/.test(fl[1]!);
+  const ub = /^PYTHONUSERBASE=([\s\S]*)$/.exec(t);
+  if (ub) return ub[1] !== "" && !/^[/~]/.test(ub[1]!) && !/^\$(?!\{?PWD\b)/.test(ub[1]!);
   const m = /^(PATH|HOME)\+?=([\s\S]*)$/.exec(t);
   if (!m) return false;
   let es = m[2]!.split(":");
@@ -570,11 +575,15 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
   const envHit = () => hit("env-assign", "a variable that loads code or config (NODE_OPTIONS, npm_config_*, BASH_ENV, LD_PRELOAD ...)");
   let later: string[] = [];
   const aliases = new Map<string, string>();
+  const vars = new Map<string, string>(); // variables the body assigned a literal
   for (const st of stages) {
     let stageCwd = false; // env -C and ruby -C move one command, not the rest of the body
     // A redirect empties its target before the command runs, so a stage does not run its own output file.
     for (const t of later) copyTargets.add(t);
-    later = st.writes;
+    // a target built from a variable the body assigned a literal to (`N=b.js; cat x > "$N"`) is a known file
+    const resolved = st.varWrites.map((t) => t.replace(/\$\{(\w+)\}|\$(\w+)/g, (m0, a, b) => (a ?? b) === "PWD" ? "." : vars.get(a ?? b) ?? m0)).filter((t) => !/[$\u0001]/.test(t));
+    later = [...st.writes, ...resolved];
+    for (const a of st.assigns) { const m = /^([A-Za-z_][A-Za-z0-9_]*)=([^$`\u0001]*)$/.exec(a); if (m) vars.set(m[1]!, m[2]!); }
     for (const s of st.subs) nested(s);
     for (const s of st.hereSubs) nested(s);
     if (st.assigns.some((a) => badEnv(a))) envHit();
@@ -602,6 +611,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
         if (name === "env" && (t === "-S" || t === "--split-string")) { if (w[k + 1]) { if (!w[k + 1]!.plain) hit("computed-command", "env -S runs text built by an expansion"); nested(w[k + 1]!.text); } k++; continue; }
         if (name === "env" && t.startsWith("--split-string=")) { nested(t.slice(15)); continue; }
         if (name === "env" && (t === "-C" || t === "--chdir" || t.startsWith("--chdir="))) stageCwd = true;
+        if (name === "sudo" && (t === "-D" || t === "--chdir" || t.startsWith("--chdir=") || (t.startsWith("-D") && t.length > 2))) stageCwd = true;
         if (spec.val.includes(t)) k++;
         else if (name === "env" && t.startsWith("-S") && t.length > 2) nested(t.slice(2));
         else if (name === "env" && t.startsWith("-C") && t.length > 2) stageCwd = true;
