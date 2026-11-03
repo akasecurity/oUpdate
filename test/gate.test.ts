@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { diffLocks } from "../src/lockdiff.ts";
 import { giteaForge } from "../src/adapters/forge/gitea.ts";
-import { runGate, gateState, MARKER, pep440Allows, poetryAllows, verdictLine, type Change } from "../src/gate.ts";
+import { comment, runGate, gateState, MARKER, pep440Allows, poetryAllows, verdictLine, type Change } from "../src/gate.ts";
 import { LOCK_NAMES } from "../src/lockfile/index.ts";
 import type { Forge, Pull, StatusState } from "../src/adapters/forge/types.ts";
 import type { ReviewResult } from "../src/review.ts";
@@ -1059,5 +1059,23 @@ describe("runGate", () => {
     expect(out[0]!.state).toBe("success");
     expect(forge.log).toEqual(["status h1 success no package changes in bun.lock", "comment 1 true false"]);
     expect(forge.comments[1]).toContain(verdictLine("h1", "success"));
+  });
+});
+
+describe("the gate comment shows a layer detail with its invisible characters escaped", () => {
+  test("a bidi override and a Hangul filler in a path are written as escapes", () => {
+    const r: ReviewResult = { eco: "npm", name: "x", from: "1.0.0", to: "1.0.1", decision: "hold", layers: [{ layer: "reviewer", verdict: "stop", detail: "binary file(s) lib/\u202eevil\u3164.js" }] };
+    const body = comment("h1", "package-lock.json", "failure", [r], []);
+    expect(body).toContain("lib/\\u{202e}evil\\u{3164}.js");
+    expect(body).not.toMatch(/[\u202e\u3164]/);
+  });
+  test("the 300-character cut is on whole characters before escaping: an escape is never cut and a surrogate pair is not split", () => {
+    const detail = "x".repeat(299) + "\u{1f600}\u202e" + "y".repeat(50);
+    const r: ReviewResult = { eco: "npm", name: "x", from: "1.0.0", to: "1.0.1", decision: "hold", layers: [{ layer: "reviewer", verdict: "stop", detail }] };
+    const body = comment("h1", "package-lock.json", "failure", [r], []);
+    expect(body).toContain("\u{1f600}");
+    expect(body).not.toContain("\\u{d83d}");
+    expect(body).not.toContain("\\u{202e}"); // the 301st character is past the cut
+    expect(body).not.toMatch(/\\u\{[0-9a-f]*(?![0-9a-f}])/);
   });
 });

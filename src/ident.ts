@@ -29,10 +29,15 @@ export function shown(text: string | null | undefined): string {
 }
 
 /**
- * Text from a package (a file path in a layer detail, say) as it may sit in a markdown comment: backticks, brackets,
- * angle brackets and control characters are written as \u{hex}, so it cannot open a link, an image, a code span, a
- * comment or a tag. Other characters are kept, so a sentence stays readable.
+ * Text from a package (a file path in a layer detail, say) as it may sit in a markdown comment. Written as \u{hex}
+ * so it cannot open a link, an image, a code span, a comment or a tag, nor reorder or hide text: backticks,
+ * brackets, angle brackets, backslash (so an escape written here cannot be mistaken for text from the package), controls (Cc),
+ * format characters (Cf: bidi, zero-width, soft hyphen, tags), every default-ignorable code point (variation selectors,
+ * Khmer inherent vowels, the Hangul fillers, unassigned hidden code points), line and paragraph separators, every
+ * space but the ASCII one, the combining grapheme joiner and the braille blank; also lone surrogates (Cs), private use (Co)
+ * and unassigned code points (Cn). The result is safe only inside a code span: `&` and `@` are not escaped. Other characters are kept, so a sentence stays readable.
  */
+const INERT = /[`[\]<>\\\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}\p{Zs}\u{34F}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2800}]/gu;
 export function inert(text: string): string {
-  return text.replace(/[`[\]<>\u0000-\u001f\u007f]/g, (ch) => `\\u{${ch.codePointAt(0)!.toString(16)}}`);
+  return text.replace(INERT, (ch) => (ch === " " ? ch : `\\u{${ch.codePointAt(0)!.toString(16)}}`));
 }
