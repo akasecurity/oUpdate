@@ -700,4 +700,12 @@ describe("reviewLayers staging", () => {
     expect((await review(OLD, grown(...three), { chunkChars: 40, maxParts: 1, maxStages: n })).r.narrowed).toBeUndefined();
     expect((await review(OLD, grown(...three), { chunkChars: 40, maxParts: 1, maxStages: n - 1 })).r.narrowed).toMatch(/^too large for model review: /);
   });
+
+  test("no cap asked for: a diff of more parts than the old default cap is read in full, never narrowed", async () => {
+    const open = await review(OLD, grown(...three), { chunkChars: 3 });
+    expect(open.r.parts.length).toBeGreaterThan(72); // the old default cap of 12 parts * 6 stages
+    expect(open.r.narrowed).toBeUndefined();
+    const capped = await review(OLD, grown(...three), { chunkChars: 3, maxParts: 12, maxStages: 6 });
+    expect(capped.r.narrowed).toMatch(/^too large for model review: /);
+  });
 });

@@ -40,12 +40,21 @@ export interface Gate {
   run(): Promise<{ ok: boolean; detail: string }>;
 }
 
-/** Parts per review stage, and stages per review: a diff of up to DEFAULT_MAX_PARTS * MAX_STAGES parts is read in full; only a larger one is narrowed. */
+/** Parts per review stage, and stages per review. With no explicit cap a diff is read in full up to CEILING_PARTS parts: a clean large release is read, never held for its size.
+ *  An operator who passes maxParts or maxStages gets a cap of maxParts * maxStages parts (the other one defaults to these); only a larger diff is then narrowed. */
 export const DEFAULT_MAX_PARTS = 12;
 export const MAX_STAGES = 6;
+/** The most parts read when no cap was asked for, a cost ceiling and not a size rule. The largest release measured in the evaluations is cline 2.2.3 at 873 parts (12 read + 861 not, 2026-10-27); 1200 is that plus a third. Above it the old narrowing and hold for a human apply. */
+export const CEILING_PARTS = 1200;
 
-/** The most parts a review reads in full. A missing, non-finite or sub-1 count falls back to the default, so a bad value never switches narrowing off. */
+/** Parts in one stage: maxParts when it is a count of 1 or more, else DEFAULT_MAX_PARTS. */
+export function stagePartCount(maxParts?: number): number {
+  return maxParts !== undefined && Number.isFinite(maxParts) && maxParts >= 1 ? Math.floor(maxParts) : DEFAULT_MAX_PARTS;
+}
+
+/** The most parts a review reads in full: CEILING_PARTS when no cap was asked for. A non-finite or sub-1 count that was passed falls back to the default, so a bad value never switches a cap off. */
 export function partLimit(maxParts?: number, maxStages?: number): number {
+  if (maxParts === undefined && maxStages === undefined) return CEILING_PARTS;
   const ok = (n: number | undefined, d: number) => (n !== undefined && Number.isFinite(n) && n >= 1 ? Math.floor(n) : d);
   return ok(maxParts, DEFAULT_MAX_PARTS) * ok(maxStages, MAX_STAGES);
 }
@@ -79,9 +88,9 @@ export interface ReviewInput {
   loadArtifacts: () => Promise<{ old: FileMap; new: FileMap }>;
   only?: LayerName[];
   chunkChars?: number;
-  /** Parts of one review stage (default DEFAULT_MAX_PARTS). */
+  /** Parts of one review stage. With neither this nor maxStages set there is no per-stage cap: a diff is read in full up to CEILING_PARTS. Set, the default is DEFAULT_MAX_PARTS. */
   maxParts?: number;
-  /** Stages of maxParts parts a diff may take; a diff over maxParts * maxStages parts is narrowed and held for a human (default MAX_STAGES). 1 gives a single stage. */
+  /** Stages of maxParts parts a diff may take; a diff over maxParts * maxStages parts is narrowed and held for a human (default MAX_STAGES when maxParts is set). 1 gives a single stage. */
   maxStages?: number;
 }
 
@@ -2273,7 +2282,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
     else if (!artifacts || !pre) layers.push({ layer: "reviewer", verdict: "error", detail: artifactError ?? "no artifacts" });
     else {
       const cap = input.chunkChars ?? 60_000;
-      // A diff over one stage is read in full, stage by stage, up to this many parts; only a larger one is narrowed.
+      // A diff is read in full, stage by stage, up to this many parts (CEILING_PARTS unless the caller set a cap); only a larger one is narrowed.
       const limit = partLimit(input.maxParts, input.maxStages);
       const { entries, fresh, gained, linked } = entryView(artifacts.old, artifacts.new);
       const rejected = parserRejected(artifacts.old, artifacts.new);
@@ -2293,6 +2302,14 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       // A path with any pre-pass or scanner signal is shown in full, never as a hash line.
       const signalled = new Set([...pre.hard, ...pre.soft].map((x) => x.path));
       let chunks = chunkDiff(artifacts.old, artifacts.new, cap, undefined, false, signalled);
+      // More than one stage of parts: read the ranked files first (the first FLAG ends the review), then the rest, every part.
+      // (Over the limit the narrowing below ranks the files itself, so the diff is not cut twice.)
+      if (chunks.length > stagePartCount(input.maxParts) && chunks.length <= limit) {
+        const ranked = rankPriorityPaths(pre, scanHits), seen = new Set(ranked);
+        const rest = [...new Set([...artifacts.old.keys(), ...artifacts.new.keys()])].filter((q) => !seen.has(q)).sort();
+        const reordered = chunkDiff(artifacts.old, artifacts.new, cap, [...ranked, ...rest], false, signalled);
+        if (reordered.length <= limit) chunks = reordered; // cutting in another order can pack to one part more: at the boundary keep the cut that fits
+      }
       let note = "";
       let overPriority = "";
       let overFull = "";

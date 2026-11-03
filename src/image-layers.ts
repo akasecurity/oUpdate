@@ -10,7 +10,7 @@ import { benignBinary } from "./benign-binary.ts";
 import { diffSeq, renderLineDiff } from "./linediff.ts";
 import { ImageTree, LayerError, LIMITS, MergedIndex, type FsNode, type LayerStore } from "./oci-fs.ts";
 import { SOFT_PATTERNS, type FileMap } from "./prepass.ts";
-import { chunkDiff, DEFAULT_MAX_PARTS, hashedBinary, MAX_STAGES, partLimit, SCOPE_NOTE, type Scope } from "./review.ts";
+import { chunkDiff, hashedBinary, partLimit, SCOPE_NOTE, type Scope } from "./review.ts";
 import type { ImageEvidence } from "./targets/broker/answer.ts";
 
 export interface LayerReview {
@@ -28,13 +28,13 @@ export interface LayerReview {
 
 export interface LayerBudget {
   chunkChars: number;
-  /** Parts per review stage. */
-  maxParts: number;
-  /** Stages a diff may take before it is too large to read (default MAX_STAGES); 1 reads at most maxParts parts. */
+  /** Parts per review stage; with neither this nor maxStages set a diff is read in every part. */
+  maxParts?: number;
+  /** Stages a diff may take before it is too large to read; 1 reads at most maxParts parts. Without maxParts and maxStages the cap is CEILING_PARTS parts in all. */
   maxStages?: number;
 }
 
-export const LAYER_BUDGET: LayerBudget = { chunkChars: 60_000, maxParts: DEFAULT_MAX_PARTS, maxStages: MAX_STAGES };
+export const LAYER_BUDGET: LayerBudget = { chunkChars: 60_000 };
 
 const enc = new TextEncoder();
 const dec = new TextDecoder("utf-8", { fatal: false });

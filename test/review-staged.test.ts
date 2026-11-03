@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { reviewUpdate, chunkDiff, partLimit } from "../src/review.ts";
+import { reviewUpdate, chunkDiff, partLimit, CEILING_PARTS } from "../src/review.ts";
 import { syntheticPair } from "../acceptance/synthetic/generate.ts";
 import type { FileMap } from "../src/prepass.ts";
 
@@ -13,7 +13,10 @@ const release = (n: number, extra: Record<string, string> = {}) => ({
   new: files({ ...plain(n, "2"), "setup.py": "v = 2\n", ...extra }),
 });
 
-function run(art: { old: FileMap; new: FileMap }, over: { maxParts?: number; maxStages?: number; flagCall?: number } = {}) {
+// The parts a review cuts when it reads the ranked files (setup.py here) first and the rest in sorted order.
+const rankedTotal = (art: { old: FileMap; new: FileMap }) => chunkDiff(art.old, art.new, 200, ["setup.py", ...[...new Set([...art.old.keys(), ...art.new.keys()])].filter((k) => k !== "setup.py").sort()]).length;
+
+function run(art: { old: FileMap; new: FileMap }, over: { maxParts?: number; maxStages?: number; flagCall?: number; uncapped?: boolean } = {}) {
   const prompts: string[] = [];
   const p = reviewUpdate({
     eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
@@ -23,7 +26,7 @@ function run(art: { old: FileMap; new: FileMap }, over: { maxParts?: number; max
     cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"),
     loadArtifacts: async () => art,
     chunkChars: 200,
-    maxParts: over.maxParts ?? 3,
+    maxParts: over.uncapped ? undefined : (over.maxParts ?? 3),
     maxStages: over.maxStages,
   });
   return p.then((r) => ({ r, prompts, rev: r.layers.find((l) => l.layer === "reviewer")! }));
@@ -68,12 +71,11 @@ describe("staged review of a large diff", () => {
   });
 
   test("all-APPROVE stages carry on: a FLAG in a later stage still stops, and nothing after it is asked", async () => {
-    const art = release(12, { "lib/m9.py": "x = 2\nEVIL()\n" });
-    const total = chunkDiff(art.old, art.new, 200).length;
+    const art = release(12, { "lib/m5.py": "x = 2\nEVIL()\n" });
     const { r, prompts, rev } = await run(art, { maxParts: 3, maxStages: 30 });
     expect(prompts.length).toBeGreaterThan(3);
-    expect(prompts.length).toBeLessThan(total);
-    expect(rev.detail).toContain(`FLAG on part(s) ${prompts.length} of ${total}`);
+    expect(prompts.length).toBeLessThan(rankedTotal(art)); // the flag is mid-run: the parts after it are not asked
+    expect(rev.detail).toContain(`FLAG on part(s) ${prompts.length} of ${rankedTotal(art)}`);
     expect(r.decision).toBe("hold");
   });
 
@@ -94,7 +96,7 @@ describe("staged review of a large diff", () => {
   });
 
   test("a bad stage count never switches narrowing off", () => {
-    expect(partLimit()).toBe(72);
+    expect(partLimit()).toBe(CEILING_PARTS); // no cap asked for: the diff is read up to the ceiling
     expect(partLimit(undefined, NaN)).toBe(72);
     expect(partLimit(NaN, undefined)).toBe(72);
     expect(partLimit(3, 0)).toBe(18);
@@ -154,4 +156,71 @@ describe("staged review of a large diff", () => {
     expect(rev.detail).toContain(`2 of ${total} part(s) read, the first FLAG ended the review; 2 file(s) not reviewed`);
   });
 
+});
+
+describe("a large release with no cap asked for is read in every part", () => {
+  const big = (extra: Record<string, string> = {}) => release(110, extra);
+  const readTotal = (rev: { detail: string }) => Number(/on (\d+) part\(s\)/.exec(rev.detail)![1]);
+  test("a clean diff of more than 72 parts is read in full and lands, never held for its size", async () => {
+    const art = big();
+    expect(chunkDiff(art.old, art.new, 200).length).toBeGreaterThan(72);
+    const { r, prompts, rev } = await run(art, { uncapped: true });
+    expect(rev.verdict).toBe("pass");
+    expect(readTotal(rev)).toBe(prompts.length); // every part the review cut was asked
+    expect(prompts.length).toBeGreaterThan(72);
+    for (let i = 0; i < 110; i++) expect(prompts.join("")).toContain(`lib/m${i}.py`);
+    expect(rev.detail).not.toMatch(/too large|not reviewed/);
+    expect(r.decision).toBe("land");
+  });
+  test("an attack in the very last part of a large diff holds", async () => {
+    const { r, prompts, rev } = await run(big({ "lib/m99.py": "x = 2\nEVIL()\n" }), { uncapped: true });
+    expect(rev.verdict).toBe("stop");
+    expect(prompts.length).toBeGreaterThan(72);
+    expect(rev.detail).toContain(`FLAG on part(s) ${prompts.length} of ${prompts.length}`); // the flagged part is the last one cut
+    expect(rev.detail).not.toMatch(/too large/);
+    expect(r.decision).toBe("hold");
+  });
+  test("an operator who passes a cap still gets the narrowing and the hold for a human", async () => {
+    const { r, rev } = await run(big(), { maxParts: 2, maxStages: 2 });
+    expect(rev.detail).toMatch(/too large for model review/);
+    expect(r.decision).toBe("hold");
+  });
+  test("above the ceiling, with no cap asked for, a diff is narrowed and held as too large", async () => {
+    const art = release(CEILING_PARTS / 2 + 50);
+    expect(chunkDiff(art.old, art.new, 200).length).toBeGreaterThan(CEILING_PARTS);
+    const { r, rev } = await run(art, { uncapped: true });
+    expect(rev.detail).toMatch(/too large for model review: \d+ parts > 1200/);
+    expect(r.decision).toBe("hold");
+  });
+  test("the reorder threshold is the caller's maxParts: over it the ranked file is read first, within it the sorted order stays", async () => {
+    const over = await run(big(), { maxParts: 40, maxStages: 20 });
+    expect(over.rev.verdict).toBe("pass");
+    expect(readTotal(over.rev)).toBe(over.prompts.length);
+    expect(over.prompts[0]).toContain("setup.py"); // 220 parts > 40: ranked first
+    const within = await run(big(), { maxParts: 300, maxStages: 1 });
+    expect(within.rev.verdict).toBe("pass");
+    expect(within.prompts[0]).toContain("lib/m0.py"); // 220 parts <= 300: not reordered
+    expect(within.prompts[0]).not.toContain("setup.py");
+    expect(within.prompts[within.prompts.length - 1]).toContain("setup.py");
+  });
+  test("at the limit's edge, a reordered cut that packs to one part more is not used: the diff is not narrowed", async () => {
+    const side = (v: string) => files({ ...Object.fromEntries(Array.from({ length: 3 }, (_, i) => [`lib/m${i}.py`, `x = ${v}\n`.repeat(3 + (i % 3))])), "setup.py": `v = ${v}\n`.repeat(8) });
+    const art = { old: side("1"), new: side("2") };
+    const sorted = chunkDiff(art.old, art.new, 150).length;
+    const ranked = chunkDiff(art.old, art.new, 150, ["setup.py", "lib/m0.py", "lib/m1.py", "lib/m2.py"]).length;
+    expect(sorted).toBe(4);
+    expect(ranked).toBe(5); // the boundary: 4 parts fit a limit of 4, the reordered 5 would not
+    const prompts: string[] = [];
+    const r = await reviewUpdate({
+      eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
+      registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+      advisories: { query: async () => [] },
+      reviewer: { name: "fake", review: async (t) => (prompts.push(t), "APPROVE\nno attack indicators found") },
+      cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"), loadArtifacts: async () => art, chunkChars: 150, maxParts: 2, maxStages: 2,
+    });
+    const rev = r.layers.find((l) => l.layer === "reviewer")!;
+    expect(rev.detail).not.toMatch(/too large/);
+    expect(rev.verdict).toBe("pass");
+    expect(prompts).toHaveLength(4);
+  });
 });
