@@ -657,7 +657,7 @@ function sedExecs(script: string): boolean {
 }
 
 // What a nested body inherits: the files written so far are shared (they are on disk), a cd is copied in.
-interface State { cwd: boolean; written: Set<string>; vars?: Map<string, string>; aliases?: Map<string, string>; flags?: { unknownWrite: boolean }; unk?: Set<string>; sub?: boolean; fns?: Map<string, Set<string>>; fn?: string; ints?: Set<string> }
+interface State { cwd: boolean; written: Set<string>; vars?: Map<string, string>; aliases?: Map<string, string>; flags?: { unknownWrite: boolean; wild?: boolean }; unk?: Set<string>; sub?: boolean; fns?: Map<string, Set<string>>; fn?: string; ints?: Set<string>; refs?: Map<string, Set<string>> }
 
 export function flagBody(text: string): Hit[] {
   const hits: Hit[] = [];
@@ -706,7 +706,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
   let cwd = parent.cwd;
   const copyTargets = parent.written;
   let stageCwd = false; // env -C, sudo -D and ruby -C move one command, not the rest of the body
-  const nested = (t: string, sub = true) => walk(t, depth + 1, hits, { cwd: cwd || stageCwd, written: copyTargets, vars: nestedVars, aliases, flags, fns: fnVars, fn: curFn, unk: nestedUnk, sub });
+  const nested = (t: string, sub = true) => walk(t, depth + 1, hits, { cwd: cwd || stageCwd, written: copyTargets, vars: nestedVars, aliases, flags, fns: fnVars, fn: curFn, unk: nestedUnk, sub, ints: intVars, refs });
   const written = (f: string) => {
     const n = norm(f);
     const T = new Set([...copyTargets].map(norm).filter(Boolean)); // "" (the directory ".") would match every absolute path
@@ -723,7 +723,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
   const unk = parent.unk ?? new Set<string>(); // variables the body assigned something it cannot read
   let nestedUnk = unk; // ... and the names those assignments gave a value that is not read
   const inSub = parent.sub === true; // a subshell, substitution or -c string: its assignments are not kept as literals
-  const flags = parent.flags ?? { unknownWrite: false }; // a redirect target the body cannot name: any file it runs may be that one
+  const flags: { unknownWrite: boolean; wild?: boolean } = parent.flags ?? { unknownWrite: false }; // wild: a nameref with a target the body cannot name was written, so any name may hold anything; a redirect target the body cannot name: any file it runs may be that one
   // The text with every $NAME and ${NAME} replaced by the literal the body gave it; undefined when one is not known.
   const expand = (t: string): string | undefined => {
     let ok = true;
@@ -732,7 +732,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       if (!own(n)) { ok = false; return m0; }
       const v = vars.get(n);
       if (v !== undefined && (colon === "" || v !== "")) return v;
-      if (unk.has(n) || !SCRIPT_NAME.test(n)) { ok = false; return m0; } // assigned something the body cannot read, or set by npm or the shell (PWD names the package): not the default
+      if (flags.wild || unk.has(n) || !SCRIPT_NAME.test(n)) { ok = false; return m0; } // assigned something the body cannot read, or set by npm or the shell (PWD names the package): not the default
       if ((/['"]/.test(word) && /\\/.test(word)) || (word.includes("'") && word.includes("$"))) { ok = false; return m0; } // quotes mixed with a backslash or a $: not read
       const d = expand(word.replace(/\\(.)|['"]/g, "$1")); // quote removal on the default word
       if (d === undefined) { ok = false; return m0; }
@@ -751,10 +751,34 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
   const markOwn = (n: string): void => { if (curFn !== undefined) { const set = fnOwn.get(curFn) ?? new Set<string>(); set.add(n); fnOwn.set(curFn, set); } };
   const loopDone = new Set<number>();
   const intVars = parent.ints ?? new Set<string>(); // names declared -i or -n
-  const forget = (n: string): void => { vars.delete(n); unk.add(n); if (curFn !== undefined) { const set = fnVars.get(curFn) ?? new Set<string>(); set.add(n); fnVars.set(curFn, set); } }; // the value is not known from here on
+  const refs = parent.refs ?? new Map<string, Set<string>>(); // declare -n NAME=TARGET: a write to NAME writes TARGET ("*": a target the body cannot name)
+  const addRef = (a: string): void => { // declare -n NAME=TARGET
+    const n = a.split("=")[0]!.replace(/\[.*$/, "");
+    const eq = a.indexOf("=");
+    const t = eq < 0 ? "" : a.slice(eq + 1);
+    const set = refs.get(n) ?? new Set<string>();
+    set.add(/^[A-Za-z_]\w*$/.test(t) ? t : "*");
+    refs.set(n, set);
+  };
+  const forgetOne = (n: string): void => { vars.delete(n); unk.add(n); if (curFn !== undefined) { const set = fnVars.get(curFn) ?? new Set<string>(); set.add(n); fnVars.set(curFn, set); } }; // the value is not known from here on
+  // A write to a nameref writes the name it refers to (declare -n N=M; N=b.js sets M); a target the body cannot name may be any name.
+  const forget = (n: string, seen = new Set<string>()): void => {
+    forgetOne(n);
+    if (seen.has(n)) return;
+    seen.add(n);
+    const r = refs.get(n);
+    if (!r) return;
+    if (r.has("*")) {
+      for (const k of [...vars.keys()]) forgetOne(k);
+      flags.wild = true; // a name never set is not known either: its ${N:-default} is not what it holds
+      if (curFn !== undefined) { const set = fnVars.get(curFn) ?? new Set<string>(); set.add("*"); fnVars.set(curFn, set); } // calling the function does the same
+    }
+    for (const t of r) if (t !== "*") forget(t, seen);
+  };
   // A write to a name the body cannot tell is not one that a package file can be run from when it is outside the package
   // ($TMPDIR, $HOME, /tmp/x, ${LOG:-/dev/null}) or when the command writing it is a program (its own output: node a.js > $OUT).
   const skipUnknown = (target: string, _head?: string, _words?: Word[]): boolean => {
+    if (flags.wild) return false; // a nameref with an unnameable target was written: $HOME, $TMPDIR or a default may name a package file
     // Only a place that is outside the package whatever the variables hold. A variable the body assigned or could not read,
     // a positional parameter and npm's own ($npm_package_* is set by the package) can all name a package file; and no
     // program's own output is trusted (npx, npm exec, npm run, make, node a script ... can print any file).
@@ -775,17 +799,45 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     const v = m[2] || !keep ? undefined : expand(m[3]!); // N+=x is not tracked; neither is an assignment that may not run
     if (v === undefined) forget(m[1]!); else { vars.set(m[1]!, v); markOwn(m[1]!); }
   };
+  // The builtin a stage runs and its arguments: command, builtin and time (and their options) are skipped, and an alias expands to its first word.
+  const builtinOf = (s: Stage): { h: string; args: string[] } => {
+    let at = 0;
+    while (at < s.words.length && ["command", "builtin", "time"].includes(s.words[at]!.text)) { at++; while (at < s.words.length && s.words[at]!.text.startsWith("-")) at++; }
+    let h = s.words[at]?.text ?? "";
+    let args = s.words.slice(at + 1).map((w) => w.text);
+    const al = aliases.get(h);
+    if (al !== undefined) { const t = al.trim().split(/\s+/); h = t[0] ?? h; args = [...t.slice(1), ...args]; }
+    return { h, args };
+  };
+  // The NAME=TARGET words of the nameref links a stage makes: declare/typeset/local -n, a for whose variable is a nameref (it repoints it at each word), and eval of either.
+  const refLinks = (s: Stage, d = depth + 1): string[] => {
+    const { h, args } = builtinOf(s);
+    if ((h === "declare" || h === "typeset" || h === "local") && args.some((a) => /^-[A-Za-z]*n/.test(a))) return args.filter((a) => !a.startsWith("-"));
+    if (h === "for" && args[1] === "in" && args[0] && refs.has(args[0])) return args.slice(2).map((w) => `${args[0]}=${w}`);
+    if (h === "for" && args[0] && args[1] !== "in" && refs.has(args[0])) return [`${args[0]}=*`]; // for N: the positional parameters repoint a nameref anywhere
+    if (h === "eval" && args.length && d < MAX_DEPTH) {
+      try { return parse((args[0] === "--" ? args.slice(1) : args).join(" "), d).flatMap((o) => refLinks(o, d + 1)); } catch (e) { if (!(e instanceof ParseFail)) throw e; }
+    }
+    return [];
+  };
   // The names a stage may set: its assignments, arithmetic, and the builtins that set a name.
-  const namesSet = (s: Stage): string[] => {
+  const namesSet = (s: Stage, d = depth + 1): string[] => {
     const out: string[] = [...s.clobber];
     for (const a of s.assigns) { const m = /^([A-Za-z_]\w*)/.exec(a); if (m) out.push(m[1]!); }
-    const h = s.words[0]?.text ?? "";
-    const args = s.words.slice(1).map((w) => w.text);
+    const { h, args } = builtinOf(s);
     if (DECL.has(h)) for (const a of args) { if (!a.startsWith("-")) out.push(a.split("=")[0]!.replace(/\[.*$/, "")); }
-    else if (h === "read" || h === "mapfile" || h === "readarray" || h === "getopts" || h === "for" || h === "select" || h === "printf") for (const a of args) { if (/^[A-Za-z_]\w*$/.test(a)) out.push(a); const v = /^-v([A-Za-z_]\w*)/.exec(a); if (v) out.push(v[1]!); }
+    else if (h === "read" || h === "mapfile" || h === "readarray" || h === "getopts" || h === "printf") for (const a of args) { if (/^[A-Za-z_]\w*$/.test(a)) out.push(a); const v = /^-v([A-Za-z_]\w*)/.exec(a); if (v) out.push(v[1]!); }
+    else if (h === "for" || h === "select") { if (args[0] && /^[A-Za-z_]\w*$/.test(args[0])) out.push(args[0]); } // for NAME in words: only NAME is set
     else if (h === "let") for (const a of args) { for (const m of a.matchAll(/([A-Za-z_]\w*)\s*(?:\+\+|--|[-+*\/%&|^<>]*=)/g)) out.push(m[1]!); for (const m of a.matchAll(/(?:\+\+|--)\s*([A-Za-z_]\w*)/g)) out.push(m[1]!); }
+    if (h === "eval" && args.length) { // the text eval runs sets names on every pass of a loop
+      if (args[0] === "--") for (const n of args.slice(1).join(" ").match(/[A-Za-z_]\w*/g) ?? []) out.push(n); // dash's eval does not skip --
+      const text = (args[0] === "--" ? args.slice(1) : args).join(" ");
+      try { if (d <= MAX_DEPTH) for (const o of parse(text, d)) out.push(...namesSet(o, d + 1)); } catch (e) { if (!(e instanceof ParseFail)) throw e; for (const n of text.match(/[A-Za-z_]\w*/g) ?? []) out.push(n); } // a shell runs the lines before a syntax error: every name in the text may be set
+    }
     if (h === "getopts") out.push("OPTARG", "OPTIND");
     if (h === "read") out.push("REPLY");
+    const called = fnVars.get(h); // a function called in the body sets the names its body sets, on every pass
+    if (called) for (const n of called) out.push(n);
     return out;
   };
   for (const st of stages) {
@@ -793,6 +845,12 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     for (const id of st.loops) {
       if (loopDone.has(id)) continue;
       loopDone.add(id);
+      // a nameref declared in the body links its name to its target from the second pass on: link them before the names are forgotten
+      // a for over a nameref variable links only once the nameref is declared, wherever in the body that comes: repeat until no link is new
+      for (let round = 0, before = -1; round < 4 && before !== [...refs.values()].reduce((n, v) => n + v.size, refs.size); round++) {
+        before = [...refs.values()].reduce((n, v) => n + v.size, refs.size);
+        for (const o of stages) if (o.loops.includes(id)) for (const l of refLinks(o)) addRef(l);
+      }
       for (const o of stages) if (o.loops.includes(id)) for (const n of namesSet(o)) forget(n);
     }
     stageCwd = false;
@@ -882,15 +940,15 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     // dash (and any POSIX sh) expands an alias defined earlier in the script: its text is read as the command
     if (b === "alias") { for (const a of args) { const m = /^([A-Za-z_][\w.-]*)=([\s\S]*)$/.exec(a.text); if (m) aliases.set(m[1]!, m[2]!); } continue; }
     const called = fnVars.get(b); // calling a function runs its assignments: forget every name its body sets
-    if (called) for (const n of called) forget(n);
+    if (called) for (const n of called) { if (n === "*") { flags.wild = true; for (const k of [...vars.keys()]) forgetOne(k); } else forget(n); }
     const al = aliases.get(b);
     if (al !== undefined && head.plain) { // the alias text is read without this alias (a shell does not expand it again)
       const rest2 = new Map(aliases); rest2.delete(b);
-      walk(al + " " + args.map((a) => a.text).join(" "), depth + 1, hits, { cwd: cwd || stageCwd, written: copyTargets, vars: nestedVars, aliases: rest2, flags, fns: fnVars, fn: curFn, unk: nestedUnk, sub: inSub || st.cond || st.pipeOut || st.piped });
+      walk(al + " " + args.map((a) => a.text).join(" "), depth + 1, hits, { cwd: cwd || stageCwd, written: copyTargets, vars: nestedVars, aliases: rest2, flags, fns: fnVars, fn: curFn, unk: nestedUnk, sub: inSub || st.cond || st.pipeOut || st.piped, ints: intVars, refs });
       continue;
     }
     const stdin = (what: string) => { if (st.reads.length && !st.heredoc && st.reads.every((r) => r === "/dev/null")) return; if (!st.piped || st.heredoc || st.reads.length) hit(st.heredoc ? "heredoc" : "interp-stdin", `${what} reads its program from stdin`); };
-    const ranWritten = (f: string) => { if (written(f) || (flags.unknownWrite && !f.startsWith("/"))) hit("writer-exec", `runs ${f}, written or copied by this body (or by a write to a name it cannot tell)`); };
+    const ranWritten = (f: string) => { if (written(f) || (flags.unknownWrite && !f.startsWith("/")) || (flags.wild && /[$`\u0001]/.test(f) && copyTargets.size > 0)) hit("writer-exec", `runs ${f}, written or copied by this body (or by a write to a name it cannot tell)`); };
     // A script path held in a variable: known when the body assigned it
     const scriptWord = (w: Word): Word | undefined => {
       if (w.plain) { if (braceTest(BRACE_ANY, w.text)) hit("computed-command", "a script path with a brace expansion: the file is not the one named"); return w; }
@@ -909,15 +967,16 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (b === "let") { for (const a of args) { for (const m of a.text.matchAll(/(?<![\w$])([A-Za-z_]\w*)\s*(?:\+\+|--|(?:<<|>>|[-+*\/%&|^])?=(?!=))/g)) forget(m[1]!); for (const m of a.text.matchAll(/(?:\+\+|--)\s*(?<![\w$])([A-Za-z_]\w*)/g)) forget(m[1]!); } continue; }
     if (b === "unset") { for (const a of args) if (!a.text.startsWith("-")) forget(a.text.replace(/\[.*$/, "")); continue; }
     if (b === "read") { forget("REPLY"); for (const a of args) if (!a.text.startsWith("-")) { const n = a.text.replace(/\[.*$/, ""); forget(n); if (badEnv(n + "=./x")) envHit(); } continue; } // read PATH: the value is not known, and may be a loader variable // read N: the value is not known
-    if (b === "for" && args.length >= 1 && args[1]?.text !== "in") { forget(args[0]!.text); if (badEnv(args[0]!.text + "=./x")) envHit(); continue; } // for N; do: the positional parameters
+    if (b === "for" && args.length >= 1 && args[1]?.text !== "in") { if (refs.has(args[0]!.text)) addRef(`${args[0]!.text}=*`); forget(args[0]!.text); if (badEnv(args[0]!.text + "=./x")) envHit(); continue; } // for N; do: the positional parameters
     if (b === "for" && args.length >= 2 && args[1]!.text === "in") { // for N in LIST: one literal is known
       const lst = args.slice(2);
       const lit = lst.length === 1 ? expand(lst[0]!.text) : undefined;
-      if (lit === undefined || st.cond || inSub || st.piped || st.pipeOut) forget(args[0]!.text); else { vars.set(args[0]!.text, lit); markOwn(args[0]!.text); }
+      if (refs.has(args[0]!.text)) for (const x of lst) addRef(`${args[0]!.text}=${x.text}`); // a nameref loop variable is repointed at each word
+      if (lit === undefined || st.cond || inSub || st.piped || st.pipeOut || refs.has(args[0]!.text)) forget(args[0]!.text); else { vars.set(args[0]!.text, lit); markOwn(args[0]!.text); }
       if ((lst.length ? lst : [{ text: "./x" }]).some((x) => badEnv(args[0]!.text + "=" + (expand(x.text) ?? x.text)))) envHit(); // for PATH in /usr/bin ./bin
       continue;
     }
-    if (DECL.has(b)) { for (const a of args) assign(a.text, !(st.cond || st.pipeOut || st.piped || inSub)); if (args.some((a) => /^-[A-Za-z]*[in]/.test(a.text))) for (const a of args) if (!a.text.startsWith("-")) { const n = a.text.split("=")[0]!.replace(/\[.*$/, ""); forget(n); intVars.add(n); } if (args.some((a) => !a.plain && /[\u0001$]/.test(a.text.split("=")[0]!) && !/^\$\{?npm_(?!package_)\w+\}?$/.test(a.text.split("=")[0]!))) hit("env-assign", `${b} of names or values built by an expansion (they can be NODE_OPTIONS, LD_PRELOAD ...)`); if (args.some((a) => badEnv(a.text) || BAD_NAME.test(a.text) || BAD_NAME2.test(a.text))) envHit(); continue; }
+    if (DECL.has(b)) { for (const a of args) assign(a.text, !(st.cond || st.pipeOut || st.piped || inSub)); if (b !== "export" && b !== "readonly" && args.some((a) => /^-[A-Za-z]*[in]/.test(a.text))) for (const a of args) if (!a.text.startsWith("-")) { const n = a.text.split("=")[0]!.replace(/\[.*$/, ""); forget(n); intVars.add(n); if (args.some((x) => /^-[A-Za-z]*n/.test(x.text))) addRef(a.text); } if (args.some((a) => !a.plain && /[\u0001$]/.test(a.text.split("=")[0]!) && !/^\$\{?npm_(?!package_)\w+\}?$/.test(a.text.split("=")[0]!))) hit("env-assign", `${b} of names or values built by an expansion (they can be NODE_OPTIONS, LD_PRELOAD ...)`); if (args.some((a) => badEnv(a.text) || BAD_NAME.test(a.text) || BAD_NAME2.test(a.text))) envHit(); continue; }
     if (b === "dd") { // dd of=FILE writes FILE
       for (const a of args) { const m = /^of=([\s\S]*)$/.exec(a.text); if (!m) continue; const e = a.plain ? m[1]! : expand(m[1]!); if (e === undefined) { if (!skipUnknown(m[1]!, b)) flags.unknownWrite = true; } else copyTargets.add(norm(e)); }
       continue;
@@ -962,11 +1021,14 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     }
     if (b === "eval") {
       if (args.some((a) => !a.plain)) hit("computed-command", "eval runs text built by an expansion");
-      const t = args.map((a) => a.text).join(" "); if (t) {
+      const dd = args[0]?.text === "--"; // bash's eval skips --; dash's runs a command named -- and sets nothing: either may be the shell, so the names the text names are no longer known
+      const t = (dd ? args.slice(1) : args).map((a) => a.text).join(" ");
+      if (t) {
         nested(t, inSub || st.cond || st.pipeOut || st.piped);
         // X=1 eval 'N=b.js': the nested walk saw copies of the maps; what it changed counts here too
         if (nestedVars !== vars) { for (const [k, v] of nestedVars) if (vars.get(k) !== v) forget(k); for (const k of [...vars.keys()]) if (!nestedVars.has(k)) forget(k); }
         if (nestedUnk !== unk) for (const k of nestedUnk) if (!unk.has(k)) forget(k);
+        if (dd) for (const n of t.match(/[A-Za-z_]\w*/g) ?? []) forget(n); // after the walk, which would set them again
       }
       continue; // eval runs in this shell: its assignments count
     }
@@ -1066,7 +1128,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       const f = rest[0]!;
       if (viaXargs && f.text.includes(xargsRepl)) { hit("interp-stdin", `xargs ${b} ${xargsRepl}: the script comes from stdin`); continue; }
       const f2 = scriptWord(f);
-      if (!f2) continue;
+      if (!f2) { if (flags.wild && copyTargets.size > 0) hit("writer-exec", `runs a file named by an expansion after a nameref write the body cannot name`); continue; }
       if (STDIN_PATH.test(f2.text)) { stdin(b); continue; }
       if (FD_PATH.test(f2.text)) { hit("interp-stdin", `${b} reads its program from a file descriptor`); continue; }
       if (f2.text.startsWith("/")) { ranWritten(f2.text); continue; }
@@ -1159,7 +1221,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       if (!file) { if (viaXargs && !noProgram) hit("interp-stdin", `xargs ${b}: the script comes from stdin`); else if (!noProgram) stdin(b); continue; }
       if (viaXargs && file.text.includes(xargsRepl)) { hit("interp-stdin", `xargs ${b} ${xargsRepl}: the script comes from stdin`); continue; }
       const file2 = scriptWord(file);
-      if (!file2) continue;
+      if (!file2) { if (flags.wild && copyTargets.size > 0) hit("writer-exec", `runs a file named by an expansion after a nameref write the body cannot name`); continue; }
       if (STDIN_PATH.test(file2.text)) { stdin(b); continue; } // node /dev/stdin reads the program from stdin
       if (FD_PATH.test(file2.text)) { hit("interp-stdin", `${b} reads its program from a file descriptor`); continue; }
       if (file2.text.startsWith("/")) { ranWritten(file2.text); continue; }
