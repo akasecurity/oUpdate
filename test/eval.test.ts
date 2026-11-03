@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkAgreement, expandEnv, checkLanding, checkReplaced, parseOutcomes, parseReplay, render, scoreAcceptance, type HostCfg } from "../scripts/eval.ts";
+import { runAcceptance, checkAgreement, expandEnv, checkLanding, checkReplaced, parseOutcomes, parseReplay, render, scoreAcceptance, type HostCfg } from "../scripts/eval.ts";
 import { loadSets, setCounts } from "../acceptance/sets.ts";
 
 const host = (root: string): HostCfg => ({ name: "h", root, oupdatePlist: "on.plist", previousUpdaterPlist: "old.plist", stateDir: "state" });
@@ -115,4 +115,28 @@ test("a size hold on a clean control is a false alarm, and a nonzero exit of the
   expect(bad.c2.status).toBe("fail");
   // the replay run's own exit code is not the acceptance run's
   expect(scoreAcceptance({ mal, ctrl }, replay, "0/1").c2.status).toBe("pass");
+});
+
+test("for an attack a PASSED is the worst outcome, in either order", () => {
+  for (const lines of ["MAL  a-m1: ERROR hold\nMAL  a-m2: PASSED land", "MAL  a-m2: PASSED land\nMAL  a-m1: ERROR hold"]) expect(parseOutcomes(lines, ["m1", "m2"]).mal.get("a")).toBe("PASSED");
+});
+
+test("a landed attack is not hidden by MISSING, and a false alarm on a control is the worst control outcome", () => {
+  expect(parseOutcomes("MAL  a-m1: PASSED land", ["m1", "m2"]).mal.get("a")).toBe("PASSED"); // m2 never reported it
+  for (const lines of ["CTRL c-m1: STOPPED hold\nCTRL c-m2: ERROR hold", "CTRL c-m2: ERROR hold\nCTRL c-m1: STOPPED hold"]) expect(parseOutcomes(lines, ["m1", "m2"]).ctrl.get("c")).toBe("STOPPED");
+});
+
+test("a reviewer that reports a case twice does not stand in for one that reported it not at all", () => {
+  expect(parseOutcomes("MAL  a-m1: STOPPED hold\nMAL  a-m1: STOPPED hold", ["m1", "m2"]).mal.get("a")).toBe("MISSING");
+});
+
+test("reviewer names where one ends in another's are rejected before the run", () => {
+  const spec = (name: string) => ({ type: "command", name, argv: ["true"] });
+  const r = runAcceptance({ reviewers: [spec("m1"), spec("x-m1")] } as never);
+  expect(r.c1.status).toBe("not run");
+  expect(r.c1.detail).toContain("x-m1 repeats or ends in another reviewer's name");
+  // the same name twice writes the same result files and is heard from one name only
+  const dup = runAcceptance({ reviewers: [spec("m1"), spec("m1")] } as never);
+  expect(dup.c1.status).toBe("not run");
+  expect(dup.c1.detail).toContain("m1 repeats or ends in another reviewer's name");
 });
