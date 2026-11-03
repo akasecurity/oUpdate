@@ -304,6 +304,28 @@ describe("a padded strict map: its own strings are checked before the size signa
     test(`a bare .map from ${name} still names every map: the padded map is not hashed`, async () => {
       expect(await seen(mapWith({ names: ["alpha"] }), code)).not.toContain(HASH);
     });
+  // A file that quotes the stem of the map's script ("./index.js") may load the map beside it. Every form of that string in a code file counts, as when the raw text was scanned.
+  const stemForms: [string, string, string][] = [
+    ["a JSX attribute", "lib/x.jsx", "export const A = () => <img src=\"./index.js\" />;\n"],
+    ["a TSX attribute", "lib/x.tsx", "export const A = () => <img src='./index.js' />;\n"],
+    ["a TS enum member", "lib/x.ts", "export enum E { A = './index.js' }\n"],
+    ["a template with a substitution", "lib/x.js", "module.exports = `${__dirname}/index.js`;\n"],
+    ["a template without one", "lib/x.js", "module.exports = `./index.js`;\n"],
+    ["a concatenation", "lib/x.js", "module.exports = './ind' + 'ex.js';\n"],
+    ["an escape", "lib/x.js", "module.exports = '\\x2e/index.js';\n"],
+    ["an object key", "lib/x.js", "module.exports = { './index.js': 1 };\n"],
+  ];
+  for (const [name, path, code] of stemForms)
+    test(`a padded map is not a hash line when ${name} quotes its script`, async () => {
+      expect(await seen(mapWith({ names: ["alpha"] }), "exports.v = 2;\n", { [path]: code })).not.toContain(HASH);
+    });
+  test("a code file the parser gives no transformed code for (a declaration file) is scanned raw: its quoted .map still names every map", async () => {
+    expect(await seen(mapWith({ names: ["alpha"] }), "exports.v = 2;\n", { "lib/x.d.ts": "export declare const s: '.map';\n" })).not.toContain(HASH);
+  });
+  test("a .js file of only a comment transforms to nothing and adds no names: the padded map stays a hash line", async () => {
+    const out = await seen(mapWith({ names: ["alpha"] }), "exports.v = 2;\n", { "lib/util.js": "// reads index.js + '.map'\n" });
+    expect(out).toContain(HASH);
+  });
   test("a quoted .map inside a JS comment is not a loader: the padded map stays a hash line", async () => {
     const out = await seen(mapWith({ names: ["alpha"] }), "// reads index.js + \".map\" and '.map'\nexports.v = 2;\n");
     expect(out).toContain(HASH);

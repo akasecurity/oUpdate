@@ -561,10 +561,12 @@ interface ParsedCode {
   strings: string[];
   /** The transformed source: comments removed, literal concatenations joined, template and regex text kept. */
   code: string;
+  /** The transform ran (its output may be empty, as for a file of comments); false when it threw or the file was not parsed (a declaration file, a link). */
+  folded: boolean;
   rejected: boolean;
 }
 const parsedCache = new WeakMap<Uint8Array, ParsedCode>();
-const EMPTY_PARSED: ParsedCode = { specs: [], requireSpecs: [], importSpecs: [], fallback: [], urls: [], strings: [], code: "", rejected: false };
+const EMPTY_PARSED: ParsedCode = { specs: [], requireSpecs: [], importSpecs: [], fallback: [], urls: [], strings: [], code: "", folded: false, rejected: false };
 
 function parseCode(path: string, bytes: Uint8Array, forceJs = false): ParsedCode {
   // The skip is not cached: the same bytes can be a real script, or a declaration a load names.
@@ -630,6 +632,7 @@ function parseCode(path: string, bytes: Uint8Array, forceJs = false): ParsedCode
     urls: [...new Set(scanned.urls)],
     strings: scanned.strings,
     code: folded,
+    folded: foldOk,
     rejected,
   };
   parsedCache.set(bytes, parsed);
@@ -1901,8 +1904,8 @@ function parseStrictMap(bytes: Uint8Array): { summary: string; map: Record<strin
 const MAX_MAP_SEGMENT = 64;
 
 /**
- * How a padded strict map reads against what a small map of the same strings would raise. The pre-pass skips a big file, so the same check is made here.
- * "mappings": a segment of the mappings (between , and ;) is longer than MAX_MAP_SEGMENT: the map is shown as a small map is, in full.
+ * How a padded strict map reads against the soft patterns a small map of the same strings would raise (changed entries only are listed). The pre-pass skips a big file, so the same check is made here.
+ * "mappings": a segment of the mappings (between , and ;) is longer than MAX_MAP_SEGMENT: the map is shown in full, as a small map is.
  * "strings": a pre-pass soft pattern (every one, process-spawn included) matches the names (also joined as a loader joins them), the file, the sourceRoot,
  * the sources or the sourcesContent: the mappings stay a hash line and those strings are shown. Otherwise "clean".
  */
@@ -1992,7 +1995,7 @@ function scanQuoted(text: string): string[] {
 
 
 /** Quoted strings from every new file that is not a lower-case .map. Stems come from files other than package.json and declarations. */
-function quotedNames(newFiles: FileMap): { names: Set<string>; stems: Set<string> } {
+function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: Set<string>; stems: Set<string> } {
   const names = new Set<string>();
   const stems = new Set<string>();
   for (const [q, b] of newFiles) {
@@ -2013,17 +2016,20 @@ function quotedNames(newFiles: FileMap): { names: Set<string>; stems: Set<string
       names.add(low.slice(low.lastIndexOf("/") + 1));
     }
     // Folded strings come from the parser (comments stripped, escapes cooked, literal concatenations joined).
-    const parsed = loaderFor(q) && !isLink(b) ? parseCode(q, b) : undefined;
+    // The code test is the parser's own: a known extension, an extensionless entry of package.json, or an extensionless file with a node shebang (a bin).
+    const force = extensionlessEntry(q, q, entries);
+    const isCode = (loaderFor(q) || force || nodeShebang(b)) && !isLink(b);
+    const parsed = isCode ? parseCode(q, b, force) : undefined;
     const folded = parsed?.strings ?? [];
     // A bare ".map" is the tail of a name built at run time (a string, template text, a regex source). It counts in the code of a code file, where comments are already removed.
-    // A file the parser rejects has no transformed source: its raw text is scanned.
-    const codeText = parsed ? (parsed.rejected ? text : parsed.code) : "";
+    // A file the parser rejects, whose transform throws, or that is not parsed (a declaration file) is scanned raw; one that transforms to empty output (only comments) adds no names.
+    const codeText = parsed ? (parsed.rejected || !parsed.folded ? text : parsed.code) : "";
     if (parsed) for (const m of codeText.matchAll(/[A-Za-z0-9_.\/@-]+/g)) if (m[0].toLowerCase() === ".map" && codeText[m.index! + 4] !== "(") names.add(".map");
-    // In a code file the parser's strings are the strings of the code (a quote inside a comment is not one); a file the parser rejects, and any other file, is scanned raw.
-    for (const str of [...(parsed && !parsed.rejected ? [] : scanQuoted(text)), ...folded]) {
+    // In a code file the quotes are read from the transformed code, where comments are gone (a quote inside a comment is not a string) and a template keeps the text after its last ${}; a file the parser rejects, and any other file, is scanned raw.
+    for (const str of [...scanQuoted(parsed && !parsed.rejected && parsed.folded ? parsed.code : text), ...folded]) {
       if (!str) continue;
       const low = str.toLowerCase();
-      if (low === ".map" && !loaderFor(q)) continue; // a ".map" in a README or other text file is not a loader
+      if (low === ".map" && !isCode) continue; // a ".map" in a README or other text file is not a loader
       names.add(low);
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
       if (seg.endsWith(".map")) names.add(seg);
@@ -2046,7 +2052,7 @@ function hashedMaps(oldFiles: FileMap, newFiles: FileMap, paths: string[], entri
   const cands = paths.filter((p) => p.endsWith(".map") && !entries.has(p) && !signals.has(p));
   if (!cands.length) return out;
   if (mapsUnhashed(newFiles)) return out;
-  const named = quotedNames(newFiles);
+  const named = quotedNames(newFiles, entries);
   for (const p of cands) {
     const b = newFiles.get(p) ?? oldFiles.get(p)!;
     if (isLink(b)) continue;
@@ -2159,7 +2165,7 @@ export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, onl
     if (generated.has(p)) {
       const h = b ? new Bun.CryptoHasher("sha256").update(b).digest("hex") : "-";
       push(`=== ${p} (${!a ? "added" : !b ? "removed" : "changed"}) ===\n[source map, strict v3 data, ${b?.length ?? 0} bytes, sha256 ${h}, ${generated.get(p)}]\n`);
-      // A padded map (the pre-pass did not scan it) whose strings raise a soft pattern: the strings are shown, as a small map's would be, the mappings stay a hash.
+      // A padded map (the pre-pass did not scan it) whose strings raise a soft pattern: the changed strings are shown (an entry that matches a pattern in full, any other as one hash line) and the mappings stay a hash.
       if (b && b.length > LARGE_FILE_BYTES && mapStringsClass(b) === "strings") for (const piece of mapStringPieces(p, a, b)) push(piece);
       continue;
     }
