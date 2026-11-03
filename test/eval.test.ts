@@ -74,3 +74,45 @@ test("extended line counts missing results; render prints info lines without sco
   expect(out.text).toBe("PASS 1 a: \ninfo line\nscore: 1/6");
   expect(out.score).toBe(1);
 });
+
+test("scores by case id when run.ts suffixes the reviewer name, and keeps the worst outcome", () => {
+  const out = "MAL  a-1-m1: STOPPED hold\nMAL  a-1-m2: MISSED land\nCTRL c-1-m1: PASSED land\nCTRL c-1-m2: PASSED land";
+  const o = parseOutcomes(out, ["m1", "m2"]);
+  expect(o.mal.get("a-1")).toBe("MISSED");
+  expect(o.ctrl.get("c-1")).toBe("PASSED");
+  // the order of the lines does not matter, and a hold for a human is not hidden by a pass
+  for (const lines of ["CTRL c-m1: PASSED land\nCTRL c-m2: HELD-HUMAN hold", "CTRL c-m2: HELD-HUMAN hold\nCTRL c-m1: PASSED land"]) expect(parseOutcomes(lines, ["m1", "m2"]).ctrl.get("c")).toBe("HELD-HUMAN");
+  for (const lines of ["CTRL c-m1: HELD-HUMAN hold\nCTRL c-m2: ERROR hold", "CTRL c-m2: ERROR hold\nCTRL c-m1: HELD-HUMAN hold"]) expect(parseOutcomes(lines, ["m1", "m2"]).ctrl.get("c")).toBe("ERROR");
+});
+
+test("the longest reviewer name is stripped from the case id; a name with a space works", () => {
+  expect(parseOutcomes("CTRL x-big-m1: PASSED land\nCTRL x-m1: PASSED land", ["m1", "big-m1"]).ctrl.get("x")).toBe("PASSED");
+  expect(parseOutcomes("CTRL c-gpt 5: PASSED land\nCTRL c-m1: PASSED land", ["m1", "gpt 5"]).ctrl.get("c")).toBe("PASSED");
+});
+
+test("a case one reviewer did not report is MISSING, whatever the other said", () => {
+  const o = parseOutcomes("MAL  a-m1: STOPPED hold\nMAL  a-gpt 5: STOPPED hold\nMAL  b-m1: STOPPED hold\nCTRL c-m1: PASSED land", ["m1", "gpt 5"]);
+  expect(o.mal.get("a")).toBe("STOPPED");
+  expect(o.mal.get("b")).toBe("MISSING");
+  expect(o.ctrl.get("c")).toBe("MISSING");
+  // one reviewer: nothing to compare, a line is a result
+  expect(parseOutcomes("CTRL c-m1: PASSED land", ["m1"]).ctrl.get("c")).toBe("PASSED");
+});
+
+test("a size hold on a clean control is a false alarm, and a nonzero exit of the acceptance run fails both checks", () => {
+  const sets = setCounts(loadSets(), "core");
+  const core = [...sets.controlIds];
+  const attacks = [...sets.attackIds];
+  const ctrl = new Map(core.map((id) => [id, "PASSED"]));
+  const mal = new Map(attacks.map((id) => [id, "STOPPED"]));
+  const replay = new Map([["wheel-local", "STOPPED"]]);
+  expect(scoreAcceptance({ mal, ctrl }, replay, "0/0").c2.status).toBe("pass");
+  const held = scoreAcceptance({ mal, ctrl: new Map(ctrl).set(core[0]!, "HELD-HUMAN") }, replay, "0/0").c2;
+  expect(held.status).toBe("fail");
+  expect(held.detail).toContain(`${core[0]}=HELD-HUMAN`);
+  const bad = scoreAcceptance({ mal, ctrl }, replay, "1/0");
+  expect(bad.c1.status).toBe("fail");
+  expect(bad.c2.status).toBe("fail");
+  // the replay run's own exit code is not the acceptance run's
+  expect(scoreAcceptance({ mal, ctrl }, replay, "0/1").c2.status).toBe("pass");
+});
