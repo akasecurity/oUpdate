@@ -615,6 +615,13 @@ describe("shell classes: review of 04ced3f", () => {
   });
 });
 
+describe("shell classes: O14", () => {
+  test("ruby -E, -C, -K, -T, -x, -W, -F and -0 values are not flags", () => {
+    for (const c of ["ruby -Ebinary a.rb", "ruby -Csrc a.rb", "ruby -Kutf8 a.rb", "ruby -Tn a.rb", "ruby -Wrr a.rb", "ruby -Fr a.rb"]) expect(classes(c), c).not.toContain("interp-flag");
+    for (const c of ["ruby -rfoo a.rb", "ruby -r./e a.rb", "ruby -wrfoo a.rb", "ruby -Ilib a.rb", "ruby -wI lib a.rb", "ruby -Ebinary -r ./e a.rb"]) expect(classes(c), c).toContain("interp-flag");
+  });
+});
+
 describe("shell classes: O5, O10, O12", () => {
   const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
   test("O5: a redirect target held in a variable the body assigned a literal", () => {

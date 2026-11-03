@@ -435,6 +435,13 @@ const LOADS: Record<string, RegExp> = {
   lua: /^-l/,
   deno: /^--(?:import-map|config|preload|import|cert|lock)(?:=|$)|^-c$/,
 };
+// ruby -r LIB / -I DIR load or add a path, as letters of a cluster before a flag that takes its value attached
+// (-Ebinary, -Csrc, -Kutf8, -Tn, -xdir, -W2, -Fsep, -0777, -e CODE): the letters inside that value are not flags.
+function rubyLoads(a: string): boolean {
+  if (!a.startsWith("-") || a.startsWith("--")) return false;
+  for (const c of a.slice(1)) { if (c === "r" || c === "I") return true; if ("ECKTxWF0e".includes(c)) return false; }
+  return false;
+}
 const INLINE = /^(?:-p|-pe|-c|-r|-pi|--eval|--print)$|^-[A-Za-z]*[ec]$/; // -e, -le, -we, -Bc ...
 // Flags whose value is the next word, per interpreter (so the value is not taken for the script).
 const VALUED: Record<string, string[]> = {
@@ -785,7 +792,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
           if (!a.plain) { hit("interp-flag", `${b} flag is escaped or expanded`); continue; }
           if (kind === "php" && a.text === "-f" && rest[k + 1]) { file = rest[k + 1]; break; } // php -f file: the script
           if (kind === "php" && a.text === "-d" && rest[k + 1] && PHP_INI.test(rest[k + 1]!.text)) { hit("interp-flag", "php -d " + rest[k + 1]!.text.split("=")[0]); k++; continue; }
-          if (loads?.test(a.text)) {
+          if (kind === "ruby" ? rubyLoads(a.text) : loads?.test(a.text)) {
             hit("interp-flag", `${b} ${a.text}`);
             if (kind === "python" || a.text === "--run" || a.text === "--test") { noProgram = true; break; } // -m MODULE: what follows is the module's
             if (VALUE_AFTER.has(a.text)) k++;
