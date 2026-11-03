@@ -873,7 +873,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
         if (d <= MAX_DEPTH) {
           const os = parse(text, d), defd = new Set<string>();
           for (const o of os) out.push(...namesSet(o, d + 1, used, true));
-          // a use of an alias the text defines: its text may end in ; or && so that an NAME=value argument is an assignment
+          // a use of an alias the text defines: its text may end in ; or && so that a NAME=value argument is an assignment
           for (const o of os) { const b = builtinOf(o); if (b.h === "alias") for (const a of b.args) { const m = ALIAS_DEF.exec(a); if (m) defd.add(m[1]!); } }
           if (defd.size) for (const o of os) { const b = builtinOf(o); if (defd.has(b.h)) for (const a of b.args) { const m = /^([A-Za-z_]\w*)\+?=/.exec(a); if (m) out.push(m[1]!); } }
         }
@@ -987,7 +987,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (b === "alias") { for (const a of args) { const m = ALIAS_DEF.exec(a.text); if (m) { aliases.set(m[1]!, m[2]!); aliasAt.set(m[1]!, st.unit); } } continue; }
     const called = fnVars.get(b); // calling a function runs its assignments: forget every name its body sets
     if (called) for (const n of called) { if (n === "*") { flags.wild = true; for (const k of [...vars.keys()]) forgetOne(k); } else forget(n); }
-    const ab = aliases.has(head.text) ? head.text : b; // the alias is named by the whole word (dash accepts a/b); an alias named like the base of a path over-holds
+    const ab = aliases.has(head.text) ? head.text : b; // the alias is named by the whole word (dash accepts a/b); an alias named b still matches sub/b when no alias named sub/b exists (it over-holds)
     const al = activeAlias(ab, st.unit) ? aliases.get(ab) : undefined;
     const declMaybe = (b === "local" && curFn === undefined) || b === "declare" || b === "typeset"; // local outside a function fails in sh and bash, declare and typeset fail in dash: the name keeps its old value
     const aliased = al !== undefined && head.plain && !head.q; // the alias may not expand (bash without expand_aliases): what the stage as written sets is then only maybe set
