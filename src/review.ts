@@ -2298,6 +2298,8 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         return t === undefined || hashedBinary(t, undefined, artifacts!.new.get(t));
       });
       const leftOut = (keep: Set<string>) => reviewable.filter((p) => !keep.has(p)).length;
+      // A signal can name a path that is no file of the release (a skipped tar entry, "archive"): it would cost a part and print an empty header.
+      const realPaths = (ps: string[]) => ps.filter((q) => artifacts!.old.has(q) || artifacts!.new.has(q));
       let scope: Scope = "all";
       // A path with any pre-pass or scanner signal is shown in full, never as a hash line.
       const signalled = new Set([...pre.hard, ...pre.soft].map((x) => x.path));
@@ -2305,10 +2307,10 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       // More than one stage of parts: read the ranked files first (the first FLAG ends the review), then the rest, every part.
       // (Over the limit the narrowing below ranks the files itself, so the diff is not cut twice.)
       if (chunks.length > stagePartCount(input.maxParts) && chunks.length <= limit) {
-        const ranked = rankPriorityPaths(pre, scanHits), seen = new Set(ranked);
+        const ranked = realPaths(rankPriorityPaths(pre, scanHits)), seen = new Set(ranked);
         const rest = [...new Set([...artifacts.old.keys(), ...artifacts.new.keys()])].filter((q) => !seen.has(q)).sort();
         const reordered = chunkDiff(artifacts.old, artifacts.new, cap, [...ranked, ...rest], false, signalled);
-        if (reordered.length <= limit) chunks = reordered; // cutting in another order can pack to one part more: at the boundary keep the cut that fits
+        if (reordered.length <= limit) chunks = reordered; // at the exact boundary the sorted order is kept on purpose (another cut can pack to one part more); every part is still read
       }
       let note = "";
       let overPriority = "";
@@ -2328,7 +2330,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           note = `${leftOut(sig)} file(s) not reviewed`;
           if (chunks.length > limit) {
             // Still over: review the top-ranked parts. The rest is never read, so this tier can stop, never land.
-            const ranked = chunkDiff(artifacts.old, artifacts.new, cap, rankPriorityPaths(pre, scanHits), true, signalled);
+            const ranked = chunkDiff(artifacts.old, artifacts.new, cap, realPaths(rankPriorityPaths(pre, scanHits)), true, signalled);
             rankedTotal = ranked.length;
             chunks = ranked.slice(0, limit);
             const read = filesRead(ranked, limit);
