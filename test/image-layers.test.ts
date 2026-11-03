@@ -696,6 +696,7 @@ describe("reviewLayers staging", () => {
   test("budget edge: exactly maxParts * maxStages parts is read in full, one fewer stage narrows", async () => {
     const { r } = await review(OLD, grown(...three), { chunkChars: 40, maxParts: 1, maxStages: 20 });
     const n = r.parts.length;
+    expect(n).toBeGreaterThan(1); // maxStages n - 1 must stay a real limit
     expect((await review(OLD, grown(...three), { chunkChars: 40, maxParts: 1, maxStages: n })).r.narrowed).toBeUndefined();
     expect((await review(OLD, grown(...three), { chunkChars: 40, maxParts: 1, maxStages: n - 1 })).r.narrowed).toMatch(/^too large for model review: /);
   });

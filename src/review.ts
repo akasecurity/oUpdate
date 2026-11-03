@@ -50,6 +50,19 @@ export function partLimit(maxParts?: number, maxStages?: number): number {
   return ok(maxParts, DEFAULT_MAX_PARTS) * ok(maxStages, MAX_STAGES);
 }
 
+const FILE_HEADER = String.raw`=== (.+) \((?:added|removed|changed|loaded by code|now loaded by package.json, unchanged|now loaded by changed code, unchanged|target of link .+)\) ===`;
+
+/**
+ * The files the first n parts read in full. A part ends wherever the cap falls, so the last file whose header is in the
+ * read parts goes on into the next part unless that part opens with a header of its own; that file was not fully read.
+ */
+export function filesRead(chunks: string[], n: number): Set<string> {
+  const heads = [...chunks.slice(0, n).join("").matchAll(new RegExp(`^${FILE_HEADER}$`, "gm"))].map((m) => m[1]!); // the files whose headers are in the read parts
+  const set = new Set(heads);
+  if (n < chunks.length && heads.length && !new RegExp(`^${FILE_HEADER}\n`).test(chunks[n]!)) set.delete(heads[heads.length - 1]!);
+  return set;
+}
+
 export interface ReviewInput {
   eco: Ecosystem;
   name: string;
@@ -2300,7 +2313,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
             const ranked = chunkDiff(artifacts.old, artifacts.new, cap, rankPriorityPaths(pre, scanHits), true, signalled);
             rankedTotal = ranked.length;
             chunks = ranked.slice(0, limit);
-            const read = new Set([...chunks.join("").matchAll(/^=== (.+) \((?:added|removed|changed|loaded by code|now loaded by package.json, unchanged|now loaded by changed code, unchanged|target of link .+)\) ===$/gm)].map((m) => m[1]!));
+            const read = filesRead(ranked, limit);
             scope = "ranked";
             overPriority = `too large for model review: ${ranked.length} parts > ${limit} (signal files alone)`;
             note = `${ranked.length - limit} parts not reviewed, ${leftOut(read)} file(s) not reviewed`;
@@ -2321,13 +2334,19 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         }
         result.reviewerText = texts;
         const unread = chunks.length - texts.length;
-        if (scope === "ranked" && unread) {
-          const seen = new Set([...texts.length ? chunks.slice(0, texts.length).join("").matchAll(/^=== (.+) \((?:added|removed|changed|loaded by code|now loaded by package.json, unchanged|now loaded by changed code, unchanged|target of link .+)\) ===$/gm) : []].map((m) => m[1]!));
-          note = `${rankedTotal - texts.length} parts not reviewed, ${leftOut(seen)} file(s) not reviewed`;
+        // The loop stops at the first FLAG, so a FLAG is the last text; finding it by its verdict keeps that true to the texts.
+        const flagAt = texts.findIndex((t) => parseVerdict(t) === "FLAG");
+        const flagged = flagAt >= 0 ? [flagAt] : [];
+        const parts = flagged.length ? String(flagAt + 1) : "";
+        let readNote = "";
+        if (unread) { // what the early stop left unread counts as not reviewed in every tier
+          const seen = filesRead(chunks, texts.length);
+          readNote = `; ${texts.length} of ${chunks.length} part(s) read, the first FLAG ended the review`;
+          if (scope === "ranked") note = `${rankedTotal - texts.length} parts not reviewed, ${leftOut(seen)} file(s) not reviewed`;
+          else if (scope === "signal") note = `${leftOut(seen)} file(s) not reviewed`;
+          else if (scope === "priority") note = `; priority files only, ${leftOut(seen)} file(s) not reviewed`;
+          else note = `; ${leftOut(seen)} file(s) not reviewed`;
         }
-        const readNote = unread ? `; ${texts.length} of ${chunks.length} part(s) read, the first FLAG ended the review` : "";
-        const flagged = texts.map((t, i) => [parseVerdict(t), i] as const).filter(([v]) => v === "FLAG");
-        const parts = flagged.map(([, i]) => i + 1).join(",");
         if (scope === "ranked")
           layers.push(
             flagged.length
@@ -2354,7 +2373,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         else
           layers.push(
             flagged.length
-              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on part(s) ${parts} of ${chunks.length}${readNote}${note}${flagReason(texts[flagged[0]![1]]!)}` }
+              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on part(s) ${parts} of ${chunks.length}${readNote}${note}${flagReason(texts[flagAt]!)}` }
               : { layer: "reviewer", verdict: "pass", detail: `${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}` },
           );
       } catch (e) {

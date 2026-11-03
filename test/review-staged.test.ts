@@ -13,18 +13,18 @@ const release = (n: number, extra: Record<string, string> = {}) => ({
   new: files({ ...plain(n, "2"), "setup.py": "v = 2\n", ...extra }),
 });
 
-function run(art: { old: FileMap; new: FileMap }, over: { maxParts?: number; maxStages?: number } = {}) {
+function run(art: { old: FileMap; new: FileMap }, over: { maxParts?: number; maxStages?: number; flagCall?: number } = {}) {
   const prompts: string[] = [];
   const p = reviewUpdate({
     eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
     registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
     advisories: { query: async () => [] },
-    reviewer: { name: "fake", review: async (t) => (prompts.push(t), t.includes("EVIL") ? "FLAG\nexfil" : "APPROVE\nno attack indicators found") },
+    reviewer: { name: "fake", review: async (t) => (prompts.push(t), t.includes("EVIL") || prompts.length === over.flagCall ? "FLAG\nexfil" : "APPROVE\nno attack indicators found") },
     cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"),
     loadArtifacts: async () => art,
     chunkChars: 200,
-    maxParts: 3,
-    ...over,
+    maxParts: over.maxParts ?? 3,
+    maxStages: over.maxStages,
   });
   return p.then((r) => ({ r, prompts, rev: r.layers.find((l) => l.layer === "reviewer")! }));
 }
@@ -130,4 +130,28 @@ describe("staged review of a large diff", () => {
     expect(rev.verdict).toBe("stop");
     expect(r.decision).toBe("hold");
   });
+
+  test("after an early stop the file count is recomputed from what was read, in the full-diff and priority tiers", async () => {
+    const full = await run(release(7, { "lib/m0.py": "x = 2\nEVIL()\n" }));
+    const n = Number(/(\d+) file\(s\) not reviewed$/.exec(full.rev.detail.replace(/: .*$/s, ""))?.[1]);
+    expect(full.rev.detail).toMatch(/part\(s\) read, the first FLAG ended the review; \d+ file\(s\) not reviewed/);
+    expect(n).toBeGreaterThanOrEqual(6); // 8 files, at most the first part or two read
+    expect(n).toBeLessThan(8);
+    // the priority tier: new files fill more parts than the stages allow in the full diff
+    const newf = Object.fromEntries(Array.from({ length: 6 }, (_, i) => [`lib/n${i}.py`, i === 0 ? "EVIL()\n" : `y = ${i}\n`.repeat(20)]));
+    const pr = await run({ old: files(plain(10, "1")), new: files({ ...plain(10, "2"), ...newf }) }, { maxParts: 3, maxStages: 2 });
+    expect(pr.rev.detail).toMatch(/^fake FLAG on part\(s\) 1 of 6; 1 of 6 part\(s\) read, the first FLAG ended the review; priority files only, \d+ file\(s\) not reviewed/);
+    expect(pr.rev.detail).not.toMatch(/lower-priority/);
+  });
+
+  test("a file that goes on into an unread part is not counted as read", async () => {
+    const big = Array.from({ length: 60 }, (_, i) => `v${i} = ${i}`).join("\n") + "\n";
+    const art = { old: files({}), new: files({ "lib/a.py": big, "lib/z.py": "y = 1\n" }) };
+    const total = chunkDiff(art.old, art.new, 200).length;
+    expect(total).toBeGreaterThan(4);
+    const { prompts, rev } = await run(art, { flagCall: 2 });
+    expect(prompts).toHaveLength(2);
+    expect(rev.detail).toContain(`2 of ${total} part(s) read, the first FLAG ended the review; 2 file(s) not reviewed`);
+  });
+
 });
