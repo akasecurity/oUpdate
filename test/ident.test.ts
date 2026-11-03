@@ -39,3 +39,30 @@ test("inert writes the characters that open links, code, tags and comments as es
   expect(out).toContain("(ok; fine)");
   expect(out).toContain("\\u{5b}x\\u{5d}(http://evil.example)");
 });
+
+test("inert writes every invisible or reordering character as an escape, and keeps ASCII prose and spaces", () => {
+  const one = (cp: number) => { const out = inert(`a${String.fromCodePoint(cp)}b`); expect(out, cp.toString(16)).toBe(`a\\u{${cp.toString(16)}}b`); };
+  // C1, bidi, zero-width, soft hyphen, Arabic letter mark, Mongolian vowel separator, deprecated format, specials, line/paragraph separators, a tag character
+  for (const cp of [0x85, 0x202e, 0x200b, 0x2066, 0xfeff, 0x2060, 0xad, 0x61c, 0x180e, 0x206a, 0xfff9, 0x2028, 0x2029, 0xe0041]) one(cp);
+  // variation selectors, grapheme joiner, Hangul fillers, braille blank, non-ASCII spaces, backslash
+  for (const cp of [0xfe0f, 0xe0100, 0x34f, 0x115f, 0x1160, 0x3164, 0xffa0, 0x2800, 0xa0, 0x200a, 0x3000, 0x5c]) one(cp);
+  expect(inert("a b (ok; fine) \u00e9 \u4e2d")).toBe("a b (ok; fine) \u00e9 \u4e2d");
+});
+
+test("inert escapes every default-ignorable code point, found at runtime so the file holds no raw characters", () => {
+  const ignorable = /^\p{Default_Ignorable_Code_Point}$/u;
+  let n = 0;
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    if (!ignorable.test(String.fromCodePoint(cp))) continue;
+    n++;
+    expect(inert(`a${String.fromCodePoint(cp)}b`)).toBe(`a\\u{${cp.toString(16)}}b`);
+  }
+  expect(n).toBeGreaterThan(300); // the property covers the Mongolian selectors, Khmer vowels and the hidden unassigned ranges too
+});
+
+test("inert escapes a lone surrogate, a private-use and an unassigned code point", () => {
+  for (const [cp, ch] of [[0xd800, String.fromCharCode(0xd800)], [0xdfff, String.fromCharCode(0xdfff)], [0xe000, String.fromCodePoint(0xe000)], [0xf8ff, String.fromCodePoint(0xf8ff)], [0x10ffff, String.fromCodePoint(0x10ffff)], [0x378, String.fromCodePoint(0x378)], [0xffff, String.fromCodePoint(0xffff)]] as [number, string][])
+    expect(inert(`a${ch}b`), cp.toString(16)).toBe(`a\\u{${cp.toString(16)}}b`);
+  expect(inert("a\u{1f600}b")).toBe("a\u{1f600}b"); // an assigned emoji stays
+});
