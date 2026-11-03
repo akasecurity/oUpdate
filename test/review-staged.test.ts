@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { reviewUpdate, chunkDiff, partLimit, CEILING_PARTS } from "../src/review.ts";
+import { markTarNotes } from "../src/prepass.ts";
 import { syntheticPair } from "../acceptance/synthetic/generate.ts";
 import type { FileMap } from "../src/prepass.ts";
 
@@ -222,5 +223,27 @@ describe("a large release with no cap asked for is read in every part", () => {
     expect(rev.detail).not.toMatch(/too large/);
     expect(rev.verdict).toBe("pass");
     expect(prompts).toHaveLength(4);
+  });
+});
+
+describe("a signal that names no file of the release", () => {
+  test("a skipped tar entry takes no part-budget slot and prints no empty header, in the ranked tier and in the reorder", async () => {
+    for (const [maxParts, maxStages] of [[2, 1], [3, 30]] as const) {
+      const art = release(12);
+      markTarNotes(art.new, ["skipped evil/skipped-entry"]);
+      const { prompts } = await run(art, { maxParts, maxStages });
+      expect(prompts.length).toBeGreaterThan(0);
+      expect(prompts.join("\n")).not.toContain("=== evil/skipped-entry");
+      expect(prompts[0]).toContain("setup.py"); // the real ranked file comes first
+    }
+  });
+  test("the ranked tier itself reads no phantom: signal files alone over the limit, a skipped tar entry among the ranked paths", async () => {
+    const art = release(12, { "setup.py": "v = 3\n".repeat(120) }); // setup.py alone is several parts, so the narrowing reaches the ranked tier
+    markTarNotes(art.new, ["skipped evil/skipped-entry"]);
+    const { prompts, rev } = await run(art, { maxParts: 1, maxStages: 1 });
+    expect(rev.detail).toMatch(/too large for model review: \d+ parts > 1 \(signal files alone\)/); // the tier is the ranked one
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("setup.py"); // the real file takes the one slot
+    expect(prompts.join("\n")).not.toContain("=== evil/skipped-entry");
   });
 });
