@@ -368,7 +368,7 @@ describe("shell classes: review of fcdb6a0", () => {
     for (const c of ["cp evil node && ./node a.js", "cp evil sh && ./sh a.js", "cp evil env && ./env node a.js"]) expect(classes(c), c).toEqual(["writer-exec"]);
   });
   test("sed: -e, --expression, richer addresses, and a script past the cap", () => {
-    for (const c of ["sed -e's/x/id/e' f", "sed --expression='e id' f", "sed --expression='e id' f", "sed '1~2e id' f", "sed '/x/I e id' f", "sed '1,+2e id' f", "sed '" + "p;".repeat(2100) + "' f"]) expect(classes(c), c).toEqual(["program-file"]);
+    for (const c of ["sed -e's/x/id/e' f", "sed --expression='e id' f", "sed '1~2e id' f", "sed '/x/I e id' f", "sed '1,+2e id' f", "sed '" + "p;".repeat(2100) + "' f"]) expect(classes(c), c).toEqual(["program-file"]);
     expect(classes("sed -e 's/a/b/' f")).toEqual([]);
   });
   test("fetched and copied files", () => {
@@ -622,11 +622,35 @@ describe("shell classes: O14", () => {
   });
 });
 
+describe("shell classes: review of 47a705c", () => {
+  const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
+  test("1: ruby -C, -X and -x take a directory, attached or not", () => {
+    is(["cd-relative"], ["ruby -Csrc a.rb", "ruby -C src a.rb", "ruby -Xsrc a.rb", "ruby -X src a.rb", "ruby -xsrc a.rb"]);
+    is([], ["ruby -x a.rb", "ruby -Ebinary a.rb"]);
+  });
+  test("3: parentheses in quotes do not make a group arithmetic", () => {
+    const L = ["interp-flag"] as ClassName[];
+    is(L, ['((echo "(") && (node -r ./p.js a.js ")"))', 'x=$(((echo "(") && (node -r ./p.js a.js ")")))', "((echo '(') && (node -r ./p.js a.js '('))", "((echo \\() && (node -r ./p.js a.js))"]);
+  });
+  test("5: more compiler flags that load a file", () => {
+    is(["env-assign"], ["CXXFLAGS='-B ./bin' node-gyp rebuild", "LDFLAGS=-Wl,-plugin=./p.so node-gyp rebuild", "OBJCXXFLAGS=-B./bin node-gyp rebuild"]);
+    is([], ["CXXFLAGS='-B /usr/bin' make", "LDFLAGS=-Wl,-rpath,/x make"]);
+  });
+});
+
 describe("shell classes: O5, O10, O12", () => {
   const is = (want: ClassName[], cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toEqual(want); };
   test("O5: a redirect target held in a variable the body assigned a literal", () => {
     is(["writer-exec"], ['N=b.js; cat lib/hidden.js > "$N"; node b.js', "N=b.js\ncat lib/hidden.js > $N\nnode b.js", 'cat t > "$PWD/b.js" && node b.js', 'N=b.js\ncat t >> "${N}"\nnode b.js']);
-    is([], ['echo x > "$LOG"; node a.js', 'N=b.js; echo x > "$M"; node b.js', 'N=b.js; echo x > "$N"; node a.js']);
+    is([], ['N=b.js; echo x > "$N"; node a.js', 'echo x > "$LOG"; echo done']);
+    // a name the body cannot tell: any relative file it runs afterwards may be that one
+    is(["writer-exec"], ['echo x > "$LOG"; node a.js', 'N=b.js; echo x > "$M"; node b.js', 'N=$(echo b.js); cat h > "$N"; node b.js', 'N=a; N=$(echo b.js); cat h > "$N"; node b.js', "read N <<< b.js\ncat h > \"$N\"\nnode b.js", 'cat h &> "$N"; node b.js', 'cat h >&"$N"; node b.js', 'for N in x y; do cat h > "$N"; done; node b.js', 'M=${N%.x}; cat h > "$M"; node b.js']);
+    // a variable built from known literals is known
+    is(["writer-exec"], ["N=b.js; export M=$N; cat h > $M; node b.js", "export N=b.js; cat h > $N; node b.js", "for N in b.js; do cat h > \"$N\"; done; node b.js", "N=b; M=$N.js; cat h > $M; node b.js", 'N=sub; cat h > "$N/b.js"; node sub/b.js']);
+    is([], ["N=b.js; cat h > $N; node a.js", "node $D/a.js"]);
+    // a script path built from a variable the body assigned is a file the existing scan cannot name
+    is(["computed-command"], ["D=sub; node $D/a.js"]);
+    expect(classes("cd sub; D=a.js; node $D")).toEqual(["cd-relative", "computed-command"]);
   });
   test("O10: node-gyp tool variables, compiler flags that load a file, PYTHONUSERBASE", () => {
     is(["env-assign"], ["NODE_GYP_FORCE_PYTHON=./tools/py.sh node-gyp rebuild", "LINK=./x.sh node-gyp rebuild", "CC_host=./c node-gyp rebuild", "CXX_target=./c node-gyp rebuild", "CXXFLAGS=-B./bin node-gyp rebuild", "CFLAGS=-fplugin=./p.so node-gyp rebuild", "LDFLAGS=-fuse-ld=./ld node-gyp rebuild", "PYTHONUSERBASE=. python3 a.py"]);

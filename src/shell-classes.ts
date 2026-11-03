@@ -62,9 +62,12 @@ function backtickSpan(text: string, i: number): { inner: string; end: number } {
 function wrapsAll(t: string): boolean {
   if (!t.startsWith("(") || !t.endsWith(")")) return false;
   let d = 0;
-  for (let i = 0; i < t.length; i++) {
+  for (let i = 0; i < t.length; i++) { // parentheses inside quotes and after a backslash are text
     const c = t[i];
-    if (c === "(") d++;
+    if (c === "\\") i++;
+    else if (c === "'") { const e = t.indexOf("'", i + 1); if (e < 0) return false; i = e; }
+    else if (c === '"') { for (i++; i < t.length && t[i] !== '"'; i++) if (t[i] === "\\") i++; }
+    else if (c === "(") d++;
     else if (c === ")" && --d === 0) return i === t.length - 1;
   }
   return false;
@@ -352,7 +355,7 @@ function parse(text: string, depth: number): Stage[] {
       if (cur && /^[0-9]+$/.test(cur.text) && cur.plain) cur = undefined; else endWord(); // 2>x, 10>x
       let j = i + 1; let op = c;
       if (text[j] === ">" || text[j] === "|" || text[j] === "&") { op += text[j]; j++; }
-      if (op === ">&" || op === "<&") { const { w, next } = readWordAt(j); st.subs.push(...wordSubs); if (!/^[0-9-]+$/.test(w.text)) st.writes.push(w.text); i = next - 1; continue; }
+      if (op === ">&" || op === "<&") { const { w, next } = readWordAt(j); st.subs.push(...wordSubs); if (!/^[0-9-]+$/.test(w.text)) { if (w.plain) st.writes.push(w.text); else st.varWrites.push(w.text); } i = next - 1; continue; }
       let q = j; while (text[q] === " " || text[q] === "\t") q++;
       if ((text[q] === "<" || text[q] === ">") && text[q + 1] === "(") { // `< <(cmd)`, `> >(cmd)`
         const e = matchClose(q + 2, "(", ")"); st.subs.push(text.slice(q + 2, e)); i = e; continue;
@@ -363,7 +366,7 @@ function parse(text: string, depth: number): Stage[] {
       if (c === ">") { if (w.text && w.text !== "/dev/null" && w.plain) st.writes.push(w.text); else if (w.text && !w.plain) st.varWrites.push(w.text); } else st.reads.push(w.text);
       i = next - 1; continue;
     }
-    if (c === "&" && text[i + 1] === ">") { endWord(); const { w, next } = readWordAt(text[i + 2] === ">" ? i + 3 : i + 2); st.subs.push(...wordSubs); if (!w.text && wordSubs.length === 0) fail("redirect target", "unparsed"); if (w.text !== "/dev/null" && w.plain) st.writes.push(w.text); i = next - 1; continue; }
+    if (c === "&" && text[i + 1] === ">") { endWord(); const { w, next } = readWordAt(text[i + 2] === ">" ? i + 3 : i + 2); st.subs.push(...wordSubs); if (!w.text && wordSubs.length === 0) fail("redirect target", "unparsed"); if (w.text !== "/dev/null" && w.plain) st.writes.push(w.text); else if (w.text && w.text !== "/dev/null") st.varWrites.push(w.text); i = next - 1; continue; }
     if (c === "|" && casePat) { cur = undefined; continue; } // a|b) separates case patterns
     if (c === "|" && text[i + 1] !== "|") { endStage(); st.piped = true; if (text[i + 1] === "&") i++; continue; }
     if (c === "|" || c === "&" || c === ";") { endStage(); if (text[i + 1] === c) i++; if (c === ";" && text[i] === ";") casePat = true; continue; }
@@ -439,7 +442,13 @@ const LOADS: Record<string, RegExp> = {
 // (-Ebinary, -Csrc, -Kutf8, -Tn, -xdir, -W2, -Fsep, -0777, -e CODE): the letters inside that value are not flags.
 function rubyLoads(a: string): boolean {
   if (!a.startsWith("-") || a.startsWith("--")) return false;
-  for (const c of a.slice(1)) { if (c === "r" || c === "I") return true; if ("ECKTxWF0e".includes(c)) return false; }
+  for (const c of a.slice(1)) { if (c === "r" || c === "I") return true; if ("ECKTxWFX0e".includes(c)) return false; }
+  return false;
+}
+// -e CODE (also -we, -ne ...): the letter e before any flag that takes its value attached.
+function rubyInline(a: string): boolean {
+  if (!a.startsWith("-") || a.startsWith("--")) return /^--eval$/.test(a);
+  for (const c of a.slice(1)) { if (c === "e") return true; if ("ECKTxWFX0".includes(c)) return false; }
   return false;
 }
 const INLINE = /^(?:-p|-pe|-c|-r|-pi|--eval|--print)$|^-[A-Za-z]*[ec]$/; // -e, -le, -we, -Bc ...
@@ -472,8 +481,8 @@ function badEnv(t: string): boolean {
   const tv = TOOL_VAR.exec(t);
   if (tv) return /\//.test(tv[1]!) && (!/^[/~]/.test(tv[1]!) && !/^\$(?!\{?PWD\b)/.test(tv[1]!) || /^\$\{?PWD\b/.test(tv[1]!) || tv[1]!.startsWith("\u0001")); // $PWD and a substitution are inside the package or unknown
   // compiler flags that run or load a file from a path (-B dir, -fplugin=, -specs=, -fuse-ld=), and a Python user base: not absolute
-  const fl = /^(?:C|CXX|CPP|LD)FLAGS=([\s\S]*)$/.exec(t);
-  if (fl) return /(?:^|\s)(?:-B|-fplugin=|-specs=|-fuse-ld=)(?![/~])\S/.test(fl[1]!);
+  const fl = /^(?:C|CXX|CPP|LD|OBJC|OBJCXX|AS|F)FLAGS=([\s\S]*)$/.exec(t);
+  if (fl) return /(?:^|\s)(?:-B\s*|-fplugin=|-specs=|-fuse-ld=|-Wl,[^\s]*-plugin=)(?![/~])\S/.test(fl[1]!);
   const ub = /^PYTHONUSERBASE=([\s\S]*)$/.exec(t);
   if (ub) return ub[1] !== "" && !/^[/~]/.test(ub[1]!) && !/^\$(?!\{?PWD\b)/.test(ub[1]!);
   const m = /^(PATH|HOME)\+?=([\s\S]*)$/.exec(t);
@@ -582,15 +591,29 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
   const envHit = () => hit("env-assign", "a variable that loads code or config (NODE_OPTIONS, npm_config_*, BASH_ENV, LD_PRELOAD ...)");
   let later: string[] = [];
   const aliases = new Map<string, string>();
-  const vars = new Map<string, string>(); // variables the body assigned a literal
+  const vars = new Map<string, string>(); // variables the body assigned a literal (or a value built from such)
+  let unknownWrite = false; // a redirect target the body cannot name: any file it runs may be that one
+  // The text with every $NAME and ${NAME} replaced by the literal the body gave it; undefined when one is not known.
+  const expand = (t: string): string | undefined => {
+    let ok = true;
+    const r = t.replace(/\$\{(\w+)\}|\$(\w+)/g, (m0, a, b) => { const n = a ?? b; if (n === "PWD") return "."; const v = vars.get(n); if (v === undefined) { ok = false; return m0; } return v; });
+    return ok && !/[$`\u0001]/.test(r) ? r : undefined;
+  };
+  const assign = (a: string): void => {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)(\+?)=([\s\S]*)$/.exec(a);
+    if (!m) return;
+    const v = m[2] ? undefined : expand(m[3]!); // N+=x is not tracked
+    if (v === undefined) vars.delete(m[1]!); else vars.set(m[1]!, v);
+  };
   for (const st of stages) {
     let stageCwd = false; // env -C and ruby -C move one command, not the rest of the body
     // A redirect empties its target before the command runs, so a stage does not run its own output file.
     for (const t of later) copyTargets.add(t);
     // a target built from a variable the body assigned a literal to (`N=b.js; cat x > "$N"`) is a known file
-    const resolved = st.varWrites.map((t) => t.replace(/\$\{(\w+)\}|\$(\w+)/g, (m0, a, b) => (a ?? b) === "PWD" ? "." : vars.get(a ?? b) ?? m0)).filter((t) => !/[$\u0001]/.test(t));
+    const resolved: string[] = [];
+    for (const t of st.varWrites) { const e = expand(t); if (e === undefined) unknownWrite = true; else resolved.push(e); }
     later = [...st.writes, ...resolved];
-    for (const a of st.assigns) { const m = /^([A-Za-z_][A-Za-z0-9_]*)=([^$`\u0001]*)$/.exec(a); if (m) vars.set(m[1]!, m[2]!); }
+    for (const a of st.assigns) assign(a);
     for (const s of st.subs) nested(s);
     for (const s of st.hereSubs) nested(s);
     if (st.assigns.some((a) => badEnv(a))) envHit();
@@ -644,9 +667,23 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     const al = aliases.get(b);
     if (al !== undefined && head.plain) { nested(al + " " + args.map((a) => a.text).join(" ")); continue; }
     const stdin = (what: string) => { if (st.reads.length && !st.heredoc && st.reads.every((r) => r === "/dev/null")) return; if (!st.piped || st.heredoc || st.reads.length) hit(st.heredoc ? "heredoc" : "interp-stdin", `${what} reads its program from stdin`); };
-    const ranWritten = (f: string) => { if (written(f)) hit("writer-exec", `runs ${f}, written or copied by this body`); };
+    const ranWritten = (f: string) => { if (written(f) || (unknownWrite && !f.startsWith("/"))) hit("writer-exec", `runs ${f}, written or copied by this body (or by a write to a name it cannot tell)`); };
+    // A script path held in a variable: known when the body assigned it
+    const scriptWord = (w: Word): Word | undefined => {
+      if (w.plain) return w;
+      const e = expand(w.text);
+      if (e !== undefined) { hit("computed-command", "a script path the existing scan cannot see: it is built from a variable"); return { text: e, plain: true }; }
+      return undefined; // an unknown script variable stays as it was (a lone variable is the script; the existing scan reads $npm_* values)
+    };
     if (head.text.includes("/")) ranWritten(head.text); // ./node, ./sh, /tmp/x: a command this body wrote
-    if (DECL.has(b)) { if (args.some((a) => badEnv(a.text) || BAD_NAME.test(a.text))) envHit(); continue; }
+    if (b === "read") { for (const a of args) if (!a.text.startsWith("-")) vars.delete(a.text.replace(/\[.*$/, "")); continue; } // read N: the value is not known
+    if (b === "for" && args.length >= 2 && args[1]!.text === "in") { // for N in LIST: one literal is known
+      const lst = args.slice(2);
+      const lit = lst.length === 1 ? expand(lst[0]!.text) : undefined;
+      if (lit === undefined) vars.delete(args[0]!.text); else vars.set(args[0]!.text, lit);
+      continue;
+    }
+    if (DECL.has(b)) { for (const a of args) assign(a.text); if (args.some((a) => badEnv(a.text) || BAD_NAME.test(a.text))) envHit(); continue; }
     if (COPIES.has(b)) {
       const ops = args.filter((a) => !a.text.startsWith("-")).map((a) => a.text);
       for (const o of ops) copyTargets.add(norm(o));
@@ -751,11 +788,12 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       if (noProgram && rest.length === 0) continue;
       if (rest.length === 0 || stdinFlag) { stdin(b); continue; }
       const f = rest[0]!;
-      if (!f.plain) continue;
-      if (STDIN_PATH.test(f.text)) { stdin(b); continue; }
-      if (f.text.startsWith("/")) { ranWritten(f.text); continue; }
+      const f2 = scriptWord(f);
+      if (!f2) continue;
+      if (STDIN_PATH.test(f2.text)) { stdin(b); continue; }
+      if (f2.text.startsWith("/")) { ranWritten(f2.text); continue; }
       if (cwd || stageCwd) hit("cd-relative", `${b} file after cd`);
-      ranWritten(f.text);
+      ranWritten(f2.text);
       continue;
     }
     if (b === "bun") { // config, working directory and preload flags: before the subcommand or script
@@ -790,6 +828,8 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
         if (a.text === "-") { stdin(b); inline = true; break; }
         if (a.text.startsWith("-")) {
           if (!a.plain) { hit("interp-flag", `${b} flag is escaped or expanded`); continue; }
+          if (kind === "ruby" && /^-[CX]/.test(a.text)) stageCwd = true; // ruby -C dir / -X dir (attached or not) runs the script from there
+          if (kind === "ruby" && /^-x./.test(a.text)) stageCwd = true; // -xdir: the same, after the leading text is skipped
           if (kind === "php" && a.text === "-f" && rest[k + 1]) { file = rest[k + 1]; break; } // php -f file: the script
           if (kind === "php" && a.text === "-d" && rest[k + 1] && PHP_INI.test(rest[k + 1]!.text)) { hit("interp-flag", "php -d " + rest[k + 1]!.text.split("=")[0]); k++; continue; }
           if (kind === "ruby" ? rubyLoads(a.text) : loads?.test(a.text)) {
@@ -798,13 +838,12 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
             if (VALUE_AFTER.has(a.text)) k++;
             continue;
           }
-          if (INLINE.test(a.text)) { // inline code is read by the existing scan; later flags still load code (node -e 1 -r x, perl -e 1 -MX)
+          if (kind === "ruby" ? rubyInline(a.text) : INLINE.test(a.text)) { // inline code is read by the existing scan; later flags still load code (node -e 1 -r x, perl -e 1 -MX)
             inline = true;
             if (kind === "python") break; // after python -c CODE the rest is sys.argv
             if (rest[k + 1] && !rest[k + 1]!.text.startsWith("-")) k++;
             continue;
           }
-          if (kind === "ruby" && a.text.startsWith("-C")) stageCwd = true; // ruby -C dir runs the script from there
           if ((NO_PROGRAM.test(a.text) && !(kind === "python" && a.text === "-v")) || (kind === "php" && NO_PROGRAM_PHP.test(a.text))) noProgram = true;
           else if (valued.includes(a.text) || (kind === "node" && /^--max-[a-z-]+$/.test(a.text))) k++;
           else if (kind === "node" && a.text.startsWith("--") && !NODE_BOOL.test(a.text) && !a.text.includes("=") && rest[k + 1] && !rest[k + 1]!.text.startsWith("-") && k + 2 < rest.length && !rest.some((x) => INLINE.test(x.text)) && !/\.(?:[cm]?[jt]s|json)$|\//.test(rest[k + 1]!.text)) {
@@ -817,16 +856,17 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
           if (inplace) for (const f of rest.slice(k)) if (!f.text.startsWith("-")) copyTargets.add(norm(f.text));
           break;
         }
-        if (!a.plain && k < rest.length - 1) { hit("interp-flag", `${b} an expanded word before the script (it can hold flags)`); continue; }
+        if (!a.plain && k < rest.length - 1 && expand(a.text) === undefined) { hit("interp-flag", `${b} an expanded word before the script (it can hold flags)`); continue; }
         file = a; break;
       }
       if (inline) continue;
       if (!file) { if (viaXargs && !noProgram) hit("interp-stdin", `xargs ${b}: the script comes from stdin`); else if (!noProgram) stdin(b); continue; }
-      if (!file.plain) continue;
-      if (STDIN_PATH.test(file.text)) { stdin(b); continue; } // node /dev/stdin reads the program from stdin
-      if (file.text.startsWith("/")) { ranWritten(file.text); continue; }
+      const file2 = scriptWord(file);
+      if (!file2) continue;
+      if (STDIN_PATH.test(file2.text)) { stdin(b); continue; } // node /dev/stdin reads the program from stdin
+      if (file2.text.startsWith("/")) { ranWritten(file2.text); continue; }
       if (cwd || stageCwd) hit("cd-relative", `${b} script after cd`);
-      ranWritten(file.text);
+      ranWritten(file2.text);
       continue;
     }
     if (head.text.includes("/") && !PM.test(b)) {
