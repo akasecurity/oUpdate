@@ -1502,3 +1502,17 @@ describe("shell classes: a builtin read as written under an alias of the same na
     expect(classes(c), c).not.toEqual([]);
   });
 });
+
+describe("shell classes: failing declarations, slash alias names, an aliased cd", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("local outside a function and declare/typeset (dash has none) may fail: the name keeps its old value", () => {
+    held(["N=a.js; local N=b.js; cat lib/hidden.js > $N; node a.js", "N=a.js\nlocal N=b.js\ncat lib/hidden.js > $N\nnode a.js", "N=a.js; typeset N=b.js; cat lib/hidden.js > $N; node a.js", "N=a.js; declare N=b.js; cat lib/hidden.js > $N; node a.js"]);
+  });
+  test("an alias name may hold a slash (dash): a/b, ./x and x/", () => {
+    held(["alias a/b='node -r ./p.js a.js'\na/b", "alias ./x='node -r ./p.js a.js'\n./x", "alias x/='node -r ./p.js a.js'\nx/", "N=a.js\nalias a/b='N=b.js;true'\na/b\ncat lib/hidden.js > $N\nnode a.js"]);
+  });
+  test("an alias of cd (to true or :) may leave the directory: the write and the run stay tied to the same place", () => {
+    held(["alias cd=true\ncd sub\ncat lib/hidden.js > a.js\nnode a.js", "alias cd=:\ncd sub\ncat lib/hidden.js > a.js\nnode a.js", "cat lib/hidden.js > a.js\nalias cd=true\ncd sub\nnode a.js",
+      "(alias cd=true; cd sub; cat lib/hidden.js > a.js; node a.js)", "alias cd=true\ncd sub\ncat lib/hidden.js > l.js\nnode -r ./l.js b.js", "alias cd=:\ncd sub\ncat lib/hidden.js > l.js\nnode -r ./l.js b.js"]);
+  });
+});
