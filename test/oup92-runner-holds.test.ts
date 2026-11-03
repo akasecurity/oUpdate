@@ -52,7 +52,7 @@ describe("npm forms that leave this package hold", () => {
 
 describe("an unknown flag before the script name holds", () => {
   test("yarn, pnpm, bun and npm do not guess what a flag takes", () => {
-    for (const cmd of ["yarn run -T build", "yarn -T build", "pnpm run --foo build", "pnpm --bar build", "pnpm run -T build", "bun run --bun build", "npm run --foo build", "yarn run -- build"]) {
+    for (const cmd of ["yarn run -T build", "yarn -T build", "pnpm run --foo build", "pnpm --bar build", "pnpm run -T build", "bun run --bun build", "npm run --foo build", "yarn run -- build", "yarn -C sub build", "yarn run -C sub build", "yarn -Csub build"]) {
       expect(fileHeld(cmd), cmd).toBe(true);
     }
   });

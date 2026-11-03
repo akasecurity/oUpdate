@@ -3699,7 +3699,7 @@ function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
 
 const WORKSPACE_WIDEN: Record<"yarn" | "pnpm" | "bun", RegExp> = {
   pnpm: /^(?:-[A-Za-z]*[FCrw].*|--filter(?:-prod)?(?:=.*)?|--dir(?:=.*)?|--prefix(?:=.*)?|--recursive(?:=.*)?|--workspace-root(?:=.*)?|recursive|m|multi)$/,
-  yarn: /^(?:--cwd(?:=.*)?|workspace|workspaces)$/,
+  yarn: /^(?:--cwd(?:=.*)?|-C.*|workspace|workspaces)$/, // -C is not a yarn flag: the generic skip would read `-C sub` as a flag with a value and run the local script
   bun: /^(?:-F.*|--filter(?:=.*)?|--cwd(?:=.*)?|--workspaces)$/,
 };
 // npm reaches another package with --prefix/-C, -w/--workspace and --workspaces/-ws.
