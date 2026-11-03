@@ -2424,7 +2424,8 @@ export type Outcome = "stopped" | "held-human" | "error" | "passed";
 export function classifyOutcome(r: ReviewResult): Outcome {
   const tooLarge = (l: LayerVerdict) => l.layer === "reviewer" && l.verdict === "stop" && /^(too large for model review|not model-reviewable)/.test(l.detail);
   if (r.layers.some((l) => l.verdict === "stop" && !tooLarge(l))) return "stopped";
-  if (r.layers.some(tooLarge)) return "held-human";
+  // A layer that errored may have hidden a stop: the hold for a limit never outranks it.
   if (r.layers.some((l) => l.verdict === "error")) return "error";
+  if (r.layers.some(tooLarge)) return "held-human";
   return r.decision === "land" ? "passed" : "error";
 }

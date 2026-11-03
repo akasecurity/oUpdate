@@ -34,10 +34,10 @@ test("counts per set: attacks are real releases (replay included, synthetic not)
   expect(setCounts({ cases, controls }, "all").attacks).toBe(3);
 });
 
-test("the shipped JSON: core stays the published 9 attacks and 8 controls; extended is 17 and 17", () => {
+test("the shipped JSON: core is the published 9 attacks and 8 controls plus two small clean controls (ms, six); extended is 17 and 17", () => {
   const sets = loadSets();
   const core = setCounts(sets, "core");
-  expect([core.attacks, core.dataset, core.controls]).toEqual([9, 8, 8]);
+  expect([core.attacks, core.dataset, core.controls]).toEqual([9, 8, 10]);
   const ext = setCounts(sets, "extended");
   expect([ext.attacks, ext.dataset, ext.controls]).toEqual([17, 17, 17]);
   expect(sets.cases.filter((c) => c.source?.type === "synthetic").every((c) => setOf(c) === "core")).toBe(true);

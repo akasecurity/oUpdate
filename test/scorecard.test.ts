@@ -92,3 +92,16 @@ test("core set keeps the bar and the published column whatever expected says", (
   expect(out).toContain("scorecard: local\n");
   expect(out).toMatch(/attacks stopped\s+9\/9\s+bar 9\/9\s+26 Oct: 9\/9/);
 });
+
+test("a control marked expect-held that the reviewer holds for a limit counts as landed, an unmarked one does not", () => {
+  const binary = layer("reviewer", "stop", "not model-reviewable: binary file(s) pkg/_ext.so; local APPROVE on 58 part(s); needs a human");
+  const held = rows("local").map((r) => (r.id === "control-0" ? { ...r, result: result("hold", "pass", binary, true) } : r));
+  expect(scorecard(held).join("\n")).toMatch(/controls landed\s+7\/8\s+bar 8\/8/);
+  expect(scorecard(held, { held: new Set(["control-0"]) }).join("\n")).toMatch(/controls landed\s+8\/8\s+bar 8\/8/);
+  expect(scorecard(held, { held: new Set(["control-1"]) }).join("\n")).toMatch(/controls landed\s+7\/8\s+bar 8\/8/);
+});
+
+test("the bar is the core control count from the JSON: a run that lost a control shows 7/7 against 8/8", () => {
+  const lost = rows("local").filter((r) => r.id !== "control-7");
+  expect(scorecard(lost, { barControls: 8 }).join("\n")).toMatch(/controls landed\s+7\/7\s+bar 8\/8/);
+});

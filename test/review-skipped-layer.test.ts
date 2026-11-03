@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { reviewUpdate, classifyOutcome, type LayerName } from "../src/review.ts";
+import { reviewUpdate, classifyOutcome, type LayerName, type ReviewResult } from "../src/review.ts";
 
 const input = (only: LayerName[]) => ({
   eco: "pypi" as const, name: "p", from: "1", to: "2",
@@ -35,4 +35,12 @@ describe("landing needs a layer that reads code", () => {
   test("a pre-pass pass with the rest skipped lands", async () => {
     expect((await reviewUpdate(input(["prepass"]))).decision).toBe("land");
   });
+});
+
+test("a layer that errored is never read as a hold for a limit: the error ranks above held-human, a real stop above both", () => {
+  const mk = (...layers: [LayerName, "pass" | "stop" | "error", string][]): ReviewResult => ({ eco: "npm", name: "p", from: "1", to: "2", decision: "hold", layers: layers.map(([layer, verdict, detail]) => ({ layer, verdict, detail })) });
+  const limit: [LayerName, "stop", string] = ["reviewer", "stop", "too large for model review: 90 parts > 72 (full diff); needs a human"];
+  expect(classifyOutcome(mk(limit))).toBe("held-human");
+  expect(classifyOutcome(mk(["scan", "error", "scanner crashed"], limit))).toBe("error");
+  expect(classifyOutcome(mk(["scan", "error", "scanner crashed"], ["prepass", "stop", "install script"], limit))).toBe("stopped");
 });

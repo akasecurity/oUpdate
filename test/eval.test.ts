@@ -60,7 +60,7 @@ test("checks 1 and 2 count the core set from the JSON and ignore extended result
   const replay = new Map([["wheel-local", "STOPPED"]]);
   const r = scoreAcceptance({ mal, ctrl }, replay, "0/0");
   expect(r.c1).toMatchObject({ status: "pass", detail: "9 of 9 stopped" });
-  expect(r.c2).toMatchObject({ status: "pass", detail: "8 of 8 passed" });
+  expect(r.c2).toMatchObject({ status: "pass", detail: `${core.controls} approved, 0 held by a limit, 0 false alarms (of ${core.controls})` });
   expect(r.extended).toBe(`extended set (informational, not scored): 0 of ${ext.attacks} attacks stopped, 0 of ${ext.controls} controls passed`);
   expect(scoreAcceptance({ mal: new Map(), ctrl: new Map() }, new Map(), "1/1").extended).toBeUndefined();
 });
@@ -99,7 +99,7 @@ test("a case one reviewer did not report is MISSING, whatever the other said", (
   expect(parseOutcomes("CTRL c-m1: PASSED land", ["m1"]).ctrl.get("c")).toBe("PASSED");
 });
 
-test("a size hold on a clean control is a false alarm, and a nonzero exit of the acceptance run fails both checks", () => {
+test("a hold for a limit is correct only on the control marked expect held, a stop or an error on a control is a false alarm, and a nonzero exit of the acceptance run fails both checks", () => {
   const sets = setCounts(loadSets(), "core");
   const core = [...sets.controlIds];
   const attacks = [...sets.attackIds];
@@ -107,9 +107,16 @@ test("a size hold on a clean control is a false alarm, and a nonzero exit of the
   const mal = new Map(attacks.map((id) => [id, "STOPPED"]));
   const replay = new Map([["wheel-local", "STOPPED"]]);
   expect(scoreAcceptance({ mal, ctrl }, replay, "0/0").c2.status).toBe("pass");
-  const held = scoreAcceptance({ mal, ctrl: new Map(ctrl).set(core[0]!, "HELD-HUMAN") }, replay, "0/0").c2;
-  expect(held.status).toBe("fail");
-  expect(held.detail).toContain(`${core[0]}=HELD-HUMAN`);
+  const markedId = [...sets.heldIds][0]!; // the control marked expect held; it may also be approved (PASSED above), which is intended
+  const held = scoreAcceptance({ mal, ctrl: new Map(ctrl).set(markedId, "HELD-HUMAN") }, replay, "0/0").c2;
+  expect(held.status).toBe("pass");
+  expect(held.detail).toContain(`${core.length - 1} approved, 1 held by a limit, 0 false alarms (of ${core.length})`);
+  const stopped = scoreAcceptance({ mal, ctrl: new Map(ctrl).set(core[0]!, "STOPPED") }, replay, "0/0").c2;
+  expect(stopped.status).toBe("fail");
+  expect(stopped.detail).toContain(`${core[0]}=STOPPED`);
+  const errored = scoreAcceptance({ mal, ctrl: new Map(ctrl).set(core[1]!, "ERROR") }, replay, "0/0").c2; // a crashed layer beside a size hold is classified ERROR, never a hold for a limit
+  expect(errored.status).toBe("fail");
+  expect(errored.detail).toContain(`${core[1]}=ERROR`);
   const bad = scoreAcceptance({ mal, ctrl }, replay, "1/0");
   expect(bad.c1.status).toBe("fail");
   expect(bad.c2.status).toBe("fail");
@@ -139,4 +146,24 @@ test("reviewer names where one ends in another's are rejected before the run", (
   const dup = runAcceptance({ reviewers: [spec("m1"), spec("m1")] } as never);
   expect(dup.c1.status).toBe("not run");
   expect(dup.c1.detail).toContain("m1 repeats or ends in another reviewer's name");
+});
+
+test("check 2 needs the unmarked controls approved: all ten held for a limit fails, a hold is correct only on a control marked expect held", () => {
+  const sets = loadSets();
+  const ids = setCounts(sets, "core").controlIds;
+  const core = sets.controls.filter((c) => ids.has(c.id));
+  const marked = [...setCounts(sets, "core").heldIds];
+  expect(marked).toEqual(["control-litellm-1.106.2"]);
+  const attacks = new Map<string, string>();
+  const allHeld = new Map(core.map((c) => [c.id, "HELD-HUMAN"]));
+  const r = scoreAcceptance({ mal: attacks, ctrl: allHeld }, new Map(), "0/0").c2;
+  expect(r.status).toBe("fail");
+  expect(r.detail).toContain(`0 approved, 1 held by a limit, ${core.length - 1} false alarms (of ${core.length})`);
+  const oneUnmarked = new Map(core.map((c) => [c.id, "PASSED"]));
+  oneUnmarked.set(core[core.length - 1]!.id, "HELD-HUMAN");
+  const u = scoreAcceptance({ mal: attacks, ctrl: oneUnmarked }, new Map(), "0/0").c2;
+  expect(u.status).toBe("fail");
+  expect(u.detail).toContain(`${core[core.length - 1]!.id}=HELD-HUMAN`);
+  const markedPassed = new Map(core.map((c) => [c.id, "PASSED"]));
+  expect(scoreAcceptance({ mal: attacks, ctrl: markedPassed }, new Map(), "0/0").c2.status).toBe("pass"); // the marked control may also be approved
 });

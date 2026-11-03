@@ -1,4 +1,4 @@
-// Case sets. "core" is the published set: the bar (9/9 attacks, 8/8 controls) and the 26 Oct
+// Case sets. "core" is the published set: the bar (every attack stopped, every core control landed) and the 26 Oct
 // result are scored on it. "extended" holds further real compromised releases and their clean
 // controls, scored on their own counts. An entry in cases.json or controls.json without a
 // "set" key is core; the synthetic evasion cases are core and keep their own scorecard line.
@@ -14,6 +14,8 @@ export interface SetEntry {
   id: string;
   set?: CaseSet;
   source?: { type: string };
+  /** "held": a clean control the reviewer is expected to hold for a limit it cannot read past (a binary), counted as correct. */
+  expect?: "held";
 }
 
 export function setOf(e: SetEntry): CaseSet {
@@ -49,5 +51,6 @@ export function setCounts(sets: { cases: SetEntry[]; controls: SetEntry[] }, cho
     controls: controls.length,
     attackIds: new Set(attacks.map((c) => c.id)),
     controlIds: new Set(controls.map((c) => c.id)),
+    heldIds: new Set(controls.filter((c) => c.expect === "held").map((c) => c.id)),
   };
 }
