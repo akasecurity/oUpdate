@@ -103,6 +103,9 @@ export interface PrepassResult {
 
 const NPM_INSTALL_SCRIPTS = ["preinstall", "install", "postinstall", "prepare"];
 
+/** A new or changed file over this size is not scanned by the pre-pass. */
+export const LARGE_FILE_BYTES = 5_000_000;
+
 export const SOFT_PATTERNS: { kind: string; re: RegExp }[] = [
   { kind: "encoded-blob", re: /[A-Za-z0-9+/=_-]{400,}/ },
   { kind: "dynamic-exec", re: /\b(exec|eval)\s*\(\s*(base64|codecs|zlib|marshal|atob|Buffer\.from|bytes\.fromhex|__import__)/ },
@@ -1051,7 +1054,7 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
 
   for (const p of [...added, ...changed]) {
     const bytes = newFiles.get(p)!;
-    if (bytes.length > 5_000_000) {
+    if (bytes.length > LARGE_FILE_BYTES) {
       soft.push({ kind: "large-file", path: p, detail: `${bytes.length} bytes, not scanned` });
       continue;
     }

@@ -153,12 +153,12 @@ test("check 2 needs the unmarked controls approved: all ten held for a limit fai
   const ids = setCounts(sets, "core").controlIds;
   const core = sets.controls.filter((c) => ids.has(c.id));
   const marked = [...setCounts(sets, "core").heldIds];
-  expect(marked).toEqual(["control-litellm-1.106.2"]);
+  expect(marked.sort()).toEqual(["control-bitwarden-cli-2026.3.0", "control-litellm-1.106.2"]); // the releases that ship a binary no model can read
   const attacks = new Map<string, string>();
   const allHeld = new Map(core.map((c) => [c.id, "HELD-HUMAN"]));
   const r = scoreAcceptance({ mal: attacks, ctrl: allHeld }, new Map(), "0/0").c2;
   expect(r.status).toBe("fail");
-  expect(r.detail).toContain(`0 approved, 1 held by a limit, ${core.length - 1} false alarms (of ${core.length})`);
+  expect(r.detail).toContain(`0 approved, 2 held by a limit, ${core.length - 2} false alarms (of ${core.length})`);
   const oneUnmarked = new Map(core.map((c) => [c.id, "PASSED"]));
   oneUnmarked.set(core[core.length - 1]!.id, "HELD-HUMAN");
   const u = scoreAcceptance({ mal: attacks, ctrl: oneUnmarked }, new Map(), "0/0").c2;
@@ -166,4 +166,15 @@ test("check 2 needs the unmarked controls approved: all ten held for a limit fai
   expect(u.detail).toContain(`${core[core.length - 1]!.id}=HELD-HUMAN`);
   const markedPassed = new Map(core.map((c) => [c.id, "PASSED"]));
   expect(scoreAcceptance({ mal: attacks, ctrl: markedPassed }, new Map(), "0/0").c2.status).toBe("pass"); // the marked control may also be approved
+});
+
+test("the bitwarden control is marked expect held: its hold for the .wasm counts in check 2, and an unmarked control's does not", () => {
+  const sets = setCounts(loadSets(), "core");
+  const attacks = new Map([...sets.attackIds].map((id) => [id, "STOPPED"]));
+  const replay = new Map([["wheel-local", "STOPPED"]]);
+  const ctrl = new Map([...sets.controlIds].map((id) => [id, "PASSED"]));
+  const held = scoreAcceptance({ mal: attacks, ctrl: new Map(ctrl).set("control-bitwarden-cli-2026.3.0", "HELD-HUMAN") }, replay, "0/0").c2;
+  expect(held.status).toBe("pass");
+  expect(held.detail).toContain(`${sets.controls - 1} approved, 1 held by a limit, 0 false alarms`);
+  expect(scoreAcceptance({ mal: attacks, ctrl: new Map(ctrl).set("control-ms-2.1.3", "HELD-HUMAN") }, replay, "0/0").c2.status).toBe("fail");
 });
