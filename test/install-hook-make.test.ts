@@ -99,3 +99,15 @@ describe("an empty quote before a ~ and repeated slashes after a tilde prefix", 
     }
   });
 });
+
+describe("repeated slashes inside a run target", () => {
+  test("node .//sub/x.js and node ~+/sub//x.js name sub/x.js", () => {
+    for (const f of ["node .//sub/x.js", "node ~+/sub//x.js", "node ~+/sub///x.js", "node ./sub//x.js"]) {
+      expect(details(f, ["sub/x.js"]), f).toContain("file sub/x.js");
+      expect(details(f, ["other/y.js"]), f).toEqual([]);
+    }
+  });
+  test("node ~+\\/sub/x.js is a file called ~+", () => {
+    expect(details("node ~+\\/sub/x.js", ["~+/sub/x.js"])).toContain("file ~+/sub/x.js");
+  });
+});

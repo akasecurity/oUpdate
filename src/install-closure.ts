@@ -153,7 +153,7 @@ function words(cmd: string): string[] {
 }
 
 function normalize(token: string): string {
-  let t = token.replace(/^~(?:[+-]\d*|\d+)\/+/, ""); // ~0/x and ~+/x are x in the working directory
+  let t = token.replace(/\/{2,}/g, "/").replace(/^~(?:[+-]\d*|\d+)\/+/, ""); // ~0/x and ~+/x are x in the working directory
   while (t.startsWith("./")) t = t.slice(2);
   return t;
 }
@@ -343,7 +343,7 @@ function skipHeredocs(t: string, i: number, pend: { delim: string; strip: boolea
 // (null), or, when `loose`, is replaced by UNRESOLVED so that the commands around it can still be read.
 function subst(ctx: Ctx, body: string, loose = false): string | null {
   // A backslash in the tilde prefix (~\+/x, \~+/x) makes it a literal name: ./~+/x. Said here so the later scans see no backslash.
-  body = body.replace(/(^|[\s;&|(])\\~/g, "$1./~").replace(/(^|[\s;&|(])(~[^\s/\\'"$`]*)\\([^\s/\\])/g, "$1./$2$3");
+  body = body.replace(/(^|[\s;&|(])\\~/g, "$1./~").replace(/(^|[\s;&|(])(~[^\s/\\'"$`]*)\\([^\s\\])/g, "$1./$2$3");
   let out = "";
   let inDq = false;
   let escAt = -1; // the index of the last escaped character
@@ -1220,7 +1220,7 @@ type ArgHit =
   | { t: "code"; text: string };
 
 function stripDot(p: string): string {
-  let t = p.trim().replace(/^~(?:[+-]\d*|\d+)\/+/, "");
+  let t = p.trim().replace(/\/{2,}/g, "/").replace(/^~(?:[+-]\d*|\d+)\/+/, "");
   while (t.startsWith("./")) t = t.slice(2);
   return t;
 }
@@ -2991,7 +2991,7 @@ function quotedTokens(text: string): string[] {
 }
 
 function addLiteralToken(ctx: Ctx, token: string): void {
-  let t = token.replace(/^~(?:[+-]\d*|\d+)\/+/, "");
+  let t = token.replace(/\/{2,}/g, "/").replace(/^~(?:[+-]\d*|\d+)\/+/, "");
   while (t.startsWith("./")) t = t.slice(2);
   if (t.startsWith("/")) t = t.slice(1);
   if (t.startsWith("../")) t = t.slice(3);

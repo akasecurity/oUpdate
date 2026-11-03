@@ -1179,3 +1179,79 @@ describe("shell classes: a function with a subshell body, deep call chains, time
       "N=~+/b.js; cat lib/hidden.js > \"$N\"; node b.js"]);
   });
 });
+
+describe("shell classes: wrapper, loop and shell fail-opens", () => {
+  const H = "cat lib/hidden.js > $N; node b.js";
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).toContain("writer-exec"); };
+  test("a loop or compound before | or & runs in a subshell: a name it sets is not known after it", () => {
+    held(["N=b.js; for N in a.js; do :; done | cat; " + H, "N=b.js; for N in a.js; do :; done & wait; " + H, "N=b.js; if N=a.js; then :; fi | cat; " + H]);
+  });
+  test("time before an assignment: the assignment is the command and sticks", () => {
+    held(["N=a.js; time N=b.js; " + H, "N=a.js; time -p N=b.js; " + H, "N=a.js; ! N=b.js; " + H]);
+  });
+  test("assignments in arithmetic places: subscripts, offsets, [[ -eq ]], N[0]=, quoted $(( )), nested :=, case subject", () => {
+    held(["N=a.js; : ${x[N=b.js]}; " + H, "N=1; : ${x:N=2}; cat lib/hidden.js > $N.js; node 2.js", "N=1; [[ 1 -eq N=2 ]]; cat lib/hidden.js > $N.js; node 2.js",
+      "N=a.js; N[0]=b.js; " + H, 'N=1; : "$((N=2))"x; cat lib/hidden.js > $N.js; node 2.js', "N=; : ${x:-${N:=b.js}}; " + H, "N=; case ${N:=b.js} in *) ;; esac; " + H]);
+  });
+  test("builtins that set names: getopts OPTARG, read REPLY, declare -i/-n", () => {
+    held(["OPTARG=a.js; getopts x: o -x b.js; cat lib/hidden.js > $OPTARG; node b.js", "REPLY=a.js; read <<< b.js; cat lib/hidden.js > $REPLY; node b.js",
+      "N=a.js; declare -n N=M; M=b.js; " + H, "N=a.js; declare -i N=3; " + H.replace("b.js", "3")]);
+  });
+  test("a function body reads names when it is called, not where it is defined", () => {
+    held(["N=a.js; f() { cat lib/hidden.js > $N; }; N=b.js; f; node b.js"]);
+    held(["f() { N=b.js; cat lib/hidden.js > $N; node b.js; }; f"]);
+  });
+  test("a loop body runs again: a name it sets is not known at its start", () => {
+    held(["N=a.js; for i in 1 2; do cat lib/hidden.js > $N; N=b.js; done; node b.js", "N=a.js; i=0; while [ $i -lt 2 ]; do cat lib/hidden.js > $N; N=b.js; i=1; done; node b.js"]);
+    expect(classes("for f in a b; do cp x y/$f; done")).toEqual([]);
+  });
+  test("CFLAGS=-B~+/bin and -fplugin=~+/p.so name a place in the package", () => {
+    expect(classes("CFLAGS=-B~+/bin make")).not.toEqual([]);
+    expect(classes("CFLAGS=-fplugin=~+/p.so make")).not.toEqual([]);
+  });
+});
+
+describe("shell classes: prefix words, quoted names and loop name sets", () => {
+  const H = "cat lib/hidden.js > $N; node b.js";
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("R1: a function body that runs a name set outside it holds", () => {
+    held(["N=a.js; f() { node $N; }; cat lib/hidden.js > b.js; N=b.js; f", 'N=a.js; f() { node "$N"; }; cat lib/hidden.js > b.js; N=b.js; f',
+      "N=a.js; function f { node $N; }; cat lib/hidden.js > b.js; N=b.js; f", "N=a.js; f() { node $N/x.js; }; N=sub; cat lib/hidden.js > sub/x.js; f",
+      "N=a.js; f() { node $N; }; cat lib/hidden.js > a.js; f", "N=a.js; f() { node $N; }; N=lib/hidden.js; f", "f() { node $N; }; cat lib/hidden.js > b.js; N=b.js; f"]);
+  });
+  test("R2: a quoted or escaped time, ! or keyword is a command, not the reserved word", () => {
+    const w = (k: string) => `N=a.js; ${k} N=b.js; cat lib/hidden.js > $N; node a.js`;
+    held([w("\\time"), w("\\!"), w("'time'")]);
+  });
+  test("loop second pass sees printf -vN and let ++N / --N", () => {
+    held(["N=a.js; for i in 1 2; do cat lib/hidden.js > $N; printf -vN b.js; done; node b.js", "N=1; for i in 1 2; do cat lib/hidden.js > $N.js; let ++N; done; node 2.js",
+      "N=1; for i in 1 2; do cat lib/hidden.js > $N.js; let --N; done; node 0.js"]);
+  });
+  test("subscripts are arithmetic in a[N=2]=x, read, declare, ${!x[ ]} and a quoted [[ -eq ]] operand; declare -i names evaluate later assignments", () => {
+    held(["N=1; a[N=2]=x; cat lib/hidden.js > $N.js; node 2.js", "N=1; read a[N=2] <<< x; cat lib/hidden.js > $N.js; node 2.js", "N=1; declare a[N=2]=x; cat lib/hidden.js > $N.js; node 2.js",
+      "N=1; : ${!x[N=2]}; cat lib/hidden.js > $N.js; node 2.js", 'N=1; [[ 1 -eq "N = 2" ]]; cat lib/hidden.js > $N.js; node 2.js', "declare -i N; N=1+1; cat lib/hidden.js > $N.js; node 2.js"]);
+  });
+  test("a for header on the right of a pipe runs in a subshell", () => {
+    held(["N=a.js; echo | for N in b.js; do :; done; " + H.replace("b.js", "a.js"), "N=b.js; echo | for N in a.js; do :; done; " + H]);
+  });
+  test("CFLAGS=-fplugin=~/p.so and -specs=~/x: a ~ after a flag is literal", () => {
+    held(["CFLAGS=-fplugin=~/p.so make", "CFLAGS=-specs=~/x make"]);
+  });
+});
+
+describe("shell classes: time prefix words", () => {
+  const body = (p: string, run = "a.js") => `N=a.js; ${p} N=b.js; cat lib/hidden.js > $N; node ${run}`;
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("R3: time is first, -p directly after it, ! first or after time / time -p; anything else is a command", () => {
+    held([body("time time"), body("-p"), body("! -p"), body("! time"), body("time -p -p")]);
+    expect(classes(body("!"))).toEqual([]); // a ! prefix is the assignment in every shell: N is b.js
+    held([body("!", "b.js")]);
+  });
+  test("dash has no time keyword: N is not known after time / time -p", () => {
+    held([body("time"), body("time -p"), body("time ! !"), body("time", "b.js")]);
+  });
+  test("a quoted or escaped assignment name is a command, with or without time", () => {
+    held(['N=a.js; time "N"=b.js; cat lib/hidden.js > $N; node a.js', 'N=a.js; time \\N=b.js; cat lib/hidden.js > $N; node a.js', 'N=a.js; "N"=b.js; cat lib/hidden.js > $N; node a.js',
+      'N=a.js; time N="b.js"; cat lib/hidden.js > $N; node b.js']);
+  });
+});
