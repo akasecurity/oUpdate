@@ -10,7 +10,7 @@ import { benignBinary } from "./benign-binary.ts";
 import { diffSeq, renderLineDiff } from "./linediff.ts";
 import { ImageTree, LayerError, LIMITS, MergedIndex, type FsNode, type LayerStore } from "./oci-fs.ts";
 import { SOFT_PATTERNS, type FileMap } from "./prepass.ts";
-import { chunkDiff, hashedBinary, SCOPE_NOTE, type Scope } from "./review.ts";
+import { chunkDiff, DEFAULT_MAX_PARTS, hashedBinary, MAX_STAGES, partLimit, SCOPE_NOTE, type Scope } from "./review.ts";
 import type { ImageEvidence } from "./targets/broker/answer.ts";
 
 export interface LayerReview {
@@ -28,10 +28,13 @@ export interface LayerReview {
 
 export interface LayerBudget {
   chunkChars: number;
+  /** Parts per review stage. */
   maxParts: number;
+  /** Stages a diff may take before it is too large to read (default MAX_STAGES); 1 reads at most maxParts parts. */
+  maxStages?: number;
 }
 
-export const LAYER_BUDGET: LayerBudget = { chunkChars: 60_000, maxParts: 12 };
+export const LAYER_BUDGET: LayerBudget = { chunkChars: 60_000, maxParts: DEFAULT_MAX_PARTS, maxStages: MAX_STAGES };
 
 const enc = new TextEncoder();
 const dec = new TextDecoder("utf-8", { fatal: false });
@@ -690,21 +693,22 @@ export async function reviewLayers(a: { old: ImageLayers; new: ImageLayers; newE
   let scope: Scope = "all";
   let parts = cut(order);
   let narrowed: string | undefined;
-  if (parts.length > budget.maxParts) {
+  const limit = partLimit(budget.maxParts, budget.maxStages);
+  if (parts.length > limit) {
     const total = parts.length;
     const priority = order.filter((p) => ranks.get(p)! <= 4);
     scope = "priority";
     parts = cut(priority);
-    narrowed = `too large for model review: ${total} parts > ${budget.maxParts} (full diff); priority files only, ${order.length - priority.length} file(s) not reviewed; needs a human`;
-    if (parts.length > budget.maxParts) {
+    narrowed = `too large for model review: ${total} parts > ${limit} (full diff); priority files only, ${order.length - priority.length} file(s) not reviewed; needs a human`;
+    if (parts.length > limit) {
       const signal = order.filter((p) => ranks.get(p)! <= 1);
       scope = "signal";
       parts = cut(signal);
-      narrowed = `too large for model review: ${total} parts > ${budget.maxParts} (priority files alone); signal files only, ${order.length - signal.length} file(s) not reviewed; needs a human`;
-      if (parts.length > budget.maxParts) {
+      narrowed = `too large for model review: ${total} parts > ${limit} (priority files alone); signal files only, ${order.length - signal.length} file(s) not reviewed; needs a human`;
+      if (parts.length > limit) {
         scope = "ranked";
-        narrowed = `too large for model review: ${parts.length} parts > ${budget.maxParts} (signal files alone); top ${budget.maxParts} ranked parts only, never lands; needs a human`;
-        parts = parts.slice(0, budget.maxParts);
+        narrowed = `too large for model review: ${parts.length} parts > ${limit} (signal files alone); top ${limit} ranked parts only, never lands; needs a human`;
+        parts = parts.slice(0, limit);
       }
     }
   }

@@ -59,6 +59,7 @@ describe("synthetic evasion cases", () => {
       reviewer: { name: "stub", review: async (p) => (prompts.push(p), "APPROVE\nno attack indicators found") },
       cooldownDays: 7, now: new Date(), only: ["prepass", "reviewer"],
       loadArtifacts: async () => pair,
+      maxStages: 1,
     });
     expect(prompts.length).toBe(12);
     expect(prompts.join("")).toContain("=== lib/util/compat.js (added) ===");

@@ -118,7 +118,7 @@ describe("reviewLayers", () => {
   });
 
   test("a diff over the part budget narrows tier by tier, ending where it can never land", async () => {
-    const { r } = await review(OLD, grown("new-preload.tar", "new-setuid.tar", "new-cacert.tar"), { chunkChars: 40, maxParts: 1 });
+    const { r } = await review(OLD, grown("new-preload.tar", "new-setuid.tar", "new-cacert.tar"), { chunkChars: 40, maxParts: 1, maxStages: 1 });
     expect(r.narrowed).toMatch(/too large for model review.*never lands; needs a human/);
     expect(r.parts).toHaveLength(1);
     expect(r.parts[0]).toContain("top-ranked priority files only");
@@ -680,5 +680,23 @@ describe("round 10", () => {
     const b3 = { work: 1_999_000 };
     linkAliases(MergedIndex.fromListings([kids]), () => true, () => true, b3);
     expect(b3.work).toBeLessThan(2_000_100);
+  });
+});
+
+describe("reviewLayers staging", () => {
+  const three = ["new-preload.tar", "new-setuid.tar", "new-cacert.tar"] as const;
+
+  test("a diff over one stage is read in full when the stages allow it", async () => {
+    const { r } = await review(OLD, grown(...three), { chunkChars: 40, maxParts: 1, maxStages: 20 });
+    expect(r.narrowed).toBeUndefined();
+    expect(r.parts.length).toBeGreaterThan(1);
+    expect(r.parts.join("")).not.toContain("priority files only");
+  });
+
+  test("budget edge: exactly maxParts * maxStages parts is read in full, one fewer stage narrows", async () => {
+    const { r } = await review(OLD, grown(...three), { chunkChars: 40, maxParts: 1, maxStages: 20 });
+    const n = r.parts.length;
+    expect((await review(OLD, grown(...three), { chunkChars: 40, maxParts: 1, maxStages: n })).r.narrowed).toBeUndefined();
+    expect((await review(OLD, grown(...three), { chunkChars: 40, maxParts: 1, maxStages: n - 1 })).r.narrowed).toMatch(/^too large for model review: /);
   });
 });

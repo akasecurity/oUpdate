@@ -40,6 +40,16 @@ export interface Gate {
   run(): Promise<{ ok: boolean; detail: string }>;
 }
 
+/** Parts per review stage, and stages per review: a diff of up to DEFAULT_MAX_PARTS * MAX_STAGES parts is read in full; only a larger one is narrowed. */
+export const DEFAULT_MAX_PARTS = 12;
+export const MAX_STAGES = 6;
+
+/** The most parts a review reads in full. A missing, non-finite or sub-1 count falls back to the default, so a bad value never switches narrowing off. */
+export function partLimit(maxParts?: number, maxStages?: number): number {
+  const ok = (n: number | undefined, d: number) => (n !== undefined && Number.isFinite(n) && n >= 1 ? Math.floor(n) : d);
+  return ok(maxParts, DEFAULT_MAX_PARTS) * ok(maxStages, MAX_STAGES);
+}
+
 export interface ReviewInput {
   eco: Ecosystem;
   name: string;
@@ -56,8 +66,10 @@ export interface ReviewInput {
   loadArtifacts: () => Promise<{ old: FileMap; new: FileMap }>;
   only?: LayerName[];
   chunkChars?: number;
-  /** Diffs needing more model calls than this are held for a human (default 12). */
+  /** Parts of one review stage (default DEFAULT_MAX_PARTS). */
   maxParts?: number;
+  /** Stages of maxParts parts a diff may take; a diff over maxParts * maxStages parts is narrowed and held for a human (default MAX_STAGES). 1 gives a single stage. */
+  maxStages?: number;
 }
 
 export interface ReviewResult {
@@ -2247,7 +2259,8 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
     else if (!artifacts || !pre) layers.push({ layer: "reviewer", verdict: "error", detail: artifactError ?? "no artifacts" });
     else {
       const cap = input.chunkChars ?? 60_000;
-      const maxParts = input.maxParts ?? 12;
+      // A diff over one stage is read in full, stage by stage, up to this many parts; only a larger one is narrowed.
+      const limit = partLimit(input.maxParts, input.maxStages);
       const { entries, fresh, gained, linked } = entryView(artifacts.old, artifacts.new);
       const rejected = parserRejected(artifacts.old, artifacts.new);
       const reviewable = [...new Set([...pre.added, ...pre.changed, ...fresh, ...gained, ...linked])];
@@ -2269,26 +2282,28 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       let note = "";
       let overPriority = "";
       let overFull = "";
-      if (chunks.length > maxParts) {
+      let rankedTotal = 0;
+      if (chunks.length > limit) {
         const keep = priorityPaths(pre);
-        if (leftOut(keep)) overFull = `too large for model review: ${chunks.length} parts > ${maxParts} (full diff)`;
+        if (leftOut(keep)) overFull = `too large for model review: ${chunks.length} parts > ${limit} (full diff)`;
         chunks = chunkDiff(artifacts.old, artifacts.new, cap, keep, false, signalled);
         scope = "priority";
         note = `; priority files only, ${leftOut(keep)} lower-priority file(s) not reviewed`;
-        if (chunks.length > maxParts) {
-          overPriority = `too large for model review: ${chunks.length} parts > ${maxParts} (priority files alone)`;
+        if (chunks.length > limit) {
+          overPriority = `too large for model review: ${chunks.length} parts > ${limit} (priority files alone)`;
           const sig = signalPaths(pre);
           chunks = sig.size ? chunkDiff(artifacts.old, artifacts.new, cap, sig, true, signalled) : [];
           scope = "signal";
           note = `${leftOut(sig)} file(s) not reviewed`;
-          if (chunks.length > maxParts) {
+          if (chunks.length > limit) {
             // Still over: review the top-ranked parts. The rest is never read, so this tier can stop, never land.
             const ranked = chunkDiff(artifacts.old, artifacts.new, cap, rankPriorityPaths(pre, scanHits), true, signalled);
-            chunks = ranked.slice(0, maxParts);
+            rankedTotal = ranked.length;
+            chunks = ranked.slice(0, limit);
             const read = new Set([...chunks.join("").matchAll(/^=== (.+) \((?:added|removed|changed|loaded by code|now loaded by package.json, unchanged|now loaded by changed code, unchanged|target of link .+)\) ===$/gm)].map((m) => m[1]!));
             scope = "ranked";
-            overPriority = `too large for model review: ${ranked.length} parts > ${maxParts} (signal files alone)`;
-            note = `${ranked.length - maxParts} parts not reviewed, ${leftOut(read)} file(s) not reviewed`;
+            overPriority = `too large for model review: ${ranked.length} parts > ${limit} (signal files alone)`;
+            note = `${ranked.length - limit} parts not reviewed, ${leftOut(read)} file(s) not reviewed`;
           }
         }
       }
@@ -2299,21 +2314,31 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: 0 parts to review; ${pre.added.length + pre.changed.length + pre.removed.length} file(s) added, changed or removed${note}; needs a human` });
       else try {
         const texts: string[] = [];
-        for (let i = 0; i < chunks.length; i++) texts.push(await input.reviewer.review(reviewPrompt(input, pre, chunks[i]!, i, chunks.length, scope, prepareChangedInert(artifacts.old, artifacts.new, pre) ? PREPARE_NOTE : "")));
+        for (let i = 0; i < chunks.length; i++) {
+          texts.push(await input.reviewer.review(reviewPrompt(input, pre, chunks[i]!, i, chunks.length, scope, prepareChangedInert(artifacts.old, artifacts.new, pre) ? PREPARE_NOTE : "")));
+          // The first FLAG ends the review: the stop is certain and only the first FLAG gives the reason, so the later parts are not paid for.
+          if (parseVerdict(texts[i]!) === "FLAG") break;
+        }
         result.reviewerText = texts;
+        const unread = chunks.length - texts.length;
+        if (scope === "ranked" && unread) {
+          const seen = new Set([...texts.length ? chunks.slice(0, texts.length).join("").matchAll(/^=== (.+) \((?:added|removed|changed|loaded by code|now loaded by package.json, unchanged|now loaded by changed code, unchanged|target of link .+)\) ===$/gm) : []].map((m) => m[1]!));
+          note = `${rankedTotal - texts.length} parts not reviewed, ${leftOut(seen)} file(s) not reviewed`;
+        }
+        const readNote = unread ? `; ${texts.length} of ${chunks.length} part(s) read, the first FLAG ended the review` : "";
         const flagged = texts.map((t, i) => [parseVerdict(t), i] as const).filter(([v]) => v === "FLAG");
         const parts = flagged.map(([, i]) => i + 1).join(",");
         if (scope === "ranked")
           layers.push(
             flagged.length
-              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on ranked part(s) ${parts} of ${chunks.length} reviewed; ${note}` }
+              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on ranked part(s) ${parts} of ${texts.length} reviewed; ${note}` }
               : { layer: "reviewer", verdict: "stop", detail: `${overPriority}; ${input.reviewer.name} APPROVE on the top ${chunks.length} ranked part(s); ${note}; needs a human` },
           );
         else if (scope === "signal")
           // A narrowed review never lands an update: an APPROVE leaves the unread files for a human.
           layers.push(
             flagged.length
-              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on signal part(s) ${parts} of ${chunks.length}; ${note}` }
+              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on signal part(s) ${parts} of ${chunks.length}${readNote}; ${note}` }
               : { layer: "reviewer", verdict: "stop", detail: `${overPriority}; ${input.reviewer.name} APPROVE on the signal files (${chunks.length} part(s)), ${note}; needs a human` },
           );
         else if (scope === "priority" && overFull && !flagged.length)
@@ -2329,7 +2354,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         else
           layers.push(
             flagged.length
-              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on part(s) ${parts} of ${chunks.length}${note}${flagReason(texts[flagged[0]![1]]!)}` }
+              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on part(s) ${parts} of ${chunks.length}${readNote}${note}${flagReason(texts[flagged[0]![1]]!)}` }
               : { layer: "reviewer", verdict: "pass", detail: `${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}` },
           );
       } catch (e) {
