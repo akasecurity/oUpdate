@@ -1255,3 +1255,131 @@ describe("shell classes: time prefix words", () => {
       'N=a.js; time N="b.js"; cat lib/hidden.js > $N; node b.js']);
   });
 });
+
+describe("shell classes: eval in a loop and namerefs", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("a loop second pass sees the names eval sets", () => {
+    held(["N=a.js; for i in 1 2; do cat lib/hidden.js > $N; eval N=b.js; done; node b.js", "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; eval 'N=b.js'; done; node b.js",
+      'N=a.js; for i in 1 2; do cat lib/hidden.js > $N; eval "N=b.js"; done; node b.js', "N=a.js; while :; do cat lib/hidden.js > $N; eval N=b.js; break; done; node b.js",
+      "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; eval 'eval N=b.js'; done; node b.js", "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; eval 'read N <<< b.js'; done; node b.js"]);
+    expect(classes("for i in 1 2; do eval echo hi; done")).toEqual([]);
+  });
+  test("a write through a nameref writes its target (declare, typeset, local -n; read, for, +=, no target yet)", () => {
+    held(["M=a.js; declare -n N=M; N=b.js; cat lib/hidden.js > $M; node b.js", "M=a.js; typeset -n N=M; N=b.js; cat lib/hidden.js > $M; node b.js",
+      "M=a.js; f() { local -n N=M; N=b.js; }; f; cat lib/hidden.js > $M; node b.js", "M=a.js; declare -n N=M; read N <<< b.js; cat lib/hidden.js > $M; node b.js",
+      "M=a.js; declare -n N=M; for N in b.js; do :; done; cat lib/hidden.js > $M; node b.js", "M=a.js; declare -n N=M; N+=b.js; cat lib/hidden.js > $M; node a.jsb.js",
+      "M=a.js; declare -n N; N=M; N=b.js; cat lib/hidden.js > $M; node b.js", "M=b.js; declare -n N=M; cat lib/hidden.js > $N; node b.js"]);
+  });
+});
+
+describe("shell classes: over-holds", () => {
+  test("for and select set only their variable; the words after in are not names it sets", () => {
+    for (const c of ["a=x.js; for f in a b; do :; done; cat lib/hidden.js > $a; node z.js", "b=z.js; for i in a b; do :; done; cat x > $b; node y.js",
+      "a=1; select s in a b; do break; done; cat lib/hidden.js > $a.js; node z.js"]) expect(classes(c), c).toEqual([]);
+  });
+  test("export -n removes the export attribute; it is not a nameref and the name stays known", () => {
+    for (const c of ["N=a.js; export -n N; N=b.js; cat lib/x.js > $N; node a.js", "N=a.js; export -n N; cat lib/x.js > $N; node b.js"]) expect(classes(c), c).toEqual([]);
+  });
+  test("the loop variable itself is still unknown on the second pass", () => {
+    expect(classes("N=a.js; for N in b.js c.js; do cat lib/hidden.js > $N; done; node b.js")).not.toEqual([]);
+  });
+});
+
+describe("shell classes: namerefs in a loop, eval behind wrappers and --, alias bodies", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("a nameref declared in a loop body links its name to its target on the second pass", () => {
+    held(["M=a.js; for i in 1 2; do cat lib/hidden.js > $M; declare -n N=M; N=b.js; done; node b.js", "M=a.js; for i in 1 2; do cat lib/hidden.js > $M; typeset -n N=M; N=b.js; done; node b.js"]);
+  });
+  test("command, builtin and time in front of a builtin that sets a name, in a loop", () => {
+    held(["N=a.js; for i in 1 2; do cat lib/hidden.js > $N; command eval N=b.js; done; node b.js", "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; builtin eval N=b.js; done; node b.js",
+      "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; time eval N=b.js; done; node b.js", "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; command read N <<< b.js; done; node b.js",
+      "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; command export N=b.js; done; node b.js", "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; command -p eval N=b.js; done; node b.js"]);
+  });
+  test("eval -- takes the text after the --", () => {
+    held(["N=a.js; eval -- N=b.js; cat lib/hidden.js > $N; node b.js", "N=a.js; eval -- 'N=b.js'; cat lib/hidden.js > $N; node b.js",
+      "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; eval -- 'N=b.js'; done; node b.js"]);
+  });
+  test("an alias body sees declare -i and -n names", () => {
+    held(["N=a.js; alias f='declare -i N'; f; N=1+1; cat lib/hidden.js > $N.js; node 2.js", "M=a.js; alias f='declare -n N=M'; f; N=b.js; cat lib/hidden.js > $M; node b.js"]);
+  });
+});
+
+describe("shell classes: nameref loop variables, wrapped and aliased declarations, export -n in a loop", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("a for whose variable is a nameref repoints it at each listed name", () => {
+    held(["X=a.js; declare -n N=M; for N in X; do N=b.js; done; cat lib/hidden.js > $X; node b.js", "X=a.js; declare -n N=M; for i in 1 2; do for N in X; do N=b.js; done; done; cat lib/hidden.js > $X; node b.js"]);
+  });
+  test("a nameref declared behind builtin, command, eval or an alias inside a loop is linked", () => {
+    held(["M=a.js; for i in 1 2; do cat lib/hidden.js > $M; builtin declare -n N=M; N=b.js; done; node b.js", "M=a.js; for i in 1 2; do cat lib/hidden.js > $M; command declare -n N=M; N=b.js; done; node b.js",
+      "M=a.js; for i in 1 2; do cat lib/hidden.js > $M; eval 'declare -n N=M'; N=b.js; done; node b.js", "M=a.js; alias d='declare -n'; for i in 1 2; do cat lib/hidden.js > $M; d N=M; N=b.js; done; node b.js"]);
+  });
+  test("a nameref with no target set in a function forgets the names it may reach, also when the function is called later", () => {
+    held(["M=a.js; f() { declare -n N; N=M; N=b.js; }; f; cat lib/hidden.js > $M; node b.js", "f() { declare -n N; N=M; N=b.js; }; M=a.js; f; cat lib/hidden.js > $M; node b.js"]);
+  });
+  test("export -n in a loop is not a nameref: the names stay known", () => {
+    expect(classes("N=a.js; X=z.js; for i in 1 2; do export -n N; done; cat lib/x.js > $X; node b.js")).toEqual([]);
+  });
+});
+
+describe("shell classes: a function called in a loop sets its names on every pass", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("export -n NAME=value, export and plain assignments in a function body called in a loop", () => {
+    held(["function f { export -n N=b.js; }; N=a.js; for i in 1 2; do cat lib/hidden.js > ${N:-b.js}; f; done; node b.js", "function f { export -n N''=b.js; }; N=a.js; for i in 1 2; do cat lib/hidden.js > ${N:-b.js}; f; done; node b.js",
+      "f() { export -n N''=b.js; }; N=a.js; for i in 1 2; do cat lib/hidden.js > \"$N\"; f; done; node b.js", "f() { export N=b.js; }; N=a.js; for i in 1 2; do cat lib/hidden.js > \"$N\"; f; done; node b.js",
+      "f() { N=b.js; }; N=a.js; for i in 1 2; do cat lib/hidden.js > $N; f; done; node b.js"]);
+  });
+});
+
+describe("shell classes: eval -- is read as bash and as dash read it", () => {
+  const words = ["N=b.js", "'N=b.js'", '"N=b.js"', "N\\=b.js", "N''=b.js", 'N""=b.js', "'N'=b.js", '"N"=b.js', "N=b.js;", "N=b.js ; true", "N=\\b.js", "N=b'.js'", "N=b.js && :", "N=a.js N=b.js", 'N="b.js"', "export N=b.js", "read N <<< b.js", "N+=b.js", "X=1 N=b.js"];
+  const wrap = (e: string, x: string) => [`N=a.js; ${e} ${x}; cat lib/hidden.js > $N; node b.js`, `N=a.js; for i in 1 2; do cat lib/hidden.js > $N; ${e} ${x}; done; node b.js`,
+    `N=a.js; f() { ${e} ${x}; }; for i in 1 2; do cat lib/hidden.js > $N; f; done; node b.js`, `N=a.js; ${e} ${x} ; true | cat lib/hidden.js > $N; node b.js`];
+  test("whatever eval X holds, eval -- X holds too (bash skips the --, dash does not: either may be the shell)", () => {
+    for (const x of words) {
+      const a = wrap("eval", x), b = wrap("eval --", x);
+      for (let i = 0; i < a.length; i++) if (classes(a[i]!).length > 0) expect(classes(b[i]!).length > 0, b[i]).toBe(true);
+    }
+  });
+  test("dash runs eval -- N=b.js as a command named --: N stays a.js, so the file node runs is the one written", () => {
+    const tails = ["cat lib/hidden.js > ${N:-b.js}; node a.js", 'cat lib/hidden.js > "$N"; node a.js'];
+    const heads = ["N=a.js; eval -- \\N=b.js", "N=a.js; eval -- 'N'=b.js", 'N=a.js; e""val -- N=b.js', 'N=a.js; { eval -- N""=b.js; }', 'N=a.js; { e""val -- N=b.js; }',
+      "N=a.js; eval 'eval -- \\N=b.js'", "N=a.js; eval 'e'\\'''\\''val -- N=b.js'", "N=a.js; eval 'eva\\l -- N=b.js'", "N=a.js; eval -- N=b.js"];
+    for (const h of heads) for (const t of tails) expect(classes(`${h}; ${t}`), `${h}; ${t}`).not.toEqual([]);
+    // without the -- both shells set N: the file written is b.js and node runs a.js
+    expect(classes('N=a.js; eval N=b.js; cat lib/hidden.js > "$N"; node a.js')).toEqual([]);
+  });
+});
+
+describe("shell classes: a nameref to an unnamed target, and an eval with a syntax error in a loop", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("a write through a nameref whose target the body cannot name leaves no name's default standing", () => {
+    held(["declare -n R; R=$1; R=b.js; cat lib/hidden.js > ${N:-a.js}; node b.js", "f() { declare -n R; R=$1; R=b.js; }; f N; cat lib/hidden.js > ${N:-a.js}; node b.js",
+      "N=a.js; declare -n R; R=$1; R=b.js; cat lib/hidden.js > ${N:-a.js}; node b.js", "f() { declare -n R; R=$1; R=b.js; }; f; cat lib/hidden.js > ${N:-a.js}; node b.js"]);
+  });
+  test("an eval whose text fails to parse in a loop: the lines before the error still run on every pass", () => {
+    held(["N=a.js; for i in 1 2; do cat lib/hidden.js > $N; eval 'N=b.js\n('; done; node b.js"]);
+  });
+});
+
+describe("shell classes: a for over a nameref declared later in the loop body", () => {
+  test("the nameref is linked before the for is read, wherever in the body it is declared", () => {
+    for (const c of ["X=a.js; for i in 1 2 3; do cat lib/hidden.js > $X; for N in X; do N=b.js; done; declare -n N=M; done; node b.js", "X=a.js; for i in 1 2; do cat lib/hidden.js > $X; declare -n N=M; for N in X; do N=b.js; done; done; node b.js"]) expect(classes(c), c).not.toEqual([]);
+  });
+  test("a nameref whose target is built by a command substitution leaves no name's default standing", () => {
+    for (const c of ["declare -n R; R=$(printf N); R=b.js; cat lib/hidden.js > ${N:-a.js}; node b.js", "f() { declare -n R; R=$(printf $1); R=b.js; }; f N; cat lib/hidden.js > ${N:-a.js}; node b.js"]) expect(classes(c), c).not.toEqual([]);
+  });
+});
+
+describe("shell classes: a nameref to an unnamed target and the places a name is read", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("after a write through it, $HOME, $TMPDIR, a /dev/null default and an unset name in a run path may all name a package file", () => {
+    held(["declare -n R; R=$1; R=.; cat lib/hidden.js > $HOME/b.js; node b.js", "declare -n R; R=$1; R=.; cat lib/hidden.js > $TMPDIR/b.js; node b.js",
+      "declare -n R; R=$1; R=b.js; cat lib/hidden.js > ${LOG:-/dev/null}; node b.js", "declare -n R; R=$1; R=.; cat lib/hidden.js > ./b.js; node $P/b.js"]);
+  });
+  test("without such a write the same places stay outside the package", () => {
+    for (const c of ["declare -n R=M; M=a.js; cat lib/hidden.js > $HOME/b.js; node a.js", "cat lib/hidden.js > ${LOG:-/dev/null}; node b.js"]) expect(classes(c), c).toEqual([]);
+  });
+  test("for N with no in runs over the arguments: a nameref loop variable may then point anywhere", () => {
+    held(["declare -n N=M; for N; do N=b.js; done; cat lib/hidden.js > ${X:-a.js}; node b.js", "declare -n N=M; for i in 1 2; do for N; do N=b.js; done; done; cat lib/hidden.js > ${X:-a.js}; node b.js"]);
+  });
+});
