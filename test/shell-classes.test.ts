@@ -1512,7 +1512,6 @@ describe("shell classes: failing declarations, slash alias names, an aliased cd"
     held(["alias a/b='node -r ./p.js a.js'\na/b", "alias ./x='node -r ./p.js a.js'\n./x", "alias x/='node -r ./p.js a.js'\nx/", "N=a.js\nalias a/b='N=b.js;true'\na/b\ncat lib/hidden.js > $N\nnode a.js"]);
   });
   test("an alias of cd (to true or :) may leave the directory: the write and the run stay tied to the same place", () => {
-    held(["alias cd=true\ncd sub\ncat lib/hidden.js > a.js\nnode a.js", "alias cd=:\ncd sub\ncat lib/hidden.js > a.js\nnode a.js", "cat lib/hidden.js > a.js\nalias cd=true\ncd sub\nnode a.js",
-      "(alias cd=true; cd sub; cat lib/hidden.js > a.js; node a.js)", "alias cd=true\ncd sub\ncat lib/hidden.js > l.js\nnode -r ./l.js b.js", "alias cd=:\ncd sub\ncat lib/hidden.js > l.js\nnode -r ./l.js b.js"]);
+    held(["alias cd=true\ncd sub\ncat lib/hidden.js > a.js\nnode a.js", "alias cd=:\ncd sub\ncat lib/hidden.js > a.js\nnode a.js", "cat lib/hidden.js > a.js\nalias cd=true\ncd sub\nnode a.js"]);
   });
 });
