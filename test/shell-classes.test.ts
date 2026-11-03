@@ -1383,3 +1383,39 @@ describe("shell classes: a nameref to an unnamed target and the places a name is
     held(["declare -n N=M; for N; do N=b.js; done; cat lib/hidden.js > ${X:-a.js}; node b.js", "declare -n N=M; for i in 1 2; do for N; do N=b.js; done; done; cat lib/hidden.js > ${X:-a.js}; node b.js"]);
   });
 });
+
+describe("shell classes: aliases in a loop body", () => {
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("an alias that is an assignment, a chain of aliases, a trailing-space alias and a wrapped alias set their names on every pass", () => {
+    held(["M=a.js; alias e='M=b.js'; for i in 1 2; do cat lib/hidden.js > $M; e; done; node b.js", "M=a.js; alias a=b; alias b=eval; for i in 1 2; do cat lib/hidden.js > $M; a M=b.js; done; node b.js",
+      "M=a.js; alias c='command '; for i in 1 2; do cat lib/hidden.js > $M; c eval M=b.js; done; node b.js", "M=a.js; alias c='command '; for i in 1 2; do cat lib/hidden.js > $M; c declare -n N=M; N=b.js; done; node b.js",
+      "M=a.js; alias e='command eval'; for i in 1 2; do cat lib/hidden.js > $M; e M=b.js; done; node b.js", "M=a.js; alias d=\"declare -n 'N=M'\"; for i in 1 2; do cat lib/hidden.js > $M; d; N=b.js; done; node b.js"]);
+  });
+  test("an alias that names itself ends", () => {
+    expect(classes("alias a=a; for i in 1 2; do a; done")).toEqual([]);
+  });
+});
+
+describe("shell classes: an alias is a whole script in a loop body", () => {
+  const L = (a: string, body = "e") => `M=a.js; alias e='${a}'; for i in 1 2; do cat lib/hidden.js > $M; ${body}; done; node b.js`;
+  test("an alias with a list, && or a group sets the names its text sets", () => {
+    for (const c of [L("true; M=b.js"), L("true;M=b.js"), L("true && M=b.js"), L("{ M=b.js; }"), L("true; read M"), L("M=b.js; true"),
+      "M=a.js; alias e='true; declare -n N=M'; for i in 1 2; do cat lib/hidden.js > $M; e; N=b.js; done; node b.js"]) expect(classes(c), c).not.toEqual([]);
+  });
+  test("an alias named like a builtin does not hide the real builtin after command or builtin", () => {
+    for (const w of ["command", "builtin"]) expect(classes(`M=a.js; alias eval=true; for i in 1 2; do cat lib/hidden.js > $M; ${w} eval M=b.js; done; node b.js`), w).not.toEqual([]);
+  });
+  test("an alias ending in a blank lets the next word be an alias: its text is part of the script", () => {
+    expect(classes("M=a.js\nalias a='echo '\nalias b='; M=b.js'\nfor i in 1 2; do cat lib/hidden.js > $M; a b; done\nnode b.js")).not.toEqual([]);
+  });
+  test("a chain of aliases ending in a blank has no length limit", () => {
+    for (const [w, n, last, body] of [["s", 9, "t", "echo "], ["s", 30, "t", "echo "], ["a", 12, "e", "command "]] as const) {
+      const c = `M=a.js\nalias ${w}='${body}'\nalias ${last}='true; M=b.js'\nfor i in 1 2; do cat lib/hidden.js > $M; ${Array(n).fill(w).join(" ")} ${last}; done\nnode b.js`;
+      expect(classes(c), `${w} x${n}`).not.toEqual([]);
+    }
+  });
+  test("an argument that held a # or a ; in the script stays one quoted word after the alias text", () => {
+    expect(classes("M=a.js; alias d=declare; for i in 1 2; do cat lib/hidden.js > $M; d '#' -n N=M; N=b.js; done; node b.js")).not.toEqual([]);
+    expect(classes("alias d=ls; for i in 1 2; do d 'a b' '#x'; done")).toEqual([]);
+  });
+});

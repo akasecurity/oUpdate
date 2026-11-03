@@ -799,31 +799,48 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     const v = m[2] || !keep ? undefined : expand(m[3]!); // N+=x is not tracked; neither is an assignment that may not run
     if (v === undefined) forget(m[1]!); else { vars.set(m[1]!, v); markOwn(m[1]!); }
   };
-  // The builtin a stage runs and its arguments: command, builtin and time (and their options) are skipped, and an alias expands to its first word.
+  // The builtin a stage runs and its arguments: command, builtin and time (and their options) are skipped.
   const builtinOf = (s: Stage): { h: string; args: string[] } => {
+    const t = s.words.map((w) => w.text);
     let at = 0;
-    while (at < s.words.length && ["command", "builtin", "time"].includes(s.words[at]!.text)) { at++; while (at < s.words.length && s.words[at]!.text.startsWith("-")) at++; }
-    let h = s.words[at]?.text ?? "";
-    let args = s.words.slice(at + 1).map((w) => w.text);
-    const al = aliases.get(h);
-    if (al !== undefined) { const t = al.trim().split(/\s+/); h = t[0] ?? h; args = [...t.slice(1), ...args]; }
-    return { h, args };
+    while (at < t.length && ["command", "builtin", "time"].includes(t[at]!)) { at++; while (at < t.length && t[at]!.startsWith("-")) at++; }
+    return { h: t[at] ?? "", args: t.slice(at + 1) };
   };
-  // The NAME=TARGET words of the nameref links a stage makes: declare/typeset/local -n, a for whose variable is a nameref (it repoints it at each word), and eval of either.
-  const refLinks = (s: Stage, d = depth + 1): string[] => {
+  // A stage whose command word is an alias runs the alias text, a whole script, with the other words after it. Both readings count: the alias read
+  // as written (an alias named eval does not expand after command, and an alias of true may hide the real builtin) and the text it stands for.
+  // undefined: no alias; null: its text does not parse.
+  const aliasStages = (s: Stage, d: number, used: Set<string>): { stages: Stage[] | null; text: string; name: string } | undefined => {
     const { h, args } = builtinOf(s);
-    if ((h === "declare" || h === "typeset" || h === "local") && args.some((a) => /^-[A-Za-z]*n/.test(a))) return args.filter((a) => !a.startsWith("-"));
-    if (h === "for" && args[1] === "in" && args[0] && refs.has(args[0])) return args.slice(2).map((w) => `${args[0]}=${w}`);
-    if (h === "for" && args[0] && args[1] !== "in" && refs.has(args[0])) return [`${args[0]}=*`]; // for N: the positional parameters repoint a nameref anywhere
+    const al = aliases.get(h);
+    if (al === undefined || used.has(h) || d > MAX_DEPTH) return undefined;
+    // an alias text that ends in a blank lets the next word be an alias too, and so on down the chain
+    let text = al, rest = args;
+    while (/\s$/.test(text) && rest.length && aliases.has(rest[0]!)) { text += aliases.get(rest[0]!)!; rest = rest.slice(1); } // rest shrinks each step: the chain ends
+    // a word that held a quote, an operator or a # in the script keeps it quoted, so it is still one word
+    text = `${text} ${rest.map((a) => (/[\s#;&|<>()'"`\\]/.test(a) ? `'${a.replace(/'/g, "'\\''")}'` : a)).join(" ")}`;
+    try { return { stages: parse(text, d), text, name: h }; } catch (e) { if (!(e instanceof ParseFail)) throw e; return { stages: null, text, name: h }; }
+  };
+  // The NAME=TARGET words of the nameref links a stage makes: declare/typeset/local -n, a for whose variable is a nameref (it repoints it at each word), and eval or an alias of either.
+  const refLinks = (s: Stage, d = depth + 1, used = new Set<string>()): string[] => {
+    const out: string[] = [];
+    const al = aliasStages(s, d, used);
+    if (al?.stages) for (const o of al.stages) out.push(...refLinks(o, d + 1, new Set(used).add(al.name)));
+    const { h, args } = builtinOf(s);
+    if ((h === "declare" || h === "typeset" || h === "local") && args.some((a) => /^-[A-Za-z]*n/.test(a))) out.push(...args.filter((a) => !a.startsWith("-")));
+    if (h === "for" && args[1] === "in" && args[0] && refs.has(args[0])) out.push(...args.slice(2).map((w) => `${args[0]}=${w}`));
+    if (h === "for" && args[0] && args[1] !== "in" && refs.has(args[0])) out.push(`${args[0]}=*`); // for N: the positional parameters repoint a nameref anywhere
     if (h === "eval" && args.length && d < MAX_DEPTH) {
-      try { return parse((args[0] === "--" ? args.slice(1) : args).join(" "), d).flatMap((o) => refLinks(o, d + 1)); } catch (e) { if (!(e instanceof ParseFail)) throw e; }
+      try { for (const o of parse((args[0] === "--" ? args.slice(1) : args).join(" "), d)) out.push(...refLinks(o, d + 1, used)); } catch (e) { if (!(e instanceof ParseFail)) throw e; }
     }
-    return [];
+    return out;
   };
   // The names a stage may set: its assignments, arithmetic, and the builtins that set a name.
-  const namesSet = (s: Stage, d = depth + 1): string[] => {
+  const namesSet = (s: Stage, d = depth + 1, used = new Set<string>()): string[] => {
     const out: string[] = [...s.clobber];
     for (const a of s.assigns) { const m = /^([A-Za-z_]\w*)/.exec(a); if (m) out.push(m[1]!); }
+    const al = aliasStages(s, d, used);
+    if (al?.stages) for (const o of al.stages) out.push(...namesSet(o, d + 1, new Set(used).add(al.name)));
+    else if (al) for (const n of al.text.match(/[A-Za-z_]\w*/g) ?? []) out.push(n); // an alias text that does not parse: every name in it may be set
     const { h, args } = builtinOf(s);
     if (DECL.has(h)) for (const a of args) { if (!a.startsWith("-")) out.push(a.split("=")[0]!.replace(/\[.*$/, "")); }
     else if (h === "read" || h === "mapfile" || h === "readarray" || h === "getopts" || h === "printf") for (const a of args) { if (/^[A-Za-z_]\w*$/.test(a)) out.push(a); const v = /^-v([A-Za-z_]\w*)/.exec(a); if (v) out.push(v[1]!); }
@@ -832,7 +849,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (h === "eval" && args.length) { // the text eval runs sets names on every pass of a loop
       if (args[0] === "--") for (const n of args.slice(1).join(" ").match(/[A-Za-z_]\w*/g) ?? []) out.push(n); // dash's eval does not skip --
       const text = (args[0] === "--" ? args.slice(1) : args).join(" ");
-      try { if (d <= MAX_DEPTH) for (const o of parse(text, d)) out.push(...namesSet(o, d + 1)); } catch (e) { if (!(e instanceof ParseFail)) throw e; for (const n of text.match(/[A-Za-z_]\w*/g) ?? []) out.push(n); } // a shell runs the lines before a syntax error: every name in the text may be set
+      try { if (d <= MAX_DEPTH) for (const o of parse(text, d)) out.push(...namesSet(o, d + 1, used)); } catch (e) { if (!(e instanceof ParseFail)) throw e; for (const n of text.match(/[A-Za-z_]\w*/g) ?? []) out.push(n); } // a shell runs the lines before a syntax error: every name in the text may be set
     }
     if (h === "getopts") out.push("OPTARG", "OPTIND");
     if (h === "read") out.push("REPLY");
