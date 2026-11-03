@@ -682,7 +682,7 @@ export function flagBody(text: string): Hit[] {
  * down the chain, but only an unquoted word is looked up as an alias. A word that held a quote, an operator or a # keeps it quoted so it is
  * still one word: single quotes for a word without an expansion, double quotes (the $ left live) for a word with one.
  */
-const ALIAS_DEF = /^([^\s'"`\/$\\=;&|<>()]+)=([\s\S]*)$/; // NAME=text: a shell accepts any name but blanks, quotes, / $ \ = and metacharacters
+const ALIAS_DEF = /^([^\s'"`$\\=;&|<>()]+)=([\s\S]*)$/; // NAME=text: a shell accepts any name but blanks, quotes, $ \ = and metacharacters (dash takes a/b, ./x and x/)
 
 function aliasScript(aliases: Map<string, string>, name: string, args: Word[], active: (n: string) => boolean): string {
   let text = aliases.get(name)!, rest = args;
@@ -869,18 +869,19 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (h === "eval" && args.length) { // the text eval runs sets names on every pass of a loop
       if (args[0] === "--") for (const n of args.slice(1).join(" ").match(/[A-Za-z_]\w*/g) ?? []) out.push(n); // dash's eval does not skip --
       const text = (args[0] === "--" ? args.slice(1) : args).join(" ");
-      try { if (d <= MAX_DEPTH) for (const o of parse(text, d)) out.push(...namesSet(o, d + 1, used, true)); } catch (e) { if (!(e instanceof ParseFail)) throw e; for (const n of text.match(/[A-Za-z_]\w*/g) ?? []) out.push(n); } // a shell runs the lines before a syntax error: every name in the text may be set
+      try { // one parse: a second one would spend the budget again, and a failure there must also fall back to every name
+        if (d <= MAX_DEPTH) {
+          const os = parse(text, d), defd = new Set<string>();
+          for (const o of os) out.push(...namesSet(o, d + 1, used, true));
+          // a use of an alias the text defines: its text may end in ; or && so that an NAME=value argument is an assignment
+          for (const o of os) { const b = builtinOf(o); if (b.h === "alias") for (const a of b.args) { const m = ALIAS_DEF.exec(a); if (m) defd.add(m[1]!); } }
+          if (defd.size) for (const o of os) { const b = builtinOf(o); if (defd.has(b.h)) for (const a of b.args) { const m = /^([A-Za-z_]\w*)\+?=/.exec(a); if (m) out.push(m[1]!); } }
+        }
+      } catch (e) { if (!(e instanceof ParseFail)) throw e; for (const n of text.match(/[A-Za-z_]\w*/g) ?? []) out.push(n); } // a shell runs the lines before a syntax error: every name in the text may be set
     }
     if (h === "alias") for (const a of args) { const m = ALIAS_DEF.exec(a); if (m) for (const n of m[2]!.match(/[A-Za-z_]\w*/g) ?? []) out.push(n); } // an alias defined here may run later in the same body (in an eval text it is not in the map yet): the names its text names may be set
     if (h === "getopts") out.push("OPTARG", "OPTIND");
     if (h === "read") out.push("REPLY");
-    if (h === "eval" && args.length && d <= MAX_DEPTH) { // a use of an alias the text defines: its text may end in ; or && so that an NAME=value argument is an assignment
-      try {
-        const os = parse((args[0] === "--" ? args.slice(1) : args).join(" "), d), defd = new Set<string>();
-        for (const o of os) { const b = builtinOf(o); if (b.h === "alias") for (const a of b.args) { const m = ALIAS_DEF.exec(a); if (m) defd.add(m[1]!); } }
-        if (defd.size) for (const o of os) { const b = builtinOf(o); if (defd.has(b.h)) for (const a of b.args) { const m = /^([A-Za-z_]\w*)\+?=/.exec(a); if (m) out.push(m[1]!); } }
-      } catch (e) { if (!(e instanceof ParseFail)) throw e; }
-    }
     const called = fnVars.get(h); // a function called in the body sets the names its body sets, on every pass
     if (called) for (const n of called) out.push(n);
     return out;
@@ -986,14 +987,16 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (b === "alias") { for (const a of args) { const m = ALIAS_DEF.exec(a.text); if (m) { aliases.set(m[1]!, m[2]!); aliasAt.set(m[1]!, st.unit); } } continue; }
     const called = fnVars.get(b); // calling a function runs its assignments: forget every name its body sets
     if (called) for (const n of called) { if (n === "*") { flags.wild = true; for (const k of [...vars.keys()]) forgetOne(k); } else forget(n); }
-    const al = activeAlias(b, st.unit) ? aliases.get(b) : undefined;
+    const ab = aliases.has(head.text) ? head.text : b; // the alias is named by the whole word (dash accepts a/b); an alias named like the base of a path over-holds
+    const al = activeAlias(ab, st.unit) ? aliases.get(ab) : undefined;
+    const declMaybe = (b === "local" && curFn === undefined) || b === "declare" || b === "typeset"; // local outside a function fails in sh and bash, declare and typeset fail in dash: the name keeps its old value
     const aliased = al !== undefined && head.plain && !head.q; // the alias may not expand (bash without expand_aliases): what the stage as written sets is then only maybe set
     if (aliased) { // the alias text is read without this alias (a shell does not expand it again)
-      const rest2 = new Map(aliases); rest2.delete(b);
-      const script = aliasScript(aliases, b, args, (n) => activeAlias(n, st.unit));
+      const rest2 = new Map(aliases); rest2.delete(ab);
+      const script = aliasScript(aliases, ab, args, (n) => activeAlias(n, st.unit));
       walk(script, depth + 1, hits, { cwd: cwd || stageCwd, written: copyTargets, vars: nestedVars, aliases: rest2, flags, fns: fnVars, fn: curFn, unk: nestedUnk, sub: inSub || st.cond || st.pipeOut || st.piped, ints: intVars, refs });
       // bash does not expand aliases in a script unless expand_aliases is on, and sh and dash do: the names the text sets are known on one reading only
-      try { for (const o of parse(script, depth + 1)) for (const n of namesSet(o, depth + 2, new Set([b]), true)) forget(n); } catch (e) { if (!(e instanceof ParseFail)) throw e; }
+      try { for (const o of parse(script, depth + 1)) for (const n of namesSet(o, depth + 2, new Set([ab]), true)) forget(n); } catch (e) { if (!(e instanceof ParseFail)) throw e; }
       // no continue: bash without expand_aliases runs the stage as written (alias node=true; node -r ./p.js runs the real node)
     }
     const stdin = (what: string) => { if (st.reads.length && !st.heredoc && st.reads.every((r) => r === "/dev/null")) return; if (!st.piped || st.heredoc || st.reads.length) hit(st.heredoc ? "heredoc" : "interp-stdin", `${what} reads its program from stdin`); };
@@ -1025,7 +1028,7 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       if ((lst.length ? lst : [{ text: "./x" }]).some((x) => badEnv(args[0]!.text + "=" + (expand(x.text) ?? x.text)))) envHit(); // for PATH in /usr/bin ./bin
       continue;
     }
-    if (DECL.has(b)) { for (const a of args) assign(a.text, !(aliased || st.cond || st.pipeOut || st.piped || inSub)); if (b !== "export" && b !== "readonly" && args.some((a) => /^-[A-Za-z]*[in]/.test(a.text))) for (const a of args) if (!a.text.startsWith("-")) { const n = a.text.split("=")[0]!.replace(/\[.*$/, ""); forget(n); intVars.add(n); if (args.some((x) => /^-[A-Za-z]*n/.test(x.text))) addRef(a.text); } if (args.some((a) => !a.plain && /[\u0001$]/.test(a.text.split("=")[0]!) && !/^\$\{?npm_(?!package_)\w+\}?$/.test(a.text.split("=")[0]!))) hit("env-assign", `${b} of names or values built by an expansion (they can be NODE_OPTIONS, LD_PRELOAD ...)`); if (args.some((a) => badEnv(a.text) || BAD_NAME.test(a.text) || BAD_NAME2.test(a.text))) envHit(); continue; }
+    if (DECL.has(b)) { for (const a of args) assign(a.text, !(aliased || declMaybe || st.cond || st.pipeOut || st.piped || inSub)); if (b !== "export" && b !== "readonly" && args.some((a) => /^-[A-Za-z]*[in]/.test(a.text))) for (const a of args) if (!a.text.startsWith("-")) { const n = a.text.split("=")[0]!.replace(/\[.*$/, ""); forget(n); intVars.add(n); if (args.some((x) => /^-[A-Za-z]*n/.test(x.text))) addRef(a.text); } if (args.some((a) => !a.plain && /[\u0001$]/.test(a.text.split("=")[0]!) && !/^\$\{?npm_(?!package_)\w+\}?$/.test(a.text.split("=")[0]!))) hit("env-assign", `${b} of names or values built by an expansion (they can be NODE_OPTIONS, LD_PRELOAD ...)`); if (args.some((a) => badEnv(a.text) || BAD_NAME.test(a.text) || BAD_NAME2.test(a.text))) envHit(); continue; }
     if (b === "dd") { // dd of=FILE writes FILE
       for (const a of args) { const m = /^of=([\s\S]*)$/.exec(a.text); if (!m) continue; const e = a.plain ? m[1]! : expand(m[1]!); if (e === undefined) { if (!skipUnknown(m[1]!, b)) flags.unknownWrite = true; } else copyTargets.add(norm(e)); }
       continue;
