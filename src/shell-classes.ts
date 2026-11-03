@@ -451,8 +451,9 @@ function parse(text: string, depth: number): Stage[] {
     if (c === "\n") {
       // a newline after && or || continues the list: the next command is still conditional
       const idle = !(st.words.length || st.assigns.length || st.clobber.length || st.writes.length || st.varWrites.length || st.reads.length || st.subs.length || st.heredoc);
+      const goesOn = idle && (nextCond || st.piped); // after a trailing && || or | the shell has not finished the list: the next line is the same input line
       endStage(); if (!idle) nextCond = false; st.cond = compound || nextCond;
-      if (open.length === 0) { unitNo++; st.unit = unitNo; }
+      if (open.length === 0 && !goesOn) { unitNo++; st.unit = unitNo; }
       if (pendingHere.length) {
         for (const h of pendingHere) {
           let p = i + 1; let found = false;
@@ -681,10 +682,14 @@ export function flagBody(text: string): Hit[] {
  * down the chain, but only an unquoted word is looked up as an alias. A word that held a quote, an operator or a # keeps it quoted so it is
  * still one word: single quotes for a word without an expansion, double quotes (the $ left live) for a word with one.
  */
+const ALIAS_DEF = /^([^\s'"`\/$\\=;&|<>()]+)=([\s\S]*)$/; // NAME=text: a shell accepts any name but blanks, quotes, / $ \ = and metacharacters
+
 function aliasScript(aliases: Map<string, string>, name: string, args: Word[], active: (n: string) => boolean): string {
   let text = aliases.get(name)!, rest = args;
   while (/\s$/.test(text) && rest.length && !rest[0]!.q && rest[0]!.plain && aliases.has(rest[0]!.text) && active(rest[0]!.text)) { text += aliases.get(rest[0]!.text)!; rest = rest.slice(1); } // rest shrinks each step: the chain ends
   const quote = (w: Word): string => {
+    const asg = !w.q ? /^([A-Za-z_]\w*\+?=)([\s\S]*)$/.exec(w.text) : null; // NAME=value stays an assignment: only the value is quoted
+    if (asg) return asg[1] + quote({ text: asg[2]!, plain: w.plain });
     if (!w.q && !/[\s#;&|<>()'"`\\]/.test(w.text)) return w.text; // a word that was quoted stays quoted: it is a command or an argument, never an assignment or an alias
     return w.plain ? `'${w.text.replace(/'/g, "'\\''")}'` : `"${w.text.replace(/[\\"`]/g, "\\$&")}"`;
   };
@@ -866,8 +871,16 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       const text = (args[0] === "--" ? args.slice(1) : args).join(" ");
       try { if (d <= MAX_DEPTH) for (const o of parse(text, d)) out.push(...namesSet(o, d + 1, used, true)); } catch (e) { if (!(e instanceof ParseFail)) throw e; for (const n of text.match(/[A-Za-z_]\w*/g) ?? []) out.push(n); } // a shell runs the lines before a syntax error: every name in the text may be set
     }
+    if (h === "alias") for (const a of args) { const m = ALIAS_DEF.exec(a); if (m) for (const n of m[2]!.match(/[A-Za-z_]\w*/g) ?? []) out.push(n); } // an alias defined here may run later in the same body (in an eval text it is not in the map yet): the names its text names may be set
     if (h === "getopts") out.push("OPTARG", "OPTIND");
     if (h === "read") out.push("REPLY");
+    if (h === "eval" && args.length && d <= MAX_DEPTH) { // a use of an alias the text defines: its text may end in ; or && so that an NAME=value argument is an assignment
+      try {
+        const os = parse((args[0] === "--" ? args.slice(1) : args).join(" "), d), defd = new Set<string>();
+        for (const o of os) { const b = builtinOf(o); if (b.h === "alias") for (const a of b.args) { const m = ALIAS_DEF.exec(a); if (m) defd.add(m[1]!); } }
+        if (defd.size) for (const o of os) { const b = builtinOf(o); if (defd.has(b.h)) for (const a of b.args) { const m = /^([A-Za-z_]\w*)\+?=/.exec(a); if (m) out.push(m[1]!); } }
+      } catch (e) { if (!(e instanceof ParseFail)) throw e; }
+    }
     const called = fnVars.get(h); // a function called in the body sets the names its body sets, on every pass
     if (called) for (const n of called) out.push(n);
     return out;
@@ -970,16 +983,18 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
     if (head.plain && (SPECIAL_BUILTINS.has(b) || fnVars.has(b))) for (const as of st.assigns) { const n = /^([A-Za-z_]\w*)\+?=/.exec(as); if (n) forget(n[1]!); }
     const args = w.slice(1);
     // dash (and any POSIX sh) expands an alias defined earlier in the script: its text is read as the command
-    if (b === "alias") { for (const a of args) { const m = /^([A-Za-z_][\w.-]*)=([\s\S]*)$/.exec(a.text); if (m) { aliases.set(m[1]!, m[2]!); aliasAt.set(m[1]!, st.unit); } } continue; }
+    if (b === "alias") { for (const a of args) { const m = ALIAS_DEF.exec(a.text); if (m) { aliases.set(m[1]!, m[2]!); aliasAt.set(m[1]!, st.unit); } } continue; }
     const called = fnVars.get(b); // calling a function runs its assignments: forget every name its body sets
     if (called) for (const n of called) { if (n === "*") { flags.wild = true; for (const k of [...vars.keys()]) forgetOne(k); } else forget(n); }
     const al = activeAlias(b, st.unit) ? aliases.get(b) : undefined;
-    if (al !== undefined && head.plain && !head.q) { // the alias text is read without this alias (a shell does not expand it again)
+    const aliased = al !== undefined && head.plain && !head.q; // the alias may not expand (bash without expand_aliases): what the stage as written sets is then only maybe set
+    if (aliased) { // the alias text is read without this alias (a shell does not expand it again)
       const rest2 = new Map(aliases); rest2.delete(b);
-      walk(aliasScript(aliases, b, args, (n) => activeAlias(n, st.unit)), depth + 1, hits, { cwd: cwd || stageCwd, written: copyTargets, vars: nestedVars, aliases: rest2, flags, fns: fnVars, fn: curFn, unk: nestedUnk, sub: inSub || st.cond || st.pipeOut || st.piped, ints: intVars, refs });
+      const script = aliasScript(aliases, b, args, (n) => activeAlias(n, st.unit));
+      walk(script, depth + 1, hits, { cwd: cwd || stageCwd, written: copyTargets, vars: nestedVars, aliases: rest2, flags, fns: fnVars, fn: curFn, unk: nestedUnk, sub: inSub || st.cond || st.pipeOut || st.piped, ints: intVars, refs });
       // bash does not expand aliases in a script unless expand_aliases is on, and sh and dash do: the names the text sets are known on one reading only
-      try { for (const o of parse(aliasScript(aliases, b, args, (n) => activeAlias(n, st.unit)), depth + 1)) for (const n of namesSet(o, depth + 2, new Set([b]), true)) forget(n); } catch (e) { if (!(e instanceof ParseFail)) throw e; }
-      continue;
+      try { for (const o of parse(script, depth + 1)) for (const n of namesSet(o, depth + 2, new Set([b]), true)) forget(n); } catch (e) { if (!(e instanceof ParseFail)) throw e; }
+      // no continue: bash without expand_aliases runs the stage as written (alias node=true; node -r ./p.js runs the real node)
     }
     const stdin = (what: string) => { if (st.reads.length && !st.heredoc && st.reads.every((r) => r === "/dev/null")) return; if (!st.piped || st.heredoc || st.reads.length) hit(st.heredoc ? "heredoc" : "interp-stdin", `${what} reads its program from stdin`); };
     const ranWritten = (f: string) => { if (written(f) || (flags.unknownWrite && !f.startsWith("/")) || (flags.wild && /[$`\u0001]/.test(f) && copyTargets.size > 0)) hit("writer-exec", `runs ${f}, written or copied by this body (or by a write to a name it cannot tell)`); };
@@ -1006,11 +1021,11 @@ function walk(text: string, depth: number, hits: Hit[], parent: State): void {
       const lst = args.slice(2);
       const lit = lst.length === 1 ? expand(lst[0]!.text) : undefined;
       if (refs.has(args[0]!.text)) for (const x of lst) addRef(`${args[0]!.text}=${x.text}`); // a nameref loop variable is repointed at each word
-      if (lit === undefined || st.cond || inSub || st.piped || st.pipeOut || refs.has(args[0]!.text)) forget(args[0]!.text); else { vars.set(args[0]!.text, lit); markOwn(args[0]!.text); }
+      if (lit === undefined || aliased || st.cond || inSub || st.piped || st.pipeOut || refs.has(args[0]!.text)) forget(args[0]!.text); else { vars.set(args[0]!.text, lit); markOwn(args[0]!.text); }
       if ((lst.length ? lst : [{ text: "./x" }]).some((x) => badEnv(args[0]!.text + "=" + (expand(x.text) ?? x.text)))) envHit(); // for PATH in /usr/bin ./bin
       continue;
     }
-    if (DECL.has(b)) { for (const a of args) assign(a.text, !(st.cond || st.pipeOut || st.piped || inSub)); if (b !== "export" && b !== "readonly" && args.some((a) => /^-[A-Za-z]*[in]/.test(a.text))) for (const a of args) if (!a.text.startsWith("-")) { const n = a.text.split("=")[0]!.replace(/\[.*$/, ""); forget(n); intVars.add(n); if (args.some((x) => /^-[A-Za-z]*n/.test(x.text))) addRef(a.text); } if (args.some((a) => !a.plain && /[\u0001$]/.test(a.text.split("=")[0]!) && !/^\$\{?npm_(?!package_)\w+\}?$/.test(a.text.split("=")[0]!))) hit("env-assign", `${b} of names or values built by an expansion (they can be NODE_OPTIONS, LD_PRELOAD ...)`); if (args.some((a) => badEnv(a.text) || BAD_NAME.test(a.text) || BAD_NAME2.test(a.text))) envHit(); continue; }
+    if (DECL.has(b)) { for (const a of args) assign(a.text, !(aliased || st.cond || st.pipeOut || st.piped || inSub)); if (b !== "export" && b !== "readonly" && args.some((a) => /^-[A-Za-z]*[in]/.test(a.text))) for (const a of args) if (!a.text.startsWith("-")) { const n = a.text.split("=")[0]!.replace(/\[.*$/, ""); forget(n); intVars.add(n); if (args.some((x) => /^-[A-Za-z]*n/.test(x.text))) addRef(a.text); } if (args.some((a) => !a.plain && /[\u0001$]/.test(a.text.split("=")[0]!) && !/^\$\{?npm_(?!package_)\w+\}?$/.test(a.text.split("=")[0]!))) hit("env-assign", `${b} of names or values built by an expansion (they can be NODE_OPTIONS, LD_PRELOAD ...)`); if (args.some((a) => badEnv(a.text) || BAD_NAME.test(a.text) || BAD_NAME2.test(a.text))) envHit(); continue; }
     if (b === "dd") { // dd of=FILE writes FILE
       for (const a of args) { const m = /^of=([\s\S]*)$/.exec(a.text); if (!m) continue; const e = a.plain ? m[1]! : expand(m[1]!); if (e === undefined) { if (!skipUnknown(m[1]!, b)) flags.unknownWrite = true; } else copyTargets.add(norm(e)); }
       continue;

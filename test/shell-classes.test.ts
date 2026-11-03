@@ -1457,3 +1457,48 @@ describe("shell classes: an alias takes effect from the next input line", () => 
     expect(classes("M=a.js\nalias a='echo hi'\na\ncat lib/hidden.js > $M\nnode b.js")).toEqual([]);
   });
 });
+
+describe("shell classes: an alias defined inside an eval string in a loop", () => {
+  const ev = (defs: string, use: string) => `N=a.js; for i in 1 2; do cp lib/hidden.js \${N:-b.js}; eval '${defs}\n${use}'; done; node b.js`;
+  test("names set through it count as maybe, as for a top-level alias", () => {
+    for (const c of [ev("alias s=\"N=b.js;true\"", "s"), ev("alias s=\"{ N=b.js; }\"", "s"), ev("alias a=b\nalias b=c\nalias c=\"N=b.js;true\"", "a"), ev("alias s=\"N=b.js; echo\"", "s x")])
+      expect(classes(c), c).not.toEqual([]);
+  });
+});
+
+describe("shell classes: an active alias hides nothing about the stage as written", () => {
+  test("a stage whose command word is an active alias is also read as written", () => {
+    expect(classes("alias node=true\nnode -r ./p.js a.js\n")).not.toEqual([]);
+  });
+  test("a newline after a trailing && or | does not end the list", () => {
+    expect(classes("alias node=true &&\nnode -r ./p.js a.js\n")).not.toEqual([]);
+  });
+  test("an assignment word with a space in its value stays an assignment after an alias expansion", () => {
+    expect(classes("M=a.js\nalias e='true;'\ne M='b c.js'\ncat lib/hidden.js > \"$M\"\nnode 'b c.js'\n")).not.toEqual([]);
+  });
+});
+
+describe("shell classes: eval-in-loop alias shapes, alias names, and the line counter", () => {
+  const ev = (body: string) => `N=a.js; for i in 1 2; do cp lib/hidden.js \${N:-b.js}; eval '${body}'; done; node b.js`;
+  test("an alias text ending in a separator turns an NAME=value argument into an assignment", () => {
+    for (const c of [ev("alias e=\"true;\"\ne N=b.js"), ev("alias e=\"true &&\"\ne N=b.js")]) expect(classes(c), c).not.toEqual([]);
+  });
+  test("an alias name is anything the shell accepts, not only a word that starts with a letter", () => {
+    for (const n of ["1s", "9", "1-x", "1.s", "+s", "@s", "%s", "s:1", ",s", "-s"]) { const c = ev(`shopt -s expand_aliases\nalias ${n}=\"N=b.js;true\"\n${n}`); expect(classes(c), c).not.toEqual([]); }
+    const top = "N=a.js\nalias 1s='N=b.js;true'\n1s\ncat lib/hidden.js > ${N:-b.js}\nnode b.js";
+    expect(classes(top), top).not.toEqual([]);
+  });
+  test("a newline after a trailing && or | keeps the input line: an alias defined before it is not active after it", () => {
+    for (const c of ["alias a='node -r ./p.js a.js' &&\na", "alias a='node -r ./p.js a.js' |\na", "alias node='node -r ./p.js' &&\nnode a.js", "alias node='node -r ./p.js' |\nnode a.js"]) expect(classes(c), c).toEqual([]);
+  });
+});
+
+describe("shell classes: a builtin read as written under an alias of the same name sets its names only maybe", () => {
+  test("alias export=true: export N=b.js may not run, so N is not known afterwards", () => {
+    for (const d of ["export", "readonly", "declare", "typeset"]) { const c = `N=a.js\nalias ${d}=true\n${d} N=b.js\ncat lib/hidden.js > $N\nnode a.js\n`; expect(classes(c), c).not.toEqual([]); }
+  });
+  test("an alias name may hold a # inside the word", () => {
+    const c = "N=a.js; for i in 1 2; do cp lib/hidden.js ${N:-b.js}; eval 'shopt -s expand_aliases\nalias \"a#b=N=b.js;true\"\na#b'; done; node b.js";
+    expect(classes(c), c).not.toEqual([]);
+  });
+});
