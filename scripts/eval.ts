@@ -4,7 +4,7 @@
 //
 //   1 attacks   all 9 attacks stopped: the 8 dataset cases (acceptance/run.ts) and the litellm
 //               replay (every pair), local reviewer only, advisory and cooldown layers off
-//   2 controls  all 8 controls pass (acceptance/run.ts, same run), 0 false alarms
+//   2 controls  every core control passes, or is held for a limit when marked expect held (acceptance/run.ts, same run), 0 false alarms
 //               Checks 1 and 2 score the core set; their counts come from acceptance/cases.json and
 //               controls.json (acceptance/sets.ts). With `extended: true` in the config the run also
 //               covers the extended set, printed as one informational line that is not a check.
@@ -119,7 +119,7 @@ export function parseReplay(out: string): Map<string, string> {
   return r;
 }
 
-// The core set as the JSON defines it: today 9 attacks (8 dataset cases plus the replay) and 8 controls.
+// The core set as the JSON defines it: 9 attacks (8 dataset cases plus the replay) and the core controls.
 const SETS = loadSets();
 const CORE = setCounts(SETS, "core");
 const EXTENDED = setCounts(SETS, "extended");
@@ -144,11 +144,22 @@ export function scoreAcceptance(out: { mal: Map<string, string>; ctrl: Map<strin
     attackSeen < ATTACKS
       ? { n: 1, name: "attacks", status: "not run", detail: `only ${attackSeen} of ${ATTACKS} attacks produced a result (${mal.size} dataset, ${replay.size} replay pairs); rc=${rc}` }
       : { n: 1, name: "attacks", status: attacks === ATTACKS && !rcBad ? "pass" : "fail", detail: `${attacks} of ${ATTACKS} stopped${rcBad ? `; the acceptance run exited nonzero (rc=${rc})` : ""}${attacks < ATTACKS ? `; missed: ${[...mal].filter(([, o]) => o !== "STOPPED").map(([k, o]) => `${k}=${o}`).concat(replayOk ? [] : ["litellm-replay"]).join(", ")}` : ""}` };
+  // A clean release the reviewer approves (PASSED) or holds for a human only because the diff is too large to
+  // review or has a binary no model can read (HELD-HUMAN) is correct. The bar is zero false alarms: anything else counts against it.
+  // Only a control marked "expect": "held" may count a hold; a hold on any other control is a false alarm, so a regression that sends every clean release to a limit cannot pass.
   const passed = [...ctrl].filter(([, o]) => o === "PASSED").length;
+  const heldBySize = [...ctrl].filter(([id, o]) => o === "HELD-HUMAN" && CORE.heldIds.has(id)).length;
+  // A marked control may also simply be approved: that is intended (the mark allows a hold, it does not require one).
+  const correct = (id: string, o: string) => o === "PASSED" || (o === "HELD-HUMAN" && CORE.heldIds.has(id));
   const c2: CheckResult =
     ctrl.size < CONTROLS
       ? { n: 2, name: "controls", status: "not run", detail: `only ${ctrl.size} of ${CONTROLS} controls produced a result; rc=${rc.split("/")[0]}` }
-      : { n: 2, name: "controls", status: passed === CONTROLS && !rcBad ? "pass" : "fail", detail: `${passed} of ${CONTROLS} passed${rcBad ? `; the acceptance run exited nonzero (rc=${rc})` : ""}${passed < CONTROLS ? `; not passed: ${[...ctrl].filter(([, o]) => o !== "PASSED").map(([k, o]) => `${k}=${o}`).join(", ")}` : ""}` };
+      : {
+          n: 2,
+          name: "controls",
+          status: passed + heldBySize === CONTROLS && !rcBad ? "pass" : "fail",
+          detail: `${passed} approved, ${heldBySize} held by a limit, ${CONTROLS - passed - heldBySize} false alarms (of ${CONTROLS})${rcBad ? `; the acceptance run exited nonzero (rc=${rc})` : ""}${passed + heldBySize < CONTROLS ? `; false alarms: ${[...ctrl].filter(([k, o]) => !correct(k, o)).map(([k, o]) => `${k}=${o}`).join(", ")}` : ""}`,
+        };
   const xm = pick(out.mal, EXTENDED.attackIds);
   const xc = pick(out.ctrl, EXTENDED.controlIds);
   if (!xm.size && !xc.size) return { c1, c2 };

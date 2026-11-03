@@ -186,6 +186,6 @@ for (const t of tally) counts.set(t, (counts.get(t) ?? 0) + 1);
 // Off core, a run is scored against the set's dataset attacks and controls in the JSON (not with --only).
 const inJson = setCounts({ cases: allCases, controls: allControls }, set);
 const expected = only ? undefined : { attacks: inJson.dataset, controls: inJson.controls };
-summary.push(`set: ${set}`, `layers: ${layers?.join(",") ?? "all"}`, ...[...counts].sort().map(([k, n]) => `${k}: ${n}`), "", ...scorecard(scored, { set, expected }));
+summary.push(`set: ${set}`, `layers: ${layers?.join(",") ?? "all"}`, ...[...counts].sort().map(([k, n]) => `${k}: ${n}`), "", ...scorecard(scored, { set, expected, held: inJson.heldIds, barControls: setCounts({ cases: allCases, controls: allControls }, "core").controls }));
 writeFileSync(join(results, "summary.txt"), summary.join("\n") + "\n");
 console.log(summary.join("\n"));
