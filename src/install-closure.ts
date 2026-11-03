@@ -3189,9 +3189,17 @@ function noteUnparsedMake(ctx: Ctx, text: string): void {
       }
       argv.push(t);
     }
+    // the command word: past assignments, compound-command keywords and wrappers with their options
     let h = 0;
-    while (h < argv.length && ASSIGN.test(argv[h]!)) h++;
-    if (h < argv.length && /^g?make$/.test(binName(argv[h]!)) && ctx.depth < DEPTH) {
+    while (h < argv.length) {
+      const t = argv[h]!;
+      if (ASSIGN.test(t) || /^(?:if|then|elif|else|do|while|until|!|\{|time)$/.test(t)) h++;
+      else if (/^(?:env|command|builtin|exec|nice|nohup|setsid|stdbuf|ionice)$/.test(binName(t))) {
+        h++;
+        while (h < argv.length && argv[h]!.startsWith("-")) h += /^-[nuCcpt]$/.test(argv[h]!) ? 2 : 1; // nice -n 5, env -u X
+      } else break;
+    }
+    if (h < argv.length && (/^g?make$/.test(binName(argv[h]!)) || /^["']?\$\{?(?:MAKE|GMAKE)\b/.test(argv[h]!)) && ctx.depth < DEPTH) {
       ctx.depth++;
       dispatch(ctx, argv.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
       ctx.depth--;
@@ -3380,6 +3388,7 @@ function runBody(ctx: Ctx, body: string): void {
   const sub = subst(ctx, body);
   if (sub === null || ctx.hold) {
     if (sub === null && !ctx.hold) readParts(ctx, body);
+    if (sub === null && !ctx.hold) noteUnparsedMake(ctx, body); // `echo $(make -C sub)`, `${MAKE:-make} -C sub`
     // An expansion that cannot be resolved may name another directory: widen when the body moves the run.
     if (sub === null && noteBody(ctx, body)) widenAll(ctx);
     return;

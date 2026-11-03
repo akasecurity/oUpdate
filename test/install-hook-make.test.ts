@@ -30,11 +30,27 @@ describe("make in a body that is not split into commands is still read", () => {
     `V=1 ${P} > log`,
     `gmake -C sub > log`,
     `echo ok\n${P} > log\necho done`,
+    `nice ${P} > log`,
+    `nice -n 5 ${P} > log`,
+    `env V=1 ${P} > log`,
+    `command ${P} > log`,
+    `exec ${P} > log`,
+    `time ${P} > log`,
+    `! ${P} > log`,
+    `nohup ${P} > log`,
+    `{ ${P}; } > log`,
+    `if true; then ${P}; fi > log`,
+    `for d in sub; do ${P} -j1; done > log`,
+    `while true; do ${P}; break; done > log`,
+    "${MAKE:-make} -C sub",
+    "${MAKE} -C sub > log",
+    `echo $(${P})`,
+    `x=$(${P}) > log`,
   ];
   for (const f of forms) {
     test(JSON.stringify(f) + ": the payload is read, the twin and an unchanged package are quiet", () => {
       expect(details(f)).toContain("file sub/x.js");
-      const twin = f.replace(/g?make -C sub/, "echo ok");
+      const twin = f.replace(/\$\{MAKE(?::-make)?\} -C sub|g?make -C sub/, "echo ok");
       expect(details(twin)).toEqual([]);
       expect(details(f, [])).toEqual([]);
     });
