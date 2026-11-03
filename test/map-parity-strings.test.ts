@@ -12,21 +12,21 @@ const map = (seed: string, big: boolean, pay: string | null, where: W) => {
 };
 const LD = (name: string, src = "m.sourcesContent[0]") => `const m = JSON.parse(require('fs').readFileSync(${name}, 'utf8'));\nrequire('vm').runInThisContext(${src});\nexports.v = 2;\n`;
 const SC = 'm["sources"+"Content"][0]';
-const cases: [string, string, string | null, W, boolean][] = [
-  ["1 names META + loader .map", LD("__filename + '.map'", "m.names.join('')"), META, "names", true],
-  ["2 names META no loader", "exports.v = 2;\n", META, "names", true],
-  ["3 sc META + loader .map", LD("__filename + '.map'", SC), META, "sourcesContent", true],
-  ["4 sc META no loader", "exports.v = 2;\n", META, "sourcesContent", true],
-  ["5 sc SPAWN + loader .map", LD("__filename + '.map'", SC), SPAWN, "sourcesContent", true],
-  ["6 sc SPAWN no loader", "exports.v = 2;\n", SPAWN, "sourcesContent", true],
-  ["7 sc SPAWN loader '.m'+'ap'", LD("__filename + '.m' + 'ap'", SC), SPAWN, "sourcesContent", true],
-  ["8 sc SPAWN loader replace js.map", LD("__filename.replace(/js$/, 'js.map')", SC), SPAWN, "sourcesContent", true],
-  ["9 sc SPAWN loader fromCharCode", LD("__filename + String.fromCharCode(46) + 'map'", SC), SPAWN, "sourcesContent", true],
-  ["10 sc SPAWN loader readdir endsWith map", LD("require('path').join(__dirname, require('fs').readdirSync(__dirname).find((f) => f.endsWith('map')))", SC), SPAWN, "sourcesContent", true],
-  ["11 namesRev SPAWN loader reverse", LD("__filename + '.map'", "m.names.reverse().join('')"), SPAWN, "namesRev", true],
-  ["12 namesRev SPAWN loader reverse + '.m'+'ap'", LD("__filename + '.m' + 'ap'", "m.names.reverse().join('')"), SPAWN, "namesRev", true],
+const cases: [string, string, string | null, W][] = [
+  ["1 names META + loader .map", LD("__filename + '.map'", "m.names.join('')"), META, "names"],
+  ["2 names META no loader", "exports.v = 2;\n", META, "names"],
+  ["3 sc META + loader .map", LD("__filename + '.map'", SC), META, "sourcesContent"],
+  ["4 sc META no loader", "exports.v = 2;\n", META, "sourcesContent"],
+  ["5 sc SPAWN + loader .map", LD("__filename + '.map'", SC), SPAWN, "sourcesContent"],
+  ["6 sc SPAWN no loader", "exports.v = 2;\n", SPAWN, "sourcesContent"],
+  ["7 sc SPAWN loader '.m'+'ap'", LD("__filename + '.m' + 'ap'", SC), SPAWN, "sourcesContent"],
+  ["8 sc SPAWN loader replace js.map", LD("__filename.replace(/js$/, 'js.map')", SC), SPAWN, "sourcesContent"],
+  ["9 sc SPAWN loader fromCharCode", LD("__filename + String.fromCharCode(46) + 'map'", SC), SPAWN, "sourcesContent"],
+  ["10 sc SPAWN loader readdir endsWith map", LD("require('path').join(__dirname, require('fs').readdirSync(__dirname).find((f) => f.endsWith('map')))", SC), SPAWN, "sourcesContent"],
+  ["11 namesRev SPAWN loader reverse", LD("__filename + '.map'", "m.names.reverse().join('')"), SPAWN, "namesRev"],
+  ["12 namesRev SPAWN loader reverse + '.m'+'ap'", LD("__filename + '.m' + 'ap'", "m.names.reverse().join('')"), SPAWN, "namesRev"],
 ];
-for (const [label, code, pay, where, want] of cases) test(label, async () => {
+for (const [label, code, pay, where] of cases) test(label, async () => {
   const reviewed: string[] = [];
   const r = await reviewUpdate({
     eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
@@ -42,5 +42,5 @@ for (const [label, code, pay, where, want] of cases) test(label, async () => {
   // Payload in front of the reviewer: a strings-only hit shows the strings and keeps the mappings a hash line, so the mappings text itself is not the test.
   const all = reviewed.join("");
   const shown = all.includes(pay!.slice(0, 20)) || all.includes(pay!.slice(20));
-  expect({ label, payloadShown: shown }).toEqual({ label, payloadShown: want });
+  expect({ label, payloadShown: shown }).toEqual({ label, payloadShown: true });
 }, 60000);
