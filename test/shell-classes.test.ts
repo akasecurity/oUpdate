@@ -1300,7 +1300,7 @@ describe("shell classes: namerefs in a loop, eval behind wrappers and --, alias 
       "N=a.js; for i in 1 2; do cat lib/hidden.js > $N; eval -- 'N=b.js'; done; node b.js"]);
   });
   test("an alias body sees declare -i and -n names", () => {
-    held(["N=a.js; alias f='declare -i N'; f; N=1+1; cat lib/hidden.js > $N.js; node 2.js", "M=a.js; alias f='declare -n N=M'; f; N=b.js; cat lib/hidden.js > $M; node b.js"]);
+    held(["N=a.js\nalias f='declare -i N'\nf; N=1+1; cat lib/hidden.js > $N.js; node 2.js", "M=a.js\nalias f='declare -n N=M'\nf; N=b.js; cat lib/hidden.js > $M; node b.js"]);
   });
 });
 
@@ -1311,7 +1311,7 @@ describe("shell classes: nameref loop variables, wrapped and aliased declaration
   });
   test("a nameref declared behind builtin, command, eval or an alias inside a loop is linked", () => {
     held(["M=a.js; for i in 1 2; do cat lib/hidden.js > $M; builtin declare -n N=M; N=b.js; done; node b.js", "M=a.js; for i in 1 2; do cat lib/hidden.js > $M; command declare -n N=M; N=b.js; done; node b.js",
-      "M=a.js; for i in 1 2; do cat lib/hidden.js > $M; eval 'declare -n N=M'; N=b.js; done; node b.js", "M=a.js; alias d='declare -n'; for i in 1 2; do cat lib/hidden.js > $M; d N=M; N=b.js; done; node b.js"]);
+      "M=a.js; for i in 1 2; do cat lib/hidden.js > $M; eval 'declare -n N=M'; N=b.js; done; node b.js", "M=a.js\nalias d='declare -n'\nfor i in 1 2; do cat lib/hidden.js > $M; d N=M; N=b.js; done; node b.js"]);
   });
   test("a nameref with no target set in a function forgets the names it may reach, also when the function is called later", () => {
     held(["M=a.js; f() { declare -n N; N=M; N=b.js; }; f; cat lib/hidden.js > $M; node b.js", "f() { declare -n N; N=M; N=b.js; }; M=a.js; f; cat lib/hidden.js > $M; node b.js"]);
@@ -1387,23 +1387,23 @@ describe("shell classes: a nameref to an unnamed target and the places a name is
 describe("shell classes: aliases in a loop body", () => {
   const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
   test("an alias that is an assignment, a chain of aliases, a trailing-space alias and a wrapped alias set their names on every pass", () => {
-    held(["M=a.js; alias e='M=b.js'; for i in 1 2; do cat lib/hidden.js > $M; e; done; node b.js", "M=a.js; alias a=b; alias b=eval; for i in 1 2; do cat lib/hidden.js > $M; a M=b.js; done; node b.js",
-      "M=a.js; alias c='command '; for i in 1 2; do cat lib/hidden.js > $M; c eval M=b.js; done; node b.js", "M=a.js; alias c='command '; for i in 1 2; do cat lib/hidden.js > $M; c declare -n N=M; N=b.js; done; node b.js",
-      "M=a.js; alias e='command eval'; for i in 1 2; do cat lib/hidden.js > $M; e M=b.js; done; node b.js", "M=a.js; alias d=\"declare -n 'N=M'\"; for i in 1 2; do cat lib/hidden.js > $M; d; N=b.js; done; node b.js"]);
+    held(["M=a.js\nalias e='M=b.js'\nfor i in 1 2; do cat lib/hidden.js > $M; e; done; node b.js", "M=a.js\nalias a=b\nalias b=eval\nfor i in 1 2; do cat lib/hidden.js > $M; a M=b.js; done; node b.js",
+      "M=a.js\nalias c='command '\nfor i in 1 2; do cat lib/hidden.js > $M; c eval M=b.js; done; node b.js", "M=a.js\nalias c='command '\nfor i in 1 2; do cat lib/hidden.js > $M; c declare -n N=M; N=b.js; done; node b.js",
+      "M=a.js\nalias e='command eval'\nfor i in 1 2; do cat lib/hidden.js > $M; e M=b.js; done; node b.js", "M=a.js\nalias d=\"declare -n 'N=M'\"\nfor i in 1 2; do cat lib/hidden.js > $M; d; N=b.js; done; node b.js"]);
   });
   test("an alias that names itself ends", () => {
-    expect(classes("alias a=a; for i in 1 2; do a; done")).toEqual([]);
+    expect(classes("alias a=a\nfor i in 1 2; do a; done")).toEqual([]);
   });
 });
 
 describe("shell classes: an alias is a whole script in a loop body", () => {
-  const L = (a: string, body = "e") => `M=a.js; alias e='${a}'; for i in 1 2; do cat lib/hidden.js > $M; ${body}; done; node b.js`;
+  const L = (a: string, body = "e") => `M=a.js\nalias e='${a}'\nfor i in 1 2; do cat lib/hidden.js > $M; ${body}; done; node b.js`;
   test("an alias with a list, && or a group sets the names its text sets", () => {
     for (const c of [L("true; M=b.js"), L("true;M=b.js"), L("true && M=b.js"), L("{ M=b.js; }"), L("true; read M"), L("M=b.js; true"),
-      "M=a.js; alias e='true; declare -n N=M'; for i in 1 2; do cat lib/hidden.js > $M; e; N=b.js; done; node b.js"]) expect(classes(c), c).not.toEqual([]);
+      "M=a.js\nalias e='true; declare -n N=M'\nfor i in 1 2; do cat lib/hidden.js > $M; e; N=b.js; done; node b.js"]) expect(classes(c), c).not.toEqual([]);
   });
   test("an alias named like a builtin does not hide the real builtin after command or builtin", () => {
-    for (const w of ["command", "builtin"]) expect(classes(`M=a.js; alias eval=true; for i in 1 2; do cat lib/hidden.js > $M; ${w} eval M=b.js; done; node b.js`), w).not.toEqual([]);
+    for (const w of ["command", "builtin"]) expect(classes(`M=a.js\nalias eval=true\nfor i in 1 2; do cat lib/hidden.js > $M; ${w} eval M=b.js; done; node b.js`), w).not.toEqual([]);
   });
   test("an alias ending in a blank lets the next word be an alias: its text is part of the script", () => {
     expect(classes("M=a.js\nalias a='echo '\nalias b='; M=b.js'\nfor i in 1 2; do cat lib/hidden.js > $M; a b; done\nnode b.js")).not.toEqual([]);
@@ -1415,7 +1415,45 @@ describe("shell classes: an alias is a whole script in a loop body", () => {
     }
   });
   test("an argument that held a # or a ; in the script stays one quoted word after the alias text", () => {
-    expect(classes("M=a.js; alias d=declare; for i in 1 2; do cat lib/hidden.js > $M; d '#' -n N=M; N=b.js; done; node b.js")).not.toEqual([]);
-    expect(classes("alias d=ls; for i in 1 2; do d 'a b' '#x'; done")).toEqual([]);
+    expect(classes("M=a.js\nalias d=declare\nfor i in 1 2; do cat lib/hidden.js > $M; d '#' -n N=M; N=b.js; done; node b.js")).not.toEqual([]);
+    expect(classes("alias d=ls\nfor i in 1 2; do d 'a b' '#x'; done")).toEqual([]);
+  });
+});
+
+describe("shell classes: an alias outside a loop is read as a script with quoted words", () => {
+  test("an alias ending in a blank lets the next word be an alias, at any length", () => {
+    for (const c of ["M=a.js\nalias a='echo '\nalias b='; M=b.js'\na b\ncat lib/hidden.js > $M\nnode b.js", `M=a.js\nalias s='echo '\nalias t='; M=b.js'\n${Array(9).fill("s").join(" ")} t\ncat lib/hidden.js > \${M:-b.js}\nnode b.js`])
+      expect(classes(c), c).not.toEqual([]);
+  });
+  test("a quoted ' or # argument stays one word and does not break the parse of the alias text", () => {
+    for (const c of ["M=a.js\nalias e='M=b.js;'\ne \"'\"\ncat lib/hidden.js > $M\nnode b.js", "M=a.js\nalias d=declare\nd '#' -n N=M\nN=b.js\ncat lib/hidden.js > $M\nnode b.js"]) expect(classes(c), c).not.toEqual([]);
+  });
+  test("only an unquoted word is looked up as an alias down a chain", () => {
+    for (const w of ["'b'", "\\b", '"b"']) expect(classes(`M=b.js\nalias a='echo '\nalias b='; M=a.js'\na ${w}\ncat lib/hidden.js > $M\nnode b.js`), w).not.toEqual([]);
+  });
+  test("a word with an expansion and a blank keeps the expansion live after the alias text", () => {
+    for (const c of ['F=a.js\nalias n=node\nn "$F x.js"', 'alias n=node\nn "${F:-a b.js}"', 'D=lib\ncat lib/hidden.js > "$D/my file.js"\nalias n=node\nn "$D/my file.js"', 'F=a.js\nalias n=node\nfor i in 1 2; do n "$F x.js"; done'])
+      expect(classes(c), c).not.toEqual([]);
+  });
+});
+
+describe("shell classes: an alias takes effect from the next input line", () => {
+  const T = "cat lib/hidden.js > $M; node b.js";
+  const held = (cmds: string[]) => { for (const c of cmds) expect(classes(c), c).not.toEqual([]); };
+  test("an alias defined and used on one line is not expanded: sh, bash and dash read the whole line first", () => {
+    held([`M=b.js; alias a='echo '; alias b='; M=a.js'; a b; ${T}`, `M=b.js; alias a='echo ' b='; M=a.js'; a b; ${T}`, `M=b.js\nalias a='echo '; alias b='; M=a.js'; a b\n${T}`,
+      `M=b.js; { alias a='echo '; alias b='; M=a.js'; }; a b; ${T}`, `M=b.js; alias a='echo '; alias s='echo '; alias b='; M=a.js'; a s s b; ${T}`,
+      `M=b.js; alias a='M=a.js'; a; ${T}`, `M=b.js; alias a='true; M=a.js'; a; ${T}`]);
+  });
+  test("an alias from an earlier line may or may not expand (bash needs expand_aliases): the names it sets are not known afterwards", () => {
+    held([`M=b.js\nalias a='M=a.js'\na\n${T}`, `M=b.js\nalias a='echo '\nalias b='; M=a.js'\na b\n${T}`, `shopt -s expand_aliases\nM=b.js\nalias a='M=a.js'\na\n${T}`]);
+  });
+  test("a quoted word is a command or an argument, never an assignment or an alias", () => {
+    held(["N=a.js; alias e='true;'; e 'N=b.js'; cat lib/hidden.js > $N; node a.js", "N=a.js\nalias e='true;'\ne 'N=b.js'\ncat lib/hidden.js > $N\nnode a.js",
+      "M=a.js; alias x='M=b.js;true'; 'x'; cat lib/hidden.js > $M; node a.js", "M=a.js\nalias x='M=b.js;true'\n'x'\ncat lib/hidden.js > $M\nnode a.js",
+      "alias x='M=b.js;true'\nalias e='true;'\ne 'x'\ncat lib/hidden.js > ${M:-a.js}\nnode a.js"]);
+  });
+  test("an alias that sets nothing the run depends on stays quiet", () => {
+    expect(classes("M=a.js\nalias a='echo hi'\na\ncat lib/hidden.js > $M\nnode b.js")).toEqual([]);
   });
 });
