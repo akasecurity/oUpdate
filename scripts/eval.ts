@@ -75,13 +75,32 @@ const repo = resolve(import.meta.dir, "..");
 
 // ---- checks 1 and 2 -------------------------------------------------------
 
-/** Pure: reads run.ts summary lines ("MAL  id: STOPPED hold", "CTRL id: PASSED land") and replay lines ("tag: STOPPED hold"). */
-export function parseOutcomes(out: string): { mal: Map<string, string>; ctrl: Map<string, string> } {
+/**
+ * Pure: reads run.ts summary lines ("MAL  id: STOPPED hold", "CTRL id: PASSED land") and replay lines ("tag: STOPPED hold").
+ * With several reviewers run.ts tags each line "<case id>-<reviewer name>": the longest reviewer name that ends the tag is
+ * stripped, the worst outcome across reviewers is kept per case, and a case a reviewer did not report is MISSING.
+ */
+export function parseOutcomes(out: string, reviewers: string[] = []): { mal: Map<string, string>; ctrl: Map<string, string> } {
   const mal = new Map<string, string>();
   const ctrl = new Map<string, string>();
+  const seen = new Map<string, number>();
+  const bySize = [...reviewers].sort((a, b) => b.length - a.length);
   for (const l of out.split("\n")) {
-    const m = /^(MAL|CTRL)\s+(\S+): (\S+)/.exec(l);
-    if (m) (m[1] === "MAL" ? mal : ctrl).set(m[2]!, m[3]!);
+    const m = /^(MAL|CTRL)\s+(.+?): (\S+) (?:hold|land)/.exec(l);
+    if (!m) continue;
+    const suffix = bySize.find((r) => m[2]!.endsWith(`-${r}`));
+    const id = suffix ? m[2]!.slice(0, -(suffix.length + 1)) : m[2]!;
+    const target = m[1] === "MAL" ? mal : ctrl;
+    const good = m[1] === "MAL" ? "STOPPED" : "PASSED";
+    // The worst outcome wins: the good one, then a hold for a human, then anything else (an error, a miss).
+    const rank = (o: string) => (o === good ? 0 : o === "HELD-HUMAN" ? 1 : 2);
+    const prev = target.get(id);
+    target.set(id, prev !== undefined && rank(prev) >= rank(m[3]!) ? prev : m[3]!);
+    seen.set(`${m[1]} ${id}`, (seen.get(`${m[1]} ${id}`) ?? 0) + 1);
+  }
+  // A case one of several reviewers never reported (it crashed, or its lines did not parse) is MISSING, whatever the others said.
+  if (reviewers.length > 1) {
+    for (const [k, n] of seen) if (n < reviewers.length) (k.startsWith("MAL ") ? mal : ctrl).set(k.slice(k.indexOf(" ") + 1), "MISSING");
   }
   return { mal, ctrl };
 }
@@ -115,15 +134,16 @@ export function scoreAcceptance(out: { mal: Map<string, string>; ctrl: Map<strin
   const replayOk = replay.size > 0 && [...replay.values()].every((o) => o === "STOPPED");
   const attacks = stoppedMal + (replayOk ? 1 : 0);
   const attackSeen = mal.size + (replay.size ? 1 : 0);
+  const rcBad = rc.split("/")[0] !== "0"; // the acceptance run exited nonzero; the replay run has its own lines
   const c1: CheckResult =
     attackSeen < ATTACKS
       ? { n: 1, name: "attacks", status: "not run", detail: `only ${attackSeen} of ${ATTACKS} attacks produced a result (${mal.size} dataset, ${replay.size} replay pairs); rc=${rc}` }
-      : { n: 1, name: "attacks", status: attacks === ATTACKS ? "pass" : "fail", detail: `${attacks} of ${ATTACKS} stopped${attacks < ATTACKS ? `; missed: ${[...mal].filter(([, o]) => o !== "STOPPED").map(([k, o]) => `${k}=${o}`).concat(replayOk ? [] : ["litellm-replay"]).join(", ")}` : ""}` };
+      : { n: 1, name: "attacks", status: attacks === ATTACKS && !rcBad ? "pass" : "fail", detail: `${attacks} of ${ATTACKS} stopped${rcBad ? `; the acceptance run exited nonzero (rc=${rc})` : ""}${attacks < ATTACKS ? `; missed: ${[...mal].filter(([, o]) => o !== "STOPPED").map(([k, o]) => `${k}=${o}`).concat(replayOk ? [] : ["litellm-replay"]).join(", ")}` : ""}` };
   const passed = [...ctrl].filter(([, o]) => o === "PASSED").length;
   const c2: CheckResult =
     ctrl.size < CONTROLS
       ? { n: 2, name: "controls", status: "not run", detail: `only ${ctrl.size} of ${CONTROLS} controls produced a result; rc=${rc.split("/")[0]}` }
-      : { n: 2, name: "controls", status: passed === CONTROLS ? "pass" : "fail", detail: `${passed} of ${CONTROLS} passed${passed < CONTROLS ? `; not passed: ${[...ctrl].filter(([, o]) => o !== "PASSED").map(([k, o]) => `${k}=${o}`).join(", ")}` : ""}` };
+      : { n: 2, name: "controls", status: passed === CONTROLS && !rcBad ? "pass" : "fail", detail: `${passed} of ${CONTROLS} passed${rcBad ? `; the acceptance run exited nonzero (rc=${rc})` : ""}${passed < CONTROLS ? `; not passed: ${[...ctrl].filter(([, o]) => o !== "PASSED").map(([k, o]) => `${k}=${o}`).join(", ")}` : ""}` };
   const xm = pick(out.mal, EXTENDED.attackIds);
   const xc = pick(out.ctrl, EXTENDED.controlIds);
   if (!xm.size && !xc.size) return { c1, c2 };
@@ -157,7 +177,7 @@ export function runAcceptance(cfg: EvalConfig): { c1: CheckResult; c2: CheckResu
     const set = cfg.extended ? ["--set", "all"] : [];
     const acc = runBun([join(repo, "acceptance/run.ts"), "--reviewers", rfile, "--layers", layers, "--work", work, ...scanner, ...set], scratch);
     const rep = runBun([join(repo, "replay/litellm-2026-10-21/run.ts"), rfile, cfg.scanner ? JSON.stringify(cfg.scanner) : "", layers], scratch);
-    return scoreAcceptance(parseOutcomes(acc.out), parseReplay(rep.out), `${acc.rc}/${rep.rc}`);
+    return scoreAcceptance(parseOutcomes(acc.out, (cfg.reviewers as { name: string }[]).map((r) => r.name)), parseReplay(rep.out), `${acc.rc}/${rep.rc}`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
