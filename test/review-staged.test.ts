@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { reviewUpdate, chunkDiff, partLimit, CEILING_PARTS } from "../src/review.ts";
+import { classifyOutcome, reviewUpdate, chunkDiff, partLimit, CEILING_PARTS } from "../src/review.ts";
 import { markTarNotes } from "../src/prepass.ts";
 import { syntheticPair } from "../acceptance/synthetic/generate.ts";
 import type { FileMap } from "../src/prepass.ts";
@@ -243,5 +243,69 @@ describe("a signal that names no file of the release", () => {
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain("setup.py"); // the real file takes the one slot
     expect(prompts.join("\n")).not.toContain("=== evil/skipped-entry");
+  });
+});
+
+describe("read time budget", () => {
+  const base = (art: { old: FileMap; new: FileMap }, extra: Record<string, unknown>, delayMs: number) => {
+    const prompts: string[] = [];
+    const p = reviewUpdate({
+      eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
+      registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+      advisories: { query: async () => [] },
+      reviewer: { name: "fake", review: async (t) => (prompts.push(t), await Bun.sleep(delayMs), "APPROVE\nno attack indicators found") },
+      cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"),
+      loadArtifacts: async () => art,
+      chunkChars: 200,
+      ...extra,
+    });
+    return p.then((r) => ({ r, prompts, rev: r.layers.find((l) => l.layer === "reviewer")! }));
+  };
+
+  test("a spent budget holds the rest as unread and never lands", async () => {
+    const art = release(12);
+    const total = chunkDiff(art.old, art.new, 200).length;
+    const { r, prompts, rev } = await base(art, { maxReadMs: 1 }, 10);
+    expect(prompts.length).toBeGreaterThanOrEqual(1);
+    expect(prompts.length).toBeLessThan(total);
+    expect(rev.verdict).toBe("stop");
+    expect(rev.detail).toContain(`${prompts.length} of ${total} part(s) read, the read time budget of 1 ms ran out`);
+    expect(rev.detail).toContain("needs a human");
+    expect(r.decision).toBe("hold");
+    // a spent budget is a hold for a person, never scored as a detection
+    expect(classifyOutcome(r)).toBe("held-human");
+  });
+
+  test("a budget the read fits in changes nothing", async () => {
+    const art = release(12);
+    const total = chunkDiff(art.old, art.new, 200).length;
+    const { r, prompts, rev } = await base(art, { maxReadMs: 600_000 }, 0);
+    expect(prompts).toHaveLength(total);
+    expect(rev.verdict).toBe("pass");
+    expect(r.decision).toBe("land");
+  });
+
+  test("no budget, or a bad one, reads every part as before", async () => {
+    const art = release(12);
+    const total = chunkDiff(art.old, art.new, 200).length;
+    for (const maxReadMs of [undefined, 0, -5, Number.NaN]) {
+      const { prompts, rev } = await base(art, { maxReadMs }, 2);
+      expect(prompts).toHaveLength(total);
+      expect(rev.verdict).toBe("pass");
+    }
+  });
+
+  test("a FLAG before the budget runs out is still the reason", async () => {
+    const art = release(12, { "lib/m0.py": "x = 2\nEVIL()\n" });
+    const prompts: string[] = [];
+    const r = await reviewUpdate({
+      eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
+      registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+      advisories: { query: async () => [] },
+      reviewer: { name: "fake", review: async (t) => (prompts.push(t), t.includes("EVIL") ? "FLAG\nexfil" : "APPROVE\nno attack indicators found") },
+      cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"),
+      loadArtifacts: async () => art, chunkChars: 200, maxReadMs: 600_000,
+    });
+    expect(r.layers.find((l) => l.layer === "reviewer")!.detail).toMatch(/fake FLAG/);
   });
 });
