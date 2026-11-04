@@ -71,7 +71,7 @@ export interface FormulaReviewResult {
   reason?: string;
 }
 
-export const SURFACE_TAIL = `This is an UPSTREAM-repo tap: the diff blocks after the formula are the release's supply-chain surface (build and install scripts, manifests, lockfiles, CI/release workflows, packaging, new executables). Other source files are not shown on purpose. Besides the indicators listed after the diff, also FLAG, quoting the line:
+export const SURFACE_TAIL = `This is an UPSTREAM-repo tap: the diff sections after the formula are the release's supply-chain surface (build and install scripts, manifests, lockfiles, CI/release workflows, packaging, new executables). Other source files are not shown on purpose. Besides the indicators listed after the diff, also FLAG, quoting the line:
 7. A new network-touching install or build step (curl/wget/git clone, a download or socket call in setup.py, a Makefile, a script or a build hook)
 8. A new or changed dependency from an unexpected source or version: a url, a VCS or direct reference, another index, a typosquat-like name, or a pin loosened to anything
 9. A new install/postinstall hook, an added executable or binary, or a workflow change that reads secrets, publishes, or fetches and runs code
