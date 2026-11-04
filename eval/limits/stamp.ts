@@ -4,19 +4,18 @@
 
 import { DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE } from "../../src/adapters/reviewer/openai.ts";
 import type { ReviewerSpec } from "../../src/adapters/reviewer/spec.ts";
-import { reviewerFingerprint } from "../../src/verdict-store.ts";
 
 export interface ReviewerStamp {
   type: ReviewerSpec["type"];
   /** The max_tokens sent: an extraBody number, else the spec's, else the adapter default. */
-  maxTokens?: number;
+  maxTokens?: number | "set in extraBody";
   /** The temperature sent; "set in extraBody" when extraBody sets one that is not a number. */
   temperature?: number | "set in extraBody";
   /** The allowlisted part of extraBody (sampling and thinking settings); every other key is dropped. */
   extraBody?: Record<string, unknown>;
   /** How many top-level extraBody keys were dropped; absent when none were. */
   extraBodyOmitted?: number;
-  /** reviewerFingerprint of the spec: a hash of the answer-shaping settings, the command line and the whole extraBody included. */
+  /** A hash of exactly the public fields above (so two runs with the same stamped settings match), never of the model id, command line or any dropped key: a guessed model name cannot be checked against it. */
   fingerprint: string;
   /** ISO time the stamp was taken. */
   at: string;
@@ -24,11 +23,17 @@ export interface ReviewerStamp {
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
-// A stamped value is a boolean, a finite number or a short string; anything else could carry free text.
-const scalar = (v: unknown): boolean => typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v)) || (typeof v === "string" && v.length <= 40);
+// A stamped value is checked per key: numbers only where the setting is numeric, booleans only where it is a switch, and
+// strings only from a closed set of setting words, so free text (a token, an address) never reaches a public file.
+const NUMERIC = new Set(["temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "repetition_penalty", "seed", "max_tokens", "max_completion_tokens", "budget_tokens"]);
+const SWITCH = new Set(["enable_thinking", "think", "thinking"]);
+const WORDS = new Set(["on", "off", "enabled", "disabled", "true", "false", "none", "minimal", "low", "medium", "high"]);
+const WORD_KEYS = new Set(["enable_thinking", "think", "thinking", "reasoning_effort", "effort", "type"]);
+const scalar = (key: string, v: unknown): boolean =>
+  (typeof v === "number" && Number.isFinite(v) && NUMERIC.has(key)) || (typeof v === "boolean" && SWITCH.has(key)) || (typeof v === "string" && WORD_KEYS.has(key) && WORDS.has(v.toLowerCase()));
 
 // Top-level keys stamped as plain values.
-const PLAIN = ["enable_thinking", "think", "reasoning_effort", "temperature", "max_tokens", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed"];
+const PLAIN = ["enable_thinking", "think", "reasoning_effort", "temperature", "max_tokens", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "repetition_penalty", "seed", "max_completion_tokens"];
 // Top-level keys whose object value is reduced to the listed entries.
 const NESTED: Record<string, string[]> = { chat_template_kwargs: ["enable_thinking", "thinking"], reasoning: ["effort", "type"], thinking: ["type", "budget_tokens"] };
 
@@ -36,10 +41,10 @@ const NESTED: Record<string, string[]> = { chat_template_kwargs: ["enable_thinki
 function allowed(key: string, v: unknown): unknown {
   const nested = Object.hasOwn(NESTED, key);
   if (nested && isObj(v)) {
-    const kept = Object.fromEntries(NESTED[key]!.filter((k) => scalar(v[k])).map((k) => [k, v[k]]));
+    const kept = Object.fromEntries(NESTED[key]!.filter((k) => scalar(k, v[k])).map((k) => [k, v[k]]));
     return Object.keys(kept).length ? kept : undefined;
   }
-  return (nested || PLAIN.includes(key)) && scalar(v) ? v : undefined;
+  return (nested || PLAIN.includes(key)) && scalar(key, v) ? v : undefined;
 }
 
 // extraBody is free-form and results are public, so only the allowlist is copied, never the rest (a model, a token).
@@ -54,24 +59,18 @@ function reduceExtraBody(body: Record<string, unknown>): { extraBody?: Record<st
   return { ...(Object.keys(kept).length ? { extraBody: kept } : {}), omitted };
 }
 
+const hashOf = (v: unknown): string => new Bun.CryptoHasher("sha256").update(JSON.stringify(v)).digest("hex");
+
 export function stampSpec(spec: ReviewerSpec, now = new Date()): ReviewerStamp {
-  const fingerprint = reviewerFingerprint(spec);
   const at = now.toISOString();
-  if (spec.type !== "openai") return { type: spec.type, fingerprint, at };
+  if (spec.type !== "openai") return { type: spec.type, fingerprint: hashOf({ type: spec.type }), at };
   const body = spec.extraBody ?? {};
   // The adapter spreads extraBody after max_tokens and temperature, so a value there is the one sent.
-  const maxTokens = typeof body.max_tokens === "number" ? body.max_tokens : spec.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const maxTokens = Object.hasOwn(body, "max_tokens") ? (typeof body.max_tokens === "number" ? body.max_tokens : "set in extraBody" as const) : spec.maxTokens ?? DEFAULT_MAX_TOKENS;
   const temperature = typeof body.temperature === "number" ? body.temperature : Object.hasOwn(body, "temperature") ? "set in extraBody" as const : DEFAULT_TEMPERATURE;
   const { extraBody, omitted } = reduceExtraBody(body);
-  return {
-    type: spec.type,
-    maxTokens,
-    temperature,
-    ...(extraBody !== undefined ? { extraBody } : {}),
-    ...(omitted ? { extraBodyOmitted: omitted } : {}),
-    fingerprint,
-    at,
-  };
+  const shown = { type: spec.type, maxTokens, temperature, ...(extraBody !== undefined ? { extraBody } : {}), ...(omitted ? { extraBodyOmitted: omitted } : {}) };
+  return { ...shown, fingerprint: hashOf(shown), at };
 }
 
 const onOff = (v: unknown): "on" | "off" | undefined => {

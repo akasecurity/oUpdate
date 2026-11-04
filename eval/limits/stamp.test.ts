@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ReviewerSpec } from "../../src/adapters/reviewer/spec.ts";
 import { DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE } from "../../src/adapters/reviewer/openai.ts";
-import { reviewerFingerprint } from "../../src/verdict-store.ts";
 import { stampSpec, thinkingOf } from "./stamp.ts";
 
 const NOW = new Date("2026-01-02T03:04:05Z");
@@ -23,7 +22,7 @@ test("a stamp carries no base URL, header, expected header or key variable", () 
   const text = JSON.stringify({ ...stamp, fingerprint: "" });
   for (const s of ["SENTINEL", "example.test", "127.0.0.1", "x-api-key", "x-served-by", "1234", "5678"]) expect(text).not.toContain(s);
   expect(Object.keys(stamp).sort()).toEqual(["at", "extraBody", "fingerprint", "maxTokens", "temperature", "type"]);
-  expect(stamp).toEqual({ type: "openai", maxTokens: 900, temperature: 0, extraBody: { chat_template_kwargs: { enable_thinking: false } }, fingerprint: reviewerFingerprint(spec), at: "2026-01-02T03:04:05.000Z" });
+  expect(stamp).toEqual({ type: "openai", maxTokens: 900, temperature: 0, extraBody: { chat_template_kwargs: { enable_thinking: false } }, fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/), at: "2026-01-02T03:04:05.000Z" });
 });
 
 test("extraBody is a deep copy and a temperature there is the one stamped", () => {
@@ -32,7 +31,7 @@ test("extraBody is a deep copy and a temperature there is the one stamped", () =
   expect(stamp.temperature).toBe(0.7);
   (spec as { extraBody: { chat_template_kwargs: { enable_thinking: boolean } } }).extraBody.chat_template_kwargs.enable_thinking = false;
   expect(thinkingOf(stamp)).toBe("on");
-  expect(stampSpec(openai(), NOW)).toEqual({ type: "openai", maxTokens: DEFAULT_MAX_TOKENS, temperature: DEFAULT_TEMPERATURE, fingerprint: reviewerFingerprint(openai()), at: "2026-01-02T03:04:05.000Z" });
+  expect(stampSpec(openai(), NOW)).toEqual({ type: "openai", maxTokens: DEFAULT_MAX_TOKENS, temperature: DEFAULT_TEMPERATURE, fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/), at: "2026-01-02T03:04:05.000Z" });
 });
 
 test("thinking reads on, off and default from extraBody", () => {
@@ -77,7 +76,7 @@ test("thinking also reads think, reasoning_effort and reasoning.effort, after th
 test("max tokens is the one sent: an extraBody number, else the spec, else the adapter default", () => {
   expect(stampSpec(openai({ maxTokens: 900, extraBody: { max_tokens: 2000 } }), NOW).maxTokens).toBe(2000);
   expect(stampSpec(openai({ extraBody: { max_tokens: 2000 } }), NOW).maxTokens).toBe(2000);
-  expect(stampSpec(openai({ maxTokens: 900, extraBody: { max_tokens: "lots" } }), NOW).maxTokens).toBe(900);
+  expect(stampSpec(openai({ maxTokens: 900, extraBody: { max_tokens: "lots" } }), NOW).maxTokens).toBe("set in extraBody");
   expect(stampSpec(openai({ maxTokens: 900 }), NOW).maxTokens).toBe(900);
   expect(stampSpec(openai(), NOW).maxTokens).toBe(DEFAULT_MAX_TOKENS);
 });
@@ -108,12 +107,12 @@ test("extraBody is stamped through an allowlist: a model or any other key is nev
   expect(stamp.extraBody).toEqual({ chat_template_kwargs: { enable_thinking: true }, reasoning: { effort: "high", type: "enabled" }, top_p: 0.9, seed: 7 });
   // model, api_token, stop and the over-long reasoning_effort are dropped top-level keys.
   expect(stamp.extraBodyOmitted).toBe(4);
-  // The fingerprint still covers the whole spec, dropped keys included.
-  expect(stamp.fingerprint).toBe(reviewerFingerprint(spec));
-  const other = stampSpec(openai({ extraBody: { top_p: 0.9, model: "m2" } }), NOW);
-  const plain = stampSpec(openai({ extraBody: { top_p: 0.9 } }), NOW);
-  expect(other.extraBody).toEqual(plain.extraBody);
-  expect(other.fingerprint).not.toBe(plain.fingerprint);
+  // The fingerprint hashes only the stamped fields: a different model id or name gives the same one, so a guessed model cannot be confirmed from it.
+  const same = (x: Partial<Extract<ReviewerSpec, { type: "openai" }>>) => stampSpec(openai({ extraBody: { top_p: 0.9 }, ...x }), NOW);
+  expect(same({ model: "other-model" }).fingerprint).toBe(same({}).fingerprint);
+  expect(same({ name: "other-name" }).fingerprint).toBe(same({}).fingerprint);
+  expect(same({}).fingerprint).toBe(stampSpec(openai({ extraBody: { top_p: 0.9 } }), NOW).fingerprint);
+  expect(same({ extraBody: { top_p: 0.5 } }).fingerprint).not.toBe(same({}).fingerprint);
 });
 
 test("a chat_template_kwargs with an extra key is reduced to its thinking switches", () => {
@@ -147,7 +146,22 @@ test("specs differing only in extraBody have different fingerprints and stamps",
 test("a command spec stamps only its type and fingerprint", () => {
   const spec: ReviewerSpec = { type: "command", name: "c", argv: ["SENTINEL-CMD", "--flag", "SENTINEL-ARG"], timeoutMs: 1234, workRoot: "/SENTINEL-ROOT" };
   const stamp = stampSpec(spec, NOW);
-  expect(stamp).toEqual({ type: "command", fingerprint: reviewerFingerprint(spec), at: "2026-01-02T03:04:05.000Z" });
+  expect(stamp).toEqual({ type: "command", fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/), at: "2026-01-02T03:04:05.000Z" });
   expect(JSON.stringify(stamp)).not.toContain("SENTINEL");
   expect(thinkingOf(stamp)).toBe("default");
+});
+
+test("a short free string under an allowed key is dropped: only setting words are stamped", () => {
+  const stamp = stampSpec(openai({ extraBody: { reasoning_effort: "sk-live-ZZZZ1234567890", thinking: { type: "dev@host.example" }, top_p: 0.9, max_completion_tokens: 500 } }), NOW);
+  const text = JSON.stringify({ ...stamp, fingerprint: "" });
+  expect(text).not.toContain("sk-live");
+  expect(text).not.toContain("dev@host");
+  expect(stamp.extraBody).toEqual({ top_p: 0.9, max_completion_tokens: 500 });
+  expect(stamp.extraBodyOmitted).toBe(2);
+});
+
+test("a number under a word key and a word under a numeric key are dropped", () => {
+  const stamp = stampSpec(openai({ extraBody: { reasoning_effort: 5, top_p: "high", temperature: 0.2, seed: true } }), NOW);
+  expect(stamp.extraBody).toEqual({ temperature: 0.2 });
+  expect(stamp.extraBodyOmitted).toBe(3);
 });
