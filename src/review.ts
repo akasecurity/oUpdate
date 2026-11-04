@@ -145,8 +145,8 @@ export function parseVerdict(text: string): "APPROVE" | "FLAG" {
 }
 
 /** Controls (ESC, CR, C1), bidi, zero-width and other invisible characters dropped: for model output that reaches the terminal raw. Newlines go too, so split lines first.
- *  Invisible here means no glyph of its own: soft hyphen, fillers, variation selectors, line and paragraph separators, annotation marks and tag characters. */
-const TERMINAL_DROP = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u2800\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
+ *  Built from Unicode properties, as ident.ts INERT is, so a format or default-ignorable character no list named is dropped too; braille blank is the one listed point. */
+const TERMINAL_DROP = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}\u{2800}]/gu;
 export function stripTerminal(s: string): string {
   return s.replace(TERMINAL_DROP, "");
 }

@@ -444,8 +444,19 @@ describe("runGate", () => {
     let body = "";
     forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
     await runGate({ forge, repo: "o/r", review: async (c) => ({ ...result(c, "hold", ["advisory"]), malicious: ["MAL-2025-1"] }) });
-    expect(body).toContain("**MALICIOUS: yaml 2.8.3 (MAL-2025-1).** Do not merge, and check where this version is already installed.");
+    expect(body).toContain("**MALICIOUS: yaml 2.8.3 (`MAL-2025-1`).** Do not merge, and check where this version is already installed.");
     expect(body.indexOf("MALICIOUS")).toBeLessThan(body.indexOf("advisory"));
+  });
+
+  test("advisory ids in the malicious headline are one code span, so a mention or an issue ref stays text", async () => {
+    const forge = memForge({ "b:bun.lock": LOCK("2.8.1"), "h1:bun.lock": LOCK("2.8.3") }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    await runGate({ forge, repo: "o/r", review: async (c) => ({ ...result(c, "hold", ["advisory"]), malicious: ["@org/team", "#123"] }) });
+    expect(body).toContain("(`@org/team, #123`)");
+    const outside = body.replace(/`[^`]*`/g, "");
+    expect(outside).not.toContain("@org/team");
+    expect(outside).not.toContain("#123");
   });
 
   test("a review that throws counts as an error layer, so the PR stays pending", async () => {
@@ -563,7 +574,34 @@ describe("runGate", () => {
     const out = await runGate({ forge, repo: "o/r", review: async () => { throw new Error("not called"); } });
     expect(out[0]!.state).toBe("failure");
     expect(forge.log[0]).toMatch(/^status h1 failure .*bun.lock deleted/);
-    expect(body).toContain("bun.lock: deleted");
+    expect(body).toContain("- `bun.lock`: deleted");
+  });
+
+  test("deleted and unread paths in the failure comment are code spans, so a mention or an issue ref in a path stays text", async () => {
+    const lock = "deps/@org/team/bun.lock";
+    const forge = memForge({ [`b:${lock}`]: LOCK("2.8.1"), "b:docs/@org/#123.md": "old", "h1:docs/@org/#123.md": "new" }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    const out = await runGate({ forge, repo: "o/r", lockPaths: [lock], review: async () => { throw new Error("not called"); } });
+    expect(out[0]!.state).toBe("failure");
+    expect(body).toContain(`- \`${lock}\`: deleted`);
+    expect(body).toContain("- `docs/@org/#123.md`: `");
+    const outside = body.replace(/`[^`]*`/g, "");
+    expect(outside).not.toContain("@org");
+    expect(outside).not.toContain("#123");
+  });
+
+  test("lock paths in the pending header of an unparseable lockfile are code spans", async () => {
+    const lock = "deps/@org/team/bun.lock";
+    const forge = memForge({ [`b:${lock}`]: LOCK("2.8.1"), [`h1:${lock}`]: "{not json" }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    const out = await runGate({ forge, repo: "o/r", lockPaths: [lock, "web/#123/bun.lock"], review: async () => { throw new Error("not called"); } });
+    expect(out[0]!.state).toBe("pending");
+    expect(body).toContain(`**oupdate: pending** (\`${lock}\`, \`web/#123/bun.lock\`)`);
+    const outside = body.replace(/`[^`]*`/g, "");
+    expect(outside).not.toContain("@org");
+    expect(outside).not.toContain("#123");
   });
 
   test("a PR changing a lockfile or manifest the gate cannot read fails (yarn, Cargo, Go, Ruby)", async () => {

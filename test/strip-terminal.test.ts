@@ -25,6 +25,12 @@ const DROPPED: [string, number[]][] = [
   ["interlinear annotation", range(0xfff9, 0xfffb)],
   ["tag characters", range(0xe0000, 0xe007f)],
   ["variation selectors supplement", range(0xe0100, 0xe01ef)],
+  // Named by no list: the class is built from Unicode properties (Cf, Default_Ignorable_Code_Point).
+  ["musical symbol format controls", range(0x1d173, 0x1d17a)],
+  ["shorthand format controls", range(0x1bca0, 0x1bca3)],
+  ["egyptian hieroglyph format controls", range(0x13430, 0x1343f)],
+  ["unassigned default-ignorable specials", range(0xfff0, 0xfff8)],
+  ["unassigned default-ignorable tag-plane points", range(0xe0080, 0xe0fff)],
 ];
 
 for (const [label, points] of DROPPED)
