@@ -5,6 +5,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readArtifact, normalizePaths, mergeArtifactPair } from "./artifact.ts";
+import { cachedReviewer, recordResult, reviewerFingerprint, rollupHolds, verdictDirOutsideRepo } from "./verdict-store.ts";
+import { hostname } from "node:os";
 import { reviewUpdate, stripTerminal, LAYERS, type LayerName, type LayerVerdict, type ReviewResult } from "./review.ts";
 import type { Ecosystem, FileMap } from "./prepass.ts";
 import type { ArtifactFile, Registry } from "./adapters/ecosystem/types.ts";
@@ -55,6 +57,8 @@ export interface ReviewArgs {
   only?: LayerName[];
   reviewer?: ReviewerSpec;
   scanner?: ScannerSpec;
+  /** A directory hosts share: a review answered there is reused, and this host's result is recorded for `oupdate verdicts`. */
+  verdictDir?: string;
   json?: string;
   cooldownDays: number;
   advisoryFix: boolean;
@@ -62,7 +66,7 @@ export interface ReviewArgs {
   stateDir?: string;
 }
 
-const VALUE_FLAGS = new Set(["--old-artifact", "--new-artifact", "--published", "--now", "--only", "--reviewer", "--scanner", "--json", "--cooldown-days", "--state-dir"]);
+const VALUE_FLAGS = new Set(["--old-artifact", "--new-artifact", "--published", "--now", "--only", "--reviewer", "--scanner", "--json", "--cooldown-days", "--state-dir", "--verdict-dir"]);
 
 function date(flag: string, v: string): Date {
   const d = new Date(v);
@@ -104,6 +108,10 @@ export function parseReviewArgs(argv: string[]): ReviewArgs {
   }
   if (flags.has("--reviewer")) out.reviewer = parseReviewerSpec(flags.get("--reviewer")!);
   if (flags.has("--scanner")) out.scanner = parseScannerSpec(flags.get("--scanner")!);
+  if (flags.has("--verdict-dir")) {
+    out.verdictDir = flags.get("--verdict-dir")!;
+    verdictDirOutsideRepo(out.verdictDir, process.cwd(), process.env);
+  }
   if (flags.has("--json")) out.json = flags.get("--json")!;
   if (flags.has("--state-dir")) {
     out.stateDir = flags.get("--state-dir")!;
@@ -218,6 +226,18 @@ export async function lockedFilesCheck(registry: Registry, name: string, version
 export const loadReviewWaivers = (a: ReviewArgs) => (a.stateDir ? listWaivers(a.stateDir) : undefined);
 
 export async function runReview(a: ReviewArgs): Promise<ReviewResult> {
+  const r = await reviewOnce(a);
+  if (a.verdictDir) {
+    try {
+      await recordResult(a.verdictDir, hostname(), r);
+    } catch (e) {
+      console.error(`verdict store not written: ${stripTerminal(String((e as Error).message ?? e))}`);
+    }
+  }
+  return r;
+}
+
+async function reviewOnce(a: ReviewArgs): Promise<ReviewResult> {
   const base: Registry = a.eco === "npm" ? npmRegistry() : pypiRegistry();
   const registry: Registry = a.published ? { ...base, publishedAt: async () => a.published } : { ...base };
   if (a.lockedFiles?.length) {
@@ -237,7 +257,7 @@ export async function runReview(a: ReviewArgs): Promise<ReviewResult> {
       to: a.to,
       registry,
       advisories: osvFeed(),
-      reviewer: a.reviewer ? makeReviewer(a.reviewer) : undefined,
+      reviewer: a.reviewer ? (a.verdictDir ? cachedReviewer(makeReviewer(a.reviewer), a.verdictDir, hostname(), reviewerFingerprint(a.reviewer)) : makeReviewer(a.reviewer)) : undefined,
       scanner: a.scanner ? makeScanner(a.scanner) : undefined,
       cooldownDays: a.cooldownDays,
       now: a.now,
@@ -276,9 +296,10 @@ export interface GateCliArgs {
   scanner?: ScannerSpec;
   /** A state dir whose waivers.json (oupdate waive) lets a PR's hold for a waived binary land. */
   stateDir?: string;
+  verdictDir?: string;
 }
 
-const GATE_FLAGS = new Set(["--forge", "--endpoint", "--repo", "--token-file", "--token-env", "--branch-prefix", "--bot-login", "--gate-login", "--lock", "--cooldown-days", "--private-registry", "--reviewer", "--scanner", "--state-dir"]);
+const GATE_FLAGS = new Set(["--forge", "--endpoint", "--repo", "--token-file", "--token-env", "--branch-prefix", "--bot-login", "--gate-login", "--lock", "--cooldown-days", "--private-registry", "--reviewer", "--scanner", "--state-dir", "--verdict-dir"]);
 
 /** `env` supplies GITHUB_API_URL, which Actions sets on GitHub Enterprise Server, as the github endpoint when --endpoint is absent. */
 export function parseGateArgs(argv: string[], env: Record<string, string | undefined> = process.env): GateCliArgs {
@@ -321,6 +342,10 @@ export function parseGateArgs(argv: string[], env: Record<string, string | undef
     out.stateDir = flags.get("--state-dir")!;
     stateDirOutsideRepo(out.stateDir, process.cwd(), process.env);
   }
+  if (flags.has("--verdict-dir")) {
+    out.verdictDir = flags.get("--verdict-dir")!;
+    verdictDirOutsideRepo(out.verdictDir, process.cwd(), env);
+  }
   return out;
 }
 
@@ -351,13 +376,25 @@ async function gateMain(argv: string[]): Promise<number> {
     lockPaths: g.lockPaths,
     privateRegistry: g.privateRegistry,
     log: (line) => console.log(line),
-    review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, lockedFiles: c.toArtifacts, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner, stateDir: g.stateDir }),
+    review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, lockedFiles: c.toArtifacts, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner, stateDir: g.stateDir, verdictDir: g.verdictDir }),
   });
   for (const p of pulls) {
     console.log(`PR #${p.number}: ${p.state}`);
     for (const r of p.results) console.log(render(r).replace(/^/gm, "  "));
   }
   return pulls.some((p) => p.state === "failure") ? 1 : 0;
+}
+
+/** `oupdate verdicts --verdict-dir DIR`: one line per held release and reason, with the hosts that hit it. */
+async function verdictsMain(argv: string[]): Promise<number> {
+  const i = argv.indexOf("--verdict-dir");
+  const dir = i >= 0 ? argv[i + 1] : undefined;
+  if (!dir || argv.length !== 2) throw new Error("usage: oupdate verdicts --verdict-dir DIR");
+  const rows = await rollupHolds(dir);
+  for (const r of rows) console.log(`${r.eco} ${r.name} ${r.from} -> ${r.to}: ${r.reason} [${r.hosts.join(", ")}]`);
+  if (!rows.length) console.log("no holds");
+  else console.log("A stored reviewer FLAG is reused by every host until its file is deleted: to clear one, delete DIR/<key>.json (the key is the sha256 file name in DIR).");
+  return 0;
 }
 
 export interface ImageArgs {
@@ -474,6 +511,7 @@ if (import.meta.main) {
   const [cmd, ...rest] = process.argv.slice(2);
   try {
     if (cmd === "gate") process.exit(await gateMain(rest));
+    if (cmd === "verdicts") process.exit(await verdictsMain(rest));
     if (cmd === "keys") process.exit(keysMain(rest));
     if (cmd === "waive") process.exit(waiveMain(parseWaiveArgs(rest), { out: (l) => console.log(l), now: new Date() }));
     if (cmd === "image") process.exit(await imageMain(rest));
