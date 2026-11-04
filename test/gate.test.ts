@@ -600,12 +600,13 @@ describe("runGate", () => {
 
   test("a read lockfile at an at-sign or issue-ref path is a code span in the success header", async () => {
     const lock = "deps/@org/team/bun.lock";
-    const forge = memForge({ [`b:${lock}`]: LOCK("2.8.1"), [`h1:${lock}`]: LOCK("2.8.1") }, { h3: "failure" });
+    const lock2 = "web/#123/bun.lock";
+    const forge = memForge({ [`b:${lock}`]: LOCK("2.8.1"), [`h1:${lock}`]: LOCK("2.8.1"), [`b:${lock2}`]: LOCK("2.8.1"), [`h1:${lock2}`]: LOCK("2.8.1") }, { h3: "failure" });
     let body = "";
     forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
-    const out = await runGate({ forge, repo: "o/r", lockPaths: [lock, "web/#123/bun.lock"], review: async () => { throw new Error("not called"); } });
+    const out = await runGate({ forge, repo: "o/r", lockPaths: [lock, lock2], review: async () => { throw new Error("not called"); } });
     expect(out[0]!.state).toBe("success");
-    expect(body).toContain(`**oupdate: success** (\`${lock}\``);
+    expect(body).toContain(`**oupdate: success** (\`${lock}\`, \`${lock2}\`)`);
     const outside = body.replace(/`[^`]*`/g, "");
     expect(outside).not.toContain("@org");
     expect(outside).not.toContain("#123");

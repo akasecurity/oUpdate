@@ -112,7 +112,7 @@ function flat(text: string): string {
 
 export function comment(sha: string, locks: string, state: StatusState, results: ReviewResult[], unreviewed: Change[]): string {
   const lines = [MARKER, verdictLine(sha, state), `**oupdate: ${state}** (${locks})`, ""];
-  for (const r of results) if (r.malicious?.length) lines.push(`**MALICIOUS: `${shown(r.name)} ${shown(r.to)}` (${codeDetail(r.malicious.join(", "))}).** Do not merge, and check where this version is already installed.`, "");
+  for (const r of results) if (r.malicious?.length) lines.push(`**MALICIOUS: \`${shown(r.name)} ${shown(r.to)}\` (${codeDetail(r.malicious.join(", "))}).** Do not merge, and check where this version is already installed.`, "");
   for (const r of results) {
     lines.push(`- \`${shown(r.name)} ${r.from ? shown(r.from) : "(new)"} -> ${shown(r.to)}\`: **${r.decision}**`);
     for (const l of r.layers) lines.push(`  - ${l.layer} ${l.verdict}: ${codeDetail(l.detail)}`);
