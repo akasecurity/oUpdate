@@ -409,8 +409,11 @@ export async function verdictsMain(argv: string[], out: (line: string) => void =
   const rows = await rollupHolds(dir);
   const entries = storeEntries(dir);
   for (const r of rows) {
-    const files = entries.filter((e) => [e.eco, e.name, e.from, e.to].every((x) => x !== undefined) && stripTerminal(e.eco!) === r.eco && stripTerminal(e.name!) === r.name && stripTerminal(e.from!) === r.from && stripTerminal(e.to!) === r.to).map((e) => stripTerminal(e.file));
-    out(`${r.eco} ${r.name} ${r.from} -> ${r.to}: ${r.reason} [${r.hosts.join(", ")}]${files.length ? ` entry: ${files.join(", ")}` : ""}`);
+    // Only the reviewer layer's answer is stored, so only its holds have an entry behind them.
+    const fromReviewer = r.reason.startsWith("reviewer: ");
+    const files = fromReviewer ? entries.filter((e) => [e.eco, e.name, e.from, e.to].every((x) => x !== undefined) && stripTerminal(e.eco!) === r.eco && stripTerminal(e.name!) === r.name && stripTerminal(e.from!) === r.from && stripTerminal(e.to!) === r.to).map((e) => stripTerminal(e.file)) : [];
+    const tail = files.length ? ` entry: ${files.join(", ")}` : fromReviewer ? ` (no entry names this release: --forget <key> takes a key from ${stripTerminal(dir)})` : "";
+    out(`${r.eco} ${r.name} ${r.from} -> ${r.to}: ${r.reason} [${r.hosts.join(", ")}]${tail}`);
   }
   if (!rows.length) out("no holds");
   else out("A stored reviewer FLAG is reused by every host until it is forgotten: oupdate verdicts --verdict-dir DIR --forget <key>|<eco>:<name>@<from>><to> deletes it (or delete DIR/<key>.json).");
