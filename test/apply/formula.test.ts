@@ -4,7 +4,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { FORMULA_TAIL, formulaReview, VERDICT_CONTRACT, type FormulaEnv } from "../../src/apply/formula.ts";
+import { FORMULA_TAIL, SURFACE_TAIL, formulaReview, VERDICT_CONTRACT, type FormulaEnv } from "../../src/apply/formula.ts";
 import { scripted } from "./helpers.ts";
 import { APPROVE, cleanupFixtures, fixture, git, OFFICIAL, OTHER, PREBUILT, SOURCE, TAP, type Fx } from "./tap-fixture.ts";
 
@@ -251,6 +251,6 @@ describe("formula prompts", () => {
   test("never use the word block (it reads as a contradiction in an approval)", async () => {
     const v = await review();
     const head = v.prompts[0]!.split("\nChunk 1 of")[0]!;
-    for (const text of [head, FORMULA_TAIL.replace(VERDICT_CONTRACT, "")]) expect(text).not.toMatch(/\bblocks?\b/i);
+    for (const text of [head, FORMULA_TAIL.replace(VERDICT_CONTRACT, ""), SURFACE_TAIL.replace(VERDICT_CONTRACT, "")]) expect(text).not.toMatch(/\bblocks?\b/i);
   });
 });
