@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { verdictDirOutsideRepo, verdictKey, cachedReviewer, recordResult, rollupHolds, reviewerFingerprint } from "../src/verdict-store.ts";
+import { verdictDirOutsideRepo, verdictKey, cachedReviewer, recordResult, rollupHolds, reviewerFingerprint, storeEntries, forgetEntries, markStoreAnswer, STORE_MARK } from "../src/verdict-store.ts";
 import type { LayerVerdict, Reviewer, ReviewResult } from "../src/review.ts";
 
 /** Runs fn with the working directory inside a throwaway git checkout, so the tests do not depend on where they run. */
@@ -236,9 +236,9 @@ describe("shared folder hardening", () => {
       await recordResult(d, "h1", held("p", "m FLAG on part(s) 1 of 1"));
       writeFileSync(join(d, "results", ".DS_Store"), "x");
       mkdirSync(join(d, "results", "bad"));
-      writeFileSync(join(d, "results", "bad", "a.json"), "{}");
-      writeFileSync(join(d, "results", "bad", "b.json"), JSON.stringify({ host: "h", result: { decision: "hold", eco: "npm" } }));
-      writeFileSync(join(d, "results", "bad", "c.json"), "null");
+      writeFileSync(join(d, "results", "bad", `${"a".repeat(64)}.json`), "{}");
+      writeFileSync(join(d, "results", "bad", `${"b".repeat(64)}.json`), JSON.stringify({ host: "h", result: { decision: "hold", eco: "npm" } }));
+      writeFileSync(join(d, "results", "bad", `${"c".repeat(64)}.json`), "null");
       await recordResult(d, "h\u001b]52;c;eA==\u0007x", held("q", "m FLAG\u001b[2J on part(s) 1 of 1"));
       const rows = await rollupHolds(d);
       expect(rows.map((r) => r.name).sort()).toEqual(["p", "q"]);
@@ -252,7 +252,7 @@ describe("roll-up shape and cooldown", () => {
   const put = async (d: string, name: string, body: unknown) => {
     const { mkdirSync, writeFileSync } = await import("node:fs");
     mkdirSync(join(d, "results", "h"), { recursive: true });
-    writeFileSync(join(d, "results", "h", `${name}.json`), JSON.stringify(body));
+    writeFileSync(join(d, "results", "h", `${new Bun.CryptoHasher("sha256").update(name).digest("hex")}.json`), JSON.stringify(body));
   };
   const base = { eco: "npm", name: "p", from: "1.0.0", to: "1.0.1", decision: "hold" };
   test("a record with valid strings but missing, non-array or non-object layers is skipped", async () => {
@@ -297,5 +297,186 @@ describe("roll-up shape and cooldown", () => {
       const rv = cachedReviewer(inner, join(blocker, "store"), "h1");
       expect(await rv.review("p")).toBe("FLAG\nbad");
     } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
+const rel = { eco: "npm", name: "left-pad", from: "1.0.0", to: "1.0.1" };
+
+describe("entry metadata", () => {
+  test("a stored entry records the release and when it was written", async () => {
+    const d = dir();
+    try {
+      const before = Date.now();
+      await cachedReviewer(counting("m", "FLAG\nbad"), d, "h1", "", rel).review("x");
+      const [e] = storeEntries(d);
+      expect(e).toMatchObject({ key: verdictKey("m", "x"), file: join(d, verdictKey("m", "x") + ".json"), reviewer: "m", host: "h1", ...rel });
+      expect(Date.parse(e!.at!)).toBeGreaterThanOrEqual(before - 1000);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("an old entry without the fields still serves its FLAG and still lists", async () => {
+    const d = dir();
+    try {
+      await Bun.write(join(d, verdictKey("m", "x") + ".json"), JSON.stringify({ reviewer: "m", host: "old", text: "FLAG\nold" }));
+      const a = counting("m", "APPROVE\nnever asked");
+      expect(await cachedReviewer(a, d, "h", "", rel).review("x")).toBe("FLAG\nold");
+      expect(a.calls).toBe(0);
+      expect(storeEntries(d)).toEqual([{ key: verdictKey("m", "x"), file: join(d, verdictKey("m", "x") + ".json"), reviewer: "m", host: "old" }]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("only key-named files holding a FLAG are listed: an APPROVE, a damaged file and a stray name are not", async () => {
+    const d = dir();
+    try {
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(join(d, verdictKey("m", "a") + ".json"), JSON.stringify({ text: "APPROVE\nplanted", ...rel }));
+      writeFileSync(join(d, verdictKey("m", "b") + ".json"), "{not json");
+      writeFileSync(join(d, "notes.json"), JSON.stringify({ text: "FLAG\nx", ...rel }));
+      expect(storeEntries(d)).toEqual([]);
+      expect(storeEntries(join(d, "missing"))).toEqual([]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("oupdate verdicts prints the key file beside each hold", async () => {
+    const d = dir();
+    try {
+      const { verdictsMain } = await import("../src/cli.ts");
+      await cachedReviewer(counting("m", "FLAG\nbad"), d, "h1", "", rel).review("x");
+      await recordResult(d, "h1", held("left-pad", "m FLAG on part(s) 1 of 1"));
+      const lines: string[] = [];
+      expect(await verdictsMain(["--verdict-dir", d], (l) => lines.push(l))).toBe(0);
+      expect(lines[0]).toContain("left-pad 1.0.0 -> 1.0.1");
+      expect(lines[0]).toContain(join(d, verdictKey("m", "x") + ".json"));
+    } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
+describe("forget", () => {
+  test("by key stem: deletes that entry, prints it, the next review asks again", async () => {
+    const d = dir();
+    try {
+      await cachedReviewer(counting("m", "FLAG\nbad"), d, "h1", "", rel).review("x");
+      const key = verdictKey("m", "x");
+      expect(forgetEntries(d, key)).toEqual([join(d, key + ".json")]);
+      expect(readdirSync(d)).toEqual([]);
+      const b = counting("m");
+      await cachedReviewer(b, d, "h2", "", rel).review("x");
+      expect(b.calls).toBe(1);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("by release: deletes every entry of that release and no other", async () => {
+    const d = dir();
+    try {
+      await cachedReviewer(counting("m", "FLAG\na"), d, "h", "", rel).review("part1");
+      await cachedReviewer(counting("m", "FLAG\nb"), d, "h", "", rel).review("part2");
+      await cachedReviewer(counting("m", "FLAG\nc"), d, "h", "", { ...rel, to: "1.0.2" }).review("other");
+      expect(forgetEntries(d, "npm:left-pad@1.0.0>1.0.1").sort()).toEqual([verdictKey("m", "part1"), verdictKey("m", "part2")].map((k) => join(d, k + ".json")).sort());
+      expect(readdirSync(d)).toEqual([verdictKey("m", "other") + ".json"]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a scoped name and an empty from parse", async () => {
+    const d = dir();
+    try {
+      const scoped = { eco: "npm", name: "@s/p", from: "", to: "2.0.0" };
+      await cachedReviewer(counting("m", "FLAG\na"), d, "h", "", scoped).review("x");
+      expect(forgetEntries(d, "npm:@s/p@>2.0.0")).toEqual([join(d, verdictKey("m", "x") + ".json")]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("no match is nothing to forget, exit 0; a malformed target is refused", async () => {
+    const d = dir();
+    try {
+      const { verdictsMain } = await import("../src/cli.ts");
+      const lines: string[] = [];
+      expect(await verdictsMain(["--verdict-dir", d, "--forget", "a".repeat(64)], (l) => lines.push(l))).toBe(0);
+      expect(await verdictsMain(["--forget", "npm:x@1>2", "--verdict-dir", d], (l) => lines.push(l))).toBe(0);
+      expect(lines).toEqual(["nothing to forget", "nothing to forget"]);
+      await expect(verdictsMain(["--verdict-dir", d, "--forget", "../../etc/passwd"], () => {})).rejects.toThrow(/usage/);
+      await expect(verdictsMain(["--verdict-dir", d, "--forget"], () => {})).rejects.toThrow(/usage/);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("oupdate verdicts --forget prints each file it deleted", async () => {
+    const d = dir();
+    try {
+      const { verdictsMain } = await import("../src/cli.ts");
+      await cachedReviewer(counting("m", "FLAG\nbad"), d, "h1", "", rel).review("x");
+      const lines: string[] = [];
+      expect(await verdictsMain(["--verdict-dir", d, "--forget", "npm:left-pad@1.0.0>1.0.1"], (l) => lines.push(l))).toBe(0);
+      expect(lines).toEqual([`forgot ${join(d, verdictKey("m", "x") + ".json")}`]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
+describe("roll-up release id", () => {
+  test("releases whose hyphen-joined ids collide are kept apart", async () => {
+    const d = dir();
+    try {
+      const a: ReviewResult = { ...held("a-b", "m FLAG on part(s) 1 of 1"), from: "1", to: "2" };
+      const b: ReviewResult = { ...held("a", "m FLAG on part(s) 1 of 1"), from: "b-1", to: "2" };
+      await recordResult(d, "h1", a);
+      await recordResult(d, "h1", b);
+      expect((await rollupHolds(d)).map((r) => `${r.name} ${r.from}`).sort()).toEqual(["a b-1", "a-b 1"]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a record left under the old hyphen-joined file name is not rolled up next to its hashed successor", async () => {
+    const d = dir();
+    try {
+      await recordResult(d, "h1", held("p", "m FLAG on part(s) 1 of 1"));
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      mkdirSync(join(d, "results", "h1"), { recursive: true });
+      writeFileSync(join(d, "results", "h1", "npm-q-1.0.0-1.0.1.json"), JSON.stringify({ host: "h1", result: held("q", "m FLAG on part(s) 1 of 1") }));
+      expect((await rollupHolds(d)).map((r) => r.name)).toEqual(["p"]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a very long package name still records", async () => {
+    const d = dir();
+    try {
+      await recordResult(d, "h1", held("x".repeat(400), "m FLAG on part(s) 1 of 1"));
+      expect((await rollupHolds(d)).length).toBe(1);
+      expect(readdirSync(join(d, "results", "h1"))[0]).toMatch(/^[0-9a-f]{64}\.json$/);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
+describe("a reused answer is marked", () => {
+  test("the wrapper counts the answers it served from the store", async () => {
+    const d = dir();
+    try {
+      const first = cachedReviewer(counting("m", "FLAG\nbad"), d, "h1");
+      await first.review("x");
+      expect(first.storeHits).toBe(0);
+      const second = cachedReviewer(counting("m"), d, "h2");
+      await second.review("x");
+      await second.review("y");
+      expect(second.storeHits).toBe(1);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("the reviewer layer's reason says it came from the shared store; other layers and a fresh answer are untouched", () => {
+    const r: ReviewResult = { ...held("p", "m FLAG on part(s) 1 of 1"), layers: [{ layer: "prepass", verdict: "pass", detail: "clean" }, { layer: "reviewer", verdict: "stop", detail: "m FLAG on part(s) 1 of 1" }] };
+    expect(markStoreAnswer(r, 0)).toEqual(r);
+    const m = markStoreAnswer(r, 1);
+    expect(m.layers[0]!.detail).toBe("clean");
+    expect(m.layers[1]!.detail).toBe(`m FLAG on part(s) 1 of 1${STORE_MARK}`);
+  });
+  test("the roll-up gives the host that paid and the host that reused one row", async () => {
+    const d = dir();
+    try {
+      await recordResult(d, "h1", held("p", "m FLAG on part(s) 1 of 1"));
+      await recordResult(d, "h2", markStoreAnswer(held("p", "m FLAG on part(s) 1 of 1"), 1));
+      const rows = await rollupHolds(d);
+      expect(rows.length).toBe(1);
+      expect(rows[0]).toMatchObject({ reason: "reviewer: m FLAG on part(s) 1 of 1", hosts: ["h1", "h2"] });
+    } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
+describe("parsers use the env they are given", () => {
+  test("review and gate check --verdict-dir and --state-dir against the passed workspace", async () => {
+    const { parseReviewArgs, parseGateArgs } = await import("../src/cli.ts");
+    const ws = mkdtempSync(join(tmpdir(), "verdict-envws-"));
+    try {
+      const env = { GITHUB_WORKSPACE: ws };
+      const g = ["--endpoint", "e", "--repo", "o/r", "--token-file", "t"];
+      expect(() => parseReviewArgs(["npm", "p", "1", "2", "--verdict-dir", join(ws, "s")], env)).toThrow(/inside/);
+      expect(() => parseReviewArgs(["npm", "p", "1", "2", "--state-dir", join(ws, "s")], env)).toThrow(/inside/);
+      expect(() => parseGateArgs([...g, "--state-dir", join(ws, "s")], env)).toThrow(/inside/);
+      expect(() => parseReviewArgs(["npm", "p", "1", "2", "--verdict-dir", join(ws, "s")], {})).not.toThrow();
+    } finally { rmSync(ws, { recursive: true }); }
   });
 });
