@@ -117,8 +117,11 @@ function parsePeers(text: string): Record<string, unknown> | undefined {
     let j: unknown = JSON.parse(text.trim() || "{}");
     if (Array.isArray(j) && j.length === 1) j = j[0];
     if (!j || typeof j !== "object" || Array.isArray(j)) return undefined;
+    // With the field named, its value must be the map: a string, array or number there is not npm's shape, so never fall back to the whole object.
+    const hasNamed = "peerDependencies" in (j as object);
     const named = (j as Record<string, unknown>).peerDependencies;
-    const peers = (named != null && typeof named === "object" && !Array.isArray(named) ? named : j) as Record<string, unknown>;
+    if (hasNamed && (named == null || typeof named !== "object" || Array.isArray(named))) return undefined;
+    const peers = (hasNamed ? named : j) as Record<string, unknown>;
     // A peer range is a string: any other value is not that shape, so the read is unparseable, never an edge.
     if (Object.values(peers).some((v) => typeof v !== "string")) return undefined;
     return peers;

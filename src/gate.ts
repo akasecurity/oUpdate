@@ -46,7 +46,8 @@ export type PrivateRegistryPolicy = "list" | "hold" | "review";
 export const PRIVATE_REGISTRY_POLICIES: PrivateRegistryPolicy[] = ["hold", "list", "review"];
 export const PRIVATE_REGISTRY_DEFAULT: PrivateRegistryPolicy = "hold";
 
-const privateNote = (c: Change) => `not reviewed (private registry ${shown(c.registry ?? "")})`;
+// The registry stays raw here: every caller puts this text through codeDetail, which escapes it once (shown() first would escape twice).
+export const privateNote = (c: Change) => `not reviewed (private registry ${c.registry || "unknown"})`;
 
 function heldPrivate(c: Change): ReviewResult {
   return { eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, decision: "hold", layers: [{ layer: "gate", verdict: "stop", detail: `${privateNote(c)}; a person decides` }] };
@@ -110,6 +111,7 @@ function flat(text: string): string {
   return [...text.replace(/[ \t\n\r\f\v]+/g, " ")].slice(0, 300).join("");
 }
 
+/** `locks` is markdown text: the caller code-spans each lock path first (codeDetail), because a path can hold an @ mention or an issue reference. */
 export function comment(sha: string, locks: string, state: StatusState, results: ReviewResult[], unreviewed: Change[]): string {
   const lines = [MARKER, verdictLine(sha, state), `**oupdate: ${state}** (${locks})`, ""];
   for (const r of results) if (r.malicious?.length) lines.push(`**MALICIOUS: \`${shown(r.name)} ${shown(r.to)}\` (${codeDetail(r.malicious.join(", "))}).** Do not merge, and check where this version is already installed.`, "");
@@ -117,7 +119,7 @@ export function comment(sha: string, locks: string, state: StatusState, results:
     lines.push(`- \`${shown(r.name)} ${r.from ? shown(r.from) : "(new)"} -> ${shown(r.to)}\`: **${r.decision}**`);
     for (const l of r.layers) lines.push(`  - ${l.layer} ${l.verdict}: ${codeDetail(l.detail)}`);
   }
-  for (const c of unreviewed) lines.push(`- \`${shown(c.name)} ${c.from ? shown(c.from) : "(new)"} -> ${shown(c.to)}\`: not reviewed (private registry ${codeDetail(c.registry ?? "")})`);
+  for (const c of unreviewed) lines.push(`- \`${shown(c.name)} ${c.from ? shown(c.from) : "(new)"} -> ${shown(c.to)}\`: not reviewed (private registry ${c.registry ? codeDetail(c.registry) : "unknown"})`);
   return lines.join("\n");
 }
 
