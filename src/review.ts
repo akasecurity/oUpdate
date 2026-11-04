@@ -3,6 +3,7 @@
 // the update. Later layers still run after an earlier stop, so a replay shows
 // what each layer would have done on its own.
 
+import { isRegistrySignal, publisherSignals } from "./publisher-signals.ts";
 import { benignBinary } from "./benign-binary.ts";
 import { findWaiver, sha256Hex, type Waiver } from "./waiver.ts";
 import { cooldownVerdict } from "./cooldown.ts";
@@ -2212,13 +2213,13 @@ export function changedFiles(old: FileMap, now: FileMap): { old: FileMap; new: F
 
 /** Files with a pre-pass or scanner signal, plus manifests and install or startup files: the last tier before a human. */
 export function signalPaths(pre: PrepassResult): Set<string> {
-  const out = new Set<string>([...pre.hard, ...pre.soft].map((s) => s.path));
+  const out = new Set<string>([...pre.hard, ...pre.soft].filter((s) => !isRegistrySignal(s)).map((s) => s.path));
   for (const p of [...pre.added, ...pre.changed]) if (PRIORITY_NAME.test(p)) out.add(p);
   return out;
 }
 
 export function priorityPaths(pre: PrepassResult): Set<string> {
-  const out = new Set<string>([...pre.hard, ...pre.soft].map((s) => s.path));
+  const out = new Set<string>([...pre.hard, ...pre.soft].filter((s) => !isRegistrySignal(s)).map((s) => s.path));
   for (const p of pre.added) out.add(p);
   for (const p of pre.changed) if (PRIORITY_NAME.test(p)) out.add(p);
   return out;
@@ -2233,7 +2234,7 @@ export function rankPriorityPaths(pre: PrepassResult, scanHits: Set<string> = ne
   const hard = new Set(pre.hard.map((s) => s.path));
   const added = new Set(pre.added);
   const count = new Map<string, number>();
-  for (const s of [...pre.hard, ...pre.soft]) count.set(s.path, (count.get(s.path) ?? 0) + 1);
+  for (const s of [...pre.hard, ...pre.soft].filter((x) => !isRegistrySignal(x))) count.set(s.path, (count.get(s.path) ?? 0) + 1);
   const tier = (p: string) => (hard.has(p) ? 0 : scanHits.has(p) ? 1 : INSTALL_NAME.test(p) ? 2 : PRIORITY_NAME.test(p) ? 3 : added.has(p) ? 4 : 5);
   return [...priorityPaths(pre)].sort((a, b) => tier(a) - tier(b) || (count.get(b) ?? 0) - (count.get(a) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
 }
@@ -2345,6 +2346,16 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
     }
   }
 
+  // Who published the release: soft signals from registry metadata, for an update only (a first install has no previous version to compare). A registry that cannot say, or an error, adds none.
+  if (pre && on("prepass") && input.from && input.registry.publisher) {
+    try {
+      const [prev, next] = await Promise.all([input.registry.publisher(input.name, input.from), input.registry.publisher(input.name, input.to)]);
+      if (next) pre.soft.push(...publisherSignals(prev?.facts, next));
+    } catch {
+      /* soft signals only */
+    }
+  }
+
   if (on("prepass")) {
     if (!pre) layers.push({ layer: "prepass", verdict: "error", detail: artifactError ?? "no artifacts" });
     else
@@ -2409,7 +2420,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       // (the bundler's own mappings text is not code and a model flags it as obfuscation). Its own strings are checked here instead (mapStringsClass). Any other signal on it,
       // a hard one or a scanner hit, still shows it in full.
       const bigMapOk = (x: { kind: string; path: string }) => x.kind === "large-file" && x.path.endsWith(".map") && strictMapOf(artifacts.new.get(x.path)!) !== undefined && mapStringsClass(artifacts.new.get(x.path)!) !== "mappings";
-      const signalled = new Set([...pre.hard, ...pre.soft.filter((x) => !bigMapOk(x))].map((x) => x.path));
+      const signalled = new Set([...pre.hard, ...pre.soft.filter((x) => !bigMapOk(x) && !isRegistrySignal(x))].map((x) => x.path));
       let chunks = chunkDiff(artifacts.old, artifacts.new, cap, undefined, false, signalled);
       // More than one stage of parts: read the ranked files first (the first FLAG ends the review), then the rest, every part.
       // (Over the limit the narrowing below ranks the files itself, so the diff is not cut twice.)
