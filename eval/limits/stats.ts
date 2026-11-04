@@ -8,9 +8,11 @@ export function wilson(k: number, n: number, z = 1.96): { lo: number; hi: number
   return { lo: Math.max(0, c - h), hi: Math.min(1, c + h) };
 }
 
-export type Scope = "full" | "priority" | "signal" | "ranked" | "none";
+export type Scope = "full" | "priority" | "signal" | "ranked" | "partial" | "none";
 /** The stops where no part reached the model, matched at the start of the hold text so wording a model or a path adds later cannot turn a real read into "none": no parts at all, or too large with nothing left to review (signal or priority files alone, or no priority files). */
 const NO_READ = /^(not model-reviewable: 0 parts to review|too large for model review: \d+ parts > \d+ \((signal|priority) files alone\); needs a human|too large for model review: [^;]*; no priority files to review)/;
 /** How much of the diff the reviewer read, from its hold text: a narrowed review names its scope; a hold with no parts to review read nothing; a landed or plainly held one read it all. */
-export const readScope = (detail: string): Scope => (NO_READ.test(detail) ? "none" : /\branked part/.test(detail) ? "ranked" : /\bsignal (part|files)/.test(detail) ? "signal" : /\bpriority files/.test(detail) ? "priority" : "full");
+/** A spent read time budget: some parts were read and the rest never, whatever tier narrowed the diff first. */
+const BUDGET_STOP = /^\d+ of \d+ part\(s\) read, the read time budget/;
+export const readScope = (detail: string): Scope => (BUDGET_STOP.test(detail) ? "partial" : NO_READ.test(detail) ? "none" : /\branked part/.test(detail) ? "ranked" : /\bsignal (part|files)/.test(detail) ? "signal" : /\bpriority files/.test(detail) ? "priority" : "full");
 export const scopeNote = (counts: Record<string, number>) => Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(", ") || "full 0";

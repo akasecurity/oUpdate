@@ -94,7 +94,7 @@ for (const c of CASES.filter((x) => !arg("only") || arg("only")!.split(",").incl
   const heldOut = c.disclosed > cutoff;
   const prepass = (await held(c, "prepass")).stop;
   let k = 0;
-  const reads = { full: 0, priority: 0, signal: 0, ranked: 0, none: 0 };
+  const reads = { full: 0, priority: 0, signal: 0, ranked: 0, partial: 0, none: 0 };
   const started = Date.now();
   for (let i = 0; i < repeats; i++) { const h = await held(c, "reviewer"); if (h.stop) k++; reads[h.scope]++; }
   const secPerReview = Math.round((Date.now() - started) / repeats / 100) / 10;
@@ -104,7 +104,7 @@ const cleanRows = [];
 for (const c of CLEAN.filter((x) => !arg("only") || arg("only")!.split(",").includes(x.id))) {
   const prepass = (await held(c, "prepass")).stop;
   let k = 0;
-  const reads = { full: 0, priority: 0, signal: 0, ranked: 0, none: 0 };
+  const reads = { full: 0, priority: 0, signal: 0, ranked: 0, partial: 0, none: 0 };
   const started = Date.now();
   for (let i = 0; i < repeats; i++) { const h = await held(c, "reviewer"); if (h.stop) k++; reads[h.scope]++; }
   cleanRows.push({ id: c.id, policy_hold: POLICY_HOLD.has(c.id), prepass_blocked: prepass, k, n: repeats, reads, sec_per_review: Math.round((Date.now() - started) / repeats / 100) / 10, ...wilson(k, repeats) });
