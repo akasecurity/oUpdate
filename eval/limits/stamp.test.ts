@@ -105,7 +105,7 @@ test("extraBody is stamped through an allowlist: a model or any other key is nev
   const text = JSON.stringify({ ...stamp, fingerprint: "" });
   for (const s of ["SENTINEL", "model", "api_token", "system_prompt", "summary", "stop", "xxxxx"]) expect(text).not.toContain(s);
   expect(stamp.extraBody).toEqual({ chat_template_kwargs: { enable_thinking: true }, reasoning: { effort: "high", type: "enabled" }, top_p: 0.9, seed: 7 });
-  // model, api_token, stop and the over-long reasoning_effort are dropped top-level keys.
+  // model, api_token, stop and the reasoning_effort that is not a setting word are dropped top-level keys.
   expect(stamp.extraBodyOmitted).toBe(4);
   // The fingerprint hashes only the stamped fields: a different model id or name gives the same one, so a guessed model cannot be confirmed from it.
   const same = (x: Partial<Extract<ReviewerSpec, { type: "openai" }>>) => stampSpec(openai({ extraBody: { top_p: 0.9 }, ...x }), NOW);
@@ -164,4 +164,19 @@ test("a number under a word key and a word under a numeric key are dropped", () 
   const stamp = stampSpec(openai({ extraBody: { reasoning_effort: 5, top_p: "high", temperature: 0.2, seed: true } }), NOW);
   expect(stamp.extraBody).toEqual({ temperature: 0.2 });
   expect(stamp.extraBodyOmitted).toBe(3);
+});
+
+test("the same settings in another key order give the same fingerprint", () => {
+  const a = stampSpec(openai({ extraBody: { top_p: 0.9, seed: 7, chat_template_kwargs: { enable_thinking: true } } }), NOW);
+  const b = stampSpec(openai({ extraBody: { chat_template_kwargs: { enable_thinking: true }, seed: 7, top_p: 0.9 } }), NOW);
+  expect(a.fingerprint).toBe(b.fingerprint);
+});
+
+test("thinking reads every setting word the stamp keeps, in any case", () => {
+  const t = (extraBody: Record<string, unknown>) => thinkingOf(stampSpec(openai({ extraBody }), NOW));
+  expect(t({ chat_template_kwargs: { enable_thinking: "off" } })).toBe("off");
+  expect(t({ think: "off" })).toBe("off");
+  expect(t({ enable_thinking: "False" })).toBe("off");
+  expect(t({ thinking: "Enabled" })).toBe("on");
+  expect(t({ think: "true" })).toBe("on");
 });

@@ -127,7 +127,7 @@ const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 const line = (n: string, s: { k: number; n: number; lo: number; hi: number }) => `${n}: ${s.k}/${s.n} runs flagged, ${pct(s.k / (s.n || 1))} (95% interval ${pct(s.lo)}-${pct(s.hi)})`;
 const md = [
   `oupdate ${version}, ${models.reviewer.label}, training cutoff ${cutoff}, ${repeats} runs per case`, "",
-  `reviewer: ${models.reviewer.label}; thinking ${thinkingOf(stamp)}; max tokens ${stamp.maxTokens ?? "n/a"}; settings fingerprint ${stamp.fingerprint.slice(0, 12)}; run ${stamp.at}`, "",
+  `reviewer: ${models.reviewer.label}; thinking ${stamp.type === "openai" ? thinkingOf(stamp) : "n/a"}; max tokens ${stamp.maxTokens ?? "n/a"}; settings fingerprint ${stamp.fingerprint.slice(0, 12)}; run ${stamp.at}`, "",
   "| case | disclosed | held-out | pre-pass | reviewer k/N | 95% interval | read | s/review |", "|---|---|---|---|---|---|---|---|",
   ...rows.map((r) => `| ${r.id} | ${r.disclosed} | ${r.held_out ? "yes" : "no"} | ${r.prepass_blocked ? "blocked" : "passed"} | ${r.k}/${r.n} | ${pct(r.lo)}-${pct(r.hi)} | ${scopeNote(r.reads)} | ${r.sec_per_review} |`),
   "", `layers: pre-pass alone blocks ${rows.filter((r) => r.prepass_blocked).length} of ${rows.length} attacks; the reviewer flags ${rows.filter((r) => !r.prepass_blocked && r.k > 0).length} more that the pre-pass passes; ${rows.filter((r) => !r.prepass_blocked && r.k === 0).length} are missed by both`,

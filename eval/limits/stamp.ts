@@ -59,7 +59,9 @@ function reduceExtraBody(body: Record<string, unknown>): { extraBody?: Record<st
   return { ...(Object.keys(kept).length ? { extraBody: kept } : {}), omitted };
 }
 
-const hashOf = (v: unknown): string => new Bun.CryptoHasher("sha256").update(JSON.stringify(v)).digest("hex");
+// Keys sorted at every level, so the same settings listed in another order hash the same.
+const canon = (v: unknown): unknown => (Array.isArray(v) ? v.map(canon) : isObj(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, x]) => [k, canon(x)])) : v);
+const hashOf = (v: unknown): string => new Bun.CryptoHasher("sha256").update(JSON.stringify(canon(v))).digest("hex");
 
 export function stampSpec(spec: ReviewerSpec, now = new Date()): ReviewerStamp {
   const at = now.toISOString();
@@ -73,14 +75,16 @@ export function stampSpec(spec: ReviewerSpec, now = new Date()): ReviewerStamp {
   return { ...shown, fingerprint: hashOf(shown), at };
 }
 
+// Every word the stamp keeps under a switch key reads here, in any case: on, enabled, true / off, disabled, false.
 const onOff = (v: unknown): "on" | "off" | undefined => {
-  if (v === true || v === "enabled") return "on";
-  if (v === false || v === "disabled") return "off";
+  const w = typeof v === "string" ? v.toLowerCase() : v;
+  if (w === true || w === "enabled" || w === "on" || w === "true") return "on";
+  if (w === false || w === "disabled" || w === "off" || w === "false") return "off";
   if (isObj(v)) return onOff(v.type);
   return undefined;
 };
 
-const bool = (v: unknown): "on" | "off" | undefined => (v === true ? "on" : v === false ? "off" : undefined);
+const bool = onOff;
 
 // A reasoning effort of "none" or "off" turns thinking off; any other non-empty string asks for it.
 const effort = (v: unknown): "on" | "off" | undefined => {
