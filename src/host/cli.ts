@@ -11,7 +11,8 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir, hostname } from "node:os";
 import type { Item } from "./collect.ts";
-import { hostReport, type HostReport } from "./report.ts";
+import { type DigestInput, renderDigest } from "./digest.ts";
+import { hostReport, localDate, type HostReport } from "./report.ts";
 import { weeklyStreak } from "./compare.ts";
 import { probeHost, type Runner } from "./probe.ts";
 import type { AdvisoryFeed } from "../adapters/advisory/osv.ts";
@@ -232,13 +233,22 @@ export function logFileFor(c: Extract<HostCommand, { mode: "apply" | "gatekeeper
 }
 
 /**
+ * The digest file for a log file: the same name with ".digest.md" for its extension. It takes the
+ * effective log file (logFileFor), so a dry run or one-off writes beside its own log. With a {date}
+ * log template a same-day rerun writes the same log name, so its digest replaces the earlier one.
+ */
+export function digestPath(logFile: string): string {
+  return logFile.replace(/\.[^./]*$/, "") + ".digest.md";
+}
+
+/**
  * Runs --apply or a Gatekeeper one-off. Each line goes out as it is made, appended to the log file
  * first, then stdout, so a run that hangs or is killed leaves its log. A real run that is stopped
  * by a signal or crashes ends with an "=== ABORTED" line, as the previous updater's exit trap did; a dry
  * run or one-off with a "=== STOPPED" line, which no reader counts as an aborted run. Returns the
  * text and the exit code.
  */
-export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatekeeper" }>, deps: ApplyDeps & { ownerWaiterArgv?: string[] }): Promise<{ text: string; rc: number }> {
+export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatekeeper" }>, deps: ApplyDeps & { ownerWaiterArgv?: string[]; renderDigest?: (a: DigestInput) => string }): Promise<{ text: string; rc: number }> {
   const now = deps.now ?? new Date();
   const loaded = loadConfig(c);
   const cfg = loaded.logFile ? { ...loaded, logFile: logFileFor(c, logPath(loaded.logFile, now)) } : loaded;
@@ -318,6 +328,22 @@ export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatek
     if (!c.dryRun) mkdirSync(cfg.stateDir, { recursive: true });
     const r = await applyHost(cfg, deps.exec, deps.fs, { dryRun: c.dryRun, now, onLine: (l) => emit(l), isStopping: () => stopCode !== undefined, ownerWaiterArgv: deps.ownerWaiterArgv ?? ownerWaiterArgv(c.config), ...(deps.previousUpdater ? { previousUpdater: deps.previousUpdater } : {}), ...(deps.jobRunners ? { jobRunners: deps.jobRunners } : {}) });
     // The end-of-run notice is logged after the summary block: emitted by applyHost already.
+    // The digest is for a person: printed and written beside the log, never added to the log a reader parses.
+    // Building, printing or writing it never aborts a finished run: a failure is a warning, the rc stands.
+    try {
+      const digest = (deps.renderDigest ?? renderDigest)({ host: cfg.host, date: localDate(now), log: lines.join("\n") });
+      out("");
+      for (const l of digest.trimEnd().split("\n")) out(l);
+      if (cfg.logFile && !logBroken) {
+        try {
+          writeFileSync(digestPath(cfg.logFile), digest);
+        } catch (e) {
+          out(`WARNING: could not write the digest (${e instanceof Error ? e.message : String(e)})`);
+        }
+      }
+    } catch (e) {
+      out(`WARNING: could not build the digest (${e instanceof Error ? e.message : String(e)})`);
+    }
     return { text: lines.join("\n"), rc: await settle(logBroken ? 1 : r.rc) };
   } catch (e) {
     if (stopCode !== undefined) return { text: lines.join("\n"), rc: await settle(2) };

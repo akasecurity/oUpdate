@@ -122,6 +122,48 @@ describe("applyMain", () => {
     expect(existsSync(join(c.dir, "state"))).toBe(true);
   });
 
+  test("--apply writes the digest beside the log and prints it after the summary, never into the log", async () => {
+    const logs = join(root, "digest-logs");
+    const c = config({ logFile: join(logs, "run.log") });
+    const h = fakeHost();
+    const printed: string[] = [];
+    await applyMain({ mode: "apply", config: c.path, dryRun: false, host: "hosta" }, { exec: h.exec, fs: h.fs, out: (l) => printed.push(l) });
+    const digest = readFileSync(join(logs, "run.digest.md"), "utf8");
+    expect(digest).toContain("# hosta: ");
+    expect(digest).toContain("Nothing waits on you.");
+    expect(printed.join("\n")).toContain(digest.trimEnd());
+    expect(readFileSync(join(logs, "run.log"), "utf8")).not.toContain("# hosta: ");
+  });
+
+  test("a dry run writes its own digest and leaves the real run's digest alone", async () => {
+    const logs = join(root, "digest-dry-logs");
+    const c = config({ logFile: join(logs, "run.log") });
+    const h = fakeHost();
+    await applyMain({ mode: "apply", config: c.path, dryRun: false, host: "hosta" }, { exec: h.exec, fs: h.fs, out: () => {} });
+    const real = readFileSync(join(logs, "run.digest.md"), "utf8");
+    await applyMain({ mode: "apply", config: c.path, dryRun: true, host: "hosta" }, { exec: h.exec, fs: h.fs, out: () => {} });
+    expect(readFileSync(join(logs, "run.digest.md"), "utf8")).toBe(real);
+    expect(real).not.toContain("Dry run");
+    expect(readFileSync(join(logs, "dry-run-run.digest.md"), "utf8")).toContain("Dry run: nothing was applied.");
+  });
+
+  test("a digest that cannot be built warns and leaves the finished run and its rc alone", async () => {
+    const logs = join(root, "digest-throw-logs");
+    const c = config({ logFile: join(logs, "run.log") });
+    const h = fakeHost();
+    const printed: string[] = [];
+    const boom = () => {
+      throw new Error("bad log");
+    };
+    const r = await applyMain({ mode: "apply", config: c.path, dryRun: false, host: "hosta" }, { exec: h.exec, fs: h.fs, out: (l) => printed.push(l), renderDigest: boom });
+    expect(r.rc).toBe(0);
+    expect(printed).toContain("WARNING: could not build the digest (bad log)");
+    expect(r.text).toContain("=== hosta summary ===");
+    expect(r.text).not.toContain("ABORTED");
+    expect(readFileSync(join(logs, "run.log"), "utf8")).not.toContain("ABORTED");
+    expect(existsSync(join(logs, "run.digest.md"))).toBe(false);
+  });
+
   test("--dry-run creates no state directory", async () => {
     const c = config({});
     const h = fakeHost();
