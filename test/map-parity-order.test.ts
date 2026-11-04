@@ -15,8 +15,8 @@ const cases: [string, string, M, M][] = [
   ["D1 duplicate names, payload first, old single clean", READDIR(SC1), { sources: ["a.ts"], sc: ["clean"] }, { sources: ["a.ts", "a.ts"], sc: [SPAWN, "clean"] }],
   ["D2 duplicate names swapped in new", READDIR("m['sources'+'Content'][0]"), { sources: ["a.ts", "a.ts"], sc: [SPAWN, "clean"] }, { sources: ["a.ts", "a.ts"], sc: ["clean", SPAWN] }],
   ["D3 duplicate names, payload second, old duplicates", READDIR(SC1), { sources: ["a.ts", "a.ts"], sc: ["ok", "ok"] }, { sources: ["a.ts", "a.ts"], sc: ["ok", SPAWN] }],
-  ["D4 old [a,a]=[clean,P0], new [a,a]=[P0,P1]: both entries by index", READDIR("m['sources'+'Content'][0]"), { sources: ["a.ts", "a.ts"], sc: ["clean", "require('child_process').exec(process.env.P0)"] }, { sources: ["a.ts", "a.ts"], sc: ["require('child_process').exec(process.env.P0)", "require('child_process').exec(process.env.P1)"] }],
-  ["D5 old [a,a]=[clean,SPAWN], new swapped [SPAWN,clean], loader reads [0]", READDIR("m['sources'+'Content'][0]"), { sources: ["a.ts", "a.ts"], sc: ["clean", SPAWN] }, { sources: ["a.ts", "a.ts"], sc: [SPAWN, "clean"] }],
+  ["D4 old [a,a]=[clean,P0], new [a,a]=[P0,P1]: both entries by index", FOLDED("0"), { sources: ["a.ts", "a.ts"], sc: ["clean", "require('child_process').exec(process.env.P0)"] }, { sources: ["a.ts", "a.ts"], sc: ["require('child_process').exec(process.env.P0)", "require('child_process').exec(process.env.P1)"] }],
+  ["D5 old [a,a]=[clean,SPAWN], new swapped [SPAWN,clean], loader reads [0]", FOLDED("0"), { sources: ["a.ts", "a.ts"], sc: ["clean", SPAWN] }, { sources: ["a.ts", "a.ts"], sc: [SPAWN, "clean"] }],
   ["S3 shift: old [a,a]=[clean,P] -> new [a,a,a]=[clean,clean,P], loader reads [2]", FOLDED("2"), { sources: ["a.ts", "a.ts"], sc: ["clean", SPAWN] }, { sources: ["a.ts", "a.ts", "a.ts"], sc: ["clean", "clean", SPAWN] }],
   ["S5 reorder with distinct names: old [x,a]=[clean,P] -> new [a,x]=[P,clean], loader reads [0]", FOLDED("0"), { sources: ["x.ts", "a.ts"], sc: ["clean", SPAWN] }, { sources: ["a.ts", "x.ts"], sc: [SPAWN, "clean"] }],
   ["N1 names split, loader reverses", READDIR("m.names.reverse().join('')"), { sources: ["a.ts"] }, { sources: ["a.ts"], names: [B, A] }],
@@ -36,10 +36,10 @@ for (const big of [true, false]) for (const [label, code, o, n] of cases) test(l
     }),
   });
   const t = reviewed.join("");
-  // The loader names its map with a bare "map" string, so a padded map is shown whole too; a small map is shown whole as a token diff, where a changed word appears as {+word+}.
+  // A padded map lists each changed entry (the loader names its map by a folded string, so it stays hashed); a small map is shown whole as a token diff, where a changed word appears as {+word+}.
   const shown = /^D[45]/.test(label)
     ? big
-      ? t.includes(label.startsWith("D5") ? "process.env.Q" : "process.env.P1")
+      ? (t.match(/=== lib\/index\.js\.map sourcesContent a\.ts \(/g) ?? []).length === 2 && t.includes(label.startsWith("D5") ? "process.env.Q" : "process.env.P1")
       : t.includes(label.startsWith("D5") ? "process.env.Q" : "process.env.P0") && (label.startsWith("D5") || t.includes("{+P1+}"))
     : (n.names?.length ? t.includes("require(") : true) && t.includes("process.env.Q");
   expect({ label, big, decision: r.decision, payloadShown: shown }).toMatchObject({ payloadShown: true });

@@ -1868,7 +1868,7 @@ const sameFile = bytesEqual;
 // (concatenations, escapes, comments and parentheses removed) name a map the same way as one quoted string.
 // A non-constant piece is not folded: the map stays a residual and the loader line is what the review shows in full. A quoted stem in package.json or a declaration file is not a map reference: those name the
 // file they describe, and treating `index.js` as the stem of `index.js.map` would show every sibling map in full.
-// A quoted map name still counts. Anything else is shown in full.
+// A quoted map name still counts. A bare string "map" in code (exact case) is the tail of a name built at run time and counts the same way. Anything else is shown in full.
 const MAP_KEYS = new Set(["version", "file", "sourceRoot", "sources", "sourcesContent", "names", "mappings", "ignoreList", "x_google_ignoreList"]);
 const strings = (v: unknown, nullable = false) => Array.isArray(v) && v.every((x) => typeof x === "string" || (nullable && x === null));
 const integers = (v: unknown) => Array.isArray(v) && v.every((x) => Number.isInteger(x));
@@ -2038,8 +2038,8 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
       if (!str) continue;
       const low = str.toLowerCase();
       if (low === ".map" && !isCode) continue; // a ".map" in a README or other text file is not a loader
-      // A name built at run time from parts (["index", "js", "map"].join(".")) leaves the bare word "map" as a string of code: it counts like the ".map" tail.
-      if (low === "map" && isCode) names.add(".map");
+      // A name built at run time from parts (["index", "js", "map"].join(".")) leaves the bare word "map" as a string of code: it counts like the ".map" tail (exact case: "Map" does not).
+      if (str === "map" && isCode) names.add(".map");
       names.add(low);
       // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
