@@ -3,10 +3,9 @@
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { readArtifact, normalizePaths, mergeArtifactPair } from "./artifact.ts";
-import { cachedReviewer, recordResult, reviewerFingerprint, rollupHolds, verdictDirOutsideRepo } from "./verdict-store.ts";
-import { hostname } from "node:os";
+import { cachedReviewer, forgetEntries, FORGET_USAGE, markStoreAnswer, recordResult, reviewerFingerprint, rollupHolds, storeEntries, verdictDirOutsideRepo, type CachedReviewer } from "./verdict-store.ts";
 import { reviewUpdate, stripTerminal, LAYERS, type LayerName, type LayerVerdict, type ReviewResult } from "./review.ts";
 import type { Ecosystem, FileMap } from "./prepass.ts";
 import type { ArtifactFile, Registry } from "./adapters/ecosystem/types.ts";
@@ -74,7 +73,8 @@ function date(flag: string, v: string): Date {
   return d;
 }
 
-export function parseReviewArgs(argv: string[]): ReviewArgs {
+/** `env` supplies GITHUB_WORKSPACE, a root that --verdict-dir and --state-dir must lie outside of. */
+export function parseReviewArgs(argv: string[], env: Record<string, string | undefined> = process.env): ReviewArgs {
   const pos: string[] = [];
   const flags = new Map<string, string>();
   let advisoryFix = false;
@@ -110,12 +110,12 @@ export function parseReviewArgs(argv: string[]): ReviewArgs {
   if (flags.has("--scanner")) out.scanner = parseScannerSpec(flags.get("--scanner")!);
   if (flags.has("--verdict-dir")) {
     out.verdictDir = flags.get("--verdict-dir")!;
-    verdictDirOutsideRepo(out.verdictDir, process.cwd(), process.env);
+    verdictDirOutsideRepo(out.verdictDir, process.cwd(), env);
   }
   if (flags.has("--json")) out.json = flags.get("--json")!;
   if (flags.has("--state-dir")) {
     out.stateDir = flags.get("--state-dir")!;
-    stateDirOutsideRepo(out.stateDir, process.cwd(), process.env);
+    stateDirOutsideRepo(out.stateDir, process.cwd(), env);
   }
   if (flags.has("--cooldown-days")) {
     const n = Number(flags.get("--cooldown-days"));
@@ -248,16 +248,17 @@ async function reviewOnce(a: ReviewArgs): Promise<ReviewResult> {
     const bad = await lockedFilesCheck(registry, a.name, a.to, a.lockedFiles);
     if (bad) return { eco: a.eco, name: a.name, from: a.from, to: a.to, decision: "hold", layers: [bad] };
   }
+  const cached: CachedReviewer | undefined = a.reviewer && a.verdictDir ? cachedReviewer(makeReviewer(a.reviewer), a.verdictDir, hostname(), reviewerFingerprint(a.reviewer), { eco: a.eco, name: a.name, from: a.from, to: a.to }) : undefined;
   const work = mkdtempSync(join(tmpdir(), "oupdate-dl-"));
   try {
-    return await reviewUpdate({
+    const r = await reviewUpdate({
       eco: a.eco,
       name: a.name,
       from: a.from,
       to: a.to,
       registry,
       advisories: osvFeed(),
-      reviewer: a.reviewer ? (a.verdictDir ? cachedReviewer(makeReviewer(a.reviewer), a.verdictDir, hostname(), reviewerFingerprint(a.reviewer)) : makeReviewer(a.reviewer)) : undefined,
+      reviewer: cached ?? (a.reviewer ? makeReviewer(a.reviewer) : undefined),
       scanner: a.scanner ? makeScanner(a.scanner) : undefined,
       cooldownDays: a.cooldownDays,
       now: a.now,
@@ -266,6 +267,7 @@ async function reviewOnce(a: ReviewArgs): Promise<ReviewResult> {
       waivers: loadReviewWaivers(a),
       loadArtifacts: () => loadArtifacts(a, registry, work),
     });
+    return cached ? markStoreAnswer(r, cached.storeHits) : r;
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -340,7 +342,7 @@ export function parseGateArgs(argv: string[], env: Record<string, string | undef
   if (flags.has("--scanner")) out.scanner = parseScannerSpec(flags.get("--scanner")!);
   if (flags.has("--state-dir")) {
     out.stateDir = flags.get("--state-dir")!;
-    stateDirOutsideRepo(out.stateDir, process.cwd(), process.env);
+    stateDirOutsideRepo(out.stateDir, process.cwd(), env);
   }
   if (flags.has("--verdict-dir")) {
     out.verdictDir = flags.get("--verdict-dir")!;
@@ -385,15 +387,33 @@ async function gateMain(argv: string[]): Promise<number> {
   return pulls.some((p) => p.state === "failure") ? 1 : 0;
 }
 
-/** `oupdate verdicts --verdict-dir DIR`: one line per held release and reason, with the hosts that hit it. */
-async function verdictsMain(argv: string[]): Promise<number> {
-  const i = argv.indexOf("--verdict-dir");
-  const dir = i >= 0 ? argv[i + 1] : undefined;
-  if (!dir || argv.length !== 2) throw new Error("usage: oupdate verdicts --verdict-dir DIR");
+const VERDICTS_USAGE = `usage: oupdate verdicts --verdict-dir DIR [--forget TARGET]\n       ${FORGET_USAGE}`;
+
+/** `oupdate verdicts --verdict-dir DIR`: one line per held release and reason, with the hosts that hit it and the stored entry files behind it. `--forget TARGET` deletes the stored FLAG entries for a key or a release instead. */
+export async function verdictsMain(argv: string[], out: (line: string) => void = (l) => console.log(l)): Promise<number> {
+  const flags = new Map<string, string>();
+  for (let i = 0; i < argv.length; i += 2) {
+    const v = argv[i + 1];
+    if ((argv[i] !== "--verdict-dir" && argv[i] !== "--forget") || v === undefined || flags.has(argv[i]!)) throw new Error(VERDICTS_USAGE);
+    flags.set(argv[i]!, v);
+  }
+  const dir = flags.get("--verdict-dir");
+  if (!dir) throw new Error(VERDICTS_USAGE);
+  const target = flags.get("--forget");
+  if (target !== undefined) {
+    const gone = forgetEntries(dir, target);
+    for (const f of gone) out(`forgot ${stripTerminal(f)}`);
+    if (!gone.length) out("nothing to forget");
+    return 0;
+  }
   const rows = await rollupHolds(dir);
-  for (const r of rows) console.log(`${r.eco} ${r.name} ${r.from} -> ${r.to}: ${r.reason} [${r.hosts.join(", ")}]`);
-  if (!rows.length) console.log("no holds");
-  else console.log("A stored reviewer FLAG is reused by every host until its file is deleted: to clear one, delete DIR/<key>.json (the key is the sha256 file name in DIR).");
+  const entries = storeEntries(dir);
+  for (const r of rows) {
+    const files = entries.filter((e) => [e.eco, e.name, e.from, e.to].every((x) => x !== undefined) && stripTerminal(e.eco!) === r.eco && stripTerminal(e.name!) === r.name && stripTerminal(e.from!) === r.from && stripTerminal(e.to!) === r.to).map((e) => stripTerminal(e.file));
+    out(`${r.eco} ${r.name} ${r.from} -> ${r.to}: ${r.reason} [${r.hosts.join(", ")}]${files.length ? ` entry: ${files.join(", ")}` : ""}`);
+  }
+  if (!rows.length) out("no holds");
+  else out("A stored reviewer FLAG is reused by every host until it is forgotten: oupdate verdicts --verdict-dir DIR --forget <key>|<eco>:<name>@<from>><to> deletes it (or delete DIR/<key>.json).");
   return 0;
 }
 
@@ -534,7 +554,7 @@ if (import.meta.main) {
       console.log(text);
       process.exit(0);
     }
-    if (cmd !== "review") throw new Error("usage: oupdate review <npm|pypi> <name> <from> <to> [--old-artifact F --new-artifact F] [--published ISO] [--now ISO] [--only layers] [--reviewer JSON] [--scanner JSON] [--advisory-fix] [--cooldown-days N] [--state-dir DIR] [--json FILE]\n       oupdate waive add|list|remove --state-dir DIR ...\n       oupdate image <old-ref> <new-ref> [--platform linux/amd64] [--reviewer JSON] [--second-reviewer JSON] [--now ISO] [--json FILE]\n       oupdate targets --apply [--dry-run] --config FILE [--target ID]...\n       oupdate targets parity --record FILE --script-log FILE --date YYYY-MM-DD --ledger FILE [--target ID]");
+    if (cmd !== "review") throw new Error("usage: oupdate review <npm|pypi> <name> <from> <to> [--old-artifact F --new-artifact F] [--published ISO] [--now ISO] [--only layers] [--reviewer JSON] [--scanner JSON] [--advisory-fix] [--cooldown-days N] [--state-dir DIR] [--verdict-dir DIR] [--json FILE]\n       oupdate verdicts --verdict-dir DIR [--forget <key>|<eco>:<name>@<from>><to>]\n       oupdate waive add|list|remove --state-dir DIR ...\n       oupdate image <old-ref> <new-ref> [--platform linux/amd64] [--reviewer JSON] [--second-reviewer JSON] [--now ISO] [--json FILE]\n       oupdate targets --apply [--dry-run] --config FILE [--target ID]...\n       oupdate targets parity --record FILE --script-log FILE --date YYYY-MM-DD --ledger FILE [--target ID]");
     const args = parseReviewArgs(rest);
     const r = await runReview(args);
     if (args.json) writeFileSync(args.json, JSON.stringify(r, null, 2) + "\n");

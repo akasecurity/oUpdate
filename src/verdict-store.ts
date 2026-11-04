@@ -3,7 +3,7 @@
 // under a hash of those two and a host that meets the same release reads it instead of paying for another review.
 // The roll-up reports one hold per release and reason with the hosts that hit it. The directory is any path hosts share.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, isAbsolute, sep } from "node:path";
 import { parseVerdict, stripTerminal, type Reviewer, type ReviewResult } from "./review.ts";
 import type { ReviewerSpec } from "./adapters/reviewer/spec.ts";
@@ -31,34 +31,121 @@ function writeAtomic(path: string, text: string): void {
   renameSync(tmp, path);
 }
 
+/** The release a review is for, written into each stored entry so a person can find and forget it. */
+export interface Release {
+  eco: string;
+  name: string;
+  from: string;
+  to: string;
+}
+
+const isFlag = (text: unknown): text is string => typeof text === "string" && !!text.trim() && parseVerdict(text) === "FLAG";
+
+export interface CachedReviewer extends Reviewer {
+  /** How many answers this wrapper served from the store instead of asking the reviewer. */
+  storeHits: number;
+}
+
 /** The reviewer, answering from the store when the same prompt was FLAGged before. Only a FLAG is stored and only a FLAG is served: the store can add a hold, never an approval, so a planted entry cannot land a release. */
-export function cachedReviewer(inner: Reviewer, dir: string, host: string, fingerprint = ""): Reviewer {
-  return {
+export function cachedReviewer(inner: Reviewer, dir: string, host: string, fingerprint = "", release?: Release): CachedReviewer {
+  const out: CachedReviewer = {
     name: inner.name,
+    storeHits: 0,
     ...(inner.ready ? { ready: () => inner.ready!() } : {}),
     async review(prompt) {
       const file = join(dir, `${verdictKey(inner.name, prompt, fingerprint)}.json`);
       try {
         const hit = JSON.parse(readFileSync(file, "utf8"));
-        if (typeof hit?.text === "string" && hit.text.trim() && parseVerdict(hit.text) === "FLAG") return hit.text;
+        if (isFlag(hit?.text)) {
+          out.storeHits++;
+          return hit.text;
+        }
       } catch {} // absent or damaged: a miss
       const text = await inner.review(prompt);
-      if (text.trim() && parseVerdict(text) === "FLAG") {
+      if (isFlag(text)) {
         try {
-          writeAtomic(file, JSON.stringify({ reviewer: inner.name, host, text }));
+          const meta = release ? { eco: release.eco, name: release.name, from: release.from, to: release.to } : {};
+          writeAtomic(file, JSON.stringify({ reviewer: inner.name, host, ...meta, at: new Date().toISOString(), text }));
         } catch {} // an unwritable store must not lose the answer just paid for
       }
       return text;
     },
   };
+  return out;
 }
 
-const releaseId = (r: ReviewResult) => `${r.eco}-${r.name}-${r.from}-${r.to}`;
+/** Appended to the reviewer layer's reason when any part of its answer came from the store. */
+export const STORE_MARK = " (from shared store)";
+
+/** The result with its reviewer reason marked when the reviewer answered from the store (hits > 0). */
+export function markStoreAnswer(r: ReviewResult, hits: number): ReviewResult {
+  if (hits <= 0) return r;
+  return { ...r, layers: r.layers.map((l) => (l.layer === "reviewer" && !l.detail.endsWith(STORE_MARK) ? { ...l, detail: l.detail + STORE_MARK } : l)) };
+}
+
+export interface StoreEntry {
+  key: string;
+  file: string;
+  reviewer?: string;
+  host?: string;
+  eco?: string;
+  name?: string;
+  from?: string;
+  to?: string;
+  at?: string;
+}
+
+const KEY = /^[0-9a-f]{64}$/;
+const META = ["reviewer", "host", "eco", "name", "from", "to", "at"] as const;
+
+/** The stored FLAG entries, by key. Entries written before the release fields existed list without them. */
+export function storeEntries(dir: string): StoreEntry[] {
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((f) => f.endsWith(".json") && KEY.test(f.slice(0, -5))).sort();
+  } catch {
+    return [];
+  }
+  const out: StoreEntry[] = [];
+  for (const f of names) {
+    let e: Record<string, unknown>;
+    try {
+      e = JSON.parse(readFileSync(join(dir, f), "utf8"));
+    } catch {
+      continue;
+    }
+    if (!e || !isFlag(e.text)) continue;
+    const row: StoreEntry = { key: f.slice(0, -5), file: join(dir, f) };
+    for (const k of META) if (typeof e[k] === "string") row[k] = e[k] as string;
+    out.push(row);
+  }
+  return out;
+}
+
+export const FORGET_USAGE = "usage: oupdate verdicts --verdict-dir DIR --forget <key>|<eco>:<name>@<from>><to>  (key: the 64-hex file name without .json; release e.g. 'npm:left-pad@1.0.0>1.0.1', from empty for a new package)";
+
+/** Deletes the entry with that key, or every entry recorded for that release; returns the files deleted. */
+export function forgetEntries(dir: string, target: string): string[] {
+  if (KEY.test(target)) {
+    const file = join(dir, `${target}.json`);
+    if (!existsSync(file)) return [];
+    unlinkSync(file);
+    return [file];
+  }
+  const m = /^([^:]+):(.+)@([^@>]*)>([^@>]+)$/.exec(target);
+  if (!m) throw new Error(`${FORGET_USAGE}; got ${stripTerminal(target)}`);
+  const [, eco, name, from, to] = m;
+  const hits = storeEntries(dir).filter((e) => e.eco === eco && e.name === name && e.from === from && e.to === to);
+  for (const e of hits) unlinkSync(e.file);
+  return hits.map((e) => e.file);
+}
+
+const releaseId = (r: ReviewResult) => new Bun.CryptoHasher("sha256").update(JSON.stringify([r.eco, r.name, r.from, r.to])).digest("hex");
 const safe = (s: string) => encodeURIComponent(s).replace(/\./g, "%2E");
 
 /** Records what this host decided for a release; a later record for the same release replaces it. */
 export async function recordResult(dir: string, host: string, r: ReviewResult): Promise<void> {
-  writeAtomic(join(dir, "results", safe(host), `${safe(releaseId(r))}.json`), JSON.stringify({ host, result: r }));
+  writeAtomic(join(dir, "results", safe(host), `${releaseId(r)}.json`), JSON.stringify({ host, result: r }));
 }
 
 export interface HoldRow {
@@ -97,7 +184,9 @@ export async function rollupHolds(dir: string): Promise<HoldRow[]> {
       const blocking = r.layers.filter((l) => l.layer !== "cooldown");
       const bad = blocking.find((l) => l.verdict === "stop") ?? blocking.find((l) => l.verdict === "error");
       if (!bad && r.layers.some((l) => l.layer === "cooldown" && l.verdict === "stop")) continue;
-      const reason = stripTerminal(bad ? `${bad.layer}: ${bad.detail}` : "no layer read the code");
+      // A reused answer is the same hold as the one paid for: one row for both.
+      const detail = bad && bad.detail.endsWith(STORE_MARK) ? bad.detail.slice(0, -STORE_MARK.length) : bad?.detail;
+      const reason = stripTerminal(bad ? `${bad.layer}: ${detail}` : "no layer read the code");
       const key = JSON.stringify([r.eco, r.name, r.from, r.to, reason]);
       const row = rows.get(key) ?? { eco: stripTerminal(r.eco), name: stripTerminal(r.name), from: stripTerminal(r.from), to: stripTerminal(r.to), reason, hosts: [] };
       const host = stripTerminal(rec.host);
