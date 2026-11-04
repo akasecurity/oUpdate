@@ -3,7 +3,7 @@ import { getJson, type Registry, type RegistryDeps } from "./types.ts";
 interface Packument {
   "dist-tags"?: { latest?: string };
   time?: Record<string, string>;
-  versions?: Record<string, { dist?: { tarball?: string } }>;
+  versions?: Record<string, { dist?: { tarball?: string; attestations?: { provenance?: unknown }; signatures?: unknown[] }; _npmUser?: { name?: string; trustedPublisher?: unknown }; maintainers?: { name?: string }[] }>;
 }
 
 export function npmRegistry(deps: RegistryDeps = {}): Registry {
@@ -25,6 +25,31 @@ export function npmRegistry(deps: RegistryDeps = {}): Registry {
     async publishedAt(name, version) {
       const t = (await doc(name))?.time?.[version];
       return t ? new Date(t) : undefined;
+    },
+    async publisher(name, version) {
+      const d = await doc(name);
+      const v = d?.versions?.[version];
+      if (!d || !v) return undefined;
+      const at = (ver: string) => (d.time?.[ver] ? new Date(d.time[ver]!) : undefined);
+      const publishedAt = at(version);
+      let previousPublishedAt: Date | undefined;
+      if (publishedAt) {
+        for (const ver of Object.keys(d.versions ?? {})) {
+          const t = ver === version ? undefined : at(ver);
+          if (t && t < publishedAt && (!previousPublishedAt || t > previousPublishedAt)) previousPublishedAt = t;
+        }
+      }
+      return {
+        facts: {
+          publishedAt,
+          maintainers: (v.maintainers ?? []).map((m) => m.name).filter((n): n is string => !!n),
+          publisher: v._npmUser?.name,
+          provenance: !!v.dist?.attestations?.provenance,
+          trusted: !!v._npmUser?.trustedPublisher,
+          signed: Array.isArray(v.dist?.signatures) && v.dist.signatures.length > 0,
+        },
+        previousPublishedAt,
+      };
     },
     async artifactUrls(name, version) {
       const t = (await doc(name))?.versions?.[version]?.dist?.tarball;

@@ -1,0 +1,32 @@
+{
+  "name": "demo-lib",
+  "dist-tags": { "latest": "2.0.0" },
+  "time": {
+    "created": "2022-01-10T10:00:00.000Z",
+    "modified": "2026-10-20T10:00:00.000Z",
+    "1.0.0": "2022-01-10T10:00:00.000Z",
+    "1.1.0": "2025-12-01T10:00:00.000Z",
+    "2.0.0": "2026-10-20T10:00:00.000Z"
+  },
+  "versions": {
+    "1.0.0": {
+      "maintainers": [{ "name": "alice", "email": "a@example.com" }],
+      "_npmUser": { "name": "alice", "email": "a@example.com" },
+      "dist": { "tarball": "https://registry.npmjs.org/demo-lib/-/demo-lib-1.0.0.tgz", "signatures": [{ "keyid": "SHA256:abc", "sig": "MEUC" }] }
+    },
+    "1.1.0": {
+      "maintainers": [{ "name": "alice", "email": "a@example.com" }],
+      "_npmUser": { "name": "GitHub Actions", "email": "npm-oidc-no-reply@github.com", "trustedPublisher": { "id": "github" } },
+      "dist": {
+        "tarball": "https://registry.npmjs.org/demo-lib/-/demo-lib-1.1.0.tgz",
+        "signatures": [{ "keyid": "SHA256:abc", "sig": "MEUC" }],
+        "attestations": { "url": "https://registry.npmjs.org/-/npm/v1/attestations/demo-lib@1.1.0", "provenance": { "predicateType": "https://slsa.dev/provenance/v1" } }
+      }
+    },
+    "2.0.0": {
+      "maintainers": [{ "name": "alice", "email": "a@example.com" }, { "name": "mallory", "email": "m@example.com" }],
+      "_npmUser": { "name": "mallory", "email": "m@example.com" },
+      "dist": { "tarball": "https://registry.npmjs.org/demo-lib/-/demo-lib-2.0.0.tgz" }
+    }
+  }
+}
