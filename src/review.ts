@@ -2038,6 +2038,8 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
       if (!str) continue;
       const low = str.toLowerCase();
       if (low === ".map" && !isCode) continue; // a ".map" in a README or other text file is not a loader
+      // A name built at run time from parts (["index", "js", "map"].join(".")) leaves the bare word "map" as a string of code: it counts like the ".map" tail.
+      if (low === "map" && isCode) names.add(".map");
       names.add(low);
       // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
