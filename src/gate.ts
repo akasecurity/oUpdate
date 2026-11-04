@@ -117,7 +117,7 @@ export function comment(sha: string, locks: string, state: StatusState, results:
     lines.push(`- \`${shown(r.name)} ${r.from ? shown(r.from) : "(new)"} -> ${shown(r.to)}\`: **${r.decision}**`);
     for (const l of r.layers) lines.push(`  - ${l.layer} ${l.verdict}: ${codeDetail(l.detail)}`);
   }
-  for (const c of unreviewed) lines.push(`- \`${shown(c.name)} ${c.from ? shown(c.from) : "(new)"} -> ${shown(c.to)}\`: ${privateNote(c)}`);
+  for (const c of unreviewed) lines.push(`- \`${shown(c.name)} ${c.from ? shown(c.from) : "(new)"} -> ${shown(c.to)}\`: not reviewed (private registry ${codeDetail(c.registry ?? "")})`);
   return lines.join("\n");
 }
 
@@ -638,7 +638,7 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
   if (!changes.length) {
     const description = found.length ? `no package changes in ${locks}` : "no dependency files changed";
     await a.forge.setStatus(a.repo, pr.headSha, { state: "success", context, description });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "success"), `**oupdate: success** (${shownLocks || "no lockfile read"})`, "", description].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "success"), `**oupdate: success** (${shownLocks || "no lockfile read"})`, "", found.length ? `no package changes in ${shownLocks}` : description].join("\n"));
     return { number: pr.number, state: "success", results: [] };
   }
   // A git, url or file source has no registry release to review; the same version with another source or hash
