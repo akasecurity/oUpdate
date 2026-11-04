@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { renderDigest } from "../src/host/digest.ts";
+import { parsePrevSummary } from "../src/host/prev-log.ts";
 
 const QUIET = "=== studio summary ===\n  brew: nothing to update\n  npm:  nothing to update\n";
 const digest = (log: string) => renderDigest({ host: "studio", date: "2026-11-03", log });
@@ -211,6 +212,116 @@ describe("renderDigest: summary parts", () => {
     expect(text).toContain("[x]\\(http://evil.example) \\<img src=x>");
   });
 
+  test("an app-bundle review flag is held once and gets no brew command", () => {
+    const text = digest(
+      "  myapp (app bundle): review aborted before a verdict: FLAG\n  myapp: review FLAG: new network step\n[notify] ⚠️ studio Type B FLAG — myapp (app bundle)\n=== studio summary ===\n  brew: FLAGGED (see notifications); myapp held: review FLAG\n",
+    );
+    expect(text).not.toContain("brew upgrade");
+    expect(section(text, "Held")).toBe("- myapp: review FLAG: new network step");
+    expect(section(text, "Waiting on you")).toBe("- myapp: review its release, then update the app by hand");
+  });
+
+  test("a HEAD install flag gives the command that fetches HEAD", () => {
+    const text = digest(`  tool: HEAD install: its review is not in this oupdate version — FLAG, not upgrading\n[notify] ⚠️ studio Type B FLAG — tool (HEAD)\n${QUIET}`);
+    expect(section(text, "Waiting on you")).toBe("- tool: review it, then upgrade it yourself with `brew upgrade --fetch-HEAD tool`");
+  });
+
+  test("a failed release check waits on you; a passed one is a note", () => {
+    const failed = digest("=== studio summary ===\n  brew: nothing to update; release check: foo 2.0 FAIL, rolled back to 1.9 (held, 1.9 PASS)\n");
+    expect(section(failed, "Waiting on you")).toBe("- release check: foo 2.0 FAIL, rolled back to 1.9 (held, 1.9 PASS); read the run log");
+    expect(failed).not.toContain("## Notes");
+    const broken = digest("=== studio summary ===\n  brew: nothing to update; release check: foo 2.0 check could not run (timeout), kept\n");
+    expect(section(broken, "Waiting on you")).toContain("- release check: foo 2.0 check could not run (timeout), kept");
+    const passed = digest("=== studio summary ===\n  brew: nothing to update; release check: bar 1.1 PASS\n");
+    expect(section(passed, "Notes")).toBe("- release check: bar 1.1 PASS");
+    expect(passed).toContain("Nothing waits on you.");
+  });
+
+  test("release-check notes are sorted one by one", () => {
+    const text = digest("=== studio summary ===\n  brew: nothing to update; release check: foo 2.0 FAIL, rolled back to 1.9 (held), 1.9 FAIL, after not run, bar 1.1 PASS, baz not upgraded, candidate unreadable, qux waits for foo\n");
+    expect(section(text, "Waiting on you")).toBe(
+      "- release check: foo 2.0 FAIL, rolled back to 1.9 (held), 1.9 FAIL, after not run; read the run log\n- release check: baz not upgraded, candidate unreadable; read the run log",
+    );
+    expect(section(text, "Notes")).toBe("- release check: bar 1.1 PASS\n- release check: qux waits for foo");
+  });
+
+  test("a failed release check already named by FAILED waits once", () => {
+    const text = digest("=== studio summary ===\n  brew: FAILED: release-check:foo; nothing to update; release check: foo 2.0 FAIL, rolled back to 1.9 (held, 1.9 PASS), bar 1.1 PASS\n");
+    expect(section(text, "Waiting on you")).toBe("- release-check:foo: the upgrade failed; read the run log");
+    expect(section(text, "Notes")).toBe("- release check: bar 1.1 PASS");
+  });
+
+  test("a release check error waits on you, once", () => {
+    const alone = digest("=== studio summary ===\n  brew: nothing to update; release check: foo release check error\n");
+    expect(section(alone, "Waiting on you")).toBe("- release check: foo release check error; read the run log");
+    const named = digest("=== studio summary ===\n  brew: FAILED: release-check:foo; nothing to update; release check: foo release check error\n");
+    expect(section(named, "Waiting on you")).toBe("- release-check:foo: the upgrade failed; read the run log");
+  });
+
+  test("a run aborted after its summary is not read as clean", () => {
+    const text = digest(`${QUIET}  mas:  not checked\n=== ABORTED: oupdate-shadow on studio got SIGTERM — this run did NOT complete ===\n`);
+    expect(section(text, "Waiting on you")).toBe("- the run was stopped and did not complete; read the run log");
+  });
+
+  test("a run aborted before its summary is not read as clean", () => {
+    const text = digest(`=== ABORTED: oupdate-shadow on studio got SIGTERM — this run did NOT complete ===\n${QUIET}`);
+    expect(section(text, "Waiting on you")).toBe("- the run was stopped and did not complete; read the run log");
+  });
+
+  test("every lane line of the block is read: a hold in either of two brew lines shows", () => {
+    for (const lines of [["FLAGGED — FLAG: postinstall runs curl | sh", "nothing to update"], ["nothing to update", "FLAGGED — FLAG: postinstall runs curl | sh"]]) {
+      const text = digest(`=== studio summary ===\n${lines.map((l) => `  brew: ${l}\n`).join("")}  npm:  nothing to update\n`);
+      expect(section(text, "Waiting on you")).toContain("curl | sh");
+    }
+  });
+
+  test("a lane line after ABORTED does not hide the summary's hold", () => {
+    const text = digest("=== studio summary ===\n  brew: FLAGGED — FLAG: postinstall runs curl | sh\n=== ABORTED: oupdate on studio got SIGTERM — this run did NOT complete ===\n  brew: nothing to update\n");
+    expect(section(text, "Waiting on you")).toContain("curl | sh");
+  });
+
+  test("a hold on a lane line after ABORTED still shows", () => {
+    const text = digest("=== studio summary ===\n  npm:  nothing to update\n=== ABORTED: oupdate on studio got SIGTERM — this run did NOT complete ===\n  brew: FLAGGED — FLAG: late hold\n");
+    expect(text).toContain("late hold");
+  });
+
+  test("a release-check note that starts with spaces or a colon does not crash the digest", () => {
+    expect(() => digest("=== studio summary ===\n  brew: nothing to update; release check:  foo FAIL\n")).not.toThrow();
+    expect(() => digest("=== studio summary ===\n  brew: nothing to update; release check: : FAIL\n")).not.toThrow();
+  });
+
+  test("reviewer text quoting a Type B notice does not hide a formula hold", () => {
+    const text = digest("  wget: review FLAG: says [notify] ⚠️ studio Type B FLAG — wget (app bundle)\n[notify] ⚠️ studio Type B FLAG — wget\n=== studio summary ===\n  brew: FLAGGED (see notifications)\n  npm:  nothing to update\n");
+    expect(section(text, "Waiting on you")).toContain("`brew upgrade wget`");
+  });
+
+  test("an app hold reason that contains a semicolon is kept whole", () => {
+    const text = digest("=== studio summary ===\n  brew: nothing approved for upgrade; myapp held: release surface — manual review: a.sh: binary file added or changed; b.yml: new workflow step\n");
+    expect(section(text, "Held")).toBe("- myapp: release surface — manual review: a.sh: binary file added or changed; b.yml: new workflow step");
+    expect(text).not.toContain("unrecognized");
+  });
+
+  test("a part after an app hold that is no finding shows as unrecognized", () => {
+    const text = digest("=== studio summary ===\n  brew: nothing approved for upgrade; myapp held: tag v2 is not in the project's source; BRAND NEW writer part\n");
+    expect(section(text, "Held")).toBe("- myapp: tag v2 is not in the project's source");
+    expect(section(text, "Waiting on you")).toBe("- unrecognized: BRAND NEW writer part");
+  });
+
+  test("tap-approval text that is not a tap item is shown, never dropped", () => {
+    const text = digest("=== studio summary ===\n  brew: FLAGGED — awaiting tap approval: garbage; one/tap (alpha 1.0→1.1, review: n/a) — approve a tap by adding it to taps.tsv; odd (thing here)\n");
+    expect(section(text, "Held")).toBe("- alpha: its tap one/tap is not approved yet");
+    expect(section(text, "Waiting on you")).toBe(
+      "- unrecognized: garbage\n- alpha: add the tap one/tap to the approved-taps file to let the next run review it\n- unrecognized: odd (thing here)",
+    );
+  });
+
+  // Linear takes milliseconds here; the old quadratic pattern took several seconds.
+  test("a STUCK part of many unclosed entries stays fast", () => {
+    const t0 = performance.now();
+    digest(`=== studio summary ===\n  brew: STUCK: ${"a=1(1 runs, since x".repeat(20000)}\n`);
+    expect(performance.now() - t0).toBeLessThan(2500);
+  }, 30_000);
+
   test("an unrecognized part waits on you, cleaned, one line and capped", () => {
     const text = digest(`=== studio summary ===\n  brew: upgraded: wget; BRAND NEW thing \u001b[31m\`rm -rf\`‮ ${"z".repeat(400)}\n`);
     const w = section(text, "Waiting on you");
@@ -221,3 +332,19 @@ describe("renderDigest: summary parts", () => {
   });
 });
 
+
+describe("the shadow report reads the same run log", () => {
+  test("an app-bundle flag is not counted as a flagged formula", () => {
+    const log = "=== oupdate-shadow studio 2026-11-03 03:00 ===\n[notify] ⚠️ studio Type B FLAG — myapp (app bundle)\n[notify] ⚠️ studio Type B FLAG — tool (HEAD)\n=== studio summary ===\n  brew: FLAGGED (see notifications); myapp held: review FLAG\n";
+    const s = parsePrevSummary(log, "studio", "shadow")!;
+    expect(s.date).toBe("2026-11-03");
+    expect(s.brew.flagged).toEqual(["tool"]);
+  });
+
+  test("another host's run header inside the body does not end the scan", () => {
+    const log = "=== oupdate-shadow studio 2026-11-02 03:00 ===\n[notify] ⚠️ studio Type B FLAG — wget\n=== oupdate-shadow other 2026-11-03 03:00 ===\n=== studio summary ===\n  brew: FLAGGED (see notifications)\n";
+    const s = parsePrevSummary(log, "studio", "shadow")!;
+    expect(s.date).toBe("2026-11-02");
+    expect(s.brew.flagged).toEqual(["wget"]);
+  });
+});
