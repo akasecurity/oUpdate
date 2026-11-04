@@ -18,6 +18,7 @@ import { readScope, scopeNote, wilson, type Scope } from "./stats.ts";
 import { MORE_CLEAN } from "./clean-cases.ts";
 import { HELDOUT } from "./heldout-cases.ts";
 import { GAP } from "./gap-cases.ts";
+import { evasionReport, writeEvasions } from "./evasions.ts";
 import { INSTALL_ATTACKS, INSTALL_CLEAN } from "./install-cases.ts";
 
 /** An attack with the date it became public. Add new write-ups here; never use them to tune prompts. */
@@ -117,6 +118,7 @@ const summary = { tool_version: version, reviewer: models.reviewer.label, cutoff
 const out = arg("out") ?? join(here, "results");
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, `${version}.json`), JSON.stringify({ summary, rows, clean_rows: cleanRows }, null, 2) + "\n");
+const evasions = evasionReport(await writeEvasions(version, out));
 const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 const line = (n: string, s: { k: number; n: number; lo: number; hi: number }) => `${n}: ${s.k}/${s.n} runs flagged, ${pct(s.k / (s.n || 1))} (95% interval ${pct(s.lo)}-${pct(s.hi)})`;
 const md = [
@@ -124,10 +126,11 @@ const md = [
   "| case | disclosed | held-out | pre-pass | reviewer k/N | 95% interval | read | s/review |", "|---|---|---|---|---|---|---|---|",
   ...rows.map((r) => `| ${r.id} | ${r.disclosed} | ${r.held_out ? "yes" : "no"} | ${r.prepass_blocked ? "blocked" : "passed"} | ${r.k}/${r.n} | ${pct(r.lo)}-${pct(r.hi)} | ${scopeNote(r.reads)} | ${r.sec_per_review} |`),
   "", `layers: pre-pass alone blocks ${rows.filter((r) => r.prepass_blocked).length} of ${rows.length} attacks; the reviewer flags ${rows.filter((r) => !r.prepass_blocked && r.k > 0).length} more that the pre-pass passes; ${rows.filter((r) => !r.prepass_blocked && r.k === 0).length} are missed by both`,
-  "", ...(summary.held_out.n ? [line("held-out attacks", summary.held_out)] : []), ...(summary.earlier.n ? [line("earlier attacks", summary.earlier)] : []), ...(summary.gap.n ? [line("attacks the pre-pass passes (reviewer only)", summary.gap)] : []), "",
+  "", ...(summary.held_out.n ? [line("held-out attacks", summary.held_out)] : []), ...(summary.earlier.n ? [line("earlier attacks", summary.earlier)] : []), ...(summary.gap.n ? [line("attacks the pre-pass passes (reviewer only)", summary.gap)] : []), `evasions (no model, own file ${version}-evasions.json): ${evasions.line}`, "",
   ...(cleanRows.length ? ["| clean case | policy hold | pre-pass | false holds k/N | 95% interval | read | s/review |", "|---|---|---|---|---|---|---|"] : []),
   ...cleanRows.map((r) => `| ${r.id} | ${r.policy_hold ? "yes" : "no"} | ${r.prepass_blocked ? "blocked" : "passed"} | ${r.k}/${r.n} | ${pct(r.lo)}-${pct(r.hi)} | ${scopeNote(r.reads)} | ${r.sec_per_review} |`),
   ...(cleanRows.length ? ["", line("false holds (reviewer, policy holds excluded)", summary.false_holds), line("policy holds (install-script signal or binary download)", summary.policy_holds)] : []), "",
 ].join("\n");
 writeFileSync(join(out, `${version}.md`), md);
 console.log(md);
+if (evasions.failed) process.exit(1);
