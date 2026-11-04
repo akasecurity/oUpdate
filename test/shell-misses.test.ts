@@ -30,6 +30,11 @@ const families: [string, string[]][] = [
   ]],
   ["time, builtin, a quoted keyword or a stray reserved word before a builtin: the shells disagree on what runs", [
     "N=a.js; time eval \\N=b.js; cat lib/hidden.js > $N; node a.js",
+    "N=a.js; eval '! ! export N=b.js'; cat lib/hidden.js > $N; node a.js",
+    "N=a.js; eval '! ! eval N=b.js'; cat lib/hidden.js > $N; node a.js",
+    "N=a.js; eval 'done export N=b.js'; cat lib/hidden.js > $N; node a.js",
+    "N=a.js; eval 'done eval N=b.js'; cat lib/hidden.js > $N; node a.js",
+    "N=a.js; eval 'fi export N=b.js'; cat lib/hidden.js > $N; node a.js",
     "N=a.js; \\builtin eval N=b.js; cat lib/hidden.js > ${N:-b.js}; node a.js",
     "N=a.js; { 'time' eval N=b.js; }; cat lib/hidden.js > $N; node a.js",
     "N=a.js; eval 'builtin eval N'\\'''\\''=b.js'; cat lib/hidden.js > ${N}; node a.js",

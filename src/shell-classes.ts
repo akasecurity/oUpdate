@@ -162,8 +162,8 @@ function parse(text: string, depth: number): Stage[] {
     if (st.words.length === 0 && !w.q && /^[A-Za-z_][A-Za-z0-9_]*\[[^\]]*\]\+?=/.test(w.text)) { st.clobber.push(w.text.slice(0, w.text.indexOf("["))); { const sb = /^[A-Za-z_]\w*\[([^\]]*)\]/.exec(w.text); if (sb) noteClobber(sb[1]!); } return; } // N[0]=b.js sets N; a[N=2]=x sets N too
     if (st.words.length === 0 && !w.q && /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(w.text)) { st.assigns.push(w.text); return; }
     if (st.words.length === 0 && w.plain && !w.q && KW_SKIP.has(w.text)) {
-      if (w.text === "!" && (st.bang = (st.bang ?? 0) + 1) > 1) st.tm = true; // `! ! N=b.js`: dash sets N, bash rejects it: not known after it
-      if (/^(?:then|elif|else|do|fi|done|\})$/.test(w.text) && open.length === 0) st.tm = true; // a closer with nothing open (eval 'done N=b.js'): bash rejects it, dash may not
+      if (w.text === "!" && (st.bang = (st.bang ?? 0) + 1) > 1) { st.tm = true; st.cond = true; } // `! ! N=b.js`: shells differ on whether it runs; not known after it
+      if (/^(?:then|elif|else|do|fi|done|\})$/.test(w.text) && open.length === 0) { st.tm = true; st.cond = true; } // a closer with nothing open (eval 'done N=b.js'): shells differ on it; not known after it
       if (/^(?:if|while|until)$/.test(w.text)) { const fb = fnNext && st.fnDef !== undefined; pushOpen(fb ? "f:" + fnName : "c", !fb && w.text !== "if"); if (fb) { fnNext = false; st.fn = fnName; } syncCompound(); }
       else if (w.text === "{") { pushOpen(fnNext ? "f:" + fnName : st.cond || st.piped ? "gc" : "g"); fnNext = false; syncCompound(); if (open[open.length - 1]!.startsWith("f:")) { st.cond = true; st.fn = fnName; } }
       else if (/^(?:fi|done|\})$/.test(w.text)) { popOpen(); syncCompound(); }
