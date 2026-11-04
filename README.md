@@ -435,7 +435,7 @@ OUPDATE_EVAL_BASE_URL=http://127.0.0.1:8080/v1 OUPDATE_EVAL_MODEL=<model> bun sc
 
 ### Run the reviewer with thinking on
 
-The reviewer should run with its thinking turned on. In the limits evaluation ([results](eval/limits/results/0.2.17.md), 21 attack cases and 16 clean cases, 10 runs each) a local reviewer with thinking on and a 12000-token answer limit flagged 210 of 210 attack runs and falsely held 0 of 160 clean runs; with thinking off it falsely held 20 of 160. For a local OpenAI-compatible server that takes the chat-template switch, set both in the reviewer spec:
+The reviewer should run with its thinking turned on. In the limits evaluation ([results](eval/limits/results/0.2.17.md), 21 attack cases and 16 clean cases, 10 runs each) a local reviewer with thinking on and a 12000-token answer limit flagged 210 of 210 attack runs and falsely held 0 of 160 clean runs (the reviewer's false holds; two more clean cases are policy holds, counted apart); with thinking off and the default 4096-token limit it falsely held 20 of 160 on the same cases. For a local OpenAI-compatible server that takes the chat-template switch, set both in the reviewer spec:
 
 ```json
 {"type":"openai","name":"local","baseUrls":["http://127.0.0.1:8080/v1"],"model":"your-model","maxTokens":12000,"extraBody":{"chat_template_kwargs":{"enable_thinking":true}}}
