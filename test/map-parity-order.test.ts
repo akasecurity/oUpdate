@@ -67,3 +67,29 @@ test("names split inside child_process, reversed by a readdir loader: a padded m
   };
   expect(await outcome(true)).toBe(await outcome(false));
 }, 60000);
+
+// The bare "map" string counts only in a file that itself reads files and calls JSON.parse. The string in one file and the loader in another is not a name: the map stays hashed, and a payload split across names is hidden (a known limit, pinned here so the per-file scope cannot widen unseen).
+const REVLOADER = `const fs = require('fs');\nconst f = fs.readdirSync(__dirname).find((f) => f.endsWith('pam'.split('').reverse().join('')));\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + f, 'utf8'));\nrequire('vm').runInThisContext(m.names.reverse().join(''));\nexports.v = 2;\n`;
+test("the map string in one file and the loader in another: the per-file scope keeps the map hashed, the same file shows it", async () => {
+  const X = "require('child", Y = "_process').exec(process.env.Q)";
+  const shown = async (big: boolean, loader: string, other: string) => {
+    const reviewed: string[] = [];
+    await reviewUpdate({
+      eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
+      registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+      advisories: { query: async () => [] },
+      reviewer: { name: "fake", review: async (p) => (reviewed.push(p), "APPROVE\nno attack indicators found") },
+      cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"), chunkChars: 60000,
+      loadArtifacts: async () => ({
+        old: files({ "package.json": '{"name":"lib","version":"a","main":"lib/index.js"}', "lib/index.js": "exports.v = 1;\n", "lib/index.js.map": map("a", big, { sources: ["a.ts"] }) }),
+        new: files({ "package.json": '{"name":"lib","version":"b","main":"lib/index.js"}', "lib/index.js": loader, "lib/util.js": other, "lib/index.js.map": map("b", big, { sources: ["a.ts"], names: [Y, X] }) }),
+      }),
+    });
+    const t = reviewed.join("");
+    return t.includes("process.env.Q") && t.includes("require('child");
+  };
+  for (const big of [true, false]) {
+    expect(await shown(big, REVLOADER, "exports.kinds = ['map', 'set'];\n")).toBe(false); // "map" in util.js, loader in index.js: hidden
+    expect(await shown(big, REVLOADER.replace("exports.v = 2;", "exports.v = 2; exports.k = 'map';"), "exports.x = 1;\n")).toBe(true); // "map" in the loader file itself: shown
+  }
+}, 120000);

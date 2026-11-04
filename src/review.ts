@@ -1868,7 +1868,7 @@ const sameFile = bytesEqual;
 // (concatenations, escapes, comments and parentheses removed) name a map the same way as one quoted string.
 // A non-constant piece is not folded: the map stays a residual and the loader line is what the review shows in full. A quoted stem in package.json or a declaration file is not a map reference: those name the
 // file they describe, and treating `index.js` as the stem of `index.js.map` would show every sibling map in full.
-// A quoted map name still counts. A bare string "map" in code (exact case) is the tail of a name built at run time and counts the same way. Anything else is shown in full.
+// A quoted map name still counts. A bare string "map" (exact case) in a file that reads a file or directory and calls JSON.parse is the tail of a name built at run time and counts the same way. Anything else is shown in full.
 const MAP_KEYS = new Set(["version", "file", "sourceRoot", "sources", "sourcesContent", "names", "mappings", "ignoreList", "x_google_ignoreList"]);
 const strings = (v: unknown, nullable = false) => Array.isArray(v) && v.every((x) => typeof x === "string" || (nullable && x === null));
 const integers = (v: unknown) => Array.isArray(v) && v.every((x) => Number.isInteger(x));
@@ -2032,14 +2032,16 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
     // A bare ".map" is the tail of a name built at run time (a string, template text, a regex source). It counts in the code of a code file, where comments are already removed.
     // A file the parser rejects, whose transform throws, or that is not parsed (a declaration file) is scanned raw; one that transforms to empty output (only comments) adds no names.
     const codeText = parsed ? (parsed.rejected || !parsed.folded ? text : parsed.code) : "";
+    // A bare "map" counts as the tail of a run-time name only in a file that also reads a file or directory and calls JSON.parse: a loader. A method name or a table of names ("map" in an array, x["map"]) is not one.
+    const readsJson = !!parsed && /\b(?:readFileSync|readFile|readdirSync|readdir)\b|fs\/promises/.test(codeText) && /\bJSON\s*\.\s*parse\b/.test(codeText);
     if (parsed) for (const m of codeText.matchAll(/[A-Za-z0-9_.\/@-]+/g)) if (m[0].toLowerCase() === ".map" && codeText[m.index! + 4] !== "(") names.add(".map");
     // In a code file the quotes are read from the transformed code, where comments are gone (a quote inside a comment is not a string) and a template keeps the text after its last ${}; a file the parser rejects, and any other file, is scanned raw.
     for (const str of [...scanQuoted(parsed && !parsed.rejected && parsed.folded ? parsed.code : text), ...folded]) {
       if (!str) continue;
       const low = str.toLowerCase();
       if (low === ".map" && !isCode) continue; // a ".map" in a README or other text file is not a loader
-      // A name built at run time from parts (["index", "js", "map"].join(".")) leaves the bare word "map" as a string of code: it counts like the ".map" tail (exact case: "Map" does not).
-      if (str === "map" && isCode) names.add(".map");
+      // A name built at run time from parts (["index", "js", "map"].join(".")) leaves the bare word "map" as a string of code: in a loader (readsJson) it counts like the ".map" tail. The match is exact case: the ".map" check is lower-cased because a file name may be written in any case, but "Map" as a bare string is the Map type (Babel helpers) and would unhash most transpiled packages.
+      if (str === "map" && readsJson) names.add(".map");
       names.add(low);
       // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
