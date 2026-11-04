@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { diffLocks } from "../src/lockdiff.ts";
 import { giteaForge } from "../src/adapters/forge/gitea.ts";
-import { comment, runGate, gateState, MARKER, pep440Allows, poetryAllows, verdictLine, type Change } from "../src/gate.ts";
+import { comment, privateNote, runGate, gateState, MARKER, pep440Allows, poetryAllows, verdictLine, type Change } from "../src/gate.ts";
 import { LOCK_NAMES } from "../src/lockfile/index.ts";
 import type { Forge, Pull, StatusState } from "../src/adapters/forge/types.ts";
 import type { ReviewResult } from "../src/review.ts";
@@ -595,6 +595,15 @@ describe("runGate", () => {
     const body = comment("h1", "package-lock.json", "pending", [], [{ eco: "npm", name: "x", from: "1.0.0", to: "1.0.1", registry: "https://reg.example/@org/team" }]);
     expect(body).toContain("private registry `https://reg.example/@org/team`");
     expect(body.replace(/`[^`]*`/g, "")).not.toContain("@org");
+  });
+
+  test("a private registry URL is escaped once in the hold text, and a missing one reads unknown", () => {
+    const c: Change = { name: "x", from: "1.0.0", to: "1.0.1", eco: "npm", registry: "https://reg.example/p?a=b" };
+    expect(privateNote(c)).toBe("not reviewed (private registry https://reg.example/p?a=b)");
+    const r: ReviewResult = { eco: "npm", name: "x", from: "1.0.0", to: "1.0.1", decision: "hold", layers: [{ layer: "gate", verdict: "stop", detail: privateNote(c) }] };
+    expect(comment("h1", "`package-lock.json`", "failure", [r], [])).not.toContain("\\u{5c}");
+    expect(privateNote({ name: "x", to: "1", eco: "npm" } as Change)).toBe("not reviewed (private registry unknown)");
+    expect(comment("h1", "`l`", "pending", [], [{ name: "x", to: "1", eco: "npm" } as Change])).toContain("private registry unknown");
   });
 
   test("a malicious scoped package name stays in a code span, so it is no team mention", () => {

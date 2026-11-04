@@ -258,6 +258,14 @@ describe("npmSection", () => {
       expect(h.calls.some((c) => c.startsWith("npm install")), deps).toBe(false);
     }
   });
+  test("peerDependencies named with a non-map value is unreadable, not the whole object read as peers", async () => {
+    for (const peers of ['{"peerDependencies": "x"}', '{"peerDependencies": ["x"]}', '{"peerDependencies": 3}', '{"peerDependencies": null}']) {
+      const h = host({ peers });
+      const s = await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+      expect([peers, s.status]).toEqual([peers, expect.stringMatching(/^FLAGGED — could not read tool@1\.1\.0 peerDependencies \(unparseable\)/)]);
+      expect(h.calls.some((c) => c.startsWith("npm install")), peers).toBe(false);
+    }
+  });
   test("a transitive floor drop between versions holds the batch, even on an APPROVE", async () => {
     // Mutant caught: dependencies never read, so a lowered floor on a transitive package upgraded unreviewed.
     const h = host({ oldDeps: '{"dependencies": {"left": "^2.1.0"}}', deps: '{"dependencies": {"left": "^1.0.0"}}' });

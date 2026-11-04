@@ -145,7 +145,7 @@ export function parseVerdict(text: string): "APPROVE" | "FLAG" {
 }
 
 /** Controls (ESC, CR, C1), bidi, zero-width and other invisible characters dropped: for model output that reaches the terminal raw. Newlines go too, so split lines first.
- *  Built from Unicode properties, as ident.ts INERT is, so a format or default-ignorable character no list named is dropped too; braille blank is the one listed point. */
+ *  Built from Unicode properties like ident.ts INERT, so a format or default-ignorable character no list named is dropped too; braille blank is the one listed point. Unlike INERT it keeps visible spaces, private-use and unassigned points: they show as a glyph or placeholder in a terminal. */
 const TERMINAL_DROP = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}\u{2800}]/gu;
 export function stripTerminal(s: string): string {
   return s.replace(TERMINAL_DROP, "");
