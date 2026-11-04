@@ -102,6 +102,7 @@ function parseDeps(text: string): DepBlocks | undefined {
       const b = (j as Record<string, unknown>)[f];
       if (b == null) continue;
       if (typeof b !== "object" || Array.isArray(b)) return undefined;
+      if (Object.values(b).some((v) => typeof v !== "string")) return undefined;
       out[f] = b as Record<string, unknown>;
     }
     return out;
@@ -117,8 +118,10 @@ function parsePeers(text: string): Record<string, unknown> | undefined {
     if (Array.isArray(j) && j.length === 1) j = j[0];
     if (!j || typeof j !== "object" || Array.isArray(j)) return undefined;
     const named = (j as Record<string, unknown>).peerDependencies;
-    if (named != null && typeof named === "object" && !Array.isArray(named)) return named as Record<string, unknown>;
-    return j as Record<string, unknown>;
+    const peers = (named != null && typeof named === "object" && !Array.isArray(named) ? named : j) as Record<string, unknown>;
+    // A peer range is a string: any other value is not that shape, so the read is unparseable, never an edge.
+    if (Object.values(peers).some((v) => typeof v !== "string")) return undefined;
+    return peers;
   } catch {
     return undefined;
   }

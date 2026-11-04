@@ -112,12 +112,12 @@ function flat(text: string): string {
 
 export function comment(sha: string, locks: string, state: StatusState, results: ReviewResult[], unreviewed: Change[]): string {
   const lines = [MARKER, verdictLine(sha, state), `**oupdate: ${state}** (${locks})`, ""];
-  for (const r of results) if (r.malicious?.length) lines.push(`**MALICIOUS: ${shown(r.name)} ${shown(r.to)} (${inert(r.malicious.join(", "))}).** Do not merge, and check where this version is already installed.`, "");
+  for (const r of results) if (r.malicious?.length) lines.push(`**MALICIOUS: \`${shown(r.name)} ${shown(r.to)}\` (${codeDetail(r.malicious.join(", "))}).** Do not merge, and check where this version is already installed.`, "");
   for (const r of results) {
     lines.push(`- \`${shown(r.name)} ${r.from ? shown(r.from) : "(new)"} -> ${shown(r.to)}\`: **${r.decision}**`);
     for (const l of r.layers) lines.push(`  - ${l.layer} ${l.verdict}: ${codeDetail(l.detail)}`);
   }
-  for (const c of unreviewed) lines.push(`- \`${shown(c.name)} ${c.from ? shown(c.from) : "(new)"} -> ${shown(c.to)}\`: ${privateNote(c)}`);
+  for (const c of unreviewed) lines.push(`- \`${shown(c.name)} ${c.from ? shown(c.from) : "(new)"} -> ${shown(c.to)}\`: not reviewed (private registry ${codeDetail(c.registry ?? "")})`);
   return lines.join("\n");
 }
 
@@ -621,23 +621,24 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
     // A lockfile that does not parse is never read as "no changes": hold the PR and say why.
     const why = e instanceof Error ? e.message : String(e);
     await a.forge.setStatus(a.repo, pr.headSha, { state: "pending", context, description: why.slice(0, 200) });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, `**oupdate: pending** (${paths.join(", ")})`, "", codeDetail(why)].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, `**oupdate: pending** (${paths.map(codeDetail).join(", ")})`, "", codeDetail(why)].join("\n"));
     return { number: pr.number, state: "pending", results: [] };
   }
   const locks = found.join(", ");
+  const shownLocks = found.map(codeDetail).join(", ");
   // What the gate cannot see is never a pass: a deleted lockfile, or any changed file it does not read.
   const hidden = await unseen(a, pr, await a.forge.changedFiles(a.repo, pr.number), found, covers);
   if (deleted.length || hidden.length) {
-    const blind = [...deleted.map((p) => `${p}: deleted`), ...hidden.map((h) => `${h.path}: ${codeDetail(h.why)}`)];
+    const blind = [...deleted.map((p) => `${codeDetail(p)}: deleted`), ...hidden.map((h) => `${codeDetail(h.path)}: ${codeDetail(h.why)}`)];
     const description = `cannot see dependency changes: ${[...deleted.map((p) => `${p} deleted`), ...hidden.map((h) => h.path)].join(", ")}`;
     await a.forge.setStatus(a.repo, pr.headSha, { state: "failure", context, description: description.slice(0, 200) });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "failure"), `**oupdate: failure** (${locks || "no lockfile read"})`, "", "A person reviews these dependency changes; oupdate cannot:", ...blind.map((b) => `- ${b}`)].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "failure"), `**oupdate: failure** (${shownLocks || "no lockfile read"})`, "", "A person reviews these dependency changes; oupdate cannot:", ...blind.map((b) => `- ${b}`)].join("\n"));
     return { number: pr.number, state: "failure", results: [] };
   }
   if (!changes.length) {
     const description = found.length ? `no package changes in ${locks}` : "no dependency files changed";
     await a.forge.setStatus(a.repo, pr.headSha, { state: "success", context, description });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "success"), `**oupdate: success** (${locks || "no lockfile read"})`, "", description].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "success"), `**oupdate: success** (${shownLocks || "no lockfile read"})`, "", found.length ? `no package changes in ${shownLocks}` : description].join("\n"));
     return { number: pr.number, state: "success", results: [] };
   }
   // A git, url or file source has no registry release to review; the same version with another source or hash
@@ -664,6 +665,6 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
   const land = results.filter((r) => r.decision === "land").length;
   const skipped = unreviewed.length ? `, ${unreviewed.length} not reviewed (private registry)` : "";
   await a.forge.setStatus(a.repo, pr.headSha, { state, context, description: `${results.length} package${results.length === 1 ? "" : "s"}: ${land} land, ${results.length - land} hold${skipped}` });
-  if (state !== "pending" || priv.length || results.some((r) => r.layers.some((l) => l.verdict === "stop"))) await a.forge.upsertComment(a.repo, pr.number, MARKER, comment(pr.headSha, locks, state, results, unreviewed));
+  if (state !== "pending" || priv.length || results.some((r) => r.layers.some((l) => l.verdict === "stop"))) await a.forge.upsertComment(a.repo, pr.number, MARKER, comment(pr.headSha, shownLocks, state, results, unreviewed));
   return { number: pr.number, state, results };
 }

@@ -444,8 +444,19 @@ describe("runGate", () => {
     let body = "";
     forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
     await runGate({ forge, repo: "o/r", review: async (c) => ({ ...result(c, "hold", ["advisory"]), malicious: ["MAL-2025-1"] }) });
-    expect(body).toContain("**MALICIOUS: yaml 2.8.3 (MAL-2025-1).** Do not merge, and check where this version is already installed.");
+    expect(body).toContain("**MALICIOUS: `yaml 2.8.3` (`MAL-2025-1`).** Do not merge, and check where this version is already installed.");
     expect(body.indexOf("MALICIOUS")).toBeLessThan(body.indexOf("advisory"));
+  });
+
+  test("advisory ids in the malicious headline are one code span, so a mention or an issue ref stays text", async () => {
+    const forge = memForge({ "b:bun.lock": LOCK("2.8.1"), "h1:bun.lock": LOCK("2.8.3") }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    await runGate({ forge, repo: "o/r", review: async (c) => ({ ...result(c, "hold", ["advisory"]), malicious: ["@org/team", "#123"] }) });
+    expect(body).toContain("(`@org/team, #123`)");
+    const outside = body.replace(/`[^`]*`/g, "");
+    expect(outside).not.toContain("@org/team");
+    expect(outside).not.toContain("#123");
   });
 
   test("a review that throws counts as an error layer, so the PR stays pending", async () => {
@@ -463,7 +474,7 @@ describe("runGate", () => {
     const seen: Change[] = [];
     await runGate({ forge, repo: "o/r", lockPaths: ["bun.lock", "web/bun.lock", "api/bun.lock"], review: async (c) => (seen.push(c), result(c, "hold", ["prepass"])) });
     expect(seen.map((c) => c.to)).toEqual(["2.8.3", "1.0.1"]);
-    expect(body).toContain("(bun.lock, web/bun.lock, api/bun.lock)");
+    expect(body).toContain("(`bun.lock`, `web/bun.lock`, `api/bun.lock`)");
     expect(forge.log[0]).toBe("status h1 pending reviewing 2 package changes");
   });
 
@@ -509,8 +520,8 @@ describe("runGate", () => {
     const out = await runGate({ forge, repo: "o/r", privateRegistry: "list", review: async (c) => (seen.push(c), result(c, "land")) });
     expect(seen).toEqual([{ name: "pyyaml", from: "6.0.1", to: "6.0.2", eco: "pypi" }]);
     expect(out[0]!.state).toBe("success");
-    expect(body).toContain("**oupdate: success** (uv.lock)");
-    expect(body).toContain("- `corp-auth 4.1.0 -> 4.2.0`: not reviewed (private registry pypi.corp.example)");
+    expect(body).toContain("**oupdate: success** (`uv.lock`)");
+    expect(body).toContain("- `corp-auth 4.1.0 -> 4.2.0`: not reviewed (private registry `pypi.corp.example`)");
   });
 
   test("a requirements file named by lock path reaches the review as pypi; unasked it is never read, so its change fails", async () => {
@@ -563,7 +574,62 @@ describe("runGate", () => {
     const out = await runGate({ forge, repo: "o/r", review: async () => { throw new Error("not called"); } });
     expect(out[0]!.state).toBe("failure");
     expect(forge.log[0]).toMatch(/^status h1 failure .*bun.lock deleted/);
-    expect(body).toContain("bun.lock: deleted");
+    expect(body).toContain("- `bun.lock`: deleted");
+  });
+
+  test("deleted and unread paths in the failure comment are code spans, so a mention or an issue ref in a path stays text", async () => {
+    const lock = "deps/@org/team/bun.lock";
+    const forge = memForge({ [`b:${lock}`]: LOCK("2.8.1"), "b:docs/@org/#123.md": "old", "h1:docs/@org/#123.md": "new" }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    const out = await runGate({ forge, repo: "o/r", lockPaths: [lock], review: async () => { throw new Error("not called"); } });
+    expect(out[0]!.state).toBe("failure");
+    expect(body).toContain(`- \`${lock}\`: deleted`);
+    expect(body).toContain("- `docs/@org/#123.md`: `");
+    const outside = body.replace(/`[^`]*`/g, "");
+    expect(outside).not.toContain("@org");
+    expect(outside).not.toContain("#123");
+  });
+
+  test("a private registry host in the not-reviewed line is a code span", () => {
+    const body = comment("h1", "package-lock.json", "pending", [], [{ eco: "npm", name: "x", from: "1.0.0", to: "1.0.1", registry: "https://reg.example/@org/team" }]);
+    expect(body).toContain("private registry `https://reg.example/@org/team`");
+    expect(body.replace(/`[^`]*`/g, "")).not.toContain("@org");
+  });
+
+  test("a malicious scoped package name stays in a code span, so it is no team mention", () => {
+    const r: ReviewResult = { eco: "npm", name: "@org/team", from: "1.0.0", to: "1.0.1", decision: "hold", layers: [], malicious: ["MAL-1"] };
+    const body = comment("h1", "package-lock.json", "failure", [r], []);
+    expect(body).toContain("**MALICIOUS: `@org/team 1.0.1` (`MAL-1`).**");
+    expect(body.split("\n").find((l) => l.startsWith("**MALICIOUS"))!.replace(/`[^`]*`/g, "")).not.toContain("@");
+  });
+
+  test("a read lockfile at an at-sign or issue-ref path is a code span in the success header", async () => {
+    const lock = "deps/@org/team/bun.lock";
+    const lock2 = "web/#123/bun.lock";
+    const forge = memForge({ [`b:${lock}`]: LOCK("2.8.1"), [`h1:${lock}`]: LOCK("2.8.1"), [`b:${lock2}`]: LOCK("2.8.1"), [`h1:${lock2}`]: LOCK("2.8.1") }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    const out = await runGate({ forge, repo: "o/r", lockPaths: [lock, lock2], review: async () => { throw new Error("not called"); } });
+    expect(out[0]!.state).toBe("success");
+    expect(body).toContain(`**oupdate: success** (\`${lock}\`, \`${lock2}\`)`);
+    expect(body).toContain(`no package changes in \`${lock}\`, \`${lock2}\``);
+    const outside = body.replace(/`[^`]*`/g, "");
+    expect(outside).not.toContain("@org");
+    expect(outside).not.toContain("#123");
+  });
+
+  test("lock paths in the pending header of an unparseable lockfile are code spans", async () => {
+    const lock = "deps/@org/team/bun.lock";
+    const forge = memForge({ [`b:${lock}`]: LOCK("2.8.1"), [`h1:${lock}`]: "{not json" }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    const out = await runGate({ forge, repo: "o/r", lockPaths: [lock, "web/#123/bun.lock"], review: async () => { throw new Error("not called"); } });
+    expect(out[0]!.state).toBe("pending");
+    expect(body).toContain(`**oupdate: pending** (\`${lock}\`, \`web/#123/bun.lock\`)`);
+    const outside = body.replace(/`[^`]*`/g, "");
+    expect(outside).not.toContain("@org");
+    expect(outside).not.toContain("#123");
   });
 
   test("a PR changing a lockfile or manifest the gate cannot read fails (yarn, Cargo, Go, Ruby)", async () => {
@@ -599,7 +665,7 @@ describe("runGate", () => {
     let body = "";
     forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
     await runGate({ forge, repo: "o/r", review: async () => { throw new Error("not called"); } });
-    const line = body.split("\n").find((l) => l.startsWith("- package.json: "))!;
+    const line = body.split("\n").find((l) => l.startsWith("- `package.json`: "))!;
     expect(line).toContain("\\u{a0}\\u{2028}");
     expect(line).not.toMatch(/[\u00a0\u2028]/);
     expect([...line.replace(/\\u\{[0-9a-f]+\}/g, "?")].length).toBeLessThanOrEqual(320);
@@ -1051,7 +1117,7 @@ describe("runGate", () => {
     expect(seen.map((c) => c.name)).toEqual(["yaml"]);
     expect(out[0]!.state).toBe("success");
     expect(forge.log[1]).toBe("status h1 success 1 package: 1 land, 0 hold, 1 not reviewed (private registry)");
-    expect(body).toContain("- `@corp/ui 3.0.0 -> 3.1.0`: not reviewed (private registry npm.corp.example)");
+    expect(body).toContain("- `@corp/ui 3.0.0 -> 3.1.0`: not reviewed (private registry `npm.corp.example`)");
   });
 
   test("with the list opt-in, a PR touching only private-registry versions stays pending with the comment naming them", async () => {
@@ -1061,7 +1127,7 @@ describe("runGate", () => {
     const out = await runGate({ forge, repo: "o/r", privateRegistry: "list", review: async () => { throw new Error("not called"); } });
     expect(out[0]!.state).toBe("pending");
     expect(forge.log.some((l) => l.startsWith("status h1 success"))).toBe(false);
-    expect(body).toContain("not reviewed (private registry npm.corp.example)");
+    expect(body).toContain("not reviewed (private registry `npm.corp.example`)");
   });
 
   test("the private-registry choice is one switch: hold fails the PR, review sends it to the public registry", async () => {
