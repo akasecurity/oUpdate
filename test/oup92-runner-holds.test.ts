@@ -71,6 +71,12 @@ describe("review round: pinned runners, exec forms, unresolved routes and .npmrc
     }
   });
 
+  test("yarn -C holds through every wrapper", () => {
+    for (const cmd of ["npx yarn -C sub build", "npx yarn run -C sub build", "pnpm exec yarn -C sub build", "npm exec -- yarn -C sub build", "bunx yarn -C sub build", "bunx yarn run -Csub build", "npx -c 'yarn -C sub build'"]) {
+      expect(manifestHeld(cmd), cmd).toBe(true);
+    }
+  });
+
   test("bunx, npm exec and npx -c reach the wrapped runner", () => {
     for (const cmd of ["bunx pnpm -C sub build", "npm exec -- pnpm -C sub build", "npx -c 'pnpm -C sub build'"]) {
       expect(manifestHeld(cmd), cmd).toBe(true);

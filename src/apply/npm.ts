@@ -14,6 +14,9 @@ import { reviewChunk } from "./verdict.ts";
 import { VERDICT_CONTRACT } from "./formula.ts";
 import { dependencyDowngrades } from "../prepass.ts";
 
+/** Registry and model text for a notice that is HTML: markup characters are entities, so a hook body or a reason cannot add tags. */
+const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 /** The phase's record, owned by the caller and filled as the phase goes, so a stop part-way keeps it. */
 export interface NpmRun {
   log: string[];
@@ -83,7 +86,7 @@ function parseScripts(text: string): Record<string, string> | undefined {
   }
 }
 
-type DepBlocks = { dependencies: Record<string, unknown>; optionalDependencies: Record<string, unknown> };
+type DepBlocks = { dependencies: Record<string, unknown>; optionalDependencies: Record<string, unknown>; peerDependencies: Record<string, unknown> };
 
 /** `npm view … dependencies optionalDependencies --json`; "" is neither field; undefined when it is not that shape. */
 function parseDeps(text: string): DepBlocks | undefined {
@@ -94,7 +97,7 @@ function parseDeps(text: string): DepBlocks | undefined {
     if (!j || typeof j !== "object" || Array.isArray(j)) return undefined;
     // With only one of the two fields present npm prints that field's map bare, with no field name.
     if (!("dependencies" in j) && !("optionalDependencies" in j)) j = { dependencies: j };
-    const out: DepBlocks = { dependencies: {}, optionalDependencies: {} };
+    const out: DepBlocks = { dependencies: {}, optionalDependencies: {}, peerDependencies: {} };
     for (const f of ["dependencies", "optionalDependencies"] as const) {
       const b = (j as Record<string, unknown>)[f];
       if (b == null) continue;
@@ -102,6 +105,20 @@ function parseDeps(text: string): DepBlocks | undefined {
       out[f] = b as Record<string, unknown>;
     }
     return out;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `npm view … peerDependencies --json`: one field, so npm prints its map bare (or the field named, or in a one-element array); "" is none. */
+function parsePeers(text: string): Record<string, unknown> | undefined {
+  try {
+    let j: unknown = JSON.parse(text.trim() || "{}");
+    if (Array.isArray(j) && j.length === 1) j = j[0];
+    if (!j || typeof j !== "object" || Array.isArray(j)) return undefined;
+    const named = (j as Record<string, unknown>).peerDependencies;
+    if (named != null && typeof named === "object" && !Array.isArray(named)) return named as Record<string, unknown>;
+    return j as Record<string, unknown>;
   } catch {
     return undefined;
   }
@@ -115,8 +132,8 @@ function depFiles(d: DepBlocks): Map<string, Uint8Array> {
 /** Added (+), removed (-) and changed (~) dependency edges, for the reviewer to read. */
 function depDiff(before: DepBlocks, after: DepBlocks): string[] {
   const out: string[] = [];
-  for (const f of ["dependencies", "optionalDependencies"] as const) {
-    const tag = f === "optionalDependencies" ? " (optional)" : "";
+  for (const f of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
+    const tag = f === "optionalDependencies" ? " (optional)" : f === "peerDependencies" ? " (peer)" : "";
     const a = after[f];
     const b = before[f];
     for (const [k, v] of Object.entries(a)) {
@@ -191,6 +208,8 @@ export async function npmSection(exec: Exec, r: Reviewer, o: NpmOptions): Promis
     const tv = await exec([o.npm, "view", `${pkg}@${v.next}`, "dist.tarball"]);
     const dn = await exec([o.npm, "view", `${pkg}@${v.next}`, "dependencies", "optionalDependencies", "--json"]);
     const dv = await exec([o.npm, "view", `${pkg}@${v.current}`, "dependencies", "optionalDependencies", "--json"]);
+    const pn = await exec([o.npm, "view", `${pkg}@${v.next}`, "peerDependencies", "--json"]);
+    const pv = await exec([o.npm, "view", `${pkg}@${v.current}`, "peerDependencies", "--json"]);
     if (sv.rc !== 0) unread.push(`${pkg}@${v.next} scripts (npm view rc ${sv.rc})`);
     if (ov.rc !== 0) unread.push(`${pkg}@${v.current} scripts (npm view rc ${ov.rc})`);
     if (tv.rc !== 0) unread.push(`${pkg}@${v.next} tarball (npm view rc ${tv.rc})`);
@@ -207,14 +226,21 @@ export async function npmSection(exec: Exec, r: Reviewer, o: NpmOptions): Promis
     // retarget holds through the prepass rule itself; additions and raises are shown to the reviewer.
     if (dn.rc !== 0) unread.push(`${pkg}@${v.next} dependencies (npm view rc ${dn.rc})`);
     if (dv.rc !== 0) unread.push(`${pkg}@${v.current} dependencies (npm view rc ${dv.rc})`);
+    if (pn.rc !== 0) unread.push(`${pkg}@${v.next} peerDependencies (npm view rc ${pn.rc})`);
+    if (pv.rc !== 0) unread.push(`${pkg}@${v.current} peerDependencies (npm view rc ${pv.rc})`);
     const depAfter = dn.rc === 0 ? parseDeps(dn.out) : undefined;
     const depBefore = dv.rc === 0 ? parseDeps(dv.out) : undefined;
+    const peerAfter = pn.rc === 0 ? parsePeers(pn.out) : undefined;
+    const peerBefore = pv.rc === 0 ? parsePeers(pv.out) : undefined;
+    if (pn.rc === 0 && !peerAfter) unread.push(`${pkg}@${v.next} peerDependencies (unparseable)`);
+    if (pv.rc === 0 && !peerBefore) unread.push(`${pkg}@${v.current} peerDependencies (unparseable)`);
     if (dn.rc === 0 && !depAfter) unread.push(`${pkg}@${v.next} dependencies (unparseable)`);
     if (dv.rc === 0 && !depBefore) unread.push(`${pkg}@${v.current} dependencies (unparseable)`);
     let depLines: string[] = [];
-    if (depAfter && depBefore) {
-      depLines = depDiff(depBefore, depAfter);
-      for (const n of dependencyDowngrades(depFiles(depBefore), depFiles(depAfter))) drops.push(`${pkg}@${v.next} ${n}`);
+    if (depAfter && depBefore && peerAfter && peerBefore) {
+      const [b, a] = [{ ...depBefore, peerDependencies: peerBefore }, { ...depAfter, peerDependencies: peerAfter }];
+      depLines = depDiff(b, a);
+      for (const n of dependencyDowngrades(depFiles(b), depFiles(a))) drops.push(`${pkg}@${v.next} ${n}`);
     }
     const scripts = sv.out.trim() || "(no scripts)";
     const tarball = tv.out.trim().split("\n")[0] || "unknown";
@@ -252,7 +278,7 @@ One-line reason if FLAG. 6 lines max.`;
   if (unread.length) {
     const reason = `could not read ${unread.join(", ")} — not reviewed`;
     log.push(`npm: ${reason}; skipping upgrade`);
-    await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${reason}\nPackages: ${names.join(" ")}\nLog: ${o.logFile ?? "-"}`);
+    await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${esc(reason)}\nPackages: ${esc(names.join(" "))}\nLog: ${o.logFile ?? "-"}`);
     return { status: `FLAGGED — ${reason}`, log };
   }
   const hookHit = [hooks.length ? `new or changed install script: ${hooks.join(", ")}` : "", runs.length ? `install script runs unreviewed package files: ${runs.join(", ")}` : "", drops.length ? `dependency floor dropped or alias retargeted: ${drops.join(", ")}` : ""].filter(Boolean).join("; ");
@@ -266,7 +292,7 @@ One-line reason if FLAG. 6 lines max.`;
   } else if (v.verdict === "UNAVAILABLE") reason = "reviewer unavailable";
   else if (v.verdict === "FLAG") reason = v.reason ?? "FLAG";
   if (reason) {
-    await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${reason}\nPackages: ${names.join(" ")}\nLog: ${o.logFile ?? "-"}`);
+    await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${esc(reason)}\nPackages: ${esc(names.join(" "))}\nLog: ${o.logFile ?? "-"}`);
     log.push("npm: flagged — skipping upgrade");
     return { status: `FLAGGED — ${reason}`, log };
   }
@@ -284,7 +310,7 @@ One-line reason if FLAG. 6 lines max.`;
     if (u.rc !== 0) {
       status = `FAILED — ${pkg}`;
       log.push(`npm: upgrade failed for ${pkg} — continuing`);
-      await send(`⚠️ <b>${o.host} npm FAILED — ${pkg}</b>\nLog: ${o.logFile ?? "-"}`);
+      await send(`⚠️ <b>${o.host} npm FAILED — ${esc(pkg)}</b>\nLog: ${o.logFile ?? "-"}`);
       continue;
     }
     // Verified, not assumed: a version that cannot be read is no match.
@@ -293,7 +319,7 @@ One-line reason if FLAG. 6 lines max.`;
       const what = `${pkg} installed ${got ?? "unknown"}, reviewed ${v.next}`;
       off.push(what);
       log.push(`npm: ${what} — FLAGGED`);
-      await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${what}\nLog: ${o.logFile ?? "-"}`);
+      await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${esc(what)}\nLog: ${o.logFile ?? "-"}`);
     } else run.upgraded.push(pkg);
   }
   if (off.length) status = [status, `FLAGGED — ${off.join(", ")}`].filter(Boolean).join("; ");

@@ -592,6 +592,19 @@ describe("runGate", () => {
     expect((await runGate({ forge: memForge(bare, { h3: "failure" }), repo: "o/r", review: async () => { throw new Error("not called"); } }))[0]!.state).toBe("failure");
   });
 
+  test("the reason a changed manifest is not read is one escaped line cut to 300 characters", async () => {
+    const lock = `{"lockfileVersion":1,"workspaces":{"":{"name":"root","dependencies":{"yaml":"^2.8.1"}}},"packages":{"yaml":["yaml@2.8.1","",{},"${SRI("X")}"]}}`;
+    const pkg = (spec: string) => JSON.stringify({ name: "root", dependencies: { yaml: spec } });
+    const forge = memForge({ "b:bun.lock": lock, "h1:bun.lock": lock, "b:package.json": pkg("^2.8.1"), "h1:package.json": pkg(`git+https://evil.example/y\u00a0\u2028${"z".repeat(400)}`) }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    await runGate({ forge, repo: "o/r", review: async () => { throw new Error("not called"); } });
+    const line = body.split("\n").find((l) => l.startsWith("- package.json: "))!;
+    expect(line).toContain("\\u{a0}\\u{2028}");
+    expect(line).not.toMatch(/[\u00a0\u2028]/);
+    expect([...line.replace(/\\u\{[0-9a-f]+\}/g, "?")].length).toBeLessThanOrEqual(320);
+  });
+
   test("a manifest change beyond dependency versions fails: lifecycle scripts, entry points, build system, package manager", async () => {
     const pkg = (extra: object = {}) => JSON.stringify({ name: "root", dependencies: { yaml: "^2.8.1" }, ...extra });
     const PNPM = `lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages: {}\n`;
@@ -1007,6 +1020,18 @@ describe("runGate", () => {
     expect(body).not.toContain("`code`");
   });
 
+  test("a lockfile parse error is cut to 300 characters and shows its invisibles escaped", async () => {
+    const key = `node_modules/a\u00a0${"z".repeat(400)}`;
+    const bad = JSON.stringify({ lockfileVersion: 3, packages: { "": { name: "r" }, [key]: { version: "nope" } } });
+    const forge = memForge({ "b:package-lock.json": '{"lockfileVersion":3,"packages":{"":{"name":"r"}}}', "h1:package-lock.json": bad }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    await runGate({ forge, repo: "o/r", review: async () => { throw new Error("not called"); } });
+    const detail = body.split("\n").find((l) => l.includes("cannot read package-lock.json"))!;
+    expect(detail).toContain("\\u{a0}");
+    expect([...detail.replace(/\\u\{[0-9a-f]+\}/g, "?")].length).toBeLessThanOrEqual(302);
+  });
+
   test("by default a private-registry version fails the PR, even when it is the only change", async () => {
     const forge = memForge({ "b:bun.lock": MIXED("2.8.1", "3.0.0"), "h1:bun.lock": MIXED("2.8.1", "3.1.0") }, { h3: "failure" });
     let body = "";
@@ -1077,5 +1102,18 @@ describe("the gate comment shows a layer detail with its invisible characters es
     expect(body).not.toContain("\\u{d83d}");
     expect(body).not.toContain("\\u{202e}"); // the 301st character is past the cut
     expect(body).not.toMatch(/\\u\{[0-9a-f]*(?![0-9a-f}])/);
+  });
+  test("space-like invisibles inside a detail are escaped, not collapsed to a plain space", () => {
+    const detail = "a\ufeffb\u00a0c\u2028d\u3000e   f\n\tg";
+    const r: ReviewResult = { eco: "npm", name: "x", from: "1.0.0", to: "1.0.1", decision: "hold", layers: [{ layer: "reviewer", verdict: "stop", detail }] };
+    const body = comment("h1", "package-lock.json", "failure", [r], []);
+    expect(body).toContain("a\\u{feff}b\\u{a0}c\\u{2028}d\\u{3000}e f g");
+    expect(body).not.toMatch(/[\ufeff\u00a0\u2028\u3000]/);
+  });
+  test("a malicious list is escaped", () => {
+    const r: ReviewResult = { eco: "npm", name: "x", from: "1.0.0", to: "1.0.1", decision: "hold", layers: [], malicious: ["evil`](http://x)\u202e"] };
+    const body = comment("h1", "package-lock.json", "failure", [r], []);
+    expect(body).toContain("evil\\u{60}\\u{5d}(http://x)\\u{202e}");
+    expect(body).not.toMatch(/[\u202e]/);
   });
 });

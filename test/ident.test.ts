@@ -66,3 +66,8 @@ test("inert escapes a lone surrogate, a private-use and an unassigned code point
     expect(inert(`a${ch}b`), cp.toString(16)).toBe(`a\\u{${cp.toString(16)}}b`);
   expect(inert("a\u{1f600}b")).toBe("a\u{1f600}b"); // an assigned emoji stays
 });
+
+test("inert leaves combining marks and the object replacement character, and still escapes the braille blank", () => {
+  expect(inert("é a\u{fffc}b")).toBe("é a\u{fffc}b");
+  expect(inert("a⠀b")).toBe("a\\u{2800}b");
+});

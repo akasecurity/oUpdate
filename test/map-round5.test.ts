@@ -43,6 +43,25 @@ for (const big of [true, false]) for (const [label, code, os, osc, ns, nsc, extr
     // a small map is shown whole as a token diff, so the payload is looked for by its distinctive word
     const key = nsc.some((x) => x?.includes("marker_qq")) ? "marker_qq" : "process.env.Q";
     const shown = t.includes(key);
-    // P2 on a padded map is the ruled case: an entry unchanged at its index carries no new text, so it is not listed. Every other case shows the payload.
+    // P2 on a padded map is the ruled case (review of PR 91: text unchanged at its index was already shipped in the old release): an entry unchanged at its index carries no new text, so it is not listed. Every other case shows the payload.
     expect({ label, big, payloadShown: shown }).toEqual({ label, big, payloadShown: !(hiddenOk && big) });
   }, 60000);
+
+// A template whose tail is not the script name does not name the script, at either size (a known limit, pinned so a change to the stem rule is a decision).
+for (const [label, code] of [["O1 `${d}index.js` (no slash after the substitution)", "const d = process.env.D;\nmodule.exports = `${d}index.js`;\n"], ["O2 `./index.js?${v}` (a query after the name)", "const v = process.env.V;\nmodule.exports = `./index.js?${v}`;\n"]] as const)
+  for (const big of [true, false])
+    test(`${label} leaves the map a hash line, big=${big}`, async () => {
+      const reviewed: string[] = [];
+      await reviewUpdate({
+        eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
+        registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+        advisories: { query: async () => [] },
+        reviewer: { name: "fake", review: async (p) => (reviewed.push(p), "APPROVE\nno attack indicators found") },
+        cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"), chunkChars: 60000,
+        loadArtifacts: async () => ({
+          old: files({ "package.json": '{"name":"lib","version":"a","main":"lib/index.js"}', "lib/index.js": "exports.v = 1;\n", "lib/index.js.map": map("a", big, ["a"], ["ok"]) }),
+          new: files({ "package.json": '{"name":"lib","version":"b","main":"lib/index.js"}', "lib/index.js": "exports.v = 2;\n", "lib/x.js": code, "lib/index.js.map": map("b", big, ["a"], ["var marker_qq = 42;"]) }),
+        }),
+      });
+      expect(reviewed.join("")).toContain("[source map, strict v3 data");
+    }, 60000);
