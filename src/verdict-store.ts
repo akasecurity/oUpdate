@@ -3,7 +3,7 @@
 // under a hash of those two and a host that meets the same release reads it instead of paying for another review.
 // The roll-up reports one hold per release and reason with the hosts that hit it. The directory is any path hosts share.
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, isAbsolute, sep } from "node:path";
 import { parseVerdict, stripTerminal, type Reviewer, type ReviewResult } from "./review.ts";
 import type { ReviewerSpec } from "./adapters/reviewer/spec.ts";
@@ -24,11 +24,16 @@ export function verdictKey(reviewerName: string, prompt: string, fingerprint = "
   return new Bun.CryptoHasher("sha256").update(`${reviewerName.length}:${reviewerName}\n${fingerprint.length}:${fingerprint}\n${prompt}`).digest("hex");
 }
 
-/** The file's text, read only when it is a regular file (a symlink to one is followed): a FIFO in a shared folder would block the synchronous read forever. Throws otherwise, like a missing file. */
+/** The file's text, read only when the opened file is a regular file (a symlink to one is followed): a FIFO in a shared folder would block the synchronous read forever. Throws otherwise, like a missing file. */
 function readRegular(path: string): string {
-  const st = lstatSync(path);
-  if (!(st.isSymbolicLink() ? statSync(path) : st).isFile()) throw new Error(`not a regular file: ${path}`);
-  return readFileSync(path, "utf8");
+  // Open without blocking, then check the opened file: a FIFO swapped in after a path check would otherwise block the read forever.
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error(`not a regular file: ${path}`);
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function writeAtomic(path: string, text: string): void {

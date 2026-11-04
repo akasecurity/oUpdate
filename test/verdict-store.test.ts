@@ -564,7 +564,7 @@ describe("store mark", () => {
 });
 
 describe("verdicts listing: entry files and the forget hint", () => {
-  test("a hold whose reason is not from the reviewer layer shows no entry file, even when an entry names the release", async () => {
+  test("a hold row naming another layer first still shows the stored FLAG entry that names the release", async () => {
     const d = dir();
     try {
       const { verdictsMain } = await import("../src/cli.ts");
@@ -573,8 +573,18 @@ describe("verdicts listing: entry files and the forget hint", () => {
       const lines: string[] = [];
       await verdictsMain(["--verdict-dir", d], (l) => lines.push(l));
       expect(lines[0]).toContain("prepass: install script added");
-      expect(lines[0]).not.toContain("entry:");
-      expect(lines[0]).not.toContain(verdictKey("m", "x"));
+      expect(lines[0]).toContain(`entry: ${join(d, verdictKey("m", "x") + ".json")}`);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a reviewer stop that is not a stored FLAG gets no forget hint", async () => {
+    const d = dir();
+    try {
+      const { verdictsMain } = await import("../src/cli.ts");
+      await recordResult(d, "h1", held("left-pad", "m read time budget of 500 ms ran out; needs a human"));
+      const lines: string[] = [];
+      await verdictsMain(["--verdict-dir", d], (l) => lines.push(l));
+      expect(lines[0]).toContain("read time budget");
+      expect(lines[0]).not.toContain("--forget <key> takes a key");
     } finally { rmSync(d, { recursive: true }); }
   });
   test("a reviewer hold with no matching entry says the key comes from the store directory", async () => {
