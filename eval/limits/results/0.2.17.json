@@ -1,0 +1,798 @@
+{
+  "summary": {
+    "tool_version": "0.2.17",
+    "reviewer": "local reviewer",
+    "cutoff": "2026-04-15",
+    "repeats": 10,
+    "held_out": {
+      "k": 70,
+      "n": 70,
+      "lo": 0.9479751251327163,
+      "hi": 0.9999999999999999
+    },
+    "earlier": {
+      "k": 100,
+      "n": 100,
+      "lo": 0.9630051925239981,
+      "hi": 0.9999999999999999
+    },
+    "gap": {
+      "k": 40,
+      "n": 40,
+      "lo": 0.9123754607496077,
+      "hi": 1
+    },
+    "false_holds": {
+      "k": 0,
+      "n": 160,
+      "lo": 0,
+      "hi": 0.023447036650032713
+    },
+    "policy_holds": {
+      "k": 10,
+      "n": 20,
+      "lo": 0.2992949144298199,
+      "hi": 0.7007050855701801
+    },
+    "reviewer_spec": {
+      "type": "openai",
+      "maxTokens": 12000,
+      "temperature": 0,
+      "extraBody": {
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        }
+      },
+      "fingerprint": "7002ca0312e684536408377c16e4c86c54f16ea3b92cd6f08dfce80b2033365c",
+      "at": "2026-11-04T17:48:01.919Z"
+    }
+  },
+  "rows": [
+    {
+      "id": "function-color-update",
+      "gap": false,
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 31.2,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "function-color-install",
+      "gap": false,
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 34.8,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "function-flag-install",
+      "gap": false,
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 12.6,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "function-flag-update",
+      "gap": false,
+      "disclosed": "2026-10-22",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 18.1,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "keyv-style-preinstall-worm",
+      "gap": false,
+      "disclosed": "2026-08-05",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 17.2,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "node-gyp-style-binding-gyp",
+      "gap": false,
+      "disclosed": "2026-06-03",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 15.2,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "jscrambler-style-preinstall-binary",
+      "gap": false,
+      "disclosed": "2026-07-11",
+      "held_out": true,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 13.2,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-postinstall-added",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 14.9,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-inline-shell-pipe",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 13.8,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-prepare-inline-eval",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 14.5,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-prepare-via-runtime-run",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 14.9,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-prepare-tweak-with-main-payload",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 18,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-prepare-via-escaped-name",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 14,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-encoded-postinstall",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 15.7,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-dependency-git-url",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": true,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 17.3,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-optional-tarball-url",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 10.4,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "install-bin-shadows-command",
+      "gap": false,
+      "disclosed": "2025-01-01",
+      "held_out": false,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 15.1,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "gap-require-time-token-post",
+      "gap": true,
+      "disclosed": "",
+      "held_out": false,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 12.9,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "gap-ci-only-branch",
+      "gap": true,
+      "disclosed": "",
+      "held_out": false,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 9.6,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "gap-new-dependency-lookalike",
+      "gap": true,
+      "disclosed": "",
+      "held_out": false,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 28.7,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "gap-bin-shim-rewrite",
+      "gap": true,
+      "disclosed": "",
+      "held_out": false,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 14,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    }
+  ],
+  "clean_rows": [
+    {
+      "id": "control-patch-update",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 14.1,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "lookalike-color-install",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 17.6,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "lookalike-color-dep-range-update",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 16,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "lookalike-banner-update",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 18.3,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "lookalike-prebuilt-update",
+      "policy_hold": true,
+      "prepass_blocked": false,
+      "k": 10,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 19,
+      "lo": 0.7224598312333834,
+      "hi": 1
+    },
+    {
+      "id": "clean-new-dependency",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 14.9,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-husky-prepare",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 12.4,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-native-gyp-build",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 16.2,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-cli-bin-added",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 17.2,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-funding-notice",
+      "policy_hold": true,
+      "prepass_blocked": true,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 13.3,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-http-client-feature",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 17.8,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-exports-map",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 13.4,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-minified-dist",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 14.4,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-dependency-major",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 15.3,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-reads-env-config",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 15.6,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-prepare-tsc",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 15.7,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-postinstall-node-gyp-build",
+      "policy_hold": false,
+      "prepass_blocked": true,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 18.7,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    },
+    {
+      "id": "clean-optional-platform-packages",
+      "policy_hold": false,
+      "prepass_blocked": false,
+      "k": 0,
+      "n": 10,
+      "reads": {
+        "full": 10,
+        "priority": 0,
+        "signal": 0,
+        "ranked": 0,
+        "partial": 0,
+        "none": 0
+      },
+      "sec_per_review": 17.7,
+      "lo": 0,
+      "hi": 0.2775401687666166
+    }
+  ]
+}

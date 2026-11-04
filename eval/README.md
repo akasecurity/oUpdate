@@ -15,3 +15,9 @@ Each folder is a public attack write-up replayed against oUpdate, or an evaluati
 ## Evasion set
 
 `bun eval/limits/evasions.ts` scores a labeled set of hand-written evasions (names split across versions or entries, chars built from code, shebang and extensionless entries, swapped duplicate sources, split sourcesContent) with no model: each case is one release through the review with a fake reviewer, and the payload is either shown to it or not. A case says whether it is expected shown or hidden and whether a hidden result is a known base weakness. It writes `limits/results/<version>-evasions.{json,md}`, exits 1 on a label mismatch; `limits/run.ts` runs it too, prints the mismatches in its summary and exits 1 on one. A case also counts as a mismatch when the reviewer was never called or a layer errored. A payload split across entries counts as shown only when every piece is in the new text.
+
+## Limits results
+
+`bun eval/limits/run.ts --reviewer <spec.json> --repeats 10` runs every attack and every clean case ten times through the gate and writes `limits/results/<version>.{json,md}`; the first lines of each result record the reviewer settings it ran with (thinking on or off, max tokens, a fingerprint of the settings).
+
+Latest run, oUpdate 0.2.17, local reviewer with thinking on and 12000 max tokens, 10 runs per case, run twice with the same counts: 210 of 210 attack runs flagged (21 attack cases, 70 held-out, 100 earlier, 40 that the pre-pass lets through), 0 of 160 clean runs falsely held (16 clean cases). With thinking off, the same clean cases were falsely held in 20 of 160 runs, so the reviewer should run with thinking on. Results: [0.2.17.md](limits/results/0.2.17.md). The earlier 0.2.12 run (7 attack cases, 14 clean cases, thinking off) stays in the folder for comparison.

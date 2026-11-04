@@ -1,0 +1,380 @@
+{
+  "summary": {
+    "tool_version": "0.2.17",
+    "n": 41,
+    "shown": 38,
+    "known_base_weaknesses": 3,
+    "mismatches": []
+  },
+  "rows": [
+    {
+      "id": "swap-clean-and-payload",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "swap-clean-and-payload",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "swap-with-new-clean-text",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "swap-with-new-clean-text",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "shift-by-one-entry",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "shift-by-one-entry",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "rename-source-then-swap",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "rename-source-then-swap",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "reorder-distinct-names",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "reorder-distinct-names",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "duplicate-names-payload-first",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "duplicate-names-payload-first",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "duplicate-names-swapped",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "duplicate-names-swapped",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "duplicate-names-payload-second",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "duplicate-names-payload-second",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "extra-content-past-sources",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "extra-content-past-sources",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "extra-content-no-loader",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "extra-content-no-loader",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "names-split-forward-join",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "names-split-forward-join",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "names-split-reversed",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "names-split-reversed",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "map-name-folded-string",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "map-name-folded-string",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "map-name-from-char-code",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "map-name-from-char-code",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "map-name-by-directory-scan",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "map-name-by-directory-scan",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "bare-map-suffix-js",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "bare-map-suffix-js",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "bare-map-suffix-shebang-bin",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "bare-map-suffix-shebang-bin",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "bare-map-suffix-bin-entry",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "bare-map-suffix-bin-entry",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "bare-map-suffix-extensionless-main",
+      "size": "big",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "bare-map-suffix-extensionless-main",
+      "size": "small",
+      "expect": "shown",
+      "baseWeakness": false,
+      "shown": true,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "same-index-same-text-reused",
+      "size": "big",
+      "expect": "hidden",
+      "baseWeakness": true,
+      "shown": false,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "names-split-inside-word-reversed",
+      "size": "big",
+      "expect": "hidden",
+      "baseWeakness": true,
+      "shown": false,
+      "ran": true,
+      "ok": true
+    },
+    {
+      "id": "names-split-inside-word-reversed",
+      "size": "small",
+      "expect": "hidden",
+      "baseWeakness": true,
+      "shown": false,
+      "ran": true,
+      "ok": true
+    }
+  ]
+}
