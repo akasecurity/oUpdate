@@ -433,6 +433,16 @@ OUPDATE_EVAL_BASE_URL=http://127.0.0.1:8080/v1 OUPDATE_EVAL_MODEL=<model> bun sc
 
 </details>
 
+### Run the reviewer with thinking on
+
+The reviewer should run with its thinking turned on. In the limits evaluation ([results](eval/limits/results/0.2.17.md), 21 attack cases and 16 clean cases, 10 runs each) a local reviewer with thinking on and a 12000-token answer limit flagged 210 of 210 attack runs and falsely held 0 of 160 clean runs (the reviewer's false holds; two more clean cases are policy holds, counted apart); with thinking off and the default 4096-token limit it falsely held 20 of 160 on the same cases. For a local OpenAI-compatible server that takes the chat-template switch, set both in the reviewer spec:
+
+```json
+{"type":"openai","name":"local","baseUrls":["http://127.0.0.1:8080/v1"],"model":"your-model","maxTokens":12000,"extraBody":{"chat_template_kwargs":{"enable_thinking":true}}}
+```
+
+A server that turns thinking on another way takes its own switch in `extraBody`. A reviewer that thinks needs the larger `maxTokens`: a short limit cuts the answer off and the review fails closed.
+
 ### Score your own model
 
 `acceptance/run.ts` runs the attack and clean-release cases through any reviewer you give it. `acceptance-results/summary.txt` ends with a scorecard per reviewer: attacks stopped, attacks stopped by the model reviewer alone, model FLAGs on attacks, controls landed, and the cases the model did not judge. Each line sits beside the bar (every attack stopped, every core control landed: 9 of 9 and 10 of 10) and the [26 Oct result](eval/2026-10-26-attack-and-clean-release-evaluation/) (9 of 9 stopped, 8 of 8 landed, model FLAG on 7 of 9). `run.ts` runs the 8 dataset attacks; litellm 1.107.0 is a separate replay, so a run scores attacks out of 8. The run also builds 4 synthetic evasion cases in memory (`acceptance/synthetic/generate.ts`: a comment telling the reviewer to approve, a loader hidden among 300 changed files, a loader inside a minified bundle, a refactor that posts the environment to a URL). They are inert, with payload URLs on `.invalid` hosts only, and the scorecard counts them on their own line, outside the published set.
