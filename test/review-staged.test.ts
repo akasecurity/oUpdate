@@ -276,6 +276,24 @@ describe("read time budget", () => {
     expect(classifyOutcome(r)).toBe("held-human");
   });
 
+  test("a spent budget on a narrowed review keeps the tier reasons and the parts count", async () => {
+    const pair = syntheticPair("needle-in-300");
+    const prompts: string[] = [];
+    const r = await reviewUpdate({
+      eco: "npm", name: "synthetic-strkit", from: "1.4.0", to: "1.4.1",
+      registry: { latest: async () => undefined, publishedAt: async () => undefined, artifactUrls: async () => [] },
+      advisories: { query: async () => [] },
+      reviewer: { name: "stub", review: async (p) => (prompts.push(p), await Bun.sleep(10), "APPROVE\nfine") },
+      cooldownDays: 7, now: new Date(), only: ["prepass", "reviewer"], loadArtifacts: async () => pair, maxParts: 3, maxStages: 1, maxReadMs: 1,
+    });
+    const d = r.layers.find((l) => l.layer === "reviewer")!.detail;
+    expect(prompts.length).toBeLessThan(3);
+    expect(d).toMatch(/^\d+ of \d+ part\(s\) read, the read time budget of 1 ms ran out; \d+ file\(s\) not reviewed; too large for model review: \d+ parts > 3 \(full diff\); too large for model review: \d+ parts > 3 \(signal files alone\); \d+ ranked parts not reviewed; needs a human$/);
+    expect(Number(/; (\d+) ranked parts not reviewed/.exec(d)![1])).toBeGreaterThan(10);
+    expect(r.decision).toBe("hold");
+    expect(classifyOutcome(r)).toBe("held-human");
+  });
+
   test("a budget the read fits in changes nothing", async () => {
     const art = release(12);
     const total = chunkDiff(art.old, art.new, 200).length;

@@ -17,6 +17,8 @@ test("readScope names a narrowed review and defaults to a full read", () => {
   expect(readScope("over budget; m APPROVE on the priority files (2 part(s)); needs a human")).toBe("priority");
   expect(readScope("m FLAG on signal part(s) 1 of 1; note")).toBe("signal");
   expect(readScope("m FLAG on ranked part(s) 1 of 3 reviewed; note")).toBe("ranked");
+  expect(readScope("3 of 12 part(s) read, the read time budget of 1 ms ran out; 4 file(s) not reviewed; needs a human")).toBe("partial");
+  expect(readScope("1 of 3 part(s) read, the read time budget of 1 ms ran out; 4 file(s) not reviewed; too large for model review: 9 parts > 6 (signal files alone); 20 ranked parts not reviewed; needs a human")).toBe("partial");
   expect(readScope("not model-reviewable: 0 parts to review; 1 file(s) added; needs a human")).toBe("none");
   expect(readScope("too large for model review: 9 parts > 6 (signal files alone); needs a human")).toBe("none");
   expect(readScope("too large for model review: 9 parts > 6 (priority files alone); needs a human")).toBe("none");
