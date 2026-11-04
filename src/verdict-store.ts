@@ -165,7 +165,7 @@ export async function rollupHolds(dir: string): Promise<HoldRow[]> {
   for (const h of readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)) {
     let files: string[];
     try {
-      files = readdirSync(join(root, h)).filter((x) => x.endsWith(".json"));
+      files = readdirSync(join(root, h)).filter((x) => x.endsWith(".json") && KEY.test(x.slice(0, -5))); // a file under the old hyphen-joined name is a stale record next to its hashed successor
     } catch {
       continue;
     }

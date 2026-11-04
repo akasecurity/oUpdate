@@ -236,9 +236,9 @@ describe("shared folder hardening", () => {
       await recordResult(d, "h1", held("p", "m FLAG on part(s) 1 of 1"));
       writeFileSync(join(d, "results", ".DS_Store"), "x");
       mkdirSync(join(d, "results", "bad"));
-      writeFileSync(join(d, "results", "bad", "a.json"), "{}");
-      writeFileSync(join(d, "results", "bad", "b.json"), JSON.stringify({ host: "h", result: { decision: "hold", eco: "npm" } }));
-      writeFileSync(join(d, "results", "bad", "c.json"), "null");
+      writeFileSync(join(d, "results", "bad", `${"a".repeat(64)}.json`), "{}");
+      writeFileSync(join(d, "results", "bad", `${"b".repeat(64)}.json`), JSON.stringify({ host: "h", result: { decision: "hold", eco: "npm" } }));
+      writeFileSync(join(d, "results", "bad", `${"c".repeat(64)}.json`), "null");
       await recordResult(d, "h\u001b]52;c;eA==\u0007x", held("q", "m FLAG\u001b[2J on part(s) 1 of 1"));
       const rows = await rollupHolds(d);
       expect(rows.map((r) => r.name).sort()).toEqual(["p", "q"]);
@@ -252,7 +252,7 @@ describe("roll-up shape and cooldown", () => {
   const put = async (d: string, name: string, body: unknown) => {
     const { mkdirSync, writeFileSync } = await import("node:fs");
     mkdirSync(join(d, "results", "h"), { recursive: true });
-    writeFileSync(join(d, "results", "h", `${name}.json`), JSON.stringify(body));
+    writeFileSync(join(d, "results", "h", `${new Bun.CryptoHasher("sha256").update(name).digest("hex")}.json`), JSON.stringify(body));
   };
   const base = { eco: "npm", name: "p", from: "1.0.0", to: "1.0.1", decision: "hold" };
   test("a record with valid strings but missing, non-array or non-object layers is skipped", async () => {
@@ -412,6 +412,16 @@ describe("roll-up release id", () => {
       await recordResult(d, "h1", a);
       await recordResult(d, "h1", b);
       expect((await rollupHolds(d)).map((r) => `${r.name} ${r.from}`).sort()).toEqual(["a b-1", "a-b 1"]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a record left under the old hyphen-joined file name is not rolled up next to its hashed successor", async () => {
+    const d = dir();
+    try {
+      await recordResult(d, "h1", held("p", "m FLAG on part(s) 1 of 1"));
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      mkdirSync(join(d, "results", "h1"), { recursive: true });
+      writeFileSync(join(d, "results", "h1", "npm-q-1.0.0-1.0.1.json"), JSON.stringify({ host: "h1", result: held("q", "m FLAG on part(s) 1 of 1") }));
+      expect((await rollupHolds(d)).map((r) => r.name)).toEqual(["p"]);
     } finally { rmSync(d, { recursive: true }); }
   });
   test("a very long package name still records", async () => {
