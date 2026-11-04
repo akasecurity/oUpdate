@@ -3,7 +3,7 @@
 // under a hash of those two and a host that meets the same release reads it instead of paying for another review.
 // The roll-up reports one hold per release and reason with the hosts that hit it. The directory is any path hosts share.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, isAbsolute, sep } from "node:path";
 import { parseVerdict, stripTerminal, type Reviewer, type ReviewResult } from "./review.ts";
 import type { ReviewerSpec } from "./adapters/reviewer/spec.ts";
@@ -22,6 +22,18 @@ export function reviewerFingerprint(spec: ReviewerSpec): string {
 /** Content hash of what an answer depends on. A changed prompt, release diff, reviewer name or reviewer fingerprint is a different key. */
 export function verdictKey(reviewerName: string, prompt: string, fingerprint = ""): string {
   return new Bun.CryptoHasher("sha256").update(`${reviewerName.length}:${reviewerName}\n${fingerprint.length}:${fingerprint}\n${prompt}`).digest("hex");
+}
+
+/** The file's text, read only when the opened file is a regular file (a symlink to one is followed): a FIFO in a shared folder would block the synchronous read forever. Throws otherwise, like a missing file. */
+function readRegular(path: string): string {
+  // Open without blocking, then check the opened file: a FIFO swapped in after a path check would otherwise block the read forever.
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error(`not a regular file: ${path}`);
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function writeAtomic(path: string, text: string): void {
@@ -55,7 +67,7 @@ export function cachedReviewer(inner: Reviewer, dir: string, host: string, finge
     async review(prompt) {
       const file = join(dir, `${verdictKey(inner.name, prompt, fingerprint)}.json`);
       try {
-        const hit = JSON.parse(readFileSync(file, "utf8"));
+        const hit = JSON.parse(readRegular(file));
         if (isFlag(hit?.text)) {
           out.storeHits++;
           return hit.text;
@@ -110,7 +122,7 @@ export function storeEntries(dir: string): StoreEntry[] {
   for (const f of names) {
     let e: Record<string, unknown>;
     try {
-      e = JSON.parse(readFileSync(join(dir, f), "utf8"));
+      e = JSON.parse(readRegular(join(dir, f)));
     } catch {
       continue;
     }
@@ -134,8 +146,9 @@ export function forgetEntries(dir: string, target: string): string[] {
   }
   const m = /^([^:]+):(.+)@([^@>]*)>([^@>]+)$/.exec(target);
   if (!m) throw new Error(`${FORGET_USAGE}; got ${stripTerminal(target)}`);
-  const [, eco, name, from, to] = m;
-  const hits = storeEntries(dir).filter((e) => e.eco === eco && e.name === name && e.from === from && e.to === to);
+  const want = m.slice(1).map(stripTerminal);
+  // Compared as the listing shows them, so the release a person copies from `oupdate verdicts` matches its entries.
+  const hits = storeEntries(dir).filter((e) => [e.eco, e.name, e.from, e.to].every((x, i) => x !== undefined && stripTerminal(x) === want[i]));
   for (const e of hits) unlinkSync(e.file);
   return hits.map((e) => e.file);
 }
@@ -172,7 +185,7 @@ export async function rollupHolds(dir: string): Promise<HoldRow[]> {
     for (const f of files) {
       let rec: { host: string; result: ReviewResult };
       try {
-        rec = JSON.parse(readFileSync(join(root, h, f), "utf8"));
+        rec = JSON.parse(readRegular(join(root, h, f)));
       } catch {
         continue;
       }

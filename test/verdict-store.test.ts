@@ -466,6 +466,153 @@ describe("a reused answer is marked", () => {
   });
 });
 
+/** Makes a FIFO at path, or returns false when mkfifo is missing so the caller can skip. */
+const fifo = async (path: string): Promise<boolean> => {
+  const { execFileSync } = await import("node:child_process");
+  try {
+    execFileSync("mkfifo", [path], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+describe("a non-regular file in the store is skipped, not read", () => {
+  test("a FIFO under the exact key is a miss: the reviewer is asked and the review finishes", async () => {
+    const d = dir();
+    try {
+      if (!(await fifo(join(d, verdictKey("m", "x") + ".json")))) return;
+      const a = counting("m", "FLAG\nlive");
+      expect(await cachedReviewer(a, d, "h").review("x")).toBe("FLAG\nlive");
+      expect(a.calls).toBe(1);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a directory under the exact key is a miss too", async () => {
+    const d = dir();
+    try {
+      const { mkdirSync } = await import("node:fs");
+      mkdirSync(join(d, verdictKey("m", "x") + ".json"));
+      const a = counting("m", "APPROVE\nlive");
+      expect(await cachedReviewer(a, d, "h").review("x")).toBe("APPROVE\nlive");
+      expect(a.calls).toBe(1);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a symlink to a regular entry is still followed", async () => {
+    const d = dir();
+    try {
+      const { symlinkSync, writeFileSync } = await import("node:fs");
+      writeFileSync(join(d, "real"), JSON.stringify({ text: "FLAG\nlinked", ...rel }));
+      symlinkSync(join(d, "real"), join(d, verdictKey("m", "x") + ".json"));
+      const a = counting("m", "APPROVE\nnever asked");
+      expect(await cachedReviewer(a, d, "h").review("x")).toBe("FLAG\nlinked");
+      expect(a.calls).toBe(0);
+      expect(storeEntries(d).map((e) => e.key)).toEqual([verdictKey("m", "x")]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("storeEntries lists the regular entries and skips a FIFO", async () => {
+    const d = dir();
+    try {
+      await cachedReviewer(counting("m", "FLAG\nbad"), d, "h1", "", rel).review("x");
+      if (!(await fifo(join(d, "f".repeat(64) + ".json")))) return;
+      expect(storeEntries(d).map((e) => e.key)).toEqual([verdictKey("m", "x")]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("rollupHolds rolls up the regular records and skips a FIFO", async () => {
+    const d = dir();
+    try {
+      await recordResult(d, "h1", held("p", "m FLAG on part(s) 1 of 1"));
+      if (!(await fifo(join(d, "results", "h1", "f".repeat(64) + ".json")))) return;
+      expect((await rollupHolds(d)).map((r) => r.name)).toEqual(["p"]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
+describe("planted non-string release fields", () => {
+  test("an entry with a number for eco, name, from or to lists without that field, and the listing does not crash", async () => {
+    const d = dir();
+    try {
+      const { writeFileSync } = await import("node:fs");
+      const { verdictsMain } = await import("../src/cli.ts");
+      writeFileSync(join(d, verdictKey("m", "a") + ".json"), JSON.stringify({ text: "FLAG\nx", eco: 1, name: { a: 1 }, from: ["1"], to: null }));
+      expect(storeEntries(d)).toEqual([{ key: verdictKey("m", "a"), file: join(d, verdictKey("m", "a") + ".json") }]);
+      await recordResult(d, "h1", held("left-pad", "m FLAG on part(s) 1 of 1"));
+      const lines: string[] = [];
+      expect(await verdictsMain(["--verdict-dir", d], (l) => lines.push(l))).toBe(0);
+      expect(lines[0]).toContain("left-pad 1.0.0 -> 1.0.1");
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a result record with a number for eco, name, from or to is dropped from the roll-up", async () => {
+    const d = dir();
+    try {
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      await recordResult(d, "h1", held("ok", "m FLAG on part(s) 1 of 1"));
+      mkdirSync(join(d, "results", "h"), { recursive: true });
+      const layers = [{ layer: "reviewer", verdict: "stop", detail: "x" }];
+      const base = { eco: "npm", name: "p", from: "1", to: "2", decision: "hold", layers };
+      for (const [i, k] of ["eco", "name", "from", "to"].entries()) writeFileSync(join(d, "results", "h", `${String(i).repeat(64)}.json`), JSON.stringify({ host: "h", result: { ...base, [k]: 1 } }));
+      expect((await rollupHolds(d)).map((r) => r.name)).toEqual(["ok"]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
+describe("store mark", () => {
+  test("a reason already carrying the mark does not get it twice", () => {
+    const once = markStoreAnswer(held("p", "m FLAG on part(s) 1 of 1"), 1);
+    const twice = markStoreAnswer(once, 2);
+    expect(twice.layers[0]!.detail).toBe(`m FLAG on part(s) 1 of 1${STORE_MARK}`);
+  });
+});
+
+describe("verdicts listing: entry files and the forget hint", () => {
+  test("a hold row naming another layer first still shows the stored FLAG entry that names the release", async () => {
+    const d = dir();
+    try {
+      const { verdictsMain } = await import("../src/cli.ts");
+      await cachedReviewer(counting("m", "FLAG\nbad"), d, "h1", "", rel).review("x");
+      await recordResult(d, "h1", { ...held("left-pad", ""), layers: [{ layer: "prepass", verdict: "stop", detail: "install script added" }] });
+      const lines: string[] = [];
+      await verdictsMain(["--verdict-dir", d], (l) => lines.push(l));
+      expect(lines[0]).toContain("prepass: install script added");
+      expect(lines[0]).toContain(`entry: ${join(d, verdictKey("m", "x") + ".json")}`);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a reviewer stop that is not a stored FLAG gets no forget hint", async () => {
+    const d = dir();
+    try {
+      const { verdictsMain } = await import("../src/cli.ts");
+      await recordResult(d, "h1", held("left-pad", "m read time budget of 500 ms ran out; needs a human"));
+      const lines: string[] = [];
+      await verdictsMain(["--verdict-dir", d], (l) => lines.push(l));
+      expect(lines[0]).toContain("read time budget");
+      expect(lines[0]).not.toContain("--forget <key> takes a key");
+    } finally { rmSync(d, { recursive: true }); }
+  });
+  test("a reviewer hold with no matching entry says the key comes from the store directory", async () => {
+    const d = dir();
+    try {
+      const { verdictsMain } = await import("../src/cli.ts");
+      await Bun.write(join(d, verdictKey("m", "x") + ".json"), JSON.stringify({ reviewer: "m", host: "old", text: "FLAG\nold" }));
+      await recordResult(d, "h1", held("left-pad", "m FLAG on part(s) 1 of 1"));
+      const lines: string[] = [];
+      await verdictsMain(["--verdict-dir", d], (l) => lines.push(l));
+      expect(lines[0]).not.toContain("entry: /");
+      expect(lines[0]).toContain(`--forget <key> takes a key from ${d}`);
+      expect(lines[0]!.split("\n").length).toBe(1);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
+describe("forget by release matches the listing", () => {
+  test("a name carrying a dropped character is forgotten by the name the listing shows", async () => {
+    const d = dir();
+    try {
+      await cachedReviewer(counting("m", "FLAG\nbad"), d, "h", "", { ...rel, name: "left\u200b-pad" }).review("x");
+      expect(forgetEntries(d, "npm:left-pad@1.0.0>1.0.1")).toEqual([join(d, verdictKey("m", "x") + ".json")]);
+      expect(readdirSync(d)).toEqual([]);
+    } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
 describe("parsers use the env they are given", () => {
   test("review and gate check --verdict-dir and --state-dir against the passed workspace", async () => {
     const { parseReviewArgs, parseGateArgs } = await import("../src/cli.ts");
