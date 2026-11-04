@@ -2,32 +2,73 @@
 // Results files are public: only settings that shape an answer are stamped. Where a reviewer is reached and with what
 // credentials (base URLs, headers, expected response headers, key variable, work folder, command line) never are.
 
+import { DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE } from "../../src/adapters/reviewer/openai.ts";
 import type { ReviewerSpec } from "../../src/adapters/reviewer/spec.ts";
 import { reviewerFingerprint } from "../../src/verdict-store.ts";
 
 export interface ReviewerStamp {
   type: ReviewerSpec["type"];
+  /** The max_tokens sent: an extraBody number, else the spec's, else the adapter default. */
   maxTokens?: number;
-  temperature?: number;
+  /** The temperature sent; "set in extraBody" when extraBody sets one that is not a number. */
+  temperature?: number | "set in extraBody";
+  /** The allowlisted part of extraBody (sampling and thinking settings); every other key is dropped. */
   extraBody?: Record<string, unknown>;
-  /** reviewerFingerprint of the spec: a hash of the answer-shaping settings, the command line included. */
+  /** How many top-level extraBody keys were dropped; absent when none were. */
+  extraBodyOmitted?: number;
+  /** reviewerFingerprint of the spec: a hash of the answer-shaping settings, the command line and the whole extraBody included. */
   fingerprint: string;
   /** ISO time the stamp was taken. */
   at: string;
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+// A stamped value is a boolean, a finite number or a short string; anything else could carry free text.
+const scalar = (v: unknown): boolean => typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v)) || (typeof v === "string" && v.length <= 40);
+
+// Top-level keys stamped as plain values.
+const PLAIN = ["enable_thinking", "think", "reasoning_effort", "temperature", "max_tokens", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed"];
+// Top-level keys whose object value is reduced to the listed entries.
+const NESTED: Record<string, string[]> = { chat_template_kwargs: ["enable_thinking", "thinking"], reasoning: ["effort", "type"], thinking: ["type", "budget_tokens"] };
+
+// The stamped value of one top-level entry, or undefined to drop it.
+function allowed(key: string, v: unknown): unknown {
+  const nested = Object.hasOwn(NESTED, key);
+  if (nested && isObj(v)) {
+    const kept = Object.fromEntries(NESTED[key]!.filter((k) => scalar(v[k])).map((k) => [k, v[k]]));
+    return Object.keys(kept).length ? kept : undefined;
+  }
+  return (nested || PLAIN.includes(key)) && scalar(v) ? v : undefined;
+}
+
+// extraBody is free-form and results are public, so only the allowlist is copied, never the rest (a model, a token).
+function reduceExtraBody(body: Record<string, unknown>): { extraBody?: Record<string, unknown>; omitted: number } {
+  const kept: Record<string, unknown> = {};
+  let omitted = 0;
+  for (const [k, v] of Object.entries(body)) {
+    const a = allowed(k, v);
+    if (a === undefined) omitted++;
+    else kept[k] = a;
+  }
+  return { ...(Object.keys(kept).length ? { extraBody: kept } : {}), omitted };
 }
 
 export function stampSpec(spec: ReviewerSpec, now = new Date()): ReviewerStamp {
   const fingerprint = reviewerFingerprint(spec);
   const at = now.toISOString();
   if (spec.type !== "openai") return { type: spec.type, fingerprint, at };
-  const extraBody = spec.extraBody === undefined ? undefined : structuredClone(spec.extraBody);
-  // The adapter sends temperature 0, and extraBody is spread after it, so a temperature there is the one sent.
-  const temperature = typeof extraBody?.temperature === "number" ? extraBody.temperature : 0;
+  const body = spec.extraBody ?? {};
+  // The adapter spreads extraBody after max_tokens and temperature, so a value there is the one sent.
+  const maxTokens = typeof body.max_tokens === "number" ? body.max_tokens : spec.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const temperature = typeof body.temperature === "number" ? body.temperature : Object.hasOwn(body, "temperature") ? "set in extraBody" as const : DEFAULT_TEMPERATURE;
+  const { extraBody, omitted } = reduceExtraBody(body);
   return {
     type: spec.type,
-    ...(spec.maxTokens !== undefined ? { maxTokens: spec.maxTokens } : {}),
+    maxTokens,
     temperature,
     ...(extraBody !== undefined ? { extraBody } : {}),
+    ...(omitted ? { extraBodyOmitted: omitted } : {}),
     fingerprint,
     at,
   };
@@ -36,15 +77,24 @@ export function stampSpec(spec: ReviewerSpec, now = new Date()): ReviewerStamp {
 const onOff = (v: unknown): "on" | "off" | undefined => {
   if (v === true || v === "enabled") return "on";
   if (v === false || v === "disabled") return "off";
-  if (v && typeof v === "object" && !Array.isArray(v)) return onOff((v as { type?: unknown }).type);
+  if (isObj(v)) return onOff(v.type);
   return undefined;
 };
 
-/** Whether the run asked for thinking: a chat-template switch (chat_template_kwargs.enable_thinking or .thinking) or a top-level enable_thinking / thinking flag. Anything else is the server's default. */
+const bool = (v: unknown): "on" | "off" | undefined => (v === true ? "on" : v === false ? "off" : undefined);
+
+// A reasoning effort of "none" or "off" turns thinking off; any other non-empty string asks for it.
+const effort = (v: unknown): "on" | "off" | undefined => {
+  if (typeof v !== "string" || !v) return undefined;
+  return ["none", "off"].includes(v.toLowerCase()) ? "off" : "on";
+};
+
+/** Whether the run asked for thinking, first switch found wins: chat_template_kwargs.enable_thinking or .thinking, a top-level enable_thinking or thinking flag, think, reasoning_effort, then reasoning.effort. Anything else is the server's default. */
 export function thinkingOf(stamp: Pick<ReviewerStamp, "extraBody">): "on" | "off" | "default" {
   const b = stamp.extraBody;
   if (!b) return "default";
-  const kw = b.chat_template_kwargs as Record<string, unknown> | undefined;
-  const isObj = !!kw && typeof kw === "object" && !Array.isArray(kw);
-  return (isObj ? onOff(kw.enable_thinking) ?? onOff(kw.thinking) : undefined) ?? onOff(b.enable_thinking) ?? onOff(b.thinking) ?? "default";
+  const kw = isObj(b.chat_template_kwargs) ? b.chat_template_kwargs : undefined;
+  return (kw ? onOff(kw.enable_thinking) ?? onOff(kw.thinking) : undefined)
+    ?? onOff(b.enable_thinking) ?? onOff(b.thinking) ?? bool(b.think) ?? effort(b.reasoning_effort)
+    ?? (isObj(b.reasoning) ? effort(b.reasoning.effort) : undefined) ?? "default";
 }

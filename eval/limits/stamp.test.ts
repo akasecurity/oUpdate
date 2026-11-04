@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ReviewerSpec } from "../../src/adapters/reviewer/spec.ts";
+import { DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE } from "../../src/adapters/reviewer/openai.ts";
 import { reviewerFingerprint } from "../../src/verdict-store.ts";
 import { stampSpec, thinkingOf } from "./stamp.ts";
 
@@ -31,7 +32,7 @@ test("extraBody is a deep copy and a temperature there is the one stamped", () =
   expect(stamp.temperature).toBe(0.7);
   (spec as { extraBody: { chat_template_kwargs: { enable_thinking: boolean } } }).extraBody.chat_template_kwargs.enable_thinking = false;
   expect(thinkingOf(stamp)).toBe("on");
-  expect(stampSpec(openai(), NOW)).toEqual({ type: "openai", temperature: 0, fingerprint: reviewerFingerprint(openai()), at: "2026-01-02T03:04:05.000Z" });
+  expect(stampSpec(openai(), NOW)).toEqual({ type: "openai", maxTokens: DEFAULT_MAX_TOKENS, temperature: DEFAULT_TEMPERATURE, fingerprint: reviewerFingerprint(openai()), at: "2026-01-02T03:04:05.000Z" });
 });
 
 test("thinking reads on, off and default from extraBody", () => {
@@ -49,6 +50,90 @@ test("thinking reads on, off and default from extraBody", () => {
   expect(t({ chat_template_kwargs: { other: true } })).toBe("default");
   expect(t({ thinking: "maybe" })).toBe("default");
   expect(t({ chat_template_kwargs: "enable_thinking" })).toBe("default");
+});
+
+test("thinking also reads think, reasoning_effort and reasoning.effort, after the earlier switches", () => {
+  const t = (extraBody: Record<string, unknown>) => thinkingOf(stampSpec(openai({ extraBody }), NOW));
+  expect(t({ think: true })).toBe("on");
+  expect(t({ think: false })).toBe("off");
+  expect(t({ think: "yes" })).toBe("default");
+  expect(t({ reasoning_effort: "high" })).toBe("on");
+  expect(t({ reasoning_effort: "low" })).toBe("on");
+  expect(t({ reasoning_effort: "none" })).toBe("off");
+  expect(t({ reasoning_effort: "off" })).toBe("off");
+  expect(t({ reasoning_effort: "" })).toBe("default");
+  expect(t({ reasoning_effort: 3 })).toBe("default");
+  expect(t({ reasoning: { effort: "medium" } })).toBe("on");
+  expect(t({ reasoning: { effort: "none" } })).toBe("off");
+  expect(t({ reasoning: { summary: "auto" } })).toBe("default");
+  expect(t({ reasoning: "high" })).toBe("default");
+  // Earlier switches win: the chat template first, then enable_thinking / thinking, then think, reasoning_effort, reasoning.
+  expect(t({ chat_template_kwargs: { enable_thinking: false }, think: true, reasoning_effort: "high" })).toBe("off");
+  expect(t({ enable_thinking: true, think: false })).toBe("on");
+  expect(t({ think: false, reasoning_effort: "high" })).toBe("off");
+  expect(t({ reasoning_effort: "none", reasoning: { effort: "high" } })).toBe("off");
+});
+
+test("max tokens is the one sent: an extraBody number, else the spec, else the adapter default", () => {
+  expect(stampSpec(openai({ maxTokens: 900, extraBody: { max_tokens: 2000 } }), NOW).maxTokens).toBe(2000);
+  expect(stampSpec(openai({ extraBody: { max_tokens: 2000 } }), NOW).maxTokens).toBe(2000);
+  expect(stampSpec(openai({ maxTokens: 900, extraBody: { max_tokens: "lots" } }), NOW).maxTokens).toBe(900);
+  expect(stampSpec(openai({ maxTokens: 900 }), NOW).maxTokens).toBe(900);
+  expect(stampSpec(openai(), NOW).maxTokens).toBe(DEFAULT_MAX_TOKENS);
+});
+
+test("a temperature in extraBody that is not a number is stamped as set there", () => {
+  expect(stampSpec(openai({ extraBody: { temperature: "0.5" } }), NOW).temperature).toBe("set in extraBody");
+  expect(stampSpec(openai({ extraBody: { temperature: null } }), NOW).temperature).toBe("set in extraBody");
+  expect(stampSpec(openai({ extraBody: { temperature: 0.3 } }), NOW).temperature).toBe(0.3);
+  expect(stampSpec(openai({ extraBody: { top_p: 0.9 } }), NOW).temperature).toBe(DEFAULT_TEMPERATURE);
+});
+
+test("extraBody is stamped through an allowlist: a model or any other key is never copied", () => {
+  const spec = openai({
+    extraBody: {
+      model: "SENTINEL-MODEL-OVERRIDE",
+      api_token: "SENTINEL-SECRET-abc123",
+      chat_template_kwargs: { enable_thinking: true, system_prompt: "SENTINEL-KWARG" },
+      reasoning: { effort: "high", type: "enabled", summary: "SENTINEL-SUMMARY" },
+      top_p: 0.9,
+      seed: 7,
+      stop: ["SENTINEL-STOP"],
+      reasoning_effort: "x".repeat(41),
+    },
+  });
+  const stamp = stampSpec(spec, NOW);
+  const text = JSON.stringify({ ...stamp, fingerprint: "" });
+  for (const s of ["SENTINEL", "model", "api_token", "system_prompt", "summary", "stop", "xxxxx"]) expect(text).not.toContain(s);
+  expect(stamp.extraBody).toEqual({ chat_template_kwargs: { enable_thinking: true }, reasoning: { effort: "high", type: "enabled" }, top_p: 0.9, seed: 7 });
+  // model, api_token, stop and the over-long reasoning_effort are dropped top-level keys.
+  expect(stamp.extraBodyOmitted).toBe(4);
+  // The fingerprint still covers the whole spec, dropped keys included.
+  expect(stamp.fingerprint).toBe(reviewerFingerprint(spec));
+  const other = stampSpec(openai({ extraBody: { top_p: 0.9, model: "m2" } }), NOW);
+  const plain = stampSpec(openai({ extraBody: { top_p: 0.9 } }), NOW);
+  expect(other.extraBody).toEqual(plain.extraBody);
+  expect(other.fingerprint).not.toBe(plain.fingerprint);
+});
+
+test("a chat_template_kwargs with an extra key is reduced to its thinking switches", () => {
+  const stamp = stampSpec(openai({ extraBody: { chat_template_kwargs: { enable_thinking: false, thinking: true, documents: ["d"], custom: 1 } } }), NOW);
+  expect(stamp.extraBody).toEqual({ chat_template_kwargs: { enable_thinking: false, thinking: true } });
+  expect("extraBodyOmitted" in stamp).toBe(false);
+});
+
+test("a thinking object is reduced to its type and budget", () => {
+  const stamp = stampSpec(openai({ extraBody: { thinking: { type: "enabled", budget_tokens: 100, note: "n" } } }), NOW);
+  expect(stamp.extraBody).toEqual({ thinking: { type: "enabled", budget_tokens: 100 } });
+  expect(thinkingOf(stamp)).toBe("on");
+});
+
+test("extraBodyOmitted counts dropped top-level keys and is absent when none are", () => {
+  expect(stampSpec(openai({ extraBody: { model: "m2" } }), NOW).extraBodyOmitted).toBe(1);
+  expect(stampSpec(openai({ extraBody: { model: "m2" } }), NOW).extraBody).toBeUndefined();
+  expect(stampSpec(openai({ extraBody: { a: 1, b: { c: 2 }, top_k: 40 } }), NOW)).toMatchObject({ extraBody: { top_k: 40 }, extraBodyOmitted: 2 });
+  expect(stampSpec(openai({ extraBody: { top_k: 40, min_p: 0.05 } }), NOW).extraBodyOmitted).toBeUndefined();
+  expect(stampSpec(openai(), NOW).extraBodyOmitted).toBeUndefined();
 });
 
 test("specs differing only in extraBody have different fingerprints and stamps", () => {
