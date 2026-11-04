@@ -250,6 +250,14 @@ describe("npmSection", () => {
       expect(h.calls.some((c) => c.startsWith("npm install")), peers).toBe(false);
     }
   });
+  test("a dependencies entry whose value is not a string holds the batch as unread", async () => {
+    for (const deps of ['{"dependencies": {"left": 1}}', '{"optionalDependencies": {"left": {"x": "^1.0.0"}}}', '{"dependencies": {"left": null}}']) {
+      const h = host({ deps });
+      const s = await npmSection(h.exec, scripted([APPROVE]).r, opts().o);
+      expect([deps, s.status]).toEqual([deps, expect.stringMatching(/^FLAGGED — could not read tool@1\.1\.0 dependencies/)]);
+      expect(h.calls.some((c) => c.startsWith("npm install")), deps).toBe(false);
+    }
+  });
   test("a transitive floor drop between versions holds the batch, even on an APPROVE", async () => {
     // Mutant caught: dependencies never read, so a lowered floor on a transitive package upgraded unreviewed.
     const h = host({ oldDeps: '{"dependencies": {"left": "^2.1.0"}}', deps: '{"dependencies": {"left": "^1.0.0"}}' });

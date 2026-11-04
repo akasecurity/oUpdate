@@ -444,7 +444,7 @@ describe("runGate", () => {
     let body = "";
     forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
     await runGate({ forge, repo: "o/r", review: async (c) => ({ ...result(c, "hold", ["advisory"]), malicious: ["MAL-2025-1"] }) });
-    expect(body).toContain("**MALICIOUS: yaml 2.8.3 (`MAL-2025-1`).** Do not merge, and check where this version is already installed.");
+    expect(body).toContain("**MALICIOUS: `yaml 2.8.3` (`MAL-2025-1`).** Do not merge, and check where this version is already installed.");
     expect(body.indexOf("MALICIOUS")).toBeLessThan(body.indexOf("advisory"));
   });
 
@@ -591,6 +591,26 @@ describe("runGate", () => {
     expect(outside).not.toContain("#123");
   });
 
+  test("a malicious scoped package name stays in a code span, so it is no team mention", () => {
+    const r: ReviewResult = { eco: "npm", name: "@org/team", from: "1.0.0", to: "1.0.1", decision: "hold", layers: [], malicious: ["MAL-1"] };
+    const body = comment("h1", "package-lock.json", "failure", [r], []);
+    expect(body).toContain("**MALICIOUS: `@org/team 1.0.1` (`MAL-1`).**");
+    expect(body.split("\n").find((l) => l.startsWith("**MALICIOUS"))!.replace(/`[^`]*`/g, "")).not.toContain("@");
+  });
+
+  test("a read lockfile at an at-sign or issue-ref path is a code span in the success header", async () => {
+    const lock = "deps/@org/team/bun.lock";
+    const forge = memForge({ [`b:${lock}`]: LOCK("2.8.1"), [`h1:${lock}`]: LOCK("2.8.1") }, { h3: "failure" });
+    let body = "";
+    forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
+    const out = await runGate({ forge, repo: "o/r", lockPaths: [lock, "web/#123/bun.lock"], review: async () => { throw new Error("not called"); } });
+    expect(out[0]!.state).toBe("success");
+    expect(body).toContain(`**oupdate: success** (\`${lock}\``);
+    const outside = body.replace(/`[^`]*`/g, "");
+    expect(outside).not.toContain("@org");
+    expect(outside).not.toContain("#123");
+  });
+
   test("lock paths in the pending header of an unparseable lockfile are code spans", async () => {
     const lock = "deps/@org/team/bun.lock";
     const forge = memForge({ [`b:${lock}`]: LOCK("2.8.1"), [`h1:${lock}`]: "{not json" }, { h3: "failure" });
@@ -637,7 +657,7 @@ describe("runGate", () => {
     let body = "";
     forge.upsertComment = async (_r, _n, _m, b) => void (body = b);
     await runGate({ forge, repo: "o/r", review: async () => { throw new Error("not called"); } });
-    const line = body.split("\n").find((l) => l.startsWith("- package.json: "))!;
+    const line = body.split("\n").find((l) => l.startsWith("- `package.json`: "))!;
     expect(line).toContain("\\u{a0}\\u{2028}");
     expect(line).not.toMatch(/[\u00a0\u2028]/);
     expect([...line.replace(/\\u\{[0-9a-f]+\}/g, "?")].length).toBeLessThanOrEqual(320);

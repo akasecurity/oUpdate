@@ -102,6 +102,7 @@ function parseDeps(text: string): DepBlocks | undefined {
       const b = (j as Record<string, unknown>)[f];
       if (b == null) continue;
       if (typeof b !== "object" || Array.isArray(b)) return undefined;
+      if (Object.values(b).some((v) => typeof v !== "string")) return undefined;
       out[f] = b as Record<string, unknown>;
     }
     return out;
