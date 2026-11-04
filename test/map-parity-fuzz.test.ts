@@ -7,7 +7,7 @@ import type { FileMap } from "../src/prepass.ts";
 // deterministic and a failure names its case. Cases known to hide the payload are listed in KNOWN_HIDDEN: a case that starts showing the
 // payload, or any other case that hides it, fails the run.
 // Scope: every loader but "unnamed" names ".map" as a constant, so the review shows each map in full. The "unnamed" loader builds the name at run time
-// from pieces the review does not fold into ".map", so its map may stay hashed. A "-tail" position puts the payload past the head of its field:
+// from parts (["index", "js", "map"].join(".")); the review counts a bare "map" string in code as the ".map" tail, so its map is shown in full too. A "-tail" position puts the payload past the head of its field:
 // after the padding body for the mappings, or as the last element after many filler elements for the arrays.
 const SEED = 116;
 const rng = (a: number) => () => {
