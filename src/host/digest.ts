@@ -7,7 +7,9 @@
 // reviewer's free-text reason), so a fragment that starts no known part is joined back to the part
 // before it when that part can hold one; anything else is shown as unrecognized, never dropped.
 
+import { STUCK_SINCE } from "../apply/stuck.ts";
 import { stripTerminal } from "../review.ts";
+import { readRunBlock } from "./prev-log.ts";
 
 export interface DigestInput {
   host: string;
@@ -56,6 +58,10 @@ interface Out {
   plainFlag?: boolean;
   /** A tap-approval or skipped-cask part already says what the review held. */
   flagExplained?: boolean;
+  /** App bundles the body's review flag already lists: their summary hold is not listed again. */
+  apps: Set<string>;
+  /** Names a FAILED part listed ("release-check:<formula>" among them). */
+  failed: Set<string>;
 }
 
 interface Part {
@@ -97,17 +103,30 @@ const PARTS: Part[] = [
   { re: /^casks need sudo:(.*)$/, on: (m, o) => void o.waiting.push(...words(m[1]!).map((n) => (SAFE_NAME.test(n) ? `${n}: run \`brew upgrade --cask ${n}\` in a terminal where sudo works` : `${one(n)}: it needs sudo; ${BY_HAND}`))) },
   { re: /^casks held \(running\):(.*)$/, on: (m, o) => void o.held.push(...each(m[1]!, (n) => `${n}: it is running; the next run tries again`)) },
   { re: /^casks deferred:(.*)$/, on: (m, o) => void o.held.push(...each(m[1]!, (n) => `${n}: left for the end of the run and not tried (a step stopped first); the next run tries again`)) },
-  { re: /^(?:casks )?FAILED:(.*)$/, on: (m, o) => void o.waiting.push(...each(m[1]!, (n) => `${n}: the upgrade failed; read the run log`)) },
+  {
+    re: /^(?:casks )?FAILED:(.*)$/,
+    on: (m, o) => {
+      for (const n of words(m[1]!)) o.failed.add(n);
+      o.waiting.push(...each(m[1]!, (n) => `${n}: the upgrade failed; read the run log`));
+    },
+  },
   { re: /^FAILED — (\S+)$/, on: (m, o, lane) => void o.waiting.push(`${one(m[1]!)}: the ${lane} step failed; read the run log`) },
   {
     re: /^FLAGGED — awaiting tap approval: (.*)$/s,
     open: TAP_ITEM,
     on: (m, o) => {
       o.flagExplained = true;
-      const list = m[1]!.replace(/ — approve a tap by adding it to .*$/s, "");
-      for (const item of list.split("; ")) {
-        const t = item.match(TAP_ITEM);
-        if (!t) continue;
+      // Text after the approve hint was joined back only because it looked like an item: it is not one.
+      let past = false;
+      for (const raw of m[1]!.split("; ")) {
+        const cut: number = past ? -1 : raw.indexOf(" — approve a tap by adding it to ");
+        const item = cut < 0 ? raw : raw.slice(0, cut);
+        const t = past ? null : item.match(TAP_ITEM);
+        past ||= cut >= 0;
+        if (!t) {
+          if (item.trim()) o.waiting.push(`unrecognized: ${one(item)}`);
+          continue;
+        }
         const pkg = one(t[2]!);
         if (t[1] === "(unresolved tap)") {
           o.held.push(`${pkg}: its tap could not be resolved`);
@@ -132,7 +151,7 @@ const PARTS: Part[] = [
   },
   { re: /^FLAGGED(?: \(see notifications\))?$/, lane: "brew", on: (_m, o) => void (o.plainFlag = true) },
   { re: /^PINNED:(.*)$/, on: (m, o) => { for (const s of m[1]!.matchAll(/([^\s(]+)\(([^)]*)\)/g)) o.held.push(`${one(s[1]!)}: pinned (${one(s[2]!)})`); } },
-  { re: /^STUCK:(.*)$/, on: (m, o) => { for (const s of m[1]!.matchAll(/(?:^|\s)([^\s=]+)=[^\s(]*\((\d+) runs, since ([^)]+)\)/g)) o.waiting.push(`${one(s[1]!)}: pending for ${s[2]} runs since ${one(s[3]!)}; upgrade it by hand or find what blocks it`); } },
+  { re: /^STUCK:(.*)$/, on: (m, o) => { for (const s of m[1]!.matchAll(new RegExp(`(?:^|\\s)([^\\s=]+)=[^\\s(]*${STUCK_SINCE}`, "g"))) o.waiting.push(`${one(s[1]!)}: pending for ${s[2]} runs since ${one(s[3]!)}; upgrade it by hand or find what blocks it`); } },
   {
     // src/apply/run-brew.ts: "<name> <version>", "<name> (record unreadable)", "<name> (hold unreadable)", space-joined.
     re: /^HELD by release check:(.*)$/,
@@ -147,7 +166,17 @@ const PARTS: Part[] = [
     },
   },
   { re: /^HELD: (.*)$/, on: (m, o) => { for (const s of m[1]!.split(", ")) o.held.push(`${one(s.replace(/ \(runs under it\)$/, ""))}: the updater runs under it, so the run does not upgrade it; upgrade it by hand between runs`); } },
-  { re: /^release check: (.*)$/, on: (m, o) => void o.notes.push(`release check: ${one(m[1]!)}`) },
+  // A FAIL, a failed step or a check that could not run needs a person; a PASS or a wait is a note.
+  {
+    re: /^release check: (.*)$/,
+    on: (m, o) => {
+      for (const note of rcNotes(m[1]!)) {
+        if (!RC_BAD.test(note)) o.notes.push(`release check: ${one(note)}`);
+        // A FAILED part naming the check already waits on you for it.
+        else if (!o.failed.has(`release-check:${note.match(/^[^\s:]+/)?.[0] ?? ""}`)) o.waiting.push(`release check: ${one(note)}; read the run log`);
+      }
+    },
+  },
   { re: /^GATEKEEPER pending: (.*)$/s, open: /^[^\s:]+: (?:\d+ unapproved|not checked)/, on: (m, o) => { for (const n of m[1]!.split("; ")) o.waiting.push(`Gatekeeper: ${one(n)}`); } },
   { re: /^(\S+) QUARANTINED — unreviewed install, not restarting \((.*)\)$/, on: (m, o) => void o.waiting.push(`${one(m[1]!)}: an unreviewed install is quarantined and not restarted; review it (${one(m[2]!)})`) },
   { re: /^(\S+) quarantined — not restarting \(see (.*)\)$/, on: (m, o) => void o.waiting.push(`${one(m[1]!)}: quarantined and not restarted; review it (${one(m[2]!)})`) },
@@ -169,7 +198,8 @@ const PARTS: Part[] = [
   { re: /^ERROR — (.*)$/, on: (m, o, lane) => void o.waiting.push(`${lane}: ${one(m[1]!)}; read the run log`) },
   { re: /^not completed(?: — still pending: (.*))?$/, lane: "npm", on: (m, o) => void o.waiting.push(`npm: the step did not finish${m[1] ? `; still pending: ${one(m[1])}` : ""}`) },
   // An app bundle: "<name> held: <why>", "<name> FAILED: <why>", "<name> <old> → <new> (<restart>)".
-  { re: /^(\S+) held: (.*)$/, on: (m, o) => void o.held.push(`${one(m[1]!)}: ${one(m[2]!)}`) },
+  // Its reason can carry "; " between release surface findings, each "<path>: <why>".
+  { re: /^(\S+) held: (.*)$/, open: /^[^\s:;]+: /, on: (m, o) => void (o.apps.has(m[1]!) || o.held.push(`${one(m[1]!)}: ${one(m[2]!)}`)) },
   { re: /^(\S+) FAILED: (.*)$/, on: (m, o) => void o.waiting.push(`${one(m[1]!)}: ${one(m[2]!)}; read the run log`) },
   { re: /^(\S+) \S+ → (\S+) \(.*\)$/, lane: "brew", on: (m, o) => void o.updated.push(`${one(m[1]!)} ${one(m[2]!)}`) },
   {
@@ -190,11 +220,38 @@ const PARTS: Part[] = [
   },
 ];
 
+// src/apply/run-release.ts and release-checks.ts notes, joined by ", " though a note can carry ", "
+// itself: a piece starts a new note only when it reads as one and does not follow a "(held)".
+const RC_START = /^\S+(?::| \S+ (?:PASS|FAIL|check |not checked)| (?:upgrade changed|not checked|not upgraded|waits for|release check error))/;
+const RC_BAD = /\bFAIL|failed|could not run|unreadable|\berror\b/;
+function rcNotes(text: string): string[] {
+  const pieces: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "(") depth++;
+    else if (c === ")") depth = Math.max(0, depth - 1);
+    else if (depth === 0 && c === "," && text[i + 1] === " ") {
+      pieces.push(text.slice(from, i));
+      from = i + 2;
+    }
+  }
+  pieces.push(text.slice(from));
+  const notes: string[] = [];
+  for (const p of pieces) {
+    const prev = notes.at(-1);
+    if (prev !== undefined && (prev.endsWith("(held)") || !RC_START.test(p))) notes[notes.length - 1] = `${prev}, ${p}`;
+    else notes.push(p);
+  }
+  return notes;
+}
+
 const UNRECOGNIZED: Part = { re: /^/, on: (m, o) => void o.waiting.push(`unrecognized: ${one(m.input!)}`) };
 const partFor = (frag: string, lane: string) => PARTS.find((p) => (!p.lane || p.lane === lane) && p.re.test(frag));
 
-const STUCK_ITEM = /([^\s(\]]+)\((\d+) runs, since ([^)]+)\) /g;
-const STUCK_TAIL = /^(?:(.*?) )?\[((?:[^\s(\]]+\(\d+ runs, since [^)]+\) )+)\]$/;
+const STUCK_ITEM = new RegExp(`([^\\s(\\]]+)${STUCK_SINCE} `, "g");
+const STUCK_TAIL = new RegExp(`^(?:(.*?) )?\\[((?:[^\\s(\\]]+${STUCK_SINCE} )+)\\]$`);
 
 /** One summary line's parts: split on the writers' "; ", joined back where a part carries "; " itself. */
 function readLine(text: string, lane: string, o: Out) {
@@ -226,27 +283,29 @@ export function renderDigest(a: DigestInput): string {
   }
   const dry = lines[at]!.includes("dry-run");
   const body = lines.slice(0, at);
-  const o: Out = { up: {}, updated: [], held: [], waiting: [], notes: [] };
+  const o: Out = { up: {}, updated: [], held: [], waiting: [], notes: [], apps: new Set(), failed: new Set() };
   const heldNames = new Set<string>();
+  const run = readRunBlock(lines, at, { host: a.host, end: (l) => /^=== /.test(l) });
 
-  for (const l of body) {
-    const f = l.match(/ Type B FLAG — ([^\s<]+)/);
-    if (f && !heldNames.has(f[1]!)) {
-      const raw = f[1]!;
-      heldNames.add(raw);
-      const n = one(raw);
-      o.held.push(`${n}: ${reasonFor(body, raw)}`);
-      o.waiting.push(SAFE_NAME.test(raw) ? `${n}: review it, then upgrade it yourself with \`brew upgrade ${raw}\`` : `${n}: review it, then ${BY_HAND}`);
+  if (run.aborted) o.waiting.push("the run was stopped and did not complete; read the run log");
+  for (const { name: raw, kind } of run.typeB) {
+    if (heldNames.has(raw)) continue;
+    heldNames.add(raw);
+    const n = one(raw);
+    o.held.push(`${n}: ${reasonFor(body, raw)}`);
+    // An app bundle is no formula: the summary's "<name> held" is this same hold.
+    if (kind === "app bundle") {
+      o.apps.add(raw);
+      o.waiting.push(`${n}: review its release, then update the app by hand`);
+      continue;
     }
-    const ex = l.match(/^\s+excluding (\S+) \(CASK_EXCLUDE\b/);
-    if (ex) o.held.push(`${one(ex[1]!)}: excluded in your config`);
+    const cmd = kind === "HEAD" ? `brew upgrade --fetch-HEAD ${raw}` : `brew upgrade ${raw}`;
+    o.waiting.push(SAFE_NAME.test(raw) ? `${n}: review it, then upgrade it yourself with \`${cmd}\`` : `${n}: review it, then ${BY_HAND}`);
   }
+  for (const ex of run.excluded) o.held.push(`${one(ex)}: excluded in your config`);
 
-  for (const l of lines.slice(at + 1)) {
-    if (/^=== /.test(l)) break;
-    const m = l.match(/^\s+(brew|npm):\s+(.*)$/);
-    if (m) readLine(m[2]!, m[1]!, o);
-  }
+  // Every lane line, a repeated one too: a hold is never hidden by a later line.
+  for (const { lane, text } of run.lanes) readLine(text, lane, o);
 
   // A Type B flag or tap-approval item already says what the review held: no second, generic line.
   if (o.plainFlag && !heldNames.size && !o.flagExplained) o.waiting.push("brew: the review held something this run; read the notifications and the run log");

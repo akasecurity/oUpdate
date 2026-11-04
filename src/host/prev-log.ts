@@ -55,37 +55,81 @@ function parseNpm(line: string): PrevSummary["npm"] {
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/** A Type B FLAG notice from the run body; kind is its parenthesized label ("formula", "HEAD", "app bundle"), when given. */
+export interface TypeBFlag {
+  name: string;
+  kind?: string;
+}
+
+/** What a run log holds around one summary line: the body's holds and the summary block's lane lines. */
+export interface RunBlock {
+  typeB: TypeBFlag[];
+  excluded: string[];
+  /** Every lane line of the summary block, in order (a repeated lane is kept, never overwritten). */
+  lanes: { lane: "brew" | "npm"; text: string }[];
+  /** An "=== ABORTED" line in the run, before or after its summary: the run did not complete. */
+  aborted: boolean;
+  /** The run header's date, when `dated` was given and found. */
+  date?: string;
+}
+
+/**
+ * Reads the run log around the summary line at `at`: the body before it, back to the host's own
+ * run header when `dated` (capturing host, then date) is given, else to the start; then the summary
+ * block after it until a line `end` matches ("=== ABORTED" never ends it). The one reader for the
+ * shadow report and the digest.
+ */
+export function readRunBlock(lines: string[], at: number, o: { host: string; dated?: RegExp; end: (l: string) => boolean }): RunBlock {
+  const r: RunBlock = { typeB: [], excluded: [], lanes: [], aborted: false };
+  for (let i = at - 1; i >= 0; i--) {
+    const l = lines[i]!;
+    const h = o.dated && l.match(o.dated);
+    if (h && h[1] === o.host) {
+      r.date = h[2];
+      break;
+    }
+    // The stop line is written on the signal, so it usually comes before the summary.
+    if (/^=== ABORTED:/.test(l)) r.aborted = true;
+    // Only the notice line itself: a reviewer's reason quoting one is not a notice.
+    const tb = l.match(/^\[(?:notify|[a-z-]+ — not notified)\] \S+ \S+ Type B FLAG — ([^\s<]+)(?: \(([^)<]{1,40})\))?/);
+    if (tb) r.typeB.unshift(tb[2] ? { name: tb[1]!, kind: tb[2] } : { name: tb[1]! });
+    const ex = l.match(/^\s+excluding (\S+) \(CASK_EXCLUDE\b/);
+    if (ex) r.excluded.unshift(ex[1]!);
+  }
+  for (let i = at + 1; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (/^=== ABORTED:/.test(l)) {
+      r.aborted = true;
+      continue;
+    }
+    if (o.end(l)) break;
+    const m = l.match(/^\s+(brew|npm):\s+(.*)$/);
+    if (m) r.lanes.push({ lane: m[1] as "brew" | "npm", text: m[2]! });
+  }
+  return r;
+}
+
 export function parsePrevSummary(log: string, host: string, name: string = DEFAULT_COMPAT.previousUpdater): PrevSummary | null {
   const header = new RegExp(`^=== (?:\\S+-)?${escape(name)} `);
   const dated = new RegExp(`^=== (?:\\S+-)?${escape(name)} (\\S+) (\\d{4}-\\d\\d-\\d\\d)`);
   const lines = log.split("\n");
   const at = lines.lastIndexOf(`=== ${host} summary ===`);
   if (at < 0) return null;
-  const s: PrevSummary = { brew: { upgraded: [], failed: [], flagged: [], stuck: [] }, npm: { upgraded: [] }, aborted: false };
-  const typeB: string[] = [];
-  const excluded: string[] = [];
-  for (let i = at - 1; i >= 0; i--) {
-    const h = lines[i]!.match(dated);
-    if (h && h[1] === host) {
-      s.date = h[2];
-      break;
-    }
-    const tb = lines[i]!.match(/ Type B FLAG — ([^\s<]+)/);
-    if (tb) typeB.unshift(tb[1]!);
-    const ex = lines[i]!.match(/^\s+excluding (\S+) \(CASK_EXCLUDE\b/);
-    if (ex) excluded.unshift(ex[1]!);
-  }
-  for (let i = at + 1; i < lines.length; i++) {
-    const l = lines[i]!;
-    // The next run's header ends this block; so does any oupdate header (a dry run's included), so
-    // lines of a later dry run never stand in for the run's own.
-    if (header.test(l) || /^=== oupdate[ -]/.test(l)) break;
-    if (/^=== ABORTED:/.test(l)) s.aborted = true;
-    const m = l.match(/^\s+(brew|npm):\s+(.*)$/);
-    if (m?.[1] === "brew") s.brew = parseBrew(m[2]!);
-    else if (m?.[1] === "npm") s.npm = parseNpm(m[2]!);
-  }
+  // The next run's header ends this block; so does any oupdate header (a dry run's included), so
+  // lines of a later dry run never stand in for the run's own.
+  const r = readRunBlock(lines, at, { host, dated, end: (l) => header.test(l) || /^=== oupdate[ -]/.test(l) });
+  // The last line of each lane, as the previous updater's own reader did.
+  const brew = r.lanes.findLast((x) => x.lane === "brew");
+  const npm = r.lanes.findLast((x) => x.lane === "npm");
+  const s: PrevSummary = {
+    ...(r.date ? { date: r.date } : {}),
+    brew: brew ? parseBrew(brew.text) : { upgraded: [], failed: [], flagged: [], stuck: [] },
+    npm: npm ? parseNpm(npm.text) : { upgraded: [] },
+    aborted: r.aborted,
+  };
+  // An app bundle is not a formula: its flag is the app's, never a brew hold.
+  const typeB = r.typeB.filter((t) => t.kind !== "app bundle").map((t) => t.name);
   s.brew.flagged = [...new Set([...s.brew.flagged, ...typeB])];
-  if (excluded.length) s.brew.excluded = [...new Set(excluded)];
+  if (r.excluded.length) s.brew.excluded = [...new Set(r.excluded)];
   return s;
 }

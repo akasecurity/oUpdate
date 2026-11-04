@@ -11,6 +11,12 @@ export interface Tracked {
   stuck: string[];
 }
 
+/**
+ * The "(<runs> runs, since <date>)" tail of one stuck entry, for log readers: runs and date are
+ * captured. Bounded and free of "(" and ")", so a line with an unclosed "(" is read in linear time.
+ */
+export const STUCK_SINCE = String.raw`\((\d{1,9}) runs, since ([^\s()]{1,40})\)`;
+
 export function trackStuck(state: string, lane: string, pending: string[], o: { today: string; after: number; exclude?: string[] }): Tracked {
   const rows = state.split("\n").filter(Boolean).map((l) => l.split("\t"));
   const kept = rows.filter((r) => r[0] !== lane);
