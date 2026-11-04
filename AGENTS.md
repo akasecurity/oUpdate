@@ -80,5 +80,5 @@ If the reviewer line says `error` or the call times out, fix the endpoint before
 ## Working on this repository
 
 - Tests: `bun test`. Types: `bunx tsc --noEmit`. Before a commit: `bun scripts/oss-scan.ts` (no home paths, private hostnames, IPs or secrets in tracked files).
-- `acceptance/run.ts` runs the attack and clean-release cases; see [docs/evaluation-2026-10-26.md](docs/evaluation-2026-10-26.md).
+- `acceptance/run.ts` runs the attack and clean-release cases; see [eval/2026-10-27-attack-and-clean-release-evaluation](eval/2026-10-27-attack-and-clean-release-evaluation/) (earlier run: [26 Oct](eval/2026-10-26-attack-and-clean-release-evaluation/)).
 - Nothing downloaded during a review is installed, imported or run. Keep it that way.

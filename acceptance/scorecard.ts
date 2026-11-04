@@ -1,6 +1,6 @@
 // Scorecard for an acceptance run: per reviewer, how many attacks were stopped (and how many by
 // the model reviewer alone), how many controls landed and which cases the model never judged,
-// next to the published bar and the published 26 Oct result (docs/evaluation-2026-10-26.md).
+// next to the published bar and the published 26 Oct result (eval/2026-10-26-attack-and-clean-release-evaluation/README.md).
 // Synthetic evasion cases are scored on their own line: they are not part of the published set.
 // The bar and the published column apply to the core set only; an extended or all run is
 // scored against that set's counts in cases.json and controls.json (acceptance/sets.ts).

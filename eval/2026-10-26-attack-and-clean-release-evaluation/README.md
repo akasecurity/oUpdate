@@ -1,6 +1,6 @@
 # Attack and clean-release evaluation, 26 Oct 2026
 
-Superseded by the [27 Oct evaluation](evaluation-2026-10-27.md), which repeats these cases, adds two cloud reviewers and a larger set.
+Superseded by the [27 Oct evaluation](../2026-10-27-attack-and-clean-release-evaluation/), which repeats these cases, adds two cloud reviewers and a larger set.
 
 oUpdate reviewed 9 real supply-chain attacks and 8 clean releases with the advisory checks off, so no known-malicious list could help. It stopped all 9 attacks and let all 8 clean releases through. This page gives the sample, the method, which check stopped each attack, and what the result does not show.
 
