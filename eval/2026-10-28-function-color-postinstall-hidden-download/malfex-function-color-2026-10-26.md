@@ -40,7 +40,7 @@ An install of `function-color` 1.7.3 brings in `function-flag` 1.7.3, so a lockf
 
 - **Not the install path in the report.** There, the agent wrote an MCP server entry whose command runs `npm install function-color` in a scratch directory through `launchctl`. oUpdate is not a hook on `npm`: it reviews the updates it applies or gates (npm globals and Homebrew on a Mac, repo dependency updates from an update bot). An install an agent or an attacker runs directly never reaches it.
 - **One run.** Model output varies between runs, and the model may have seen public write-ups of MALFEX in training.
-- **Four cases from one campaign.** For a broader measure, see the [attack and clean-release evaluation](evaluation-2026-10-26.md).
+- **Four cases from one campaign.** For a broader measure, see the [attack and clean-release evaluation](../2026-10-26-attack-and-clean-release-evaluation/).
 
 ## Reproduce
 
