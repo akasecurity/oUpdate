@@ -1,0 +1,15 @@
+=== oupdate-shadow studio 2026-11-03 03:00 ===
+
+--- brew ---
+  fancy: tap changed after review (tap HEAD moved 1111111111aa → 2222222222bb) — FLAG, not upgrading
+[notify] ⚠️ studio Type B FLAG — fancy
+  excluding slack (CASK_EXCLUDE: auto-updates itself)
+[notify] ⚠️ studio brew FLAGGED — awaiting tap approval
+
+--- npm globals ---
+npm: nothing to update
+
+=== studio summary ===
+  brew: FLAGGED — awaiting tap approval: newtap/x (widget 1.0→1.1, review: n/a) — approve a tap by adding it to the approved-taps file (apply.approvedTapsFile); upgraded: wget jq; casks upgraded: firefox; casks need sudo: docker; casks held (running): zoom; STUCK: ripgrep=15.0.0(4 runs, since 2026-10-27); PINNED: node@20(pins.json); notify: not configured — notices were logged only
+  npm:  upgraded: typescript prettier; claude-code: 2.4.0
+  mas:  not checked — the App Store phase is not in oupdate
