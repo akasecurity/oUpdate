@@ -4,6 +4,7 @@
 // what each layer would have done on its own.
 
 import { benignBinary } from "./benign-binary.ts";
+import { findWaiver, sha256Hex, type Waiver } from "./waiver.ts";
 import { cooldownVerdict } from "./cooldown.ts";
 import { shown } from "./ident.ts";
 import { prepass, SOFT_PATTERNS, LARGE_FILE_BYTES, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, expandNpmScripts, npmHookFileArgs, starMatch, bindingRunsGyp, gypCommands, hookEnvPaths, STAR_PATTERN_MAX, STAR_KEY_MAX, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
@@ -92,6 +93,8 @@ export interface ReviewInput {
   maxParts?: number;
   /** Stages of maxParts parts a diff may take; a diff over maxParts * maxStages parts is narrowed and held for a human (default MAX_STAGES when maxParts is set). 1 gives a single stage. */
   maxStages?: number;
+  /** Recorded acceptances of a shipped binary by hash (waiver.ts). A hold whose only cause is binaries every one of which is waived for this release lands. */
+  waivers?: Waiver[];
 }
 
 export interface ReviewResult {
@@ -2386,6 +2389,11 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       // Shown in the diff as code, so an APPROVE covers them. A hash-only benign pass does not.
       const loaded = loadedByCode(artifacts.old, artifacts.new);
       const binaries = reviewable.filter((p) => !loaded.has(p) && (entries.has(p) || !benignBinary(p, artifacts!.new.get(p))) && hashedBinary(p, whole(p) ? undefined : artifacts!.old.get(p), artifacts!.new.get(p)));
+      const waivedBinaries = binaries.flatMap((path) => {
+        const bytes = artifacts!.new.get(path);
+        const w = bytes && findWaiver(input.waivers, { eco: input.eco, name: input.name, version: input.to, sha256: sha256Hex(bytes) });
+        return w ? [{ path, w }] : [];
+      });
       // A link that runs as code and was added or changed, whose target cannot be shown as text.
       const badLinks = reviewable.filter((p) => {
         if (!isLink(artifacts!.new.get(p)!)) return false;
@@ -2486,9 +2494,12 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: link target of ${badLinks.join(", ")} missing, outside the package, a directory, another link or binary; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
         else if (rejected.length && !flagged.length)
           layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: parser rejected ${rejected.join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
+        else if (binaries.length && !flagged.length && waivedBinaries.length === binaries.length)
+          // A person accepted each of these bytes for this release; a changed hash finds no waiver and holds.
+          layers.push({ layer: "reviewer", verdict: "pass", detail: `${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; binary file(s) waived: ${waivedBinaries.map((b) => `${b.path} sha256 ${b.w.sha256} by ${b.w.who} at ${b.w.at}: ${b.w.reason}`).join("; ")}` });
         else if (binaries.length && !flagged.length)
           // The model saw these only as a hash, so its APPROVE does not cover them.
-          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: binary file(s) ${binaries.join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: binary file(s) ${binaries.join(", ")}; ${binaries.map((b) => { const bytes = artifacts!.new.get(b); return `${b} sha256 ${bytes ? sha256Hex(bytes) : "-"}`; }).join(", ")} for ${input.eco} ${input.name}@${input.to}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
         else
           layers.push(
             flagged.length

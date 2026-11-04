@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// oupdate CLI. Subcommands: review (one package update), image (one container image repin), gate (forge PRs), host (report-only shadow of the previous updater, --apply, or --launchd-plist), targets (OS targets: --apply [--dry-run] --config FILE; parity --record … --script-log … --date … --ledger …).
+// oupdate CLI. Subcommands: review (one package update), waive (recorded acceptance of a held binary), image (one container image repin), gate (forge PRs), host (report-only shadow of the previous updater, --apply, or --launchd-plist), targets (OS targets: --apply [--dry-run] --config FILE; parity --record … --script-log … --date … --ledger …).
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -34,6 +34,8 @@ import { realDockerSource } from "./targets/pins/docker.ts";
 import { realGithubSource } from "./targets/pins/github.ts";
 import { realSnapshotSource } from "./targets/pins/oci.ts";
 import { dockerHubSource, parseImageRef, registrySource, type ImageRef } from "./adapters/oci/registry.ts";
+import { listWaivers, stateDirOutsideRepo } from "./waiver.ts";
+import { parseWaiveArgs, waiveMain } from "./waive-cli.ts";
 import { checkImage, renderImage } from "./image.ts";
 
 export interface ReviewArgs {
@@ -56,9 +58,11 @@ export interface ReviewArgs {
   json?: string;
   cooldownDays: number;
   advisoryFix: boolean;
+  /** The host state dir whose waivers.json (oupdate waive) lets a hold for a waived binary land. */
+  stateDir?: string;
 }
 
-const VALUE_FLAGS = new Set(["--old-artifact", "--new-artifact", "--published", "--now", "--only", "--reviewer", "--scanner", "--json", "--cooldown-days"]);
+const VALUE_FLAGS = new Set(["--old-artifact", "--new-artifact", "--published", "--now", "--only", "--reviewer", "--scanner", "--json", "--cooldown-days", "--state-dir"]);
 
 function date(flag: string, v: string): Date {
   const d = new Date(v);
@@ -82,7 +86,7 @@ export function parseReviewArgs(argv: string[]): ReviewArgs {
   }
   const [eco, name, from, to] = pos;
   if (eco !== "npm" && eco !== "pypi") throw new Error(`ecosystem must be npm or pypi, got ${eco ?? "nothing"}`);
-  if (!name || !from || !to || pos.length !== 4) throw new Error("usage: oupdate gate [--forge gitea|github] [--endpoint URL] --repo owner/name (--token-file F | --token-env NAME) [--reviewer JSON] [--scanner JSON] [--branch-prefix renovate/]... [--bot-login LOGIN]... [--gate-login LOGIN] [--lock PATH]... [--cooldown-days N] [--private-registry hold|list|review]\n       oupdate review <npm|pypi> <name> <from> <to> [flags]");
+  if (!name || !from || !to || pos.length !== 4) throw new Error("usage: oupdate gate [--forge gitea|github] [--endpoint URL] --repo owner/name (--token-file F | --token-env NAME) [--reviewer JSON] [--scanner JSON] [--state-dir DIR] [--branch-prefix renovate/]... [--bot-login LOGIN]... [--gate-login LOGIN] [--lock PATH]... [--cooldown-days N] [--private-registry hold|list|review]\n       oupdate review <npm|pypi> <name> <from> <to> [flags]");
   const out: ReviewArgs = { eco, name, from, to, now: new Date(), cooldownDays: 2, advisoryFix };
   const oldA = flags.get("--old-artifact");
   const newA = flags.get("--new-artifact");
@@ -101,6 +105,10 @@ export function parseReviewArgs(argv: string[]): ReviewArgs {
   if (flags.has("--reviewer")) out.reviewer = parseReviewerSpec(flags.get("--reviewer")!);
   if (flags.has("--scanner")) out.scanner = parseScannerSpec(flags.get("--scanner")!);
   if (flags.has("--json")) out.json = flags.get("--json")!;
+  if (flags.has("--state-dir")) {
+    out.stateDir = flags.get("--state-dir")!;
+    stateDirOutsideRepo(out.stateDir, process.cwd(), process.env);
+  }
   if (flags.has("--cooldown-days")) {
     const n = Number(flags.get("--cooldown-days"));
     if (!Number.isFinite(n) || n < 0) throw new Error("--cooldown-days must be a number >= 0");
@@ -206,6 +214,9 @@ export async function lockedFilesCheck(registry: Registry, name: string, version
   return undefined;
 }
 
+/** The waivers of the run's state dir; undefined without one. A store that cannot be read throws, so the review fails instead of ignoring it. */
+export const loadReviewWaivers = (a: ReviewArgs) => (a.stateDir ? listWaivers(a.stateDir) : undefined);
+
 export async function runReview(a: ReviewArgs): Promise<ReviewResult> {
   const base: Registry = a.eco === "npm" ? npmRegistry() : pypiRegistry();
   const registry: Registry = a.published ? { ...base, publishedAt: async () => a.published } : { ...base };
@@ -232,6 +243,7 @@ export async function runReview(a: ReviewArgs): Promise<ReviewResult> {
       now: a.now,
       advisoryFix: a.advisoryFix,
       only: a.only,
+      waivers: loadReviewWaivers(a),
       loadArtifacts: () => loadArtifacts(a, registry, work),
     });
   } finally {
@@ -262,9 +274,11 @@ export interface GateCliArgs {
   privateRegistry: PrivateRegistryPolicy;
   reviewer?: ReviewerSpec;
   scanner?: ScannerSpec;
+  /** A state dir whose waivers.json (oupdate waive) lets a PR's hold for a waived binary land. */
+  stateDir?: string;
 }
 
-const GATE_FLAGS = new Set(["--forge", "--endpoint", "--repo", "--token-file", "--token-env", "--branch-prefix", "--bot-login", "--gate-login", "--lock", "--cooldown-days", "--private-registry", "--reviewer", "--scanner"]);
+const GATE_FLAGS = new Set(["--forge", "--endpoint", "--repo", "--token-file", "--token-env", "--branch-prefix", "--bot-login", "--gate-login", "--lock", "--cooldown-days", "--private-registry", "--reviewer", "--scanner", "--state-dir"]);
 
 /** `env` supplies GITHUB_API_URL, which Actions sets on GitHub Enterprise Server, as the github endpoint when --endpoint is absent. */
 export function parseGateArgs(argv: string[], env: Record<string, string | undefined> = process.env): GateCliArgs {
@@ -303,6 +317,10 @@ export function parseGateArgs(argv: string[], env: Record<string, string | undef
   else out.tokenEnv = flags.get("--token-env")!;
   if (flags.has("--reviewer")) out.reviewer = parseReviewerSpec(flags.get("--reviewer")!);
   if (flags.has("--scanner")) out.scanner = parseScannerSpec(flags.get("--scanner")!);
+  if (flags.has("--state-dir")) {
+    out.stateDir = flags.get("--state-dir")!;
+    stateDirOutsideRepo(out.stateDir, process.cwd(), process.env);
+  }
   return out;
 }
 
@@ -333,7 +351,7 @@ async function gateMain(argv: string[]): Promise<number> {
     lockPaths: g.lockPaths,
     privateRegistry: g.privateRegistry,
     log: (line) => console.log(line),
-    review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, lockedFiles: c.toArtifacts, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner }),
+    review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, lockedFiles: c.toArtifacts, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner, stateDir: g.stateDir }),
   });
   for (const p of pulls) {
     console.log(`PR #${p.number}: ${p.state}`);
@@ -457,6 +475,7 @@ if (import.meta.main) {
   try {
     if (cmd === "gate") process.exit(await gateMain(rest));
     if (cmd === "keys") process.exit(keysMain(rest));
+    if (cmd === "waive") process.exit(waiveMain(parseWaiveArgs(rest), { out: (l) => console.log(l), now: new Date() }));
     if (cmd === "image") process.exit(await imageMain(rest));
     if (cmd === "targets") process.exit(await targetsCli(rest));
     if (cmd === "host") {
@@ -477,7 +496,7 @@ if (import.meta.main) {
       console.log(text);
       process.exit(0);
     }
-    if (cmd !== "review") throw new Error("usage: oupdate review <npm|pypi> <name> <from> <to> [--old-artifact F --new-artifact F] [--published ISO] [--now ISO] [--only layers] [--reviewer JSON] [--scanner JSON] [--advisory-fix] [--cooldown-days N] [--json FILE]\n       oupdate image <old-ref> <new-ref> [--platform linux/amd64] [--reviewer JSON] [--second-reviewer JSON] [--now ISO] [--json FILE]\n       oupdate targets --apply [--dry-run] --config FILE [--target ID]...\n       oupdate targets parity --record FILE --script-log FILE --date YYYY-MM-DD --ledger FILE [--target ID]");
+    if (cmd !== "review") throw new Error("usage: oupdate review <npm|pypi> <name> <from> <to> [--old-artifact F --new-artifact F] [--published ISO] [--now ISO] [--only layers] [--reviewer JSON] [--scanner JSON] [--advisory-fix] [--cooldown-days N] [--state-dir DIR] [--json FILE]\n       oupdate waive add|list|remove --state-dir DIR ...\n       oupdate image <old-ref> <new-ref> [--platform linux/amd64] [--reviewer JSON] [--second-reviewer JSON] [--now ISO] [--json FILE]\n       oupdate targets --apply [--dry-run] --config FILE [--target ID]...\n       oupdate targets parity --record FILE --script-log FILE --date YYYY-MM-DD --ledger FILE [--target ID]");
     const args = parseReviewArgs(rest);
     const r = await runReview(args);
     if (args.json) writeFileSync(args.json, JSON.stringify(r, null, 2) + "\n");
