@@ -68,7 +68,7 @@ const mapOf = (seed: string, big: boolean, pos: Pos, pay: string | null, form: F
 };
 
 // A tail read takes the last element, or for the mappings everything after the last ";" of the leading run of mapping characters (the padding body).
-// The mappings-tail rows put script text in "mappings", so that map is not strict (not base64 VLQ) and is shown for that reason: they test the shown-in-full path and the review budget, not a read past the head of the field.
+// Every loader here now shows its map in full, so the -tail rows exercise the full-map path and the review budget, not the hashed path. The mappings-tail rows put script text in "mappings", so that map is not strict (not base64 VLQ) and is shown for that reason: they test the shown-in-full path and the review budget, not a read past the head of the field.
 const FIELD: Record<Pos, string> = {
   sources: "m.sources[0].slice(3)", names: "m.names.join('')", sourcesContent: "m['sources'+'Content'][0]", mappings: "m.mappings",
   "sources-tail": "m.sources[m.sources.length - 1].slice(3)", "names-tail": "m.names[m.names.length - 1]",

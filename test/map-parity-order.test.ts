@@ -45,8 +45,8 @@ for (const big of [true, false]) for (const [label, code, o, n] of cases) test(l
   expect({ label, big, decision: r.decision, payloadShown: shown }).toMatchObject({ payloadShown: true });
 }, 60000);
 
-// Names split inside "child_process" and put back in reverse by a loader that finds the map without a bare ".map" string: no element and no forward join matches a pattern.
-// A padded map must treat it exactly as a small one does (today both are a hash line); this pins parity, not the outcome.
+// Names split inside "child_process" and put back in reverse by a loader that finds the map with endsWith('map'): no element and no forward join matches a pattern.
+// A padded map must treat it exactly as a small one does (today both are shown in full, since the loader holds a bare "map" string and reads JSON); this pins parity, not the outcome.
 test("names split inside child_process, reversed by a readdir loader: a padded map and a small map are treated alike", async () => {
   const X = "require('child", Y = "_process').exec(process.env.Q)";
   const outcome = async (big: boolean) => {

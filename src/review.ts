@@ -2032,7 +2032,7 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
     // A bare ".map" is the tail of a name built at run time (a string, template text, a regex source). It counts in the code of a code file, where comments are already removed.
     // A file the parser rejects, whose transform throws, or that is not parsed (a declaration file) is scanned raw; one that transforms to empty output (only comments) adds no names.
     const codeText = parsed ? (parsed.rejected || !parsed.folded ? text : parsed.code) : "";
-    // A bare "map" counts as the tail of a run-time name only in a file that also reads a file or directory and calls JSON.parse: a loader. A method name or a table of names ("map" in an array, x["map"]) is not one.
+    // A bare "map" counts as the tail of a run-time name only in a file that also reads a file or directory and calls JSON.parse: a loader. Only that file-level gate applies: inside such a file any "map" string counts, including one in a table of names. A bundled MIME table in a file that also reads and parses JSON can therefore unhash its package's maps (rare; measured on a package cache).
     const readsJson = !!parsed && /\b(?:readFileSync|readFile|readdirSync|readdir)\b|fs\/promises/.test(codeText) && /\bJSON\s*\.\s*parse\b/.test(codeText);
     if (parsed) for (const m of codeText.matchAll(/[A-Za-z0-9_.\/@-]+/g)) if (m[0].toLowerCase() === ".map" && codeText[m.index! + 4] !== "(") names.add(".map");
     // In a code file the quotes are read from the transformed code, where comments are gone (a quote inside a comment is not a string) and a template keeps the text after its last ${}; a file the parser rejects, and any other file, is scanned raw.
