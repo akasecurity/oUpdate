@@ -138,9 +138,11 @@ export function parseVerdict(text: string): "APPROVE" | "FLAG" {
   return "APPROVE";
 }
 
-/** Controls (ESC, CR, C1), bidi and zero-width characters dropped: for model output that reaches the terminal raw. Newlines go too, so split lines first. */
+/** Controls (ESC, CR, C1), bidi, zero-width and other invisible characters dropped: for model output that reaches the terminal raw. Newlines go too, so split lines first.
+ *  Invisible here means no glyph of its own: soft hyphen, fillers, variation selectors, line and paragraph separators, annotation marks and tag characters. */
+const TERMINAL_DROP = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u206f\u2800\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
 export function stripTerminal(s: string): string {
-  return s.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, "");
+  return s.replace(TERMINAL_DROP, "");
 }
 
 /** The model's first reasoning line after its FLAG, one line and cut, so a hold says why (empty for a bare FLAG).
@@ -2031,6 +2033,7 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
       const low = str.toLowerCase();
       if (low === ".map" && !isCode) continue; // a ".map" in a README or other text file is not a loader
       names.add(low);
+      // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
       if (seg.endsWith(".map")) names.add(seg);
       else if (!describes) stems.add(seg);
@@ -2390,7 +2393,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         return t === undefined || hashedBinary(t, undefined, artifacts!.new.get(t));
       });
       const leftOut = (keep: Set<string>) => reviewable.filter((p) => !keep.has(p)).length;
-      // A signal can name a path that is no file of the release (a skipped tar entry, "archive"): it would cost a part and print an empty header.
+      // A signal can name a path that is no file of the release (a skipped tar entry, "archive"): such a phantom takes room in a part and prints an empty header.
       const realPaths = (ps: string[]) => ps.filter((q) => artifacts!.old.has(q) || artifacts!.new.has(q));
       let scope: Scope = "all";
       // A path with any pre-pass or scanner signal is shown in full, never as a hash line.

@@ -227,15 +227,13 @@ describe("a large release with no cap asked for is read in every part", () => {
 });
 
 describe("a signal that names no file of the release", () => {
-  test("a skipped tar entry takes no part-budget slot and prints no empty header, in the ranked tier and in the reorder", async () => {
-    for (const [maxParts, maxStages] of [[2, 1], [3, 30]] as const) {
-      const art = release(12);
-      markTarNotes(art.new, ["skipped evil/skipped-entry"]);
-      const { prompts } = await run(art, { maxParts, maxStages });
-      expect(prompts.length).toBeGreaterThan(0);
-      expect(prompts.join("\n")).not.toContain("=== evil/skipped-entry");
-      expect(prompts[0]).toContain("setup.py"); // the real ranked file comes first
-    }
+  test("in the reorder, a skipped tar entry takes no room in a part and prints no empty header", async () => {
+    const art = release(12);
+    markTarNotes(art.new, ["skipped evil/skipped-entry"]);
+    const { prompts } = await run(art, { maxParts: 3, maxStages: 30 });
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts.join("\n")).not.toContain("=== evil/skipped-entry");
+    expect(prompts[0]).toContain("setup.py"); // the real ranked file comes first
   });
   test("the ranked tier itself reads no phantom: signal files alone over the limit, a skipped tar entry among the ranked paths", async () => {
     const art = release(12, { "setup.py": "v = 3\n".repeat(120) }); // setup.py alone is several parts, so the narrowing reaches the ranked tier

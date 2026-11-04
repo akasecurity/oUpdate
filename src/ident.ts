@@ -37,7 +37,7 @@ export function shown(text: string | null | undefined): string {
  * space but the ASCII one, the combining grapheme joiner and the braille blank; also lone surrogates (Cs), private use (Co)
  * and unassigned code points (Cn). The result is safe only inside a code span: `&` and `@` are not escaped. Other characters are kept, so a sentence stays readable.
  */
-const INERT = /[`[\]<>\\\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}\p{Zs}\u{34F}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2800}]/gu;
+const INERT = /[`[\]<>\\\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}\p{Zs}\u{2800}]/gu;
 export function inert(text: string): string {
   return text.replace(INERT, (ch) => (ch === " " ? ch : `\\u{${ch.codePointAt(0)!.toString(16)}}`));
 }
