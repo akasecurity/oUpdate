@@ -18,6 +18,11 @@ export interface OpenAIReviewerConfig {
   retryDelaysMs?: number[];
 }
 
+/** The max_tokens a review asks for when the spec sets none. */
+export const DEFAULT_MAX_TOKENS = 4096;
+/** The temperature every request sends; an extraBody temperature, spread after it, replaces it. */
+export const DEFAULT_TEMPERATURE = 0;
+
 const COLD_LOAD_DELAYS_MS = [1000, 2000, 4000, 6000, 8000];
 
 const refused = (e: unknown) => /ECONNREFUSED|ConnectionRefused/.test(`${(e as { code?: string })?.code ?? ""} ${e instanceof Error ? e.message : String(e)}`);
@@ -68,7 +73,7 @@ async function probeOutage(cfg: OpenAIReviewerConfig): Promise<string | undefine
         const r = await fetch(url, {
           method: "POST",
           headers: { "content-type": "application/json", ...cfg.headers, ...(key ? { authorization: `Bearer ${key}` } : {}) },
-          body: JSON.stringify({ model: cfg.model, max_tokens: 1, temperature: 0, messages: [{ role: "user", content: "ok" }] }),
+          body: JSON.stringify({ model: cfg.model, max_tokens: 1, temperature: DEFAULT_TEMPERATURE, messages: [{ role: "user", content: "ok" }] }),
           signal,
           timeout: false,
           redirect: "manual",
@@ -125,8 +130,8 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
             headers: { "content-type": "application/json", ...cfg.headers, ...(key ? { authorization: `Bearer ${key}` } : {}) },
             body: JSON.stringify({
               model: cfg.model,
-              max_tokens: cfg.maxTokens ?? 4096,
-              temperature: 0,
+              max_tokens: cfg.maxTokens ?? DEFAULT_MAX_TOKENS,
+              temperature: DEFAULT_TEMPERATURE,
               messages: [{ role: "user", content: prompt }],
               ...cfg.extraBody,
             }),
@@ -175,7 +180,7 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
           }
           // A cut-off answer can start APPROVE and lose the FLAG that followed; it is never a verdict.
           if (choice.finish_reason === "length") {
-            errors.push(`${base}: answer truncated at max_tokens (${cfg.maxTokens ?? 4096})`);
+            errors.push(`${base}: answer truncated at max_tokens (${cfg.maxTokens ?? DEFAULT_MAX_TOKENS})`);
             continue;
           }
           // A thinking model may put its reasoning ahead of the answer; line 1 must be the verdict.

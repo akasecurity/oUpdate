@@ -20,6 +20,7 @@ import { HELDOUT } from "./heldout-cases.ts";
 import { GAP } from "./gap-cases.ts";
 import { evasionReport, writeEvasions } from "./evasions.ts";
 import { INSTALL_ATTACKS, INSTALL_CLEAN } from "./install-cases.ts";
+import { stampSpec, thinkingOf } from "./stamp.ts";
 
 /** An attack with the date it became public. Add new write-ups here; never use them to tune prompts. */
 export interface LimitCase extends Case {
@@ -42,7 +43,10 @@ const version = (await Bun.file(join(here, "../../package.json")).json()).versio
 const repeats = Number(arg("repeats") ?? models.repeats);
 const specFile = arg("reviewer");
 if (!specFile) { console.error("--reviewer <spec.json> is required"); process.exit(2); }
-const reviewer: Reviewer = makeReviewer(parseReviewerSpec(await Bun.file(specFile).text()));
+const spec = parseReviewerSpec(await Bun.file(specFile).text());
+const reviewer: Reviewer = makeReviewer(spec);
+/** Which reviewer settings produced these results, without where or how the reviewer is reached. */
+const stamp = stampSpec(spec);
 
 const registry: Registry = { latest: async () => undefined, publishedAt: async () => new Date("2026-01-01T00:00:00Z"), artifactUrls: async () => [] };
 const lock = (pkgs: Pkg[]) => JSON.stringify({ lockfileVersion: 1, packages: Object.fromEntries(pkgs.map((p) => [p.name, [`${p.name}@${p.version}`, "", {}]])) });
@@ -113,7 +117,7 @@ const sum = (rs: typeof rows) => { const k = rs.reduce((a, r) => a + r.k, 0), n 
 const tot = (rs: typeof cleanRows) => { const k = rs.reduce((a, r) => a + r.k, 0), n = rs.reduce((a, r) => a + r.n, 0); return { k, n, ...wilson(k, n) }; };
 const cleanTotal = tot(cleanRows.filter((r) => !r.policy_hold));
 const policyTotal = tot(cleanRows.filter((r) => r.policy_hold));
-const summary = { tool_version: version, reviewer: models.reviewer.label, cutoff, repeats, held_out: sum(rows.filter((r) => r.held_out)), earlier: sum(rows.filter((r) => !r.held_out && !r.gap)), gap: sum(rows.filter((r) => r.gap)), false_holds: cleanTotal, policy_holds: policyTotal };
+const summary = { tool_version: version, reviewer: models.reviewer.label, cutoff, repeats, held_out: sum(rows.filter((r) => r.held_out)), earlier: sum(rows.filter((r) => !r.held_out && !r.gap)), gap: sum(rows.filter((r) => r.gap)), false_holds: cleanTotal, policy_holds: policyTotal, reviewer_spec: stamp };
 
 const out = arg("out") ?? join(here, "results");
 mkdirSync(out, { recursive: true });
@@ -123,6 +127,7 @@ const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 const line = (n: string, s: { k: number; n: number; lo: number; hi: number }) => `${n}: ${s.k}/${s.n} runs flagged, ${pct(s.k / (s.n || 1))} (95% interval ${pct(s.lo)}-${pct(s.hi)})`;
 const md = [
   `oupdate ${version}, ${models.reviewer.label}, training cutoff ${cutoff}, ${repeats} runs per case`, "",
+  `reviewer: ${models.reviewer.label}; thinking ${stamp.type === "openai" ? thinkingOf(stamp) : "n/a"}; max tokens ${stamp.maxTokens ?? "n/a"}; settings fingerprint ${stamp.fingerprint.slice(0, 12)}; run ${stamp.at}`, "",
   "| case | disclosed | held-out | pre-pass | reviewer k/N | 95% interval | read | s/review |", "|---|---|---|---|---|---|---|---|",
   ...rows.map((r) => `| ${r.id} | ${r.disclosed} | ${r.held_out ? "yes" : "no"} | ${r.prepass_blocked ? "blocked" : "passed"} | ${r.k}/${r.n} | ${pct(r.lo)}-${pct(r.hi)} | ${scopeNote(r.reads)} | ${r.sec_per_review} |`),
   "", `layers: pre-pass alone blocks ${rows.filter((r) => r.prepass_blocked).length} of ${rows.length} attacks; the reviewer flags ${rows.filter((r) => !r.prepass_blocked && r.k > 0).length} more that the pre-pass passes; ${rows.filter((r) => !r.prepass_blocked && r.k === 0).length} are missed by both`,
