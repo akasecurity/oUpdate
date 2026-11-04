@@ -96,6 +96,8 @@ export interface ReviewInput {
   maxStages?: number;
   /** Recorded acceptances of a shipped binary by hash (waiver.ts). A hold whose only cause is binaries every one of which is waived for this release lands. */
   waivers?: Waiver[];
+  /** A time budget, in ms, for the whole read, checked between parts: one slow call is not cut short. Once it has run out no further part is asked: the parts not yet read are held as unread and the review stops for a human. Unset (the default), or not a positive number, there is no time limit. At least one part is always read. */
+  maxReadMs?: number;
 }
 
 export interface ReviewResult {
@@ -2465,7 +2467,11 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: 0 parts to review; ${pre.added.length + pre.changed.length + pre.removed.length} file(s) added, changed or removed${note}; needs a human` });
       else try {
         const texts: string[] = [];
+        const budget = input.maxReadMs !== undefined && Number.isFinite(input.maxReadMs) && input.maxReadMs > 0 ? input.maxReadMs : undefined;
+        const started = performance.now();
+        let outOfTime = false;
         for (let i = 0; i < chunks.length; i++) {
+          if (budget !== undefined && i > 0 && performance.now() - started >= budget) { outOfTime = true; break; }
           texts.push(await input.reviewer.review(reviewPrompt(input, pre, chunks[i]!, i, chunks.length, scope, prepareChangedInert(artifacts.old, artifacts.new, pre) ? PREPARE_NOTE : "")));
           // The first FLAG ends the review: the stop is certain and only the first FLAG gives the reason, so the later parts are not paid for.
           if (parseVerdict(texts[i]!) === "FLAG") break;
@@ -2485,7 +2491,11 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           else if (scope === "priority") note = `; priority files only, ${leftOut(seen)} file(s) not reviewed`;
           else note = `; ${leftOut(seen)} file(s) not reviewed`;
         }
-        if (scope === "ranked")
+        if (outOfTime) {
+          // The parts left unread can carry the attack, so an APPROVE on the rest never lands.
+          const seen = filesRead(chunks, texts.length);
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `${texts.length} of ${chunks.length} part(s) read, the read time budget of ${budget} ms ran out; ${leftOut(seen)} file(s) not reviewed; needs a human` });
+        } else if (scope === "ranked")
           layers.push(
             flagged.length
               ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on ranked part(s) ${parts} of ${texts.length} reviewed; ${note}` }
@@ -2541,9 +2551,9 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
 
 export type Outcome = "stopped" | "held-human" | "error" | "passed";
 
-/** How a review ended: a detection stopped it, only "too large for model review" or "not model-reviewable" held it for a human, a layer errored, or it passed through. */
+/** How a review ended: a detection stopped it, only "too large for model review", "not model-reviewable" or a spent read time budget held it for a human, a layer errored, or it passed through. */
 export function classifyOutcome(r: ReviewResult): Outcome {
-  const tooLarge = (l: LayerVerdict) => l.layer === "reviewer" && l.verdict === "stop" && /^(too large for model review|not model-reviewable)/.test(l.detail);
+  const tooLarge = (l: LayerVerdict) => l.layer === "reviewer" && l.verdict === "stop" && /^(too large for model review|not model-reviewable|\d+ of \d+ part\(s\) read, the read time budget)/.test(l.detail);
   if (r.layers.some((l) => l.verdict === "stop" && !tooLarge(l))) return "stopped";
   // A layer that errored may have hidden a stop: the hold for a limit never outranks it.
   if (r.layers.some((l) => l.verdict === "error")) return "error";
