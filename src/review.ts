@@ -1868,7 +1868,7 @@ const sameFile = bytesEqual;
 // (concatenations, escapes, comments and parentheses removed) name a map the same way as one quoted string.
 // A non-constant piece is not folded: the map stays a residual and the loader line is what the review shows in full. A quoted stem in package.json or a declaration file is not a map reference: those name the
 // file they describe, and treating `index.js` as the stem of `index.js.map` would show every sibling map in full.
-// A quoted map name still counts. A bare string "map" (exact case) in a file that reads a file or directory and calls JSON.parse is the tail of a name built at run time and counts the same way. Anything else is shown in full.
+// A quoted map name still counts. A bare string "map" (exact case) in a file that reads a file or directory and calls JSON.parse is the tail of a name built at run time and counts the same way, unless every such string is an element of a word list (an array of 30 or more short strings). Anything else is shown in full.
 const MAP_KEYS = new Set(["version", "file", "sourceRoot", "sources", "sourcesContent", "names", "mappings", "ignoreList", "x_google_ignoreList"]);
 const strings = (v: unknown, nullable = false) => Array.isArray(v) && v.every((x) => typeof x === "string" || (nullable && x === null));
 const integers = (v: unknown) => Array.isArray(v) && v.every((x) => Number.isInteger(x));
@@ -2032,7 +2032,8 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
     // A bare ".map" is the tail of a name built at run time (a string, template text, a regex source). It counts in the code of a code file, where comments are already removed.
     // A file the parser rejects, whose transform throws, or that is not parsed (a declaration file) is scanned raw; one that transforms to empty output (only comments) adds no names.
     const codeText = parsed ? (parsed.rejected || !parsed.folded ? text : parsed.code) : "";
-    // A bare "map" counts as the tail of a run-time name only in a file that also reads a file or directory and calls JSON.parse: a loader. Only that file-level gate applies: inside such a file any "map" string counts, including one in a table of names. A bundled MIME table in a file that also reads and parses JSON can therefore unhash its package's maps (rare; measured on a package cache).
+    // A bare "map" counts as the tail of a run-time name only in a file that also reads a file or directory and calls JSON.parse: a loader. Only that file-level gate applies: inside such a file any "map" string counts, except when every one is an element of an array holding 30 or more short strings (a word list: mapOnlyInWordTables). A MIME table is not excused (its strings are long or hold commas) and can unhash its package's maps (rare; measured on a package cache).
+    let tableOnly: boolean | undefined; // mapOnlyInWordTables(codeText), computed on first use: one pass per file
     const readsJson = !!parsed && /\b(?:readFileSync|readFile|readdirSync|readdir)\b|fs\/promises/.test(codeText) && /\bJSON\s*\.\s*parse\b/.test(codeText);
     if (parsed) for (const m of codeText.matchAll(/[A-Za-z0-9_.\/@-]+/g)) if (m[0].toLowerCase() === ".map" && codeText[m.index! + 4] !== "(") names.add(".map");
     // In a code file the quotes are read from the transformed code, where comments are gone (a quote inside a comment is not a string) and a template keeps the text after its last ${}; a file the parser rejects, and any other file, is scanned raw.
@@ -2041,7 +2042,7 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
       const low = str.toLowerCase();
       if (low === ".map" && !isCode) continue; // a ".map" in a README or other text file is not a loader
       // A name built at run time from parts (["index", "js", "map"].join(".")) leaves the bare word "map" as a string of code: in a loader (readsJson) it counts like the ".map" tail. The match is exact case: the ".map" check is lower-cased because a file name may be written in any case, but "Map" as a bare string is the Map type (Babel helpers) and would unhash most transpiled packages.
-      if (str === "map" && readsJson && !mapOnlyInWordTables(codeText)) names.add(".map");
+      if (str === "map" && readsJson && !(tableOnly ??= mapOnlyInWordTables(codeText))) names.add(".map");
       names.add(low);
       // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
@@ -2053,19 +2054,36 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
 }
 
 /**
- * True when every quoted "map" in the code sits inside a table of words (a word list or name table: 30 or more short quoted strings, comma separated, within 400
- * characters on each side), not a name being put together. A bundle that carries a word list and also reads JSON would otherwise show every map of its package.
- * A "map" that is not in the text as a literal (it came from folding) is never excused. Known limit: a loader that hides its "map" among 30 decoy strings is not counted.
+ * True when every quoted "map" in the code is one element of an array literal that holds 30 or more short quoted strings (a word list or name table), so it is
+ * not a name being put together. Only the array that directly holds the "map" counts, from its "[" to the matching "]"; a list elsewhere in the file excuses nothing.
+ * A bundle that carries a word list and also reads JSON would otherwise show every map of its package. A "map" that is not in the text as a literal is never excused (the parser prints folded and escaped forms such as "m" + "ap" as a literal, so those are judged like any other). Known limit: a loader that hides its "map" among 30 or more decoy strings in the same array (before, after or around it; template
+ * strings count) is not counted, so its map stays hashed.
  */
 function mapOnlyInWordTables(code: string): boolean {
-  let seen = 0;
-  for (const m of code.matchAll(/(["'`])map\1/g)) {
-    seen++;
-    const at = m.index ?? 0;
-    const window = code.slice(Math.max(0, at - 400), at + 400);
-    if ((window.match(/["'`][^"'`\\\n,]{1,24}["'`]\s*,/g) ?? []).length < 30) return false;
+  type Frame = { open: string; short: number; hasMap: boolean };
+  const stack: Frame[] = [];
+  let seen = 0, counted = 0;
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i]!;
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < code.length && code[j] !== c && !(c !== "`" && code[j] === "\n")) j += code[j] === "\\" ? 2 : 1;
+      const text = code.slice(i + 1, j);
+      const top = stack[stack.length - 1];
+      if (text === "map") {
+        seen++;
+        if (top?.open === "[") top.hasMap = true; else counted++;
+      }
+      if (top?.open === "[" && text.length >= 1 && text.length <= 24) top.short++;
+      i = j;
+    } else if (c === "[" || c === "(" || c === "{") stack.push({ open: c, short: 0, hasMap: false });
+    else if (c === "]" || c === ")" || c === "}") {
+      const fr = stack.pop();
+      if (fr?.hasMap && fr.short < 30) counted++;
+    }
   }
-  return seen > 0;
+  for (const fr of stack) if (fr.hasMap) counted++;
+  return seen > 0 && counted === 0;
 }
 
 /** True when a non-map file contains `sourcesContent`: code that reads a map's embedded sources. The text `.map` is not

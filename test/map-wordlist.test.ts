@@ -16,6 +16,12 @@ const cases: [string, string, boolean][] = [
   ["word list and a name built from parts: map shown", `const WORDS = [\n  ${words(2048, true)}\n];\n${READS}const n = ["index", "js", "map"].join(".");\n`, true],
   ["word list without map and a bare map string elsewhere: map shown", `const WORDS = [\n  ${words(2048, false)}\n];\n${READS}const e = "map";\n`, true],
   ["a few decoys around map in a small array: still shown", `${READS}const n = ["a", "b", "c", "index", "js", "map"].join(".");\n`, true],
+  ["an unrelated list of 31 strings before a name built from parts: map shown", `${READS}const LIST = [\n  ${words(31, false)}\n];\nconst n = ["index", "js", "map"].join(".");\n`, true],
+  ["a table of numbers beside a name built from parts: map shown", `${READS}const T = [${Array.from({ length: 60 }, (_, i) => i).join(", ")}];\nconst n = ["index", "js", "map"].join(".");\n`, true],
+  ["a word list directly followed by a name built from parts: map shown", `${READS}const W = [\n  ${words(40, false)}\n]; const n = ["index", "js", "map"].join(".");\n`, true],
+  ["a word list that holds map many times, one pass per file: map stays hashed", `const W = [\n  ${Array.from({ length: 3000 }, (_, i) => (i % 31 === 0 ? "\"map\"" : JSON.stringify("w" + i))).join(",\n  ")}\n];\n${READS}`, false],
+  // Known limit: decoys before, after or around the "map" in the same array, template strings included, make it look like a table.
+  ["known limit: 40 template-string decoys after map hide it", `${READS}const n = ["map", ${Array.from({ length: 40 }, (_, i) => "`w" + i + "`").join(", ")}].slice(0, 1);\n`, false],
   // Known limit: 40 decoy strings around the "map" make it look like a table, so the map stays hashed.
   ["known limit: 40 decoys around map hide it", `${READS}const n = [\n  ${words(40, true)}\n].slice(-3).join(".");\n`, false],
 ];
