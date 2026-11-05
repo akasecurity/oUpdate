@@ -20,6 +20,8 @@ const T8 = "const D = [" + Array.from({ length: 220 }, (_, i) => JSON.stringify(
 // 200 or more short strings in the array that holds the map make it a table.
 const TAIL_TPL = "const n = `${__dirname}/${f}map`;\n";
 const REGEX_CLASS = "const r = /[\\[]/;\n";
+const SHORT = (n: number) => Array.from({ length: n }, (_, i) => JSON.stringify("w" + i.toString(36))).join(",");
+const T9 = "const D=[" + SHORT(300) + ", /\\[/]; const p = [0][0], \"map\", 0; const r = /]/;\n";
 const cases: [string, string, boolean][] = [
   ["word list with map, bundle reads JSON: map stays hashed", `const WORDS = [\n  ${words(2048, true)}\n];\n${READS}`, false],
   ["a run-time name built from parts: map shown", `${READS}const n = ["index", "js", "map"].join(".");\n`, true],
@@ -41,6 +43,7 @@ const cases: [string, string, boolean][] = [
   ["a list of 200 strings holding map: map stays hashed", `${READS}const EXT = [\n  ${words(200, true)}\n];\n`, false],
   ["a word list holding map and a name whose last template part is map: map shown", `const WORDS = [\n  ${words(2048, true)}\n];\n${READS}${TAIL_TPL}`, true],
   ["a word list that holds map beside a regex literal with an escaped bracket: map stays hashed (only when the walk skips the regex)", `const WORDS = [\n  ${words(2048, true)}\n];\n${REGEX_CLASS}${READS}`, false],
+  ["T9: an element-shaped map at statement level inside a frame a regex literal left open: map shown", `${READS}${T9}`, true],
   // Known limit: decoys before, after or around the "map" in the same array, template strings included, make it look like a table.
   ["known limit: 220 template-string decoys after map hide it", `${READS}const n = ["map", ${Array.from({ length: 220 }, (_, i) => "`w" + i + "`").join(", ")}].slice(0, 1);\n`, false],
   // Known limit: 220 decoy strings around the "map" make it look like a table, so the map stays hashed.
