@@ -48,22 +48,19 @@ const A = SPAWN.slice(0, HALF), B = SPAWN.slice(HALF);
 const ENTRY = '{"name":"lib","version":"b","main":"lib/index.js","bin":{"cli":"bin/cli"}}';
 const Q = [SPAWN];
 
-// Run-time map names the review does not read: the loader assembles the file name without a ".map" string or a bare "map" string it extracts (the template-interpolation case keeps its "map" inside a ${}, which is not extracted).
-// Each loader puts the payload back from reversed names, as the reversed-string case does, so only a shown map can reveal it.
+// Run-time map names the review does not read: the loader assembles the file name in a way that leaves no ".map" string or bare "map" string for the review to extract.
+// Each loader puts the payload back from reversed names, as the reversed-string case does, so only a shown map can reveal it. Each case changes one thing from a loader the review does show.
 const RT_REV = "m.names.reverse().join('')";
-const RT_READ = (name: string) => `const fs = require('fs');\nconst m = JSON.parse(fs.readFileSync(${name}, 'utf8'));\nrequire('vm').runInThisContext(${RT_REV});\nexports.v = 2;\n`;
+const RT_LOADER = (name: string, parse = (text: string) => `JSON.parse(${text})`) => `const fs = require('fs');\nconst m = ${parse(`fs.readFileSync(${name}, 'utf8')`)};\nrequire('vm').runInThisContext(${RT_REV});\nexports.v = 2;\n`;
 const RT_SHAPES: [string, string, string][] = [
-  ["split-parts", "a name built from '.m' and String('ap')", RT_READ("__filename + '.m' + String('ap')")],
-  ["slice", "a name cut from a longer string with slice", RT_READ("__filename + '.js.map'.slice(3)")],
-  ["replace-marker", "a name made by replacing a marker character", RT_READ("__filename.replace(/js$/, 'jsXmap'.replace('X', '.'))")],
-  ["package-json-field", "a name read from a package.json field", "const fs = require('fs');\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + require('./package.json').sourceMapFile, 'utf8'));\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
-  ["lower-case", "a name made by lower-casing an upper-case word", RT_READ("__filename + '.' + 'MAP'.toLowerCase()")],
+  ["split-parts", "a name built from '.m' and String('ap')", RT_LOADER("__filename + '.m' + String('ap')")],
+  ["slice", "a name cut from a longer string with slice", RT_LOADER("__filename + '.js.map'.slice(3)")],
+  ["replace-marker", "a name made by replacing a marker character", RT_LOADER("__filename.replace(/js$/, 'jsXmap'.replace('X', '.'))")],
+  ["lower-case", "a name made by lower-casing an upper-case word", RT_LOADER("__filename + '.' + 'MAP'.toLowerCase()")],
   ["ends-with-ap", "a directory scan that matches the suffix 'ap'", "const fs = require('fs');\nconst f = fs.readdirSync(__dirname).find((x) => x.endsWith('ap'));\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + f, 'utf8'));\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
-  ["computed-fs-key", "a file read called through a computed property name", "const fs = require('fs');\nconst m = JSON.parse(fs['read' + 'FileSync'](__filename + '.' + ['m', 'a', 'p'].join(''), 'utf8'));\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
-  ["eval-parse", "a map parsed with eval instead of JSON.parse", "const fs = require('fs');\nconst m = eval('(' + fs.readFileSync(__filename + '.' + ['m', 'a', 'p'].join(''), 'utf8') + ')');\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
-  ["template-interpolation", "a name joined from parts inside a template interpolation", "const fs = require('fs');\nconst m = JSON.parse(fs.readFileSync(`${__dirname}/${['index', 'js', 'map'].join('.')}`, 'utf8'));\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
+  ["eval-parse", "a map parsed with eval instead of JSON.parse (the file has a bare map string but no JSON.parse)", RT_LOADER("[__filename, 'map'].join('.')", (text) => `eval('(' + ${text} + ')')`)],
   ["newline-words", "a name joined from words split on newlines", "const fs = require('fs');\nconst w = 'index\\njs\\nmap'.split('\\n');\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + w.join('.'), 'utf8'));\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
-  ["char-codes", "a name built from character codes", RT_READ("__filename + '.' + String.fromCharCode(109, 97, 112)")],
+  ["char-codes", "a name built from character codes", RT_LOADER("__filename + '.' + String.fromCharCode(109, 97, 112)")],
 ];
 const RT_NAMES = ["_process').exec(process.env.Q)", "require('child"];
 
