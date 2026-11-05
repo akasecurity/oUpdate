@@ -2032,7 +2032,7 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
     // A bare ".map" is the tail of a name built at run time (a string, template text, a regex source). It counts in the code of a code file, where comments are already removed.
     // A file the parser rejects, whose transform throws, or that is not parsed (a declaration file) is scanned raw; one that transforms to empty output (only comments) adds no names.
     const codeText = parsed ? (parsed.rejected || !parsed.folded ? text : parsed.code) : "";
-    // A bare "map" counts as the tail of a run-time name only in a file that also reads a file or directory and calls JSON.parse: a loader. Only that file-level gate applies: inside such a file any "map" string counts, except when every one is an element of an array holding 200 or more short strings (a word list: mapOnlyInWordTables). A table of 200 or more short strings that holds "map" is excused whatever it lists; an extension or MIME table keeps "map" in a small array and is not. A loader that hides among 200 decoys is the known limit named at mapOnlyInWordTables.
+    // A bare "map" counts as the tail of a run-time name only in a file that also reads a file or directory and calls JSON.parse: a loader. Only that file-level gate applies: inside such a file any "map" string counts, except when every one is an element of an array holding 200 or more short strings (a word list: mapOnlyInWordTables). A table of 200 or more short strings that holds "map" is excused whatever it lists; an extension or MIME table keeps "map" in a small array and is not. A loader that hides among 200 decoys, or reads its map name out of a real word list by index, is the known limit named at mapOnlyInWordTables.
     let tableOnly: boolean | undefined; // mapOnlyInWordTables(codeText), computed on first use: one pass per file
     const readsJson = !!parsed && /\b(?:readFileSync|readFile|readdirSync|readdir)\b|fs\/promises/.test(codeText) && /\bJSON\s*\.\s*parse\b/.test(codeText);
     if (parsed) for (const m of codeText.matchAll(/[A-Za-z0-9_.\/@-]+/g)) if (m[0].toLowerCase() === ".map" && codeText[m.index! + 4] !== "(") names.add(".map");
@@ -2057,7 +2057,7 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
  * True when every quoted "map" in the code is one element of an array literal that holds 200 or more short quoted strings (a word list or name table), so it is
  * not a name being put together. Only the array that directly holds the "map" counts, from its "[" to the matching "]"; a list elsewhere in the file excuses nothing.
  * A bundle that carries a word list and also reads JSON would otherwise show every map of its package. Every quoted "map" in the text is counted, a template's \${} included, and the map shows unless all of them are excused (the parser prints folded and escaped forms such as "m" + "ap" as a literal, so those are judged like any other). Known limit: a loader that hides its "map" among 200 or more decoy strings in the same array (before, after or around it; template
- * strings count) is not counted, so its map stays hashed.
+ * strings count) is not counted, so its map stays hashed. Reading the name out of a real list by index is the same limit.
  */
 function mapOnlyInWordTables(code: string): boolean {
   const TABLE_MIN_STRINGS = 200; // a word list has hundreds (the 2048-word mnemonic list); an extension or MIME list never gets near
