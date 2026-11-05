@@ -48,13 +48,13 @@ const A = SPAWN.slice(0, HALF), B = SPAWN.slice(HALF);
 const ENTRY = '{"name":"lib","version":"b","main":"lib/index.js","bin":{"cli":"bin/cli"}}';
 const Q = [SPAWN];
 
-// Run-time map names the review does not read: the loader assembles the file name in a way that leaves no ".map" string or bare "map" string for the review to extract.
+// Run-time map names the review does not match: the loader assembles the file name so that no whole name, bare ".map" or bare "map" string, or stem of the map reaches the review.
 // Each loader puts the payload back from reversed names, as the reversed-string case does, so only a shown map can reveal it. Each case changes one thing from a loader the review does show.
 const RT_REV = "m.names.reverse().join('')";
 const RT_LOADER = (name: string, parse = (text: string) => `JSON.parse(${text})`) => `const fs = require('fs');\nconst m = ${parse(`fs.readFileSync(${name}, 'utf8')`)};\nrequire('vm').runInThisContext(${RT_REV});\nexports.v = 2;\n`;
 const RT_SHAPES: [string, string, string][] = [
   ["split-parts", "a name built from '.m' and String('ap')", RT_LOADER("__filename + '.m' + String('ap')")],
-  ["slice", "a name cut from a longer string with slice", RT_LOADER("__filename + '.js.map'.slice(3)")],
+  ["name-tail-literal", "a name that ends in a literal which is only the tail of the map's name (the .replace(/\\.js$/, '.js.map') idiom): the review matches a whole name, the bare .map or a stem, not a tail", RT_LOADER("__filename.replace(/\\.js$/, '.js.map')")],
   ["replace-marker", "a name made by replacing a marker character", RT_LOADER("__filename.replace(/js$/, 'jsXmap'.replace('X', '.'))")],
   ["lower-case", "a name made by lower-casing an upper-case word", RT_LOADER("__filename + '.' + 'MAP'.toLowerCase()")],
   ["ends-with-ap", "a directory scan that matches the suffix 'ap'", "const fs = require('fs');\nconst f = fs.readdirSync(__dirname).find((x) => x.endsWith('ap'));\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + f, 'utf8'));\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
