@@ -13,7 +13,7 @@ email	test/pylock.test.ts
 private-ip	test/reviewer-openai.test.ts
 # the release script pushes over ssh urls for github.com
 email	scripts/release.ts
-# post-0.2.17 test fixtures: made-up sentinel header and key strings, an example.com address, the public npm OIDC publisher address
+# post-0.2.17 test fixtures: made-up sentinel header and key strings, a .example address, the public npm OIDC publisher address
 email	eval/limits/stamp.test.ts
 secret-assignment	eval/limits/stamp.test.ts
 email	test/fixtures/publisher/packument.json
