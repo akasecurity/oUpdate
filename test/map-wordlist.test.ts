@@ -17,6 +17,7 @@ const REGEX_OPEN = "const r = /\\[/;\n";
 const NESTED_TPL = "const t = `a${f ? `[` : \"\"}b`;\n";
 const BALANCED = "const r = /[a-z]+/g; const q = `x${r.test(\"a\") ? `y` : \"z\"}`;\n";
 const T8 = "const D = [" + Array.from({ length: 31 }, (_, i) => JSON.stringify("s" + i)).join(", ") + ", /\\[/];\nconst e = \"map\";\nconst n = require('fs').readFileSync([__dirname, \"index\", \"js\"].join(\".\") + \".\" + e);\nconst r = /]/;\n";
+// 200 or more short strings in the array that holds the map make it a table.
 const cases: [string, string, boolean][] = [
   ["word list with map, bundle reads JSON: map stays hashed", `const WORDS = [\n  ${words(2048, true)}\n];\n${READS}`, false],
   ["a run-time name built from parts: map shown", `${READS}const n = ["index", "js", "map"].join(".");\n`, true],
@@ -28,15 +29,18 @@ const cases: [string, string, boolean][] = [
   ["a word list directly followed by a name built from parts: map shown", `${READS}const W = [\n  ${words(40, false)}\n]; const n = ["index", "js", "map"].join(".");\n`, true],
   ["a word list that holds map many times, one pass per file: map stays hashed", `const W = [\n  ${Array.from({ length: 3000 }, (_, i) => (i % 31 === 0 ? "\"map\"" : JSON.stringify("w" + i))).join(",\n  ")}\n];\n${READS}`, false],
   ["a word list holding map and a loader whose name is built inside a template interpolation: map shown", `const WORDS = [\n  ${words(2048, true)}\n];\n${TPL_LOADER}`, true],
-  ["a regex literal with an open bracket, then a name from parts among 30 short strings: map shown", `${READS}${REGEX_OPEN}const ext = process.env.X || "map";\n${CONSTS}\n${LOAD}`, true],
-  ["a nested template with an open bracket, then a name from parts among 30 short strings: map shown", `${READS}${NESTED_TPL}const ext = process.env.X || "map";\n${CONSTS}\n${LOAD}`, true],
+  ["a regex literal with an open bracket, then a name from parts among 30 short strings: map shown", `${READS}function g(f) {\n${REGEX_OPEN}const ext = process.env.X || "map";\n${CONSTS}\n${LOAD}}\n`, true],
+  ["a nested template with an open bracket, then a name from parts among 30 short strings: map shown", `${READS}function g(f) {\n${NESTED_TPL}const ext = process.env.X || "map";\n${CONSTS}\n${LOAD}}\n`, true],
   ["a word list that holds map beside regex literals and templates that balance: map stays hashed", `const WORDS = [\n  ${words(2048, true)}\n];\n${BALANCED}${READS}`, false],
   ["a regex literal in a list of 31 strings, a name from parts after it, another regex closing it: map shown", `${READS}${T8}`, true],
   ["a map string that is not a list element, among 30 short list elements: map shown", `${READS}const L = [${Array.from({ length: 31 }, (_, i) => JSON.stringify("e" + i)).join(", ")}];\nconst e = "map";\nconst n = [__dirname, "index", "js"].join(".") + "." + e;\n`, true],
+  ["an extension list of 60 strings holding map in a loader: map shown", `${READS}const EXT = [\n  ${words(60, true)}\n];\n`, true],
+  ["a list of 199 strings holding map: map shown (the table starts at 200)", `${READS}const EXT = [\n  ${words(199, true)}\n];\n`, true],
+  ["a list of 200 strings holding map: map stays hashed", `${READS}const EXT = [\n  ${words(200, true)}\n];\n`, false],
   // Known limit: decoys before, after or around the "map" in the same array, template strings included, make it look like a table.
-  ["known limit: 40 template-string decoys after map hide it", `${READS}const n = ["map", ${Array.from({ length: 40 }, (_, i) => "`w" + i + "`").join(", ")}].slice(0, 1);\n`, false],
+  ["known limit: 220 template-string decoys after map hide it", `${READS}const n = ["map", ${Array.from({ length: 220 }, (_, i) => "`w" + i + "`").join(", ")}].slice(0, 1);\n`, false],
   // Known limit: 40 decoy strings around the "map" make it look like a table, so the map stays hashed.
-  ["known limit: 40 decoys around map hide it", `${READS}const n = [\n  ${words(40, true)}\n].slice(-3).join(".");\n`, false],
+  ["known limit: 220 decoys around map hide it", `${READS}const n = [\n  ${words(220, true)}\n].slice(-3).join(".");\n`, false],
 ];
 for (const [label, code, shown] of cases) test(label, async () => {
   const reviewed: string[] = [];
