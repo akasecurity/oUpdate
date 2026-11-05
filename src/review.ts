@@ -2047,7 +2047,14 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
       if (str === "map" && readsJson && !(tableOnly ??= mapOnlyInWordTables(codeText))) names.add(".map");
       names.add(low);
       // Two or more characters before ".map": a one-character tail ("s.map", "x.map") would match the name of almost any map, so it is a known limit (see the evasion rows).
-      if (isCode && !describes && low.length >= ".map".length + 2 && low.endsWith(".map")) tails.add(low);
+      // A template's tails are its literal segments after an interpolation (`${n}.js.map` gives ".js.map"; `${n}.js.map${e}` gives the same): the text after the last "}" of each part between "${" marks. The floor applies to each segment. The first segment is the text before the first "${" (the whole string when there is none): a name built as n + `.js.map${e}` puts the tail there.
+      if (isCode && !describes) {
+        const parts = low.split("${");
+        for (let i = 0; i < parts.length; i++) {
+          const seg = i === 0 ? parts[0]! : parts[i]!.slice(parts[i]!.lastIndexOf("}") + 1);
+          if (seg.length >= ".map".length + 2 && seg.endsWith(".map")) tails.add(seg);
+        }
+      }
       // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
       if (seg.endsWith(".map")) names.add(seg);

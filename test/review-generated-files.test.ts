@@ -95,7 +95,8 @@ describe("everything else is shown in full", () => {
     expect(marked("fs.readFileSync(path.join(__dirname, name))", "x.js.map")).not.toContain("marker_name");
     // A constant template folds to one string. A template with a real expression does not.
     expect(marked("fs.readFileSync(`x${''}.js.map`)", "x.js.map")).toContain("marker_name");
-    expect(marked("fs.readFileSync(`x${name}.js.map`)", "x.js.map")).not.toContain("marker_name");
+    expect(marked("fs.readFileSync(`x${name}.js.map`)", "x.js.map")).toContain("marker_name"); // the text after the last interpolation is a tail (a name made at run time)
+    expect(marked("fs.readFileSync(`x${name}`)", "x.js.map")).not.toContain("marker_name");
   });
 
   test("bun folds literal concatenations before a map path is trusted", () => {

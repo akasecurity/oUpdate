@@ -12,6 +12,15 @@ const LOAD = (name: string) => `const fs = require('fs');\nconst cfg = JSON.pars
 const PKG = (extra = "") => `{"name":"lib","version":"b","main":"lib/index.js"${extra}}`;
 const cases: [string, string, string, boolean][] = [
   ["replace idiom: the literal .js.map is the tail of index.js.map: map shown", LOAD("__filename.replace(/\\.js$/, '.js.map')"), PKG(), true],
+  ["a template whose text after the interpolation is the tail: map shown", LOAD("`${__filename.slice(0, -3)}.js.map`"), PKG(), true],
+  ["a template with two interpolations reads the text after the last one: map shown", LOAD("`${__dirname}/${__filename.slice(0, -3)}.js.map`"), PKG(), true],
+  ["a template whose interpolation holds braces reads the text after the last }: map shown", LOAD("`${({a: 1}).a && __filename.slice(0, -3)}.js.map`"), PKG(), true],
+  ["a template whose tail is one character before .map: the floor applies to the tail, map stays hashed", LOAD("`${__filename.slice(0, -1)}s.map`"), PKG(), false],
+  ["a template with a trailing interpolation after the tail: map shown", LOAD("`${__filename.slice(0, -3)}.js.map${String('')}`"), PKG(), true],
+  ["a template whose first literal is the tail, joined after the file path with a trailing interpolation: map shown", LOAD("__filename.slice(0, -3) + `.js.map${String('')}`"), PKG(), true],
+  ["a template whose first literal ends in the tail: map shown", LOAD("`x.js.map${__filename}`"), PKG(), true],
+  ["a plain string with a closing brace before the tail is not a tail of the name: map stays hashed", LOAD("__filename + 'a}.js.map'"), PKG(), false],
+  ["a template with no tail after the interpolation: map stays hashed", LOAD("`${__filename}.js`"), PKG(), false],
   ["slice then the tail .js.map: map shown", LOAD("__filename.slice(0, -3) + '.js.map'"), PKG(), true],
   ["a tail that is no tail of the map's name (xjs.map): map stays hashed", LOAD("__filename + 'xjs.map'.slice(1)"), PKG(), false],
   ["a lone code string .js.map with no loader still shows the map (it fails toward showing)", "exports.ext = '.js.map';\nexports.v = 2;\n", PKG(), true],
@@ -36,6 +45,8 @@ for (const [label, code, pkg, shown] of cases) test(label, async () => {
 }, 60_000);
 
 const kept: [string, Record<string, string>][] = [
+  ["a README quoting a template tail and no loader: map stays hashed", { "README.md": "Maps: \`\${name}.js.map\`\n" }],
+  ["a declaration file quoting a template tail: map stays hashed", { "lib/index.d.ts": "export declare const m: \`\${string}.js.map\`;\n" }],
   ["a README quoting .js.map and no loader: map stays hashed", { "README.md": "Maps: `fs.readFileSync('.js.map')` see '.js.map'\n" }],
   ["a declaration file quoting .js.map: map stays hashed", { "lib/index.d.ts": "export declare const m: '.js.map';\n" }],
   ["a one-character tail s.map in code and no loader: map stays hashed", { "lib/util.js": "exports.ext = 's.map';\n" }],
