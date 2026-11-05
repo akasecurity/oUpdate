@@ -2,6 +2,7 @@
 // app-bundle steps, and the brew status line.
 
 import { join } from "node:path";
+import { esc } from "./html.ts";
 import { appBundleUpgrade, realAppNet } from "./appbundle.ts";
 import type { ApplyConfig } from "./config.ts";
 import type { Exec } from "./exec.ts";
@@ -333,10 +334,10 @@ export async function brewSection(rt: RunCtx) {
     if (items.length) {
       const list = items.join("; ");
       b.unknownNote = `FLAGGED — awaiting tap approval: ${list} — approve a tap by adding it to ${where}${tbNote}`;
-      await notify(`⚠️ <b>${host} brew FLAGGED — awaiting tap approval</b>\n${list}${tbNote}\nHeld until the tap is approved; official Homebrew upgrades still proceed.\nApprove a tap once by adding a row to ${where} (tap, host or *, date, note); its updates then take the normal Type B review.\nLog: ${cfg.logFile ?? "-"}`);
+      await notify(`⚠️ <b>${host} brew FLAGGED — awaiting tap approval</b>\n${esc(list)}${esc(tbNote)}\nHeld until the tap is approved; official Homebrew upgrades still proceed.\nApprove a tap once by adding a row to ${esc(where)} (tap, host or *, date, note); its updates then take the normal Type B review.\nLog: ${cfg.logFile ?? "-"}`);
     } else {
       b.unknownNote = `FLAGGED — ${tbNote.slice(2)}`;
-      await notify(`⚠️ <b>${host} brew FLAGGED — trusted-tap cask skipped</b>\n${tbNote.slice(2)}\nLog: ${cfg.logFile ?? "-"}`);
+      await notify(`⚠️ <b>${host} brew FLAGGED — trusted-tap cask skipped</b>\n${esc(tbNote.slice(2))}\nLog: ${cfg.logFile ?? "-"}`);
     }
     log.push(`brew: awaiting tap approval — skipping [${unknownShown.join(" ")}${tbNote}], continuing with the rest`);
   }

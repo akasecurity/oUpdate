@@ -7,6 +7,7 @@
 //   - a HEAD install: its review and the quarantine of a keg that does not match it are too.
 
 import type { Reviewer } from "../review.ts";
+import { esc } from "./html.ts";
 import type { Caps } from "./chunked.ts";
 import { artifactKind } from "./formula-gates.ts";
 import { formulaReview, type FormulaEnv, type TapPin } from "./formula.ts";
@@ -80,7 +81,7 @@ export async function typeBReview(env: TypeBEnv, r: Reviewer, pkg: string, tap: 
   const reason = "source-built: the source diff review is not in this oupdate version — held for manual review";
   log.push(`  ${pkg}: ${reason}`);
   try {
-    await o.notify(`⚠️ <b>${o.host} Type B FLAG — ${pkg}</b>\n${reason}\nUpgrade: ${oldVer} → ${newVer}\nLog: ${o.logFile ?? "-"}`);
+    await o.notify(`⚠️ <b>${o.host} Type B FLAG — ${esc(pkg)}</b>\n${esc(reason)}\nUpgrade: ${esc(oldVer)} → ${esc(newVer)}\nLog: ${o.logFile ?? "-"}`);
   } catch {
     log.push(`${pkg}: the notice could not be sent`);
   }
@@ -102,7 +103,7 @@ export async function tapUnchangedSinceReview(env: TypeBEnv, pkg: string, pin: T
     else return true;
   }
   log.push(`  ${pkg}: tap changed after review (${reason}) — FLAG, not upgrading`);
-  await send(o, log, `⚠️ <b>${o.host} Type B FLAG — ${pkg}</b>\ntap changed after review (${reason}) — not upgraded\nLog: ${o.logFile ?? "-"}`);
+  await send(o, log, `⚠️ <b>${o.host} Type B FLAG — ${esc(pkg)}</b>\ntap changed after review (${esc(reason)}) — not upgraded\nLog: ${o.logFile ?? "-"}`);
   return false;
 }
 
@@ -139,7 +140,7 @@ export async function offTapDepsCurrent(env: TypeBEnv, pkg: string, tap: string,
     }
   }
   log.push(`  ${pkg}: ${reason}— FLAG, not upgrading (brew upgrade would install it too)`);
-  await send(o, log, `⚠️ <b>${o.host} Type B FLAG — ${pkg}</b>\n${reason}— not upgraded (brew would upgrade it as a dependency, unreviewed)\nLog: ${o.logFile ?? "-"}`);
+  await send(o, log, `⚠️ <b>${o.host} Type B FLAG — ${esc(pkg)}</b>\n${esc(reason)}— not upgraded (brew would upgrade it as a dependency, unreviewed)\nLog: ${o.logFile ?? "-"}`);
   return false;
 }
 
@@ -175,7 +176,7 @@ export async function typeBUpgrades(
     const list = await env.brew(["list", "--versions", `${tap}/${pkg}`]);
     if (firstVersion(list.out).startsWith("HEAD-")) {
       run.log.push(`  ${pkg}: HEAD install: its review is not in this oupdate version — FLAG, not upgrading`);
-      await send(o, run.log, `⚠️ <b>${o.host} Type B FLAG — ${pkg} (HEAD)</b>\nHEAD install: its review is not in this oupdate version — not upgraded\nLog: ${o.logFile ?? "-"}`);
+      await send(o, run.log, `⚠️ <b>${o.host} Type B FLAG — ${esc(pkg)} (HEAD)</b>\nHEAD install: its review is not in this oupdate version — not upgraded\nLog: ${o.logFile ?? "-"}`);
       run.flagged = true;
       continue;
     }

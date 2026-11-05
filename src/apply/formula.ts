@@ -8,6 +8,7 @@
 // Return codes, as in the bash: 0 the formula may install, 1 FLAG (notified), 2 cannot review.
 
 import type { Reviewer } from "../review.ts";
+import { esc } from "./html.ts";
 import { chunkedReview, type Caps } from "./chunked.ts";
 import { artifactKind, formulaDeps, formulaUrls, loadsOtherFiles, supportFilesChanged, urlOrigin } from "./formula-gates.ts";
 import { gatherSurface, type Surface } from "./surface.ts";
@@ -131,7 +132,7 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
   };
   const gate = async (reason: string): Promise<FormulaReviewResult> => {
     log.push(`${a.pkg}: ${reason} — FLAG`);
-    await send(`⚠️ <b>${a.host} Type B FLAG — ${a.pkg} (formula)</b>\n${reason}\nUpgrade: ${upgrade}\nLog: ${a.logFile ?? "-"}`);
+    await send(`⚠️ <b>${a.host} Type B FLAG — ${esc(a.pkg)} (formula)</b>\n${esc(reason)}\nUpgrade: ${esc(upgrade)}\nLog: ${a.logFile ?? "-"}`);
     return { rc: 1, calls: 0, log, reason };
   };
 
@@ -140,7 +141,7 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
   const ftext = a.tapDir && a.head && rbPath ? await env.readFile(`${a.tapDir}/${rbPath}`) : undefined;
   if (ftext === undefined) {
     log.push(`${a.pkg}: cannot locate the tap's formula file in a git checkout (tap dir '${a.tapDir}', path '${rbPath}') — FLAG`);
-    await send(`⚠️ <b>${a.host} Type B FAIL — ${a.pkg} (formula)</b>\nCould not locate the tap's formula file for review. Manual review required.\nLog: ${a.logFile ?? "-"}`);
+    await send(`⚠️ <b>${a.host} Type B FAIL — ${esc(a.pkg)} (formula)</b>\nCould not locate the tap's formula file for review. Manual review required.\nLog: ${a.logFile ?? "-"}`);
     return { rc: 2, calls: 0, log };
   }
 

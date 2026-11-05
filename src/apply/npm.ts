@@ -9,13 +9,11 @@
 // mention it; the stuck lane counts "<name>=<latest>" like the brew lane.
 
 import { untrusted, type Reviewer } from "../review.ts";
+import { esc } from "./html.ts";
 import type { Exec } from "./exec.ts";
 import { reviewChunk } from "./verdict.ts";
 import { VERDICT_CONTRACT } from "./formula.ts";
 import { dependencyDowngrades } from "../prepass.ts";
-
-/** Registry and model text for a notice that is HTML: markup characters are entities, so a hook body or a reason cannot add tags. */
-const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /** The phase's record, owned by the caller and filled as the phase goes, so a stop part-way keeps it. */
 export interface NpmRun {

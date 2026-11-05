@@ -37,6 +37,14 @@ describe("formulaReview", () => {
     expect(v.notices).toHaveLength(1);
     expect(v.notices[0]).toStartWith("⚠️ <b>fixture Type B FLAG — tool (formula)</b>");
   });
+  test("a dependency name in a FLAG notice is HTML-escaped: it cannot add markup", async () => {
+    const v = await review({ newExtra: `  depends_on "evil/tap/<img src=x>&y"` });
+    expect(v.rc).toBe(1);
+    expect(v.notices).toHaveLength(1);
+    expect(v.notices[0]).toContain("evil/tap/&lt;img src=x&gt;&amp;y");
+    expect(v.notices[0]).not.toContain("<img");
+    expect(v.notices[0]).toStartWith("⚠️ <b>fixture Type B FLAG — tool (formula)</b>");
+  });
   test("no tap revision on the receipt → the whole formula file, and the prompt says so", async () => {
     const v = await review({ receipt: "none", oldUrl: SOURCE("1.0"), newUrl: SOURCE("1.1"), artifact: "source" });
     expect(v.rc).toBe(0);
