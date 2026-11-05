@@ -2041,7 +2041,7 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
       const low = str.toLowerCase();
       if (low === ".map" && !isCode) continue; // a ".map" in a README or other text file is not a loader
       // A name built at run time from parts (["index", "js", "map"].join(".")) leaves the bare word "map" as a string of code: in a loader (readsJson) it counts like the ".map" tail. The match is exact case: the ".map" check is lower-cased because a file name may be written in any case, but "Map" as a bare string is the Map type (Babel helpers) and would unhash most transpiled packages.
-      if (str === "map" && readsJson) names.add(".map");
+      if (str === "map" && readsJson && !mapOnlyInWordTables(codeText)) names.add(".map");
       names.add(low);
       // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
@@ -2050,6 +2050,22 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
     }
   }
   return { names, stems };
+}
+
+/**
+ * True when every quoted "map" in the code sits inside a table of words (a word list or name table: 30 or more short quoted strings, comma separated, within 400
+ * characters on each side), not a name being put together. A bundle that carries a word list and also reads JSON would otherwise show every map of its package.
+ * A "map" that is not in the text as a literal (it came from folding) is never excused. Known limit: a loader that hides its "map" among 30 decoy strings is not counted.
+ */
+function mapOnlyInWordTables(code: string): boolean {
+  let seen = 0;
+  for (const m of code.matchAll(/(["'`])map\1/g)) {
+    seen++;
+    const at = m.index ?? 0;
+    const window = code.slice(Math.max(0, at - 400), at + 400);
+    if ((window.match(/["'`][^"'`\\\n,]{1,24}["'`]\s*,/g) ?? []).length < 30) return false;
+  }
+  return seen > 0;
 }
 
 /** True when a non-map file contains `sourcesContent`: code that reads a map's embedded sources. The text `.map` is not
