@@ -10,6 +10,7 @@ const MARK = "QZMARKQZ";
 const map = (seed: string) => JSON.stringify({ version: 3, file: "index.js", sources: ["a.ts"], names: [], sourcesContent: ["ok"], mappings: ("AAAA" + seed + "CAAO,aAAP,OAAO,uBAAP;").repeat(250_000) });
 const words = (n: number, withMap: boolean) => Array.from({ length: n }, (_, i) => (withMap && i === n >> 1 ? "map" : "w" + i.toString(36))).map((w) => JSON.stringify(w)).join(",\n  ");
 const READS = "const fs = require('fs');\nconst cfg = JSON.parse(fs.readFileSync(__dirname + '/cfg.json', 'utf8'));\nexports.v = cfg.v;\n";
+const TPL_LOADER = "const fs = require('fs');\nconst cfg = JSON.parse(fs.readFileSync(`${__dirname}/${[\"index\", \"js\", \"map\"].join(\".\")}`, 'utf8'));\nexports.v = cfg.v;\n";
 const cases: [string, string, boolean][] = [
   ["word list with map, bundle reads JSON: map stays hashed", `const WORDS = [\n  ${words(2048, true)}\n];\n${READS}`, false],
   ["a run-time name built from parts: map shown", `${READS}const n = ["index", "js", "map"].join(".");\n`, true],
@@ -20,6 +21,7 @@ const cases: [string, string, boolean][] = [
   ["a table of numbers beside a name built from parts: map shown", `${READS}const T = [${Array.from({ length: 60 }, (_, i) => i).join(", ")}];\nconst n = ["index", "js", "map"].join(".");\n`, true],
   ["a word list directly followed by a name built from parts: map shown", `${READS}const W = [\n  ${words(40, false)}\n]; const n = ["index", "js", "map"].join(".");\n`, true],
   ["a word list that holds map many times, one pass per file: map stays hashed", `const W = [\n  ${Array.from({ length: 3000 }, (_, i) => (i % 31 === 0 ? "\"map\"" : JSON.stringify("w" + i))).join(",\n  ")}\n];\n${READS}`, false],
+  ["a word list holding map and a loader whose name is built inside a template interpolation: map shown", `const WORDS = [\n  ${words(2048, true)}\n];\n${TPL_LOADER}`, true],
   // Known limit: decoys before, after or around the "map" in the same array, template strings included, make it look like a table.
   ["known limit: 40 template-string decoys after map hide it", `${READS}const n = ["map", ${Array.from({ length: 40 }, (_, i) => "`w" + i + "`").join(", ")}].slice(0, 1);\n`, false],
   // Known limit: 40 decoy strings around the "map" make it look like a table, so the map stays hashed.

@@ -2056,13 +2056,16 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
 /**
  * True when every quoted "map" in the code is one element of an array literal that holds 30 or more short quoted strings (a word list or name table), so it is
  * not a name being put together. Only the array that directly holds the "map" counts, from its "[" to the matching "]"; a list elsewhere in the file excuses nothing.
- * A bundle that carries a word list and also reads JSON would otherwise show every map of its package. A "map" that is not in the text as a literal is never excused (the parser prints folded and escaped forms such as "m" + "ap" as a literal, so those are judged like any other). Known limit: a loader that hides its "map" among 30 or more decoy strings in the same array (before, after or around it; template
+ * A bundle that carries a word list and also reads JSON would otherwise show every map of its package. Every quoted "map" in the text is counted, a template's \${} included, and the map shows unless all of them are excused (the parser prints folded and escaped forms such as "m" + "ap" as a literal, so those are judged like any other). Known limit: a loader that hides its "map" among 30 or more decoy strings in the same array (before, after or around it; template
  * strings count) is not counted, so its map stays hashed.
  */
 function mapOnlyInWordTables(code: string): boolean {
-  type Frame = { open: string; short: number; hasMap: boolean };
+  // Every quoted "map" in the text counts as seen, inside a template's ${} too; only a "map" the walk below places in a long enough array is excused.
+  const seen = [...code.matchAll(/(["'`])map\1/g)].length;
+  if (!seen) return false;
+  type Frame = { open: string; short: number; maps: number };
   const stack: Frame[] = [];
-  let seen = 0, counted = 0;
+  let excused = 0;
   for (let i = 0; i < code.length; i++) {
     const c = code[i]!;
     if (c === '"' || c === "'" || c === "`") {
@@ -2070,20 +2073,18 @@ function mapOnlyInWordTables(code: string): boolean {
       while (j < code.length && code[j] !== c && !(c !== "`" && code[j] === "\n")) j += code[j] === "\\" ? 2 : 1;
       const text = code.slice(i + 1, j);
       const top = stack[stack.length - 1];
-      if (text === "map") {
-        seen++;
-        if (top?.open === "[") top.hasMap = true; else counted++;
+      if (top?.open === "[") {
+        if (text === "map") top.maps++;
+        if (text.length >= 1 && text.length <= 24) top.short++;
       }
-      if (top?.open === "[" && text.length >= 1 && text.length <= 24) top.short++;
       i = j;
-    } else if (c === "[" || c === "(" || c === "{") stack.push({ open: c, short: 0, hasMap: false });
+    } else if (c === "[" || c === "(" || c === "{") stack.push({ open: c, short: 0, maps: 0 });
     else if (c === "]" || c === ")" || c === "}") {
       const fr = stack.pop();
-      if (fr?.hasMap && fr.short < 30) counted++;
+      if (fr && fr.open === "[" && fr.short >= 30) excused += fr.maps;
     }
   }
-  for (const fr of stack) if (fr.hasMap) counted++;
-  return seen > 0 && counted === 0;
+  return excused === seen;
 }
 
 /** True when a non-map file contains `sourcesContent`: code that reads a map's embedded sources. The text `.map` is not
