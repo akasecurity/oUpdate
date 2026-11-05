@@ -54,7 +54,7 @@ const RT_REV = "m.names.reverse().join('')";
 const RT_LOADER = (name: string, parse = (text: string) => `JSON.parse(${text})`) => `const fs = require('fs');\nconst m = ${parse(`fs.readFileSync(${name}, 'utf8')`)};\nrequire('vm').runInThisContext(${RT_REV});\nexports.v = 2;\n`;
 const RT_SHAPES: [string, string, string][] = [
   ["split-parts", "a name built from '.m' and String('ap')", RT_LOADER("__filename + '.m' + String('ap')")],
-  ["tail-not-of-the-name", "a name ending in 'x.map'.slice(1): the literal 'x.map' is no tail of the map's own name, so the review does not match it", RT_LOADER("__filename + 'x.map'.slice(1)")],
+  ["tail-not-of-the-name", "a name ending in 'xjs.map'.slice(1): the literal 'xjs.map' is no tail of the map's own name, so the review does not match it", RT_LOADER("__filename + 'xjs.map'.slice(1)")],
   ["short-tail", "a name ending in a one-character tail: __filename.slice(0, -1) + 's.map' (below the two-character floor)", RT_LOADER("__filename.slice(0, -1) + 's.map'")],
   ["template-tail", "a name ending in a template whose own text ends in the tail: the template's text after its last interpolation is not read as a tail", RT_LOADER("`${__filename.slice(0, -3)}.js.map`")],
   ["replace-marker", "a name made by replacing a marker character", RT_LOADER("__filename.replace(/js$/, 'jsXmap'.replace('X', '.'))")],

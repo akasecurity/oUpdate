@@ -13,7 +13,8 @@ const PKG = (extra = "") => `{"name":"lib","version":"b","main":"lib/index.js"${
 const cases: [string, string, string, boolean][] = [
   ["replace idiom: the literal .js.map is the tail of index.js.map: map shown", LOAD("__filename.replace(/\\.js$/, '.js.map')"), PKG(), true],
   ["slice then the tail .js.map: map shown", LOAD("__filename.slice(0, -3) + '.js.map'"), PKG(), true],
-  ["a tail that is no tail of the map's name (x.map): map stays hashed", LOAD("__filename + 'x.map'.slice(1)"), PKG(), false],
+  ["a tail that is no tail of the map's name (xjs.map): map stays hashed", LOAD("__filename + 'xjs.map'.slice(1)"), PKG(), false],
+  ["a lone code string .js.map with no loader still shows the map (it fails toward showing)", "exports.ext = '.js.map';\nexports.v = 2;\n", PKG(), true],
   ["a package.json files glob that ends in .js.map and no loader: map stays hashed", "exports.v = 2;\n", PKG(',"files":["lib/**/*.js.map"]'), false],
   ["a package.json script that names .d.ts.map and no loader: map stays hashed", "exports.v = 2;\n", PKG(',"scripts":{"clean":"del lib/**/*.d.ts.map"}'), false],
   ["a .js.map string that is only in a comment: map stays hashed", "// emit the .js.map file next to it\nexports.v = 2;\n", PKG(), false],
