@@ -48,6 +48,22 @@ const A = SPAWN.slice(0, HALF), B = SPAWN.slice(HALF);
 const ENTRY = '{"name":"lib","version":"b","main":"lib/index.js","bin":{"cli":"bin/cli"}}';
 const Q = [SPAWN];
 
+// Run-time map names the review does not match: the loader assembles the file name so that no whole name, bare ".map" or bare "map" string, or stem of the map reaches the review.
+// Each loader puts the payload back from reversed names, as the reversed-string case does, so only a shown map can reveal it. Each case changes one thing from a loader the review does show.
+const RT_REV = "m.names.reverse().join('')";
+const RT_LOADER = (name: string, parse = (text: string) => `JSON.parse(${text})`) => `const fs = require('fs');\nconst m = ${parse(`fs.readFileSync(${name}, 'utf8')`)};\nrequire('vm').runInThisContext(${RT_REV});\nexports.v = 2;\n`;
+const RT_SHAPES: [string, string, string][] = [
+  ["split-parts", "a name built from '.m' and String('ap')", RT_LOADER("__filename + '.m' + String('ap')")],
+  ["name-tail-literal", "a name that ends in a literal which is only the tail of the map's name (the .replace(/\\.js$/, '.js.map') idiom): the review matches a whole name, the bare .map or a stem, not a tail", RT_LOADER("__filename.replace(/\\.js$/, '.js.map')")],
+  ["replace-marker", "a name made by replacing a marker character", RT_LOADER("__filename.replace(/js$/, 'jsXmap'.replace('X', '.'))")],
+  ["lower-case", "a name made by lower-casing an upper-case word", RT_LOADER("__filename + '.' + 'MAP'.toLowerCase()")],
+  ["ends-with-ap", "a directory scan that matches the suffix 'ap'", "const fs = require('fs');\nconst f = fs.readdirSync(__dirname).find((x) => x.endsWith('ap'));\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + f, 'utf8'));\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
+  ["eval-parse", "a map parsed with eval instead of JSON.parse (the file has a bare map string but no JSON.parse)", RT_LOADER("[__filename, 'map'].join('.')", (text) => `eval('(' + ${text} + ')')`)],
+  ["newline-words", "a name joined from words split on newlines", "const fs = require('fs');\nconst w = 'index\\njs\\nmap'.split('\\n');\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + w.join('.'), 'utf8'));\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
+  ["char-codes", "a name built from character codes", RT_LOADER("__filename + '.' + String.fromCharCode(109, 97, 112)")],
+];
+const RT_NAMES = ["_process').exec(process.env.Q)", "require('child"];
+
 export const EVASIONS: EvasionCase[] = [
   { id: "swap-clean-and-payload", note: "entries swapped: payload moves to index 0, loader reads 0", expect: "shown", key: Q, code: PLAIN(SC(0)), old: { sources: ["a", "a"], sc: ["ok", SPAWN] }, next: { sources: ["a", "a"], sc: [SPAWN, "ok"] } },
   { id: "swap-with-new-clean-text", note: "payload at index 0, the other entry gets new text", expect: "shown", key: Q, code: PLAIN(SC(0)), old: { sources: ["a", "a"], sc: ["ok", SPAWN] }, next: { sources: ["a", "a"], sc: [SPAWN, "ok2"] } },
@@ -71,6 +87,7 @@ export const EVASIONS: EvasionCase[] = [
   { id: "same-index-same-text-reused", note: "an entry unchanged at its index; its text already shipped in the last release, so a padded map lists no new text", expect: "hidden", baseWeakness: true, key: Q, size: "big", code: FOLDED(SC(1)), old: { sources: ["a", "b"], sc: ["ok", SPAWN] }, next: { sources: ["a", "b"], sc: ["ok2", SPAWN] } },
   { id: "names-split-inside-word-reversed", note: "payload split inside child_process across names, put back in reverse by a loader that finds its map with a bare map string: the review shows the whole map", expect: "shown", key: ["_process').exec(process.env.Q)"], code: READDIR("m.names.reverse().join('')"), old: { sources: ["a.ts"] }, next: { sources: ["a.ts"], names: ["_process').exec(process.env.Q)", "require('child"] } },
   { id: "name-reversed-string", note: "payload split inside child_process across names, put back in reverse by a loader that builds the map suffix by reversing a string: no string of code names the map", expect: "hidden", baseWeakness: true, key: ["_process').exec(process.env.Q)"], code: REVNAME("m.names.reverse().join('')"), old: { sources: ["a.ts"] }, next: { sources: ["a.ts"], names: ["_process').exec(process.env.Q)", "require('child"] } },
+  ...RT_SHAPES.map(([id, what, code]): EvasionCase => ({ id: "run-time-name-" + id, note: "payload split inside child_process across names, put back in reverse by a loader whose map name is " + what + ", so the review does not match its name", expect: "hidden", baseWeakness: true, key: ["_process').exec(process.env.Q)"], code, old: { sources: ["a.ts"] }, next: { sources: ["a.ts"], names: RT_NAMES } })),
 ];
 
 export interface EvasionRow { id: string; size: "big" | "small"; expect: "shown" | "hidden"; baseWeakness: boolean; shown: boolean; ran: boolean; ok: boolean }
