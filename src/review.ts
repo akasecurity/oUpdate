@@ -2032,7 +2032,7 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
     // A bare ".map" is the tail of a name built at run time (a string, template text, a regex source). It counts in the code of a code file, where comments are already removed.
     // A file the parser rejects, whose transform throws, or that is not parsed (a declaration file) is scanned raw; one that transforms to empty output (only comments) adds no names.
     const codeText = parsed ? (parsed.rejected || !parsed.folded ? text : parsed.code) : "";
-    // A bare "map" counts as the tail of a run-time name only in a file that also reads a file or directory and calls JSON.parse: a loader. Only that file-level gate applies: inside such a file any "map" string counts, except when every one is an element of an array holding 30 or more short strings (a word list: mapOnlyInWordTables). A MIME table is not excused (its strings are long or hold commas) and can unhash its package's maps (rare; measured on a package cache).
+    // A bare "map" counts as the tail of a run-time name only in a file that also reads a file or directory and calls JSON.parse: a loader. Only that file-level gate applies: inside such a file any "map" string counts, except when every one is an element of an array holding 30 or more short strings (a word list: mapOnlyInWordTables). A table of 30 or more short strings that holds "map" is excused whatever it lists (a short MIME table too); a loader that hides among them is the known limit named at mapOnlyInWordTables.
     let tableOnly: boolean | undefined; // mapOnlyInWordTables(codeText), computed on first use: one pass per file
     const readsJson = !!parsed && /\b(?:readFileSync|readFile|readdirSync|readdir)\b|fs\/promises/.test(codeText) && /\bJSON\s*\.\s*parse\b/.test(codeText);
     if (parsed) for (const m of codeText.matchAll(/[A-Za-z0-9_.\/@-]+/g)) if (m[0].toLowerCase() === ".map" && codeText[m.index! + 4] !== "(") names.add(".map");
@@ -2066,25 +2066,62 @@ function mapOnlyInWordTables(code: string): boolean {
   type Frame = { open: string; short: number; maps: number };
   const stack: Frame[] = [];
   let excused = 0;
+  // Template text from i up to the closing backtick, or up to a ${ that starts code: the index after it and whether code starts.
+  const template = (i: number): { next: number; interp: boolean } => {
+    for (let j = i; j < code.length; j++) {
+      const c = code[j]!;
+      if (c === "\\") j++;
+      else if (c === "`") return { next: j + 1, interp: false };
+      else if (c === "$" && code[j + 1] === "{") return { next: j + 2, interp: true };
+    }
+    return { next: code.length, interp: false };
+  };
+  // A string counts as an array element only when a "[" or "," comes before it and a "," or "]" after it (blanks aside): `const e = "map"` is not an element.
+  const element = (from: number, to: number): boolean => {
+    let p = from - 1;
+    while (p >= 0 && /\s/.test(code[p]!)) p--;
+    let n = to;
+    while (n < code.length && /\s/.test(code[n]!)) n++;
+    return (code[p] === "[" || code[p] === ",") && (code[n] === "," || code[n] === "]");
+  };
+  const CLOSE: Record<string, string> = { "[": "]", "(": ")", "{": "}", "${": "}" };
   for (let i = 0; i < code.length; i++) {
     const c = code[i]!;
-    if (c === '"' || c === "'" || c === "`") {
+    const top = stack[stack.length - 1];
+    if (c === '"' || c === "'") {
       let j = i + 1;
-      while (j < code.length && code[j] !== c && !(c !== "`" && code[j] === "\n")) j += code[j] === "\\" ? 2 : 1;
+      while (j < code.length && code[j] !== c && code[j] !== "\n") j += code[j] === "\\" ? 2 : 1;
       const text = code.slice(i + 1, j);
-      const top = stack[stack.length - 1];
-      if (top?.open === "[") {
+      if (top?.open === "[" && element(i, j + 1)) {
         if (text === "map") top.maps++;
         if (text.length >= 1 && text.length <= 24) top.short++;
       }
       i = j;
-    } else if (c === "[" || c === "(" || c === "{") stack.push({ open: c, short: 0, maps: 0 });
+    } else if (c === "`") {
+      const t = template(i + 1);
+      const text = code.slice(i + 1, t.next - (t.interp ? 2 : 1));
+      if (t.interp) stack.push({ open: "${", short: 0, maps: 0 });
+      else if (top?.open === "[" && element(i, t.next)) {
+        if (text === "map") top.maps++;
+        if (text.length >= 1 && text.length <= 24) top.short++;
+      }
+      i = t.next - 1;
+    } else if (regexAt(code, i)) i = Math.max(skipRegex(code, i), i + 1) - 1;
+    else if (c === "[" || c === "(" || c === "{") stack.push({ open: c, short: 0, maps: 0 });
     else if (c === "]" || c === ")" || c === "}") {
       const fr = stack.pop();
-      if (fr && fr.open === "[" && fr.short >= 30) excused += fr.maps;
+      // A closer that does not match its opener means the walk lost its place (a syntax it does not read): excuse nothing.
+      if (!fr || CLOSE[fr.open] !== c) return false;
+      if (fr.open === "[" && fr.short >= 30) excused += fr.maps;
+      if (fr.open === "${") {
+        const t = template(i + 1);
+        if (t.interp) stack.push({ open: "${", short: 0, maps: 0 });
+        i = t.next - 1;
+      }
     }
   }
-  return excused === seen;
+  // Frames still open at the end are an unbalanced walk too.
+  return stack.length === 0 && excused === seen;
 }
 
 /** True when a non-map file contains `sourcesContent`: code that reads a map's embedded sources. The text `.map` is not
