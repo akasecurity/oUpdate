@@ -57,6 +57,8 @@ const RT_SHAPES: [string, string, string][] = [
   ["tail-not-of-the-name", "a name ending in 'xjs.map'.slice(1): the literal 'xjs.map' is no tail of the map's own name, so the review does not match it", RT_LOADER("__filename + 'xjs.map'.slice(1)")],
   ["short-tail", "a name ending in a one-character tail: __filename.slice(0, -1) + 's.map' (below the two-character floor)", RT_LOADER("__filename.slice(0, -1) + 's.map'")],
   ["template-quote", "a name made in a template whose interpolation holds a backtick in a string", RT_LOADER("`${'\`'.length ? __filename.slice(0, -3) : ''}.js.map`")],
+  ["template-split-tail", "a name whose tail is split by a non-constant interpolation: `.js.ma${String('')}p`", RT_LOADER("__filename.slice(0, -3) + `.js.ma${String('')}p`")],
+  ["template-nested", "a name made in a template whose interpolation holds a template: ${a ? `${b}` : c}.js.map", RT_LOADER("`${process.argv.length ? `${__filename.slice(0, -3)}` : __filename.slice(0, -3)}.js.map`")],
   ["replace-marker", "a name made by replacing a marker character", RT_LOADER("__filename.replace(/js$/, 'jsXmap'.replace('X', '.'))")],
   ["lower-case", "a name made by lower-casing an upper-case word", RT_LOADER("__filename + '.' + 'MAP'.toLowerCase()")],
   ["ends-with-ap", "a directory scan that matches the suffix 'ap'", "const fs = require('fs');\nconst f = fs.readdirSync(__dirname).find((x) => x.endsWith('ap'));\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + f, 'utf8'));\nrequire('vm').runInThisContext(" + RT_REV + ");\nexports.v = 2;\n"],
@@ -68,8 +70,8 @@ const RT_SHAPES: [string, string, string][] = [
 const TAIL_SHOWN: [string, string, string][] = [
   ["replace-idiom", "a name made with replace(/\\.js$/, '.js.map'): the literal is the tail of the map's name", RT_LOADER("__filename.replace(/\\.js$/, '.js.map')")],
   ["template-tail", "a name made in a template whose literal text after the last interpolation is the tail: `${__filename.slice(0, -3)}.js.map`", RT_LOADER("`${__filename.slice(0, -3)}.js.map`")],
-  ["template-nested", "a name made in a template whose interpolation holds a template: the literal text after its last interpolation is the tail", RT_LOADER("`${__filename.slice(0, -3) ? `${''}` : ''}.js.map`")],
   ["template-trailing", "a name made in a template with a non-constant interpolation after the tail", RT_LOADER("`${__filename.slice(0, -3)}.js.map${String('')}`")],
+  ["template-after-name", "a template tail joined after the file path, with a trailing interpolation", RT_LOADER("__filename.slice(0, -3) + `.js.map${String('')}`")],
   ["slice-then-tail", "a path cut with slice(0, -3) and the tail '.js.map' added", RT_LOADER("__filename.slice(0, -3) + '.js.map'")],
 ];
 const RT_NAMES = ["_process').exec(process.env.Q)", "require('child"];
