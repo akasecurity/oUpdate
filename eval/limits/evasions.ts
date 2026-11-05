@@ -48,7 +48,7 @@ const A = SPAWN.slice(0, HALF), B = SPAWN.slice(HALF);
 const ENTRY = '{"name":"lib","version":"b","main":"lib/index.js","bin":{"cli":"bin/cli"}}';
 const Q = [SPAWN];
 
-// Run-time map names with no ".map" string and no bare "map" string in the code: the loader assembles the file name in a way the review does not read.
+// Run-time map names the review does not read: the loader assembles the file name without a ".map" string or a bare "map" string it extracts (the template-interpolation case keeps its "map" inside a ${}, which is not extracted).
 // Each loader puts the payload back from reversed names, as the reversed-string case does, so only a shown map can reveal it.
 const RT_REV = "m.names.reverse().join('')";
 const RT_READ = (name: string) => `const fs = require('fs');\nconst m = JSON.parse(fs.readFileSync(${name}, 'utf8'));\nrequire('vm').runInThisContext(${RT_REV});\nexports.v = 2;\n`;
