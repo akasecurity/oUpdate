@@ -13,6 +13,7 @@
 // cutting code.
 
 import type { Reviewer } from "../review.ts";
+import { esc } from "./html.ts";
 import { ground } from "./ground.ts";
 import { reviewChunk } from "./verdict.ts";
 
@@ -167,7 +168,7 @@ export async function chunkedReview(r: Reviewer, a: ChunkedReviewInput): Promise
   if (reason === undefined) return { approved: true, calls, log };
   // One notice per FLAG; a failed notice is logged and the FLAG still stands.
   try {
-    await a.notify(`⚠️ <b>${a.host} Type B FLAG — ${a.label}</b>\n${reason}\nUpgrade: ${a.upgrade}\nLog: ${a.logFile ?? "-"}`);
+    await a.notify(`⚠️ <b>${a.host} Type B FLAG — ${esc(a.label)}</b>\n${esc(reason)}\nUpgrade: ${esc(a.upgrade)}\nLog: ${a.logFile ?? "-"}`);
   } catch {
     log.push(`${a.label}: the FLAG notice could not be sent`);
   }

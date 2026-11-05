@@ -353,7 +353,7 @@ export async function brewSection(rt: RunCtx) {
       const held = new Set(a.held);
       typeA = typeA.filter((p) => !held.has(p));
       keptCasks = keptCasks.filter((p) => !held.has(p));
-      await notify(`⚠️ <b>${host} Type A — holding ${a.held.length} pkg(s), upgrading rest</b>\nheld: ${a.held.join(" ")}\nSensitive major increase or unverifiable version baseline.\nLog: ${cfg.logFile ?? "-"}`);
+      await notify(`⚠️ <b>${host} Type A — holding ${a.held.length} pkg(s), upgrading rest</b>\nheld: ${esc(a.held.join(" "))}\nSensitive major increase or unverifiable version baseline.\nLog: ${cfg.logFile ?? "-"}`);
       log.push(`Type A: holding [${a.held.join(" ")}] — upgrading [${[...typeA, ...keptCasks].join(" ")}]`);
     }
     typeA = await notWaiting(rt, typeA);
@@ -453,7 +453,7 @@ async function versionHeld(rt: RunCtx, pkg: string, reviewed: string | undefined
   b.failed.push(`version:${pkg}`);
   b.flagged = true;
   log.push(`  Type A: ${why} — FLAGGED`);
-  await notify(`⚠️ <b>${host} Type A FLAGGED</b>\n${why}\nLog: ${cfg.logFile ?? "-"}`);
+  await notify(`⚠️ <b>${host} Type A FLAGGED</b>\n${esc(why)}\nLog: ${cfg.logFile ?? "-"}`);
   return false;
 }
 
@@ -598,11 +598,11 @@ export async function casksSection(rt: RunCtx) {
   } finally {
     if (b.casksFailed.length) {
       b.flagged = true;
-      await notify(`⚠️ <b>${host} casks FAILED</b>\ncasks: ${b.casksFailed.join(" ")}\nLog: ${cfg.logFile ?? "-"}`);
+      await notify(`⚠️ <b>${host} casks FAILED</b>\ncasks: ${esc(b.casksFailed.join(" "))}\nLog: ${cfg.logFile ?? "-"}`);
       log.push(`deferred casks failed: ${b.casksFailed.join(" ")}`);
     }
     if (b.casksSudo.length) {
-      await notify(`ℹ️ <b>${host} casks need manual upgrade (sudo)</b>\n${b.casksSudo.join(" ")}\nUpgrade interactively: brew upgrade --cask --greedy ${b.casksSudo.join(" ")}\nLog: ${cfg.logFile ?? "-"}`);
+      await notify(`ℹ️ <b>${host} casks need manual upgrade (sudo)</b>\n${esc(b.casksSudo.join(" "))}\nUpgrade interactively: brew upgrade --cask --greedy ${esc(b.casksSudo.join(" "))}\nLog: ${cfg.logFile ?? "-"}`);
     }
   }
 }

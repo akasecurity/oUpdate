@@ -67,6 +67,23 @@ describe("chunkedReview", () => {
     expect(v).toMatchObject({ approved: false, calls: 3 });
     expect(v.notices[0]).toContain("(ungrounded)");
   });
+  test("the FLAG notice escapes the reviewer's reason, the label and the upgrade text", async () => {
+    const quoted = 'FLAG: "<a href=x>click</a>" & more (indicator 4)';
+    const { r } = scripted([APPROVE, quoted, quoted], APPROVE);
+    const notices: string[] = [];
+    const res = await chunkedReview(r, {
+      title: "Type B review", label: "pk<i>g</i>", upgrade: "1.1<b>", head: "H", tail: "T",
+      diff: threeFiles, caps: MECH, host: "fixture", notify: (x) => void notices.push(x),
+    });
+    expect(res.approved).toBe(false);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('&lt;a href=x&gt;click&lt;/a&gt;" &amp; more');
+    expect(notices[0]).toContain("pk&lt;i&gt;g&lt;/i&gt;");
+    expect(notices[0]).toContain("Upgrade: 1.1&lt;b&gt;");
+    expect(notices[0]).not.toContain("<a href");
+    expect(notices[0]).not.toContain("<i>");
+    expect(notices[0]!.startsWith("⚠️ <b>fixture Type B FLAG — ")).toBe(true);
+  });
   test("a FLAG with no quote gets one re-review; a repeat still stands", async () => {
     const { r } = scripted(["FLAG\nsuspicious refactor", "FLAG\nstill suspicious"], APPROVE);
     const v = await review(r, threeFiles);
