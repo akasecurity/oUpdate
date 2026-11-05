@@ -2046,6 +2046,7 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
       // A name built at run time from parts (["index", "js", "map"].join(".")) leaves the bare word "map" as a string of code: in a loader (readsJson) it counts like the ".map" tail. The match is exact case: the ".map" check is lower-cased because a file name may be written in any case, but "Map" as a bare string is the Map type (Babel helpers) and would unhash most transpiled packages.
       if (str === "map" && readsJson && !(tableOnly ??= mapOnlyInWordTables(codeText))) names.add(".map");
       names.add(low);
+      // Two or more characters before ".map": a one-character tail ("s.map", "x.map") would match the name of almost any map, so it is a known limit (see the evasion rows).
       if (isCode && !describes && low.length >= ".map".length + 2 && low.endsWith(".map")) tails.add(low);
       // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);

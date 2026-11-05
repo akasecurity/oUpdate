@@ -33,3 +33,24 @@ for (const [label, code, pkg, shown] of cases) test(label, async () => {
   });
   expect(reviewed.join("").includes(MARK)).toBe(shown);
 }, 60_000);
+
+const kept: [string, Record<string, string>][] = [
+  ["a README quoting .js.map and no loader: map stays hashed", { "README.md": "Maps: `fs.readFileSync('.js.map')` see '.js.map'\n" }],
+  ["a declaration file quoting .js.map: map stays hashed", { "lib/index.d.ts": "export declare const m: '.js.map';\n" }],
+  ["a one-character tail s.map in code and no loader: map stays hashed", { "lib/util.js": "exports.ext = 's.map';\n" }],
+];
+for (const [label, extra] of kept) test(label, async () => {
+  const reviewed: string[] = [];
+  await reviewUpdate({
+    eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
+    registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+    advisories: { query: async () => [] },
+    reviewer: { name: "fake", review: async (p) => (reviewed.push(p), "APPROVE\nno attack indicators found") },
+    cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"), chunkChars: 60000,
+    loadArtifacts: async () => ({
+      old: files({ "package.json": '{"name":"lib","version":"a","main":"lib/index.js"}', "lib/index.js": "exports.v = 1;\n", "lib/index.js.map": map("A") }),
+      new: files({ "package.json": PKG(), "lib/index.js": "exports.v = 2;\n", "lib/index.js.map": map(MARK), ...extra }),
+    }),
+  });
+  expect(reviewed.join("").includes(MARK)).toBe(false);
+}, 60_000);

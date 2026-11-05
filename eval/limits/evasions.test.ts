@@ -10,7 +10,7 @@ const mism = (rows: { ok: boolean; id: string; size: string }[]) => rows.filter(
 test("every evasion case is labeled and the labels match what the reviewer is shown", async () => {
   const rows = await scoreEvasions();
   expect(rows.filter((r) => !r.ok).map((r) => `${r.id}/${r.size}`)).toEqual([]);
-  expect(summarize(rows)).toEqual({ n: 63, shown: 44, known_base_weaknesses: 19, mismatches: [] });
+  expect(summarize(rows)).toEqual({ n: 65, shown: 44, known_base_weaknesses: 21, mismatches: [] });
 }, 120000);
 
 test("the set is well formed: unique ids, a known weakness is a hidden case", () => {
