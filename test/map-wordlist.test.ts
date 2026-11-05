@@ -19,6 +19,7 @@ const BALANCED = "const r = /[a-z]+/g; const q = `x${r.test(\"a\") ? `y` : \"z\"
 const T8 = "const D = [" + Array.from({ length: 220 }, (_, i) => JSON.stringify("s" + i)).join(", ") + ", /\\[/];\nconst e = \"map\";\nconst n = require('fs').readFileSync([__dirname, \"index\", \"js\"].join(\".\") + \".\" + e);\nconst r = /]/;\n";
 // 200 or more short strings in the array that holds the map make it a table.
 const TAIL_TPL = "const n = `${__dirname}/${f}map`;\n";
+const REGEX_CLASS = "const r = /[\\[]/;\n";
 const cases: [string, string, boolean][] = [
   ["word list with map, bundle reads JSON: map stays hashed", `const WORDS = [\n  ${words(2048, true)}\n];\n${READS}`, false],
   ["a run-time name built from parts: map shown", `${READS}const n = ["index", "js", "map"].join(".");\n`, true],
@@ -39,9 +40,10 @@ const cases: [string, string, boolean][] = [
   ["a list of 199 strings holding map: map shown (the table starts at 200)", `${READS}const EXT = [\n  ${words(199, true)}\n];\n`, true],
   ["a list of 200 strings holding map: map stays hashed", `${READS}const EXT = [\n  ${words(200, true)}\n];\n`, false],
   ["a word list holding map and a name whose last template part is map: map shown", `const WORDS = [\n  ${words(2048, true)}\n];\n${READS}${TAIL_TPL}`, true],
+  ["a word list that holds map beside a regex literal with an escaped bracket: map stays hashed (only when the walk skips the regex)", `const WORDS = [\n  ${words(2048, true)}\n];\n${REGEX_CLASS}${READS}`, false],
   // Known limit: decoys before, after or around the "map" in the same array, template strings included, make it look like a table.
   ["known limit: 220 template-string decoys after map hide it", `${READS}const n = ["map", ${Array.from({ length: 220 }, (_, i) => "`w" + i + "`").join(", ")}].slice(0, 1);\n`, false],
-  // Known limit: 40 decoy strings around the "map" make it look like a table, so the map stays hashed.
+  // Known limit: 220 decoy strings around the "map" make it look like a table, so the map stays hashed.
   ["known limit: 220 decoys around map hide it", `${READS}const n = [\n  ${words(220, true)}\n].slice(-3).join(".");\n`, false],
 ];
 for (const [label, code, shown] of cases) test(label, async () => {
