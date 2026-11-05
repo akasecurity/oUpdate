@@ -2639,14 +2639,16 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
   return result;
 }
 
+/** A reviewer stop that is a hold for a human, not a detection: "too large for model review", "not model-reviewable", or a spent read time budget. */
+export const isHumanHold = (l: LayerVerdict): boolean => l.layer === "reviewer" && l.verdict === "stop" && /^(too large for model review|not model-reviewable|\d+ of \d+ part\(s\) read, the read time budget)/.test(l.detail);
+
 export type Outcome = "stopped" | "held-human" | "error" | "passed";
 
 /** How a review ended: a detection stopped it, only "too large for model review", "not model-reviewable" or a spent read time budget held it for a human, a layer errored, or it passed through. */
 export function classifyOutcome(r: ReviewResult): Outcome {
-  const tooLarge = (l: LayerVerdict) => l.layer === "reviewer" && l.verdict === "stop" && /^(too large for model review|not model-reviewable|\d+ of \d+ part\(s\) read, the read time budget)/.test(l.detail);
-  if (r.layers.some((l) => l.verdict === "stop" && !tooLarge(l))) return "stopped";
+  if (r.layers.some((l) => l.verdict === "stop" && !isHumanHold(l))) return "stopped";
   // A layer that errored may have hidden a stop: the hold for a limit never outranks it.
   if (r.layers.some((l) => l.verdict === "error")) return "error";
-  if (r.layers.some(tooLarge)) return "held-human";
+  if (r.layers.some(isHumanHold)) return "held-human";
   return r.decision === "land" ? "passed" : "error";
 }
