@@ -10,7 +10,7 @@ const mism = (rows: { ok: boolean; id: string; size: string }[]) => rows.filter(
 test("every evasion case is labeled and the labels match what the reviewer is shown", async () => {
   const rows = await scoreEvasions();
   expect(rows.filter((r) => !r.ok).map((r) => `${r.id}/${r.size}`)).toEqual([]);
-  expect(summarize(rows)).toEqual({ n: 67, shown: 44, known_base_weaknesses: 23, mismatches: [] });
+  expect(summarize(rows)).toEqual({ n: 67, shown: 46, known_base_weaknesses: 21, mismatches: [] });
 }, 120000);
 
 test("the set is well formed: unique ids, a known weakness is a hidden case", () => {
@@ -49,7 +49,7 @@ test("a mutant that keeps the removed line but drops the new payload fails the s
 
 test("a reviewer that throws makes every case a mismatch, known weaknesses included", async () => {
   const hidden = EVASIONS.filter((c) => c.baseWeakness);
-  expect(hidden.length).toBe(12);
+  expect(hidden.length).toBe(11);
   const rows = await scoreEvasions(hidden, { review: async () => { throw new Error("boom"); } });
   expect(rows.every((r) => !r.ran && !r.ok)).toBe(true);
   expect(summarize(rows).mismatches.length).toBe(rows.length);

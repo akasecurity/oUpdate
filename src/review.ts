@@ -2047,7 +2047,9 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
       if (str === "map" && readsJson && !(tableOnly ??= mapOnlyInWordTables(codeText))) names.add(".map");
       names.add(low);
       // Two or more characters before ".map": a one-character tail ("s.map", "x.map") would match the name of almost any map, so it is a known limit (see the evasion rows).
-      if (isCode && !describes && low.length >= ".map".length + 2 && low.endsWith(".map")) tails.add(low);
+      // A template's tail is its literal text after the last interpolation (`${n}.js.map` is the tail ".js.map"); the same floor applies to that text.
+      const tailText = low.includes("${") ? low.slice(low.lastIndexOf("}") + 1) : low;
+      if (isCode && !describes && tailText.length >= ".map".length + 2 && tailText.endsWith(".map")) tails.add(tailText);
       // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
       if (seg.endsWith(".map")) names.add(seg);
