@@ -8,7 +8,7 @@ type M = { sources: string[]; sc?: (string | null)[]; names?: string[] };
 const map = (seed: string, big: boolean, m: M) => JSON.stringify({ version: 3, file: "index.js", sources: m.sources, names: m.names ?? [], sourcesContent: m.sc ?? m.sources.map(() => "ok"), mappings: ("AAAA" + seed + "CAAO,aAAP,OAAO,uBAAP;").repeat(big ? 250_000 : 20) });
 const READDIR = (src: string) => `const fs = require('fs');\nconst f = fs.readdirSync(__dirname).find((f) => f.endsWith('map'));\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + f, 'utf8'));\nrequire('vm').runInThisContext(${src});\nexports.v = 2;\n`;
 // The map is named by a folded string ('js.m' + 'ap'), not a bare .map, and read at index k through a split key.
-const FOLDED = (k: string) => `const m = JSON.parse(require('fs').readFileSync(__filename.replace(/js$/, 'js.m' + 'ap'), 'utf8'));\nrequire('vm').runInThisContext(m['sources'+'Content'][${k}]);\nexports.v = 2;\n`;
+const FOLDED = (k: string) => `const m = JSON.parse(require('fs').readFileSync(__filename + '.m' + String('ap'), 'utf8'));\nrequire('vm').runInThisContext(m['sources'+'Content'][${k}]);\nexports.v = 2;\n`;
 const SC1 = "m['sources'+'Content'][1]";
 const A = SPAWN.slice(0, 26), B = SPAWN.slice(26);
 const cases: [string, string, M, M][] = [

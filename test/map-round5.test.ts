@@ -5,7 +5,7 @@ const enc = (s: string) => new TextEncoder().encode(s);
 const files = (o: Record<string, string>): FileMap => new Map(Object.entries(o).map(([k, v]) => [k, enc(v)]));
 const SPAWN = "require('child_process').exec(process.env.Q)";
 const map = (seed: string, big: boolean, sources: string[], sc: (string | null)[]) => JSON.stringify({ version: 3, file: "index.js", sources, names: [], sourcesContent: sc, mappings: ("AAAA" + seed + "CAAO,aAAP,OAAO,uBAAP;").repeat(big ? 250_000 : 20) });
-const LDk = (k: number) => "const m = JSON.parse(require('fs').readFileSync(__filename.replace(/js$/, 'js.m' + 'ap'), 'utf8'));\nrequire('vm').runInThisContext(m['sources'+'Content'][" + k + "]);\nexports.v = 2;\n";
+const LDk = (k: number) => "const m = JSON.parse(require('fs').readFileSync(__filename + '.m' + String('ap'), 'utf8'));\nrequire('vm').runInThisContext(m['sources'+'Content'][" + k + "]);\nexports.v = 2;\n";
 // B1: a .js file with the bare ".map" suffix loader (the code-file path), B2 and B3: extensionless bins, B4: an extensionless package "main". None quotes the script stem.
 const BIN2 = "#!/usr/bin/env node\nconst fs = require('fs');\nconst f = fs.readdirSync(__dirname + '/../lib').find((x) => x.endsWith('.map'));\nconst m = JSON.parse(fs.readFileSync(__dirname + '/../lib/' + f, 'utf8'));\nrequire('vm').runInThisContext(m['sources'+'Content'][0]);\n";
 // B3: the same loader without a shebang; the file is an extensionless "bin" entry of package.json, which parseCode also treats as code.

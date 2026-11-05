@@ -91,7 +91,8 @@ describe("everything else is shown in full", () => {
     expect(marked("fs.readFileSync(path.resolve(__dirname, 'pre' + 'fix.js.map'))", "prefix.js.map")).toContain("marker_name");
     expect(marked("fs.readFileSync('x' + '.js.map')", "x.js.map")).toContain("marker_name");
     expect(marked("fs.readFileSync(`x` + '.js.map')", "x.js.map")).toContain("marker_name");
-    expect(marked("fs.readFileSync(path.join(__dirname, name + '.js.map'))", "x.js.map")).not.toContain("marker_name");
+    expect(marked("fs.readFileSync(path.join(__dirname, name + '.js.map'))", "x.js.map")).toContain("marker_name"); // a quoted tail shows the map (tail rule)
+    expect(marked("fs.readFileSync(path.join(__dirname, name))", "x.js.map")).not.toContain("marker_name");
     // A constant template folds to one string. A template with a real expression does not.
     expect(marked("fs.readFileSync(`x${''}.js.map`)", "x.js.map")).toContain("marker_name");
     expect(marked("fs.readFileSync(`x${name}.js.map`)", "x.js.map")).not.toContain("marker_name");

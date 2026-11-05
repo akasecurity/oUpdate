@@ -2003,9 +2003,11 @@ function scanQuoted(text: string): string[] {
 
 
 /** Quoted strings from every new file that is not a lower-case .map. Stems come from files other than package.json and declarations. */
-function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: Set<string>; stems: Set<string> } {
+function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: Set<string>; stems: Set<string>; tails: Set<string> } {
   const names = new Set<string>();
   const stems = new Set<string>();
+  // Strings of code files (not package.json or declarations) that end in ".map" with two or more characters before it: the tail of a map's name that a loader puts after the file's own path (".js.map").
+  const tails = new Set<string>();
   for (const [q, b] of newFiles) {
     if (q.endsWith(".map")) continue;
     // package.json and declarations quote the script they describe. That stem is not a reference to its map.
@@ -2044,13 +2046,14 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
       // A name built at run time from parts (["index", "js", "map"].join(".")) leaves the bare word "map" as a string of code: in a loader (readsJson) it counts like the ".map" tail. The match is exact case: the ".map" check is lower-cased because a file name may be written in any case, but "Map" as a bare string is the Map type (Babel helpers) and would unhash most transpiled packages.
       if (str === "map" && readsJson && !(tableOnly ??= mapOnlyInWordTables(codeText))) names.add(".map");
       names.add(low);
+      if (isCode && !describes && low.length >= ".map".length + 2 && low.endsWith(".map")) tails.add(low);
       // The stem is the text after the last "/" or "\\" of the string. A template whose tail is not the script name (`${d}index.js`, `./index.js?${v}`) names nothing: a known limit, the same at small sizes.
       const seg = low.slice(Math.max(low.lastIndexOf("/"), low.lastIndexOf("\\")) + 1);
       if (seg.endsWith(".map")) names.add(seg);
       else if (!describes) stems.add(seg);
     }
   }
-  return { names, stems };
+  return { names, stems, tails };
 }
 
 /**
@@ -2140,11 +2143,12 @@ function hashedMaps(oldFiles: FileMap, newFiles: FileMap, paths: string[], entri
   if (!cands.length) return out;
   if (mapsUnhashed(newFiles)) return out;
   const named = quotedNames(newFiles, entries);
+  const tails = [...named.tails];
   for (const p of cands) {
     const b = newFiles.get(p) ?? oldFiles.get(p)!;
     if (isLink(b)) continue;
     const base = p.slice(p.lastIndexOf("/") + 1).toLowerCase();
-    if (newFiles.has(p) && (named.names.has(base) || named.names.has(".map") || named.stems.has(base.slice(0, -".map".length)))) continue; // the bare ".map" is the tail of a name built at run time (__filename + '.map')
+    if (newFiles.has(p) && (named.names.has(base) || named.names.has(".map") || named.stems.has(base.slice(0, -".map".length)) || tails.some((t) => base.endsWith(t)))) continue; // the bare ".map" is the tail of a name built at run time (__filename + '.map')
     const summary = strictMap(p, b);
     if (summary !== undefined) out.set(p, summary);
   }
