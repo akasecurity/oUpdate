@@ -6,7 +6,7 @@ import type { FileMap } from "../src/prepass.ts";
 // the same way in a small map and in a padded one. Every loader really runs the field it reads (the sources entry is stripped of its "../" prefix first). The cross product is fixed; the seed only picks the payload's words (WORD and NEW_WORD), so a run is
 // deterministic and a failure names its case. Cases known to hide the payload are listed in KNOWN_HIDDEN: a case that starts showing the
 // payload, or any other case that hides it, fails the run.
-// Scope: every loader but "unnamed" names ".map" as a constant, so the review shows each map in full. The "unnamed" loader builds the name at run time
+// Scope: every loader but "unnamed" and "reversed" has a string in the code that the review matches as the map's name, so it shows each map in full. The "unnamed" loader builds the name at run time
 // from parts (["index", "js", "map"].join(".")); the review counts a bare "map" string in code as the ".map" tail, so its map is shown in full too. A "-tail" position puts the payload past the head of its field:
 // after the padding body for the mappings, or as the last element after many filler elements for the arrays.
 const SEED = 116;
@@ -23,10 +23,10 @@ const files = (o: Record<string, string>): FileMap => new Map(Object.entries(o).
 
 type Pos = "sources" | "names" | "sourcesContent" | "mappings" | "sources-tail" | "names-tail" | "sourcesContent-tail" | "mappings-tail";
 type Form = "plain" | "template" | "concat" | "escape";
-type Loader = "explicit" | "readdir" | "shebang-bin" | "bare-entry" | "unnamed";
+type Loader = "explicit" | "readdir" | "shebang-bin" | "bare-entry" | "unnamed" | "suffix" | "upper" | "reversed" | "caseonly";
 const POS: Pos[] = ["sources", "names", "sourcesContent", "mappings", "sources-tail", "names-tail", "sourcesContent-tail", "mappings-tail"];
 const FORM: Form[] = ["plain", "template", "concat", "escape"];
-const LOADER: Loader[] = ["explicit", "readdir", "shebang-bin", "bare-entry", "unnamed"];
+const LOADER: Loader[] = ["explicit", "readdir", "shebang-bin", "bare-entry", "unnamed", "suffix", "upper", "reversed", "caseonly"];
 
 // The token the reviewer must be shown: distinctive, and absent from the padding and from the clean side.
 const WORD = pick(["zq", "kx", "vw", "jm"]) + Math.floor(rand() * 900 + 100);
@@ -68,7 +68,7 @@ const mapOf = (seed: string, big: boolean, pos: Pos, pay: string | null, form: F
 };
 
 // A tail read takes the last element, or for the mappings everything after the last ";" of the leading run of mapping characters (the padding body).
-// Every loader here now shows its map in full, so the -tail rows exercise the full-map path and the review budget, not the hashed path. The mappings-tail rows put script text in "mappings", so that map is not strict (not base64 VLQ) and is shown for that reason: they test the shown-in-full path and the review budget, not a read past the head of the field.
+// Every loader here but "reversed" shows its map in full, so the -tail rows exercise the full-map path and the review budget, not the hashed path. The mappings-tail rows put script text in "mappings", so that map is not strict (not base64 VLQ) and is shown for that reason: they test the shown-in-full path and the review budget, not a read past the head of the field.
 const FIELD: Record<Pos, string> = {
   sources: "m.sources[0].slice(3)", names: "m.names.join('')", sourcesContent: "m['sources'+'Content'][0]", mappings: "m.mappings",
   "sources-tail": "m.sources[m.sources.length - 1].slice(3)", "names-tail": "m.names[m.names.length - 1]",
@@ -79,10 +79,17 @@ const LOAD_EXPLICIT = (f: string) => `const m = JSON.parse(require('fs').readFil
 const LOAD_READDIR = (expr: string, up: string) => `const fs = require('fs');\nconst f = fs.readdirSync(__dirname + '${up}').find((x) => x.endsWith('.map'));\nconst m = JSON.parse(fs.readFileSync(__dirname + '${up}/' + f, 'utf8'));\n${run(expr)}`;
 // The map's name is joined at run time from pieces none of which is ".map" or the script's name, so no folded string names the map.
 const LOAD_UNNAMED = (f: string) => `const fs = require('fs');\nconst n = ['index', 'js', 'map'].join('.');\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + n, 'utf8'));\n${run(f)}exports.v = 2;\n`;
+// "suffix", "upper" and "caseonly" are shown (the review sees the ".js.map" tail, or the upper-case name). "reversed" is a known limit: the map's name is written backwards and reversed at run time, so no string in the code names the map; its 28 rows are in KNOWN_HIDDEN. The other "reversed" rows are shown only because the payload trips a signal of its own (the plain forms hold "child_process") or the map is not strict; a payload with no signal stays hidden in any field but "mappings". "caseonly" reads on a case-insensitive filesystem (macOS, Windows) and fails to load on a case-sensitive one; the review matches its upper-case name either way.
+const LOAD_SUFFIX = (f: string) => `const fs = require('fs');\nconst ext = '.js.map';\nconst m = JSON.parse(fs.readFileSync(__dirname + '/index' + ext, 'utf8'));\n${run(f)}exports.v = 2;\n`;
+const LOAD_NAMED = (name: string) => (f: string) => `const fs = require('fs');\nconst n = ${name};\nconst m = JSON.parse(fs.readFileSync(__dirname + '/' + n, 'utf8'));\n${run(f)}exports.v = 2;\n`;
 const loaderFiles = (l: Loader, f: string): Record<string, string> => {
   switch (l) {
     case "explicit": return { "lib/index.js": LOAD_EXPLICIT(f) };
     case "unnamed": return { "lib/index.js": LOAD_UNNAMED(f) };
+    case "suffix": return { "lib/index.js": LOAD_SUFFIX(f) };
+    case "upper": return { "lib/index.js": LOAD_NAMED("'INDEX.JS.MAP'.toLowerCase()")(f) };
+    case "reversed": return { "lib/index.js": LOAD_NAMED("'pam.sj.xedni'.split('').reverse().join('')")(f) };
+    case "caseonly": return { "lib/index.js": LOAD_NAMED("'INDEX.JS.MAP'")(f) };
     case "readdir": return { "lib/index.js": LOAD_READDIR(f, "") + "exports.v = 2;\n" };
     case "shebang-bin": return { "bin/cli": "#!/usr/bin/env node\n" + LOAD_READDIR(f, "/../lib") };
     case "bare-entry": return { "lib/loader": LOAD_READDIR(f, ""), "bin/cli": "exports.v = 2;\n" };
@@ -91,7 +98,36 @@ const loaderFiles = (l: Loader, f: string): Record<string, string> => {
 const PKG = (v: string, l: Loader) => JSON.stringify({ name: "lib", version: v, main: l === "bare-entry" ? "lib/loader" : "lib/index.js", bin: { cli: "bin/cli" } });
 
 // Known base weaknesses: cases whose payload the reviewer does not see. Key is "<pos>/<form>/<loader>/<size>", and carried rows carry a "carried/" segment before the size: "<pos>/<form>/<loader>/carried/<size>".
-const KNOWN_HIDDEN = new Set<string>([]);
+const KNOWN_HIDDEN = new Set<string>([
+  "names-tail/concat/reversed/carried/small",
+  "names-tail/concat/reversed/small",
+  "names/concat/reversed/big",
+  "names/concat/reversed/carried/big",
+  "names/concat/reversed/carried/small",
+  "names/concat/reversed/small",
+  "names/escape/reversed/carried/small",
+  "names/escape/reversed/small",
+  "names/plain/reversed/carried/small",
+  "names/plain/reversed/small",
+  "names/template/reversed/carried/small",
+  "names/template/reversed/small",
+  "sources-tail/concat/reversed/big",
+  "sources-tail/concat/reversed/carried/big",
+  "sources-tail/concat/reversed/carried/small",
+  "sources-tail/concat/reversed/small",
+  "sources/concat/reversed/big",
+  "sources/concat/reversed/carried/big",
+  "sources/concat/reversed/carried/small",
+  "sources/concat/reversed/small",
+  "sourcesContent-tail/concat/reversed/big",
+  "sourcesContent-tail/concat/reversed/carried/big",
+  "sourcesContent-tail/concat/reversed/carried/small",
+  "sourcesContent-tail/concat/reversed/small",
+  "sourcesContent/concat/reversed/big",
+  "sourcesContent/concat/reversed/carried/big",
+  "sourcesContent/concat/reversed/carried/small",
+  "sourcesContent/concat/reversed/small",
+]);
 
 // Carried cases: the old map already holds the payload at the same place and the new map adds NEW_WORD to it; the row passes only if NEW_WORD, which exists nowhere but the new map, reaches the reviewer.
 type Row = { pos: Pos; form: Form; loader: Loader; carried: boolean };
