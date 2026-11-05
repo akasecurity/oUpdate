@@ -8,6 +8,7 @@
   <a href="#configuration"><b>Configuration</b></a> &nbsp;·&nbsp;
   <a href="#gate-update-prs-on-a-forge"><b>Gate update PRs</b></a> &nbsp;·&nbsp;
   <a href="#host-apply"><b>Host apply</b></a> &nbsp;·&nbsp;
+  <a href="https://akasecurity.github.io/oUpdate-docs/"><b>Docs</b></a> &nbsp;·&nbsp;
   <a href="#license"><b>License</b></a>
 </p>
 
