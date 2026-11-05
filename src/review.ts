@@ -2062,7 +2062,8 @@ function quotedNames(newFiles: FileMap, entries: ReadonlySet<string>): { names: 
 function mapOnlyInWordTables(code: string): boolean {
   const TABLE_MIN_STRINGS = 200; // a word list has hundreds (the 2048-word mnemonic list); an extension or MIME list never gets near
   // Every quoted "map" in the text counts as seen, inside a template's ${} too; only a "map" the walk below places in a long enough array is excused.
-  const seen = [...code.matchAll(/(["'`])map\1/g)].length;
+  // A template whose text after its last ${} is "map" is the tail of a name too: the folded strings include it, so it counts as seen and is never excused.
+  const seen = [...code.matchAll(/(["'`])map\1/g)].length + [...code.matchAll(/\}map`/g)].length;
   if (!seen) return false;
   type Frame = { open: string; short: number; maps: number };
   const stack: Frame[] = [];
