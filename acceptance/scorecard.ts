@@ -5,7 +5,7 @@
 // The bar and the published column apply to the core set only; an extended or all run is
 // scored against that set's counts in cases.json and controls.json (acceptance/sets.ts).
 
-import { classifyOutcome, type ReviewResult } from "../src/review.ts";
+import { classifyOutcome, isHumanHold, type ReviewResult } from "../src/review.ts";
 import type { SetChoice } from "./sets.ts";
 
 export interface ScoreRow {
@@ -21,10 +21,10 @@ export const BAR = { attacks: 9 };
 export const PUBLISHED = { date: "26 Oct", attacks: "9/9", alone: "3/9", flag: "7/9", controls: "8/8" };
 
 const reviewerLayer = (r: ReviewResult) => r.layers.find((l) => l.layer === "reviewer");
-/** A model detection: a reviewer stop that is not "too large for model review". */
+/** A model detection: a reviewer stop that is not a hold for a human (the same definition classifyOutcome uses). */
 const modelFlag = (r: ReviewResult) => {
   const l = reviewerLayer(r);
-  return l?.verdict === "stop" && !l.detail.startsWith("too large for model review");
+  return l?.verdict === "stop" && !isHumanHold(l);
 };
 const judged = (r: ReviewResult) => (r.reviewerText?.length ?? 0) > 0;
 
