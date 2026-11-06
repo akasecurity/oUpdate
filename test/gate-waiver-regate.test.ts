@@ -271,7 +271,8 @@ describe("lockfile reads when a PR is reviewed again", () => {
 
   test("a PR whose verdict is kept reads its lockfiles once", async () => {
     const kept = counting("failure", line("failure", mine()));
-    await runGate({ forge: kept.forge, repo: "o/r", waivers: [mine()], review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+    const out = await runGate({ forge: kept.forge, repo: "o/r", waivers: [mine()], review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+    expect(out.map((p) => p.state)).toEqual(["skipped"]);
     const first = counting("failure", verdictLine("h0", "failure"));
     await runGate({ forge: first.forge, repo: "o/r", waivers: [], review: async (c) => result(c, "hold") });
     expect(kept.paths).toEqual(first.paths);
