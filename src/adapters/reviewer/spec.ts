@@ -6,12 +6,14 @@ import { openaiReviewer, type OpenAIReviewerConfig } from "./openai.ts";
 
 export type ReviewerSpec = ({ type: "command" } & CommandReviewerConfig) | ({ type: "openai" } & OpenAIReviewerConfig);
 
+// An HTTP header name is an RFC 9110 token: a name with a space or a colon would make every answer fail when it is read.
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const isStrArray = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.every((s) => typeof s === "string");
 const isStrMap = (v: unknown): v is Record<string, string> => !!v && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((s) => typeof s === "string");
 
 // Same refusal as apply/config.ts and targets/strict.ts. expectHeaders and retryDelaysMs are accepted ahead of the code that reads them, so that merge does not refuse a config that already sets them.
 const COMMAND_KEYS = ["type", "name", "argv", "timeoutMs", "workRoot"];
-const OPENAI_KEYS = ["type", "name", "baseUrls", "model", "apiKeyEnv", "maxTokens", "timeoutMs", "extraBody", "headers", "expectHeaders", "retryDelaysMs"];
+const OPENAI_KEYS = ["type", "name", "baseUrls", "model", "apiKeyEnv", "maxTokens", "timeoutMs", "extraBody", "headers", "expectHeaders", "retryDelaysMs", "servedByHeader"];
 
 function refuseUnknown(o: Record<string, unknown>, block: string, keys: readonly string[]): void {
   for (const k of Object.keys(o)) if (!keys.includes(k)) throw new Error(`${block}: unknown key ${k} (valid keys: ${keys.join(", ")})`);
@@ -33,6 +35,7 @@ export function validateReviewerSpec(v: unknown): ReviewerSpec {
   if (o.type === "openai") {
     if (!isStrArray(o.baseUrls) || typeof o.model !== "string") throw new Error("openai reviewer needs baseUrls (string array) and model");
     if (o.expectHeaders !== undefined && !isStrMap(o.expectHeaders)) throw new Error("openai reviewer expectHeaders must be an object of string to string");
+    if (o.servedByHeader !== undefined && (typeof o.servedByHeader !== "string" || !HEADER_NAME.test(o.servedByHeader))) throw new Error("openai reviewer servedByHeader must be a legal HTTP header name (letters, digits and !#$%&'*+-.^_`|~)");
     return o as unknown as ReviewerSpec;
   }
   throw new Error(`reviewer type must be command or openai, got ${String(o.type)}`);

@@ -4,7 +4,8 @@
 // The reviewer is stochastic, so each held-out attack runs N times and is reported as k/N with a Wilson 95%
 // interval. The deterministic pre-pass runs once per case. Every run starts fresh and writes
 // results/<version>.{json,md}; nothing is copied forward from an earlier release.
-//   usage: bun eval/limits/run.ts --reviewer <spec.json> [--repeats N] [--out <dir>]
+//   usage: bun eval/limits/run.ts --reviewer <spec.json> [--repeats N] [--out <dir>] [--served-values --out <dir outside the repo>]
+//   --served-values adds the served-by values (where answers came from) to the results; it is refused unless --out is outside the repo.
 // <spec.json> is one reviewer spec (the same JSON the gate takes); keep it outside the repo.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -20,6 +21,7 @@ import { HELDOUT } from "./heldout-cases.ts";
 import { GAP } from "./gap-cases.ts";
 import { evasionReport, writeEvasions } from "./evasions.ts";
 import { INSTALL_ATTACKS, INSTALL_CLEAN } from "./install-cases.ts";
+import { addTallies, newTally, publicTally, restoreTally, servedValuesRefusal, snapshotTally, trackServed, type ServedTally } from "./served.ts";
 import { stampSpec, thinkingOf } from "./stamp.ts";
 
 /** An attack with the date it became public. Add new write-ups here; never use them to tune prompts. */
@@ -47,7 +49,19 @@ try { maxReadMs = parseReadBudget(arg("max-read-ms"), arg("out")); } catch (e) {
 const specFile = arg("reviewer");
 if (!specFile) { console.error("--reviewer <spec.json> is required"); process.exit(2); }
 const spec = parseReviewerSpec(await Bun.file(specFile).text());
-const reviewer: Reviewer = makeReviewer(spec);
+const baseReviewer: Reviewer = makeReviewer(spec);
+/** The reviewer of the case being run: every answered call is counted into that case's served-by tally. */
+let reviewer: Reviewer = baseReviewer;
+const requestedModel = spec.type === "openai" ? spec.model : undefined;
+/** The served-by values name where answers came from, so they stay out of the results files unless --served-values asks for them. */
+const withValues = process.argv.includes("--served-values");
+const allServed: ServedTally[] = [];
+let activeTally: ServedTally | undefined;
+{
+  const refusal = servedValuesRefusal(withValues, arg("out"), join(here, "../.."));
+  if (refusal) { console.error(refusal); process.exit(2); }
+}
+const withTally = (): ServedTally => { const t = newTally(); allServed.push(t); activeTally = t; reviewer = trackServed(baseReviewer, requestedModel, t); return t; };
 /** Which reviewer settings produced these results, without where or how the reviewer is reached. */
 const stamp = stampSpec(spec);
 
@@ -91,8 +105,10 @@ async function heldOnce(c: Case, layers: "prepass" | "reviewer"): Promise<{ stop
 /** The router answers 502 now and then; a reviewer error is retried before it aborts the run, so one blip does not cost the whole run. */
 async function held(c: Case, layers: "prepass" | "reviewer"): Promise<{ stop: boolean; scope: Scope }> {
   for (let i = 1; ; i++) {
+    // A failed attempt's calls are dropped from the served-by tally, so its calls stay within the reviews behind k/N.
+    const before = activeTally && snapshotTally(activeTally);
     try { return await heldOnce(c, layers); }
-    catch (e) { if (i >= 4) throw e; console.error(`retry ${i} on ${c.id}: ${String(e).slice(0, 200)}`); await Bun.sleep(30_000 * i); }
+    catch (e) { if (activeTally && before) restoreTally(activeTally, before); if (i >= 4) throw e; console.error(`retry ${i} on ${c.id}: ${String(e).slice(0, 200)}`); await Bun.sleep(30_000 * i); }
   }
 }
 
@@ -103,35 +119,40 @@ for (const c of CASES.filter((x) => !arg("only") || arg("only")!.split(",").incl
   const prepass = (await held(c, "prepass")).stop;
   let k = 0;
   const reads = { full: 0, priority: 0, signal: 0, ranked: 0, partial: 0, none: 0 };
+  const served = withTally();
   const started = Date.now();
   for (let i = 0; i < repeats; i++) { const h = await held(c, "reviewer"); if (h.stop) k++; reads[h.scope]++; }
   const secPerReview = Math.round((Date.now() - started) / repeats / 100) / 10;
-  rows.push({ id: c.id, gap: GAP_IDS.has(c.id), disclosed: c.disclosed, held_out: heldOut, prepass_blocked: prepass, k, n: repeats, reads, sec_per_review: secPerReview, ...wilson(k, repeats) });
+  rows.push({ id: c.id, gap: GAP_IDS.has(c.id), disclosed: c.disclosed, held_out: heldOut, prepass_blocked: prepass, k, n: repeats, reads, served: publicTally(served, withValues), sec_per_review: secPerReview, ...wilson(k, repeats) });
 }
 const cleanRows = [];
 for (const c of CLEAN.filter((x) => !arg("only") || arg("only")!.split(",").includes(x.id))) {
   const prepass = (await held(c, "prepass")).stop;
   let k = 0;
   const reads = { full: 0, priority: 0, signal: 0, ranked: 0, partial: 0, none: 0 };
+  const served = withTally();
   const started = Date.now();
   for (let i = 0; i < repeats; i++) { const h = await held(c, "reviewer"); if (h.stop) k++; reads[h.scope]++; }
-  cleanRows.push({ id: c.id, policy_hold: POLICY_HOLD.has(c.id), prepass_blocked: prepass, k, n: repeats, reads, sec_per_review: Math.round((Date.now() - started) / repeats / 100) / 10, ...wilson(k, repeats) });
+  cleanRows.push({ id: c.id, policy_hold: POLICY_HOLD.has(c.id), prepass_blocked: prepass, k, n: repeats, reads, served: publicTally(served, withValues), sec_per_review: Math.round((Date.now() - started) / repeats / 100) / 10, ...wilson(k, repeats) });
 }
 const sum = (rs: typeof rows) => { const k = rs.reduce((a, r) => a + r.k, 0), n = rs.reduce((a, r) => a + r.n, 0); return { k, n, ...wilson(k, n) }; };
 const tot = (rs: typeof cleanRows) => { const k = rs.reduce((a, r) => a + r.k, 0), n = rs.reduce((a, r) => a + r.n, 0); return { k, n, ...wilson(k, n) }; };
 const cleanTotal = tot(cleanRows.filter((r) => !r.policy_hold));
 const policyTotal = tot(cleanRows.filter((r) => r.policy_hold));
-const summary = { tool_version: version, max_read_ms: maxReadMs ?? null, reviewer: models.reviewer.label, cutoff, repeats, held_out: sum(rows.filter((r) => r.held_out)), earlier: sum(rows.filter((r) => !r.held_out && !r.gap)), gap: sum(rows.filter((r) => r.gap)), false_holds: cleanTotal, policy_holds: policyTotal, reviewer_spec: stamp };
+const servedTotal = publicTally(addTallies(allServed), withValues);
+const summary = { tool_version: version, max_read_ms: maxReadMs ?? null, reviewer: models.reviewer.label, cutoff, repeats, held_out: sum(rows.filter((r) => r.held_out)), earlier: sum(rows.filter((r) => !r.held_out && !r.gap)), gap: sum(rows.filter((r) => r.gap)), false_holds: cleanTotal, policy_holds: policyTotal, reviewer_spec: stamp, served_by: servedTotal };
 
 const out = arg("out") ?? join(here, "results");
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, `${version}.json`), JSON.stringify({ summary, rows, clean_rows: cleanRows }, null, 2) + "\n");
 const evasions = evasionReport(await writeEvasions(version, out));
+const servedLine = (t: ReturnType<typeof publicTally>) => `served by: ${t.calls} reviewer calls; ${t.not_requested} not served by the requested model; ${t.unknown} with no served-by header${t.by_value && Object.keys(t.by_value).length ? `; by value ${Object.entries(t.by_value).map(([k, n]) => `${k} ${n}`).join(", ")}` : ""}`;
 const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 const line = (n: string, s: { k: number; n: number; lo: number; hi: number }) => `${n}: ${s.k}/${s.n} runs flagged, ${pct(s.k / (s.n || 1))} (95% interval ${pct(s.lo)}-${pct(s.hi)})`;
 const md = [
   `oupdate ${version}, ${models.reviewer.label}, training cutoff ${cutoff}, ${repeats} runs per case`, "",
   `reviewer: ${models.reviewer.label}; thinking ${stamp.type === "openai" ? thinkingOf(stamp) : "n/a"}; max tokens ${stamp.maxTokens ?? "n/a"}; read budget ${maxReadMs === undefined ? "none" : `${maxReadMs} ms`}; settings fingerprint ${stamp.fingerprint.slice(0, 12)}; run ${stamp.at}`, "",
+  servedLine(servedTotal), "",
   "| case | disclosed | held-out | pre-pass | reviewer k/N | 95% interval | read | s/review |", "|---|---|---|---|---|---|---|---|",
   ...rows.map((r) => `| ${r.id} | ${r.disclosed} | ${r.held_out ? "yes" : "no"} | ${r.prepass_blocked ? "blocked" : "passed"} | ${r.k}/${r.n} | ${pct(r.lo)}-${pct(r.hi)} | ${scopeNote(r.reads)} | ${r.sec_per_review} |`),
   "", `layers: pre-pass alone blocks ${rows.filter((r) => r.prepass_blocked).length} of ${rows.length} attacks; the reviewer flags ${rows.filter((r) => !r.prepass_blocked && r.k > 0).length} more that the pre-pass passes; ${rows.filter((r) => !r.prepass_blocked && r.k === 0).length} are missed by both`,

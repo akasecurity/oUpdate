@@ -269,7 +269,7 @@ oUpdate has no other package-manager backend. After Homebrew stops on Intel, eac
    }
    ```
 
-   The openai reviewer also takes optional `headers` and `expectHeaders`. `headers` are sent on the request. `expectHeaders` names response headers a 2xx answer must carry: the name is compared case-insensitively and the value exactly. A mismatch discards that answer (`<base>: answer <header> <got>, expected <want>`, or `missing` when the header is absent) and the next base is tried. It is not retried. To refuse an answer a model proxy served from its cloud fallback, set `"expectHeaders": {"x-served-by": "local"}` (the header your proxy sets).
+   The openai reviewer also takes optional `headers` and `expectHeaders`. `headers` are sent on the request. `expectHeaders` names response headers a 2xx answer must carry: the name is compared case-insensitively and the value exactly. A mismatch discards that answer (`<base>: answer <header> <got>, expected <want>`, or `missing` when the header is absent) and the next base is tried. It is not retried. To refuse an answer a model proxy served from its cloud fallback, set `"expectHeaders": {"x-served-by": "local"}` (the header your proxy sets). `servedByHeader` (optional) names the response header that says who served an answer; without it served-by stays unknown. The limits eval always writes counts of the reviewer calls (answered, not served by the requested model, with no served-by header); the values themselves are written only with `--served-values` and an `--out` folder outside the repo.
 
 2. `oupdate host --apply --dry-run` prints the run and a dry-run summary. Read the tier split, the holds and the notices it would have sent. It writes `dry-run-<log file name>` beside the log, never the dated log itself, and its header and summary are named so that nothing reading a log takes a dry run for a run.
 3. `oupdate host --apply` is the live run. The exit code is 1 when anything failed.
@@ -447,6 +447,8 @@ The reviewer should run with its thinking turned on. In the limits evaluation ([
 ```json
 {"type":"openai","name":"local","baseUrls":["http://127.0.0.1:8080/v1"],"model":"your-model","maxTokens":12000,"extraBody":{"chat_template_kwargs":{"enable_thinking":true}}}
 ```
+
+Limits evaluation runs (`bun eval/limits/run.ts --reviewer <spec.json>`) write counts of how many reviewer calls the endpoint reported as served by another model; pass `--served-values --out <dir outside the repo>` to also write the served-by values.
 
 A server that turns thinking on another way takes its own switch in `extraBody`. A reviewer that thinks needs the larger `maxTokens`: a short limit cuts the answer off and the review fails closed.
 

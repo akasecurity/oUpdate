@@ -16,6 +16,8 @@ export interface OpenAIReviewerConfig {
   expectHeaders?: Record<string, string>;
   /** Waits before each retry of a 503 or a refused connection (a local model cold-loading); default about 21 s in all. */
   retryDelaysMs?: number[];
+  /** The response header that names who served an answer (a router in front of several models). Absent: served-by is not read and stays unknown. */
+  servedByHeader?: string;
 }
 
 /** The max_tokens a review asks for when the spec sets none. */
@@ -103,11 +105,24 @@ async function probeOutage(cfg: OpenAIReviewerConfig): Promise<string | undefine
   return `reviewer ${cfg.name} not reachable: ${errors.join("; ")}`;
 }
 
+// A name the headers object refuses leaves served-by unknown; it never costs the answer.
+function readServedBy(headers: Headers, name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  try {
+    return headers.get(name)?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
+  let served: string | undefined;
   return {
     name: cfg.name,
     ready: () => probeOutage(cfg),
+    lastServedBy: () => served,
     async review(prompt) {
+      served = undefined;
       const key = cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined;
       const errors: string[] = [];
       for (const base of cfg.baseUrls) {
@@ -189,6 +204,7 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
             errors.push(`${base}: empty answer`);
             continue;
           }
+          served = readServedBy(r.headers, cfg.servedByHeader);
           return text;
         } catch (e) {
           errors.push(`${base}: ${e instanceof Error ? e.message : String(e)}`);

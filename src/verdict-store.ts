@@ -9,7 +9,7 @@ import { parseVerdict, stripTerminal, type Reviewer, type ReviewResult } from ".
 import type { ReviewerSpec } from "./adapters/reviewer/spec.ts";
 
 // Where and how a reviewer is reached, not what it answers with: these differ per host and must not split the store.
-const LOCAL_ONLY = new Set(["baseUrls", "timeoutMs", "retryDelaysMs", "headers", "expectHeaders", "apiKeyEnv", "workRoot"]);
+const LOCAL_ONLY = new Set(["baseUrls", "timeoutMs", "retryDelaysMs", "headers", "expectHeaders", "servedByHeader", "apiKeyEnv", "workRoot"]);
 
 const canon = (v: unknown): unknown => (Array.isArray(v) ? v.map(canon) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v as object).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, x]) => [k, canon(x)])) : v);
 
