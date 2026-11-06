@@ -134,10 +134,11 @@ describe("a verdict is kept only while the waivers that apply to the PR's packag
   });
 
   test("a read of the lockfile that fails for a PR with a final verdict does not keep the verdict by guesswork: the PR is held and says why", async () => {
-    const { forge } = forgeWith("failure", line("failure"));
+    const { forge, body } = forgeWith("failure", line("failure"));
     const broken = { ...forge, readFile: async () => { throw new Error("forge unreachable"); } } as Forge;
     const out = await runGate({ forge: broken, repo: "o/r", waivers: [waiver({ name: "left-pad", version: "1.0.0" })], review: hold }); // a store with a waiver: the packages must be read to know it does not apply
     expect(out.map((p) => p.state)).toEqual(["pending"]);
+    expect(body()).toContain("forge unreachable"); // the comment says why the PR is held
   });
 });
 
@@ -246,5 +247,51 @@ describe("a gate run reads the waiver store at the start", () => {
     expect(() => gateWaivers({ stateDir: d })).toThrow(/waivers\.json/);
     writeFileSync(waiversPath(d), "{}");
     expect(() => gateWaivers({ stateDir: d })).toThrow(/waivers\.json/);
+  });
+});
+
+describe("lockfile reads when a PR is reviewed again", () => {
+  /** A forge whose readFile calls are counted. */
+  const counting = (state: StatusState, kept: string, fileset?: Record<string, string>) => {
+    const f = forgeWith(state, kept, fileset);
+    const paths: string[] = [];
+    const readFile = f.forge.readFile;
+    return { ...f, paths, forge: { ...f.forge, readFile: async (r: string, sha: string, p: string) => (paths.push(`${sha}:${p}`), readFile(r, sha, p)) } as Forge };
+  };
+
+  test("a PR reviewed again because a relevant waiver changed reads its lockfiles once, as a first review does", async () => {
+    const first = counting("failure", verdictLine("h0", "failure"));
+    await runGate({ forge: first.forge, repo: "o/r", waivers: [], review: async (c) => result(c, "hold") });
+    const again = counting("failure", line("failure"));
+    const out = await runGate({ forge: again.forge, repo: "o/r", waivers: [mine()], review: async (c) => result(c, "land") });
+    expect(out.map((p) => p.state)).toEqual(["success"]);
+    expect(first.paths.length).toBeGreaterThan(0);
+    expect(again.paths).toEqual(first.paths); // the read made to compare the fingerprint is the one the review uses
+  });
+
+  test("a PR whose verdict is kept reads its lockfiles once", async () => {
+    const kept = counting("failure", line("failure", mine()));
+    const out = await runGate({ forge: kept.forge, repo: "o/r", waivers: [mine()], review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+    expect(out.map((p) => p.state)).toEqual(["skipped"]);
+    const first = counting("failure", verdictLine("h0", "failure"));
+    await runGate({ forge: first.forge, repo: "o/r", waivers: [], review: async (c) => result(c, "hold") });
+    expect(kept.paths).toEqual(first.paths);
+  });
+});
+
+describe("a PR with a deleted lockfile", () => {
+  const deleted = { "b:bun.lock": LOCK("2.8.1") };
+
+  test("is held for a person with the plain line, and a waiver for a package the lockfile once had does not change that", async () => {
+    const fresh = forgeWith("failure", verdictLine("h0", "failure"), deleted);
+    const out = await runGate({ forge: fresh.forge, repo: "o/r", waivers: [mine({ version: "2.8.1" }), mine()], review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+    expect(out.map((p) => p.state)).toEqual(["failure"]);
+    expect(fresh.body()).toContain("<!-- oupdate-verdict: h1 failure -->");
+    // kept under the same store, and under a different one
+    for (const list of [[mine({ version: "2.8.1" }), mine()], [waiver({ name: "left-pad", version: "1.0.0" })], [mine({ name: "other" })]]) {
+      const kept = forgeWith("failure", verdictLine("h1", "failure"), deleted);
+      const r = await runGate({ forge: kept.forge, repo: "o/r", waivers: list, review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+      expect(r.map((p) => p.state)).toEqual(["skipped"]);
+    }
   });
 });
