@@ -53,7 +53,7 @@ describe("a stalled request fails instead of hanging", () => {
     const r = await reviewUpdate({
       eco: "npm", name: "yaml", from: "1.0.0", to: "1.0.1",
       registry: npmRegistry({ base: never, timeoutMs: MS }), advisories: osvFeed({ base: never, timeoutMs: MS }),
-      cooldownDays: 7, now: new Date(), only: ["cooldown", "advisory"], reviewer: undefined, loadArtifacts: async () => ({ old: {}, new: {} }),
+      cooldownDays: 7, now: new Date(), only: ["cooldown", "advisory"], reviewer: undefined, loadArtifacts: async () => ({ old: new Map(), new: new Map() }),
     });
     for (const layer of ["cooldown", "advisory"]) {
       const l = r.layers.find((x) => x.layer === layer)!;
