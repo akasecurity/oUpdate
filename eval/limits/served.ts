@@ -63,9 +63,9 @@ export function restoreTally(t: ServedTally, snap: ServedTally): void {
  * The reviewer with every answered call counted into `tally`; `requested` is the model the spec asked for (undefined: none to compare,
  * so no call is "not requested"). The result is a view of the same reviewer: its methods run on the original object, so a class
  * reviewer keeps its methods and fields. The served-by value is read after each call from that one reviewer, which is right while
- * calls run one at a time; a parallel eval would have to capture it per call. Only the view counts: a spread or Object.assign copy
- * of it is a plain snapshot of the properties, calls through the copy are not counted, and each read of a method returns a new bound
- * function (compare methods on the original reviewer). A reviewer wrapped by the verdict store reports no served-by for a store hit,
+ * calls run one at a time; a parallel eval would have to capture it per call. A spread or Object.assign copy of the view keeps the
+ * tracked `review` of a plain-object reviewer, but a class reviewer's copy loses `review` and every other prototype method; and each
+ * read of a method other than `review` returns a new bound function (compare methods on the original reviewer). A reviewer wrapped by the verdict store reports no served-by for a store hit,
  * so such a call would count as unknown; the limits eval does not use the store.
  */
 export function trackServed(reviewer: Reviewer, requested: string | undefined, tally: ServedTally): Reviewer {
