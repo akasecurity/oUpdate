@@ -4,7 +4,7 @@ This folder holds one record per release and run: `<version>.json` and `.md` fro
 
 ## Changed held-out fixtures
 
-The fixture package names of three held-out cases were changed, under the same case ids (a fourth, flow-agent, became flow-agent-kit-x before it was public or run, so it has no old results), because the old names were real npm packages a reviewer model might recognize. Only the package name changed; versions and file contents are the same. The result files store case ids, not package names, so this note is the record of the change.
+The fixture package names of three held-out cases were changed, under the same case ids (a fourth, the host package of the mastra-style-typosquat-dependency-postinstall case, was named flow-agent and became flow-agent-kit-x before it was public or run, so it has no old results), because the old names were real npm packages a reviewer model might recognize. Only the package name changed; versions and file contents are the same. The result files store case ids, not package names, so this note is the record of the change.
 
 | Case | Old name | New name |
 | --- | --- | --- |
@@ -14,4 +14,4 @@ The fixture package names of three held-out cases were changed, under the same c
 
 The results here (0.2.17 and earlier) for the keyv-style and jscrambler-style cases were recorded under the old names, so they are not directly comparable to later runs for those two ids. The node-ipc-style case was renamed before any run was recorded, so it appears in no result here and has no old results to compare. The new names did not exist on the npm registry when they were chosen (2026-11-06).
 
-The mastra-style-typosquat-dependency-postinstall case changed bytes on 2026-11-06: the dropper grew from 2987 to 4595 bytes (decoys 60 -> 123) to match the write-up. The 60-decoy bytes were never in a release (the case was added after v0.2.17), so no recorded run used them, and the case appears in no result here.
+The mastra-style-typosquat-dependency-postinstall case changed bytes on 2026-11-06: the dropper grew from 2987 to 4595 bytes (decoys 60 -> 123) to match the write-up. No release carries the case (it is not in v0.2.19 either), so no recorded run used the 60-decoy bytes, and the case appears in no result here.
