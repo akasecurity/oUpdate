@@ -4,6 +4,7 @@
 import { basename, dirname, join } from "node:path";
 import { isStopping as execStopping } from "./exec.ts";
 import { staleKegCheck } from "./kegs.ts";
+import { MAS_NOT_CHECKED } from "./summary-text.ts";
 import { npmSection, type NpmRun } from "./npm.ts";
 import { ownerDir, queueOwners } from "./owner-waiter.ts";
 import { savePending } from "./release-checks.ts";
@@ -211,7 +212,7 @@ export async function finishRun(rt: RunCtx, a: { npmRun: NpmRun; npmStatus: stri
   ];
   const npmParts = [...uniq(npmFailed).map((t) => `FAILED — ${t}`), ...(npmStatus ? [npmStatus] : npmFailed.length ? npmPartial : ["nothing to update"])];
   const npmLine = [...npmParts, ...(ccPart ? [ccPart] : [])].join("; ");
-  const mas = "not checked — the App Store phase is not in oupdate";
+  const mas = MAS_NOT_CHECKED;
   const rc: 0 | 1 = b.failed.length || /FAILED|ERROR/.test(npmLine) ? 1 : 0;
   const summary = summaryLines(host, dryRun, brewStatus, npmLine, mas);
   for (const l of summary) sink?.(l);

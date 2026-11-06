@@ -3,6 +3,7 @@
 // own logs read the same way). Two holds show only in the run body, between the two:
 // a Type B FLAG (a third-party tap's formula review) and a CASK_EXCLUDE skip.
 
+import { MAS_NOT_CHECKED } from "../apply/summary-text.ts";
 import { DEFAULT_COMPAT } from "../targets/compat.ts";
 
 export interface PrevSummary {
@@ -79,7 +80,7 @@ export interface RunBlock {
 // the two notice lines makeNotify writes ("[notify] ..." and "[dry-run — not notified] ...") and,
 // directly after a "[notify] " line, its send-failure note. A continuation that matches one of these
 // exactly is skipped too; the summary writer puts each lane on one line, so a new log has none.
-const MAS_TEXT = /^\s+mas:\s+not checked — the App Store phase is not in oupdate$/;
+const MAS_TEXT = new RegExp(`^\\s+mas:\\s+${MAS_NOT_CHECKED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 const NOTICE = /^\[(?:notify|dry-run — not notified)\] /;
 const runOwnLine = (l: string, prev: string | undefined) =>
   MAS_TEXT.test(l) || NOTICE.test(l) || (/^\s+the notice could not be sent$/.test(l) && prev !== undefined && /^\[notify\] /.test(prev));
