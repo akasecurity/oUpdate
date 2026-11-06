@@ -35,7 +35,7 @@ import { realDockerSource } from "./targets/pins/docker.ts";
 import { realGithubSource } from "./targets/pins/github.ts";
 import { realSnapshotSource } from "./targets/pins/oci.ts";
 import { dockerHubSource, parseImageRef, registrySource, type ImageRef } from "./adapters/oci/registry.ts";
-import { listWaivers, stateDirOutsideRepo } from "./waiver.ts";
+import { listWaivers, stateDirOutsideRepo, waiverFingerprint, type Waiver } from "./waiver.ts";
 import { parseWaiveArgs, waiveMain } from "./waive-cli.ts";
 import { checkImage, renderImage } from "./image.ts";
 
@@ -63,6 +63,8 @@ export interface ReviewArgs {
   advisoryFix: boolean;
   /** The host state dir whose waivers.json (oupdate waive) lets a hold for a waived binary land. */
   stateDir?: string;
+  /** The waivers to use, already read; when set the state dir is not read again, so a gate run reviews every package against one list. */
+  waivers?: Waiver[];
 }
 
 const VALUE_FLAGS = new Set(["--old-artifact", "--new-artifact", "--published", "--now", "--only", "--reviewer", "--scanner", "--json", "--cooldown-days", "--state-dir", "--verdict-dir"]);
@@ -222,8 +224,8 @@ export async function lockedFilesCheck(registry: Registry, name: string, version
   return undefined;
 }
 
-/** The waivers of the run's state dir; undefined without one. A store that cannot be read throws, so the review fails instead of ignoring it. */
-export const loadReviewWaivers = (a: ReviewArgs) => (a.stateDir ? listWaivers(a.stateDir) : undefined);
+/** The waivers a review uses: the list it was given, else those of the run's state dir; undefined with neither. A store that cannot be read throws, so the review fails instead of ignoring it. */
+export const loadReviewWaivers = (a: ReviewArgs) => a.waivers ?? (a.stateDir ? listWaivers(a.stateDir) : undefined);
 
 export async function runReview(a: ReviewArgs): Promise<ReviewResult> {
   const r = await reviewOnce(a);
@@ -367,9 +369,17 @@ export function gateForge(g: GateCliArgs, token: string, f?: typeof fetch): Forg
   return g.forge === "github" ? githubForge({ endpoint: g.endpoint, token, login: g.gateLogin, fetch: f }) : giteaForge({ endpoint: g.endpoint!, token, login: g.gateLogin, fetch: f });
 }
 
+/** The waivers of a gate run, read once, and their fingerprint: the same list is the one every review uses and the one the verdict line records, so a waiver changed mid-run cannot land a PR under a fingerprint that predates it. */
+export function gateWaiverState(g: Pick<GateCliArgs, "stateDir">): { waivers?: Waiver[]; waiverPrint?: string } {
+  if (!g.stateDir) return {};
+  const waivers = listWaivers(g.stateDir);
+  return { waivers, waiverPrint: waiverFingerprint(waivers) };
+}
+
 async function gateMain(argv: string[]): Promise<number> {
   const g = parseGateArgs(argv);
   const token = await gateToken(g);
+  const { waivers, waiverPrint } = gateWaiverState(g);
   const pulls = await runGate({
     forge: gateForge(g, token),
     repo: g.repo,
@@ -377,8 +387,9 @@ async function gateMain(argv: string[]): Promise<number> {
     botLogins: g.botLogins,
     lockPaths: g.lockPaths,
     privateRegistry: g.privateRegistry,
+    waiverPrint,
     log: (line) => console.log(line),
-    review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, lockedFiles: c.toArtifacts, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner, stateDir: g.stateDir, verdictDir: g.verdictDir }),
+    review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, lockedFiles: c.toArtifacts, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner, waivers, verdictDir: g.verdictDir }),
   });
   for (const p of pulls) {
     console.log(`PR #${p.number}: ${p.state}`);

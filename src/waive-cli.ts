@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { addWaiver, listWaivers, removeWaiver, sha256Hex } from "./waiver.ts";
 
-const USAGE = "usage: oupdate waive add --state-dir DIR --eco npm|pypi --name N --version V (--file BINARY | --sha256 HEX) --reason TEXT --who NAME\n       oupdate waive list --state-dir DIR\n       oupdate waive remove --state-dir DIR --eco npm|pypi --name N --version V (--file BINARY | --sha256 HEX)\n       A waiver added after a gate hold does not re-gate that pull request: push a commit, or clear its status and comment.";
+const USAGE = "usage: oupdate waive add --state-dir DIR --eco npm|pypi --name N --version V (--file BINARY | --sha256 HEX) --reason TEXT --who NAME\n       oupdate waive list --state-dir DIR\n       oupdate waive remove --state-dir DIR --eco npm|pypi --name N --version V (--file BINARY | --sha256 HEX)\n       A gate reviews a pull request again when the waivers have changed since its verdict.";
 
 export interface WaiveCommand {
   verb: "add" | "list" | "remove";
