@@ -7,10 +7,10 @@ interface Release {
 export function pypiRegistry(deps: RegistryDeps = {}): Registry {
   const f = deps.fetch ?? fetch;
   const base = deps.base ?? "https://pypi.org/pypi";
-  const release = (name: string, version: string) => getJson(f, `${base}/${name}/${version}/json`) as Promise<Release | undefined>;
+  const release = (name: string, version: string) => getJson(f, `${base}/${name}/${version}/json`, deps.timeoutMs) as Promise<Release | undefined>;
   return {
     async latest(name) {
-      const d = (await getJson(f, `${base}/${name}/json`)) as { info?: { version?: string } } | undefined;
+      const d = (await getJson(f, `${base}/${name}/json`, deps.timeoutMs)) as { info?: { version?: string } } | undefined;
       return d?.info?.version;
     },
     async publishedAt(name, version) {

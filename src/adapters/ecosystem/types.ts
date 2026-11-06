@@ -1,3 +1,4 @@
+import { timed } from "../http.ts";
 import type { VersionPublisher } from "../../publisher-signals.ts";
 
 /** One installable file of a release, with the digest the registry publishes for it. */
@@ -21,11 +22,15 @@ export interface Registry {
 export interface RegistryDeps {
   fetch?: typeof fetch;
   base?: string;
+  /** Limit for one request in milliseconds; the default is HTTP_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
-export async function getJson(f: typeof fetch, url: string): Promise<unknown | undefined> {
-  const r = await f(url, { headers: { accept: "application/json" } });
-  if (r.status === 404) return undefined;
-  if (!r.ok) throw new Error(`registry ${r.status} for ${url}`);
-  return r.json();
+export async function getJson(f: typeof fetch, url: string, timeoutMs?: number): Promise<unknown | undefined> {
+  return timed(url, async (init) => {
+    const r = await f(url, { headers: { accept: "application/json" }, ...init });
+    if (r.status === 404) { await r.body?.cancel().catch(() => {}); return undefined; }
+    if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`registry ${r.status} for ${url}`); }
+    return r.json();
+  }, timeoutMs);
 }
