@@ -65,8 +65,8 @@ export function restoreTally(t: ServedTally, snap: ServedTally): void {
  * reviewer keeps its methods and fields. The served-by value is read after each call from that one reviewer, which is right while
  * calls run one at a time; a parallel eval would have to capture it per call. A spread or Object.assign copy of the view keeps the
  * tracked `review` of a plain-object reviewer, but a class reviewer's copy loses `review` and every other prototype method; and each
- * read of a method other than `review` returns a new bound function (compare methods on the original reviewer). A reviewer wrapped by the verdict store reports no served-by for a store hit,
- * so such a call would count as unknown; the limits eval does not use the store.
+ * read of a method other than `review` returns a new bound function (compare methods on the original reviewer). A reviewer wrapped by
+ * the verdict store reports no served-by for a store hit, so such a call would count as unknown; the limits eval does not use the store.
  */
 export function trackServed(reviewer: Reviewer, requested: string | undefined, tally: ServedTally): Reviewer {
   const review = async (prompt: string) => {
