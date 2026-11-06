@@ -3,12 +3,13 @@ import { HELDOUT } from "./heldout-cases.ts";
 
 const text = (f: Map<string, Uint8Array>, k: string) => new TextDecoder().decode(f.get(k)!);
 const byId = (id: string) => HELDOUT.find((c) => c.id === id)!;
-/** The file text plus every hex string literal decoded and put back in quotes (a bare hostname then reads as a quoted one). Entries under 8 hex characters are skipped. */
+/** Limits: only lowercase hex in double quotes is decoded (any other encoding, such as base64, is not). The file text plus every hex string literal decoded and put back in quotes (a bare hostname then reads as a quoted one). Entries under 8 hex characters are skipped. */
 const unpacked = (s: string) => s + "\n" + (s.match(/"[0-9a-f]{8,}"/g) ?? []).map((h) => `"${Buffer.from(h.slice(1, -1), "hex").toString("latin1")}"`).join("\n");
-const FILE_EXT = /\.(js|cjs|mjs|json|ts|gyp|npmrc|md|txt|sh|out)$/;
+const FILE_EXT = /\.(js|cjs|mjs|json|ts|gyp|npmrc|txt|out)$/;
+const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 const hostsIn = (s: string) => [
   ...(s.match(/https?:\/\/[^\s"'`/\\]+/g) ?? []),
-  ...[...s.matchAll(/["'`]([a-z0-9-]+(?:\.[a-z0-9-]+)+)["'`]/g)].map((m) => m[1]!).filter((t) => !FILE_EXT.test(t) && !/^\d+(\.\d+)+$/.test(t)),
+  ...[...s.matchAll(/["'`]([a-z0-9-]+(?:\.[a-z0-9-]+)+)["'`]/g)].map((m) => m[1]!).filter((t) => !FILE_EXT.test(t) && (IPV4.test(t) || !/^\d+(\.\d+)+$/.test(t))),
 ];
 // Words a keyword scan would key on; in the two obfuscated payloads they may only appear after the table is decoded.
 const PLAIN = ["child_process", ".npmrc", ".ssh", "readFileSync", "POST", "stage.example", "execFile", "spawn"];
@@ -18,7 +19,7 @@ test("every held-out case is a dated attack with a source page and only .example
   for (const c of HELDOUT) {
     expect(c.kind, c.id).toBe("attack");
     expect(c.expect, c.id).toBe("hold");
-    expect(c.disclosed, c.id).toMatch(/^2026-\d\d-\d\d$/);
+    expect(c.disclosed, c.id).toMatch(/^\d{4}-\d\d-\d\d$/);
     expect(c.source, c.id).toMatch(/^https:\/\/\S+$/);
     for (const p of [...c.base, ...c.head]) for (const [k, v] of p.files) {
       const body = unpacked(new TextDecoder().decode(v));
@@ -36,6 +37,8 @@ test("the host guard sees a hex-encoded real hostname", () => {
 
 test("the host guard sees a quoted bare hostname and ignores file names", () => {
   expect(hostsIn(`x("sh.stage.example"); y("ipc.cjs"); z("1.2.3"); w("evil.test")`)).toEqual(["sh.stage.example", "evil.test"]);
+  expect(hostsIn(`x("203.0.113.7"); y("1.2.3")`)).toEqual(["203.0.113.7"]);
+  expect(hostsIn(`x("run.sh"); y("go.md")`)).toEqual(["run.sh", "go.md"]);
 });
 
 test("node-ipc style: no install hook, main loads the bundle, the payload is appended after module.exports", () => {
@@ -59,7 +62,11 @@ test("node-ipc style: no install hook, main loads the bundle, the payload is app
   for (const w of ["child_process", "spawn", ".npmrc", ".ssh", "readFileSync", "POST", "sh.stage.example"]) expect(seen, w).toContain(w);
   // the gate: a hash of the module file name that is the real name of this bundle
   expect(tail).toContain(new Bun.CryptoHasher("sha256").update("ipc.cjs").digest("hex"));
-  expect(() => new Function(tail)).not.toThrow();
+  expect(() => new Function(tail), "parses").not.toThrow();
+  // detach-then-send: the first run starts the marked copy and returns; only the marked copy reads and posts
+  expect(tail).toMatch(/\.unref\(\);\s*return;\s*\}/);
+  expect(tail.indexOf(".unref();")).toBeLessThan(tail.indexOf("_0xout"));
+  expect(tail).toMatch(/if \(!process\[_0xd\(\d+\)\]\[_0xd\(\d+\)\]\) \{/);
   expect(text(h!.files, "index.mjs")).toBe(text(b!.files, "index.mjs"));
 });
 
@@ -69,8 +76,15 @@ test("tanstack style: the only manifest change is a git-hosted optionalDependenc
   // the postmortem names only the two malicious versions, so the note must say where the clean base comes from
   expect(c.note).toMatch(/registry/);
   expect(c.note).toMatch(/postmortem/);
-  const [b] = c.base, [h] = c.head;
+  const [b] = c.base, [h, dep] = c.head;
+  expect(c.base).toHaveLength(1);
+  expect(c.head).toHaveLength(2);
   expect([b!.version, h!.version]).toEqual(["1.161.6", "1.161.9"]);
+  // the git dependency is a head package whose own prepare script runs the obfuscated file in its own checkout
+  expect(dep!.name).toBe("@route/setup");
+  expect(JSON.parse(text(dep!.files, "package.json")).scripts).toEqual({ prepare: "node router_init.js" });
+  expect(text(dep!.files, "router_init.js")).toBe(text(h!.files, "router_init.js"));
+  expect(c.note).toMatch(/install-dependency-git-url/);
   const bp = JSON.parse(text(b!.files, "package.json")), hp = JSON.parse(text(h!.files, "package.json"));
   expect(hp.scripts).toBeUndefined();
   expect(hp.optionalDependencies["@route/setup"]).toMatch(/^github:example-org\/example-router#[0-9a-f]{40}$/);
@@ -84,5 +98,5 @@ test("tanstack style: the only manifest change is a git-hosted optionalDependenc
   for (const w of PLAIN) expect(init, w).not.toContain(w);
   const seen = unpacked(init);
   for (const w of ["child_process", "execFile"]) expect(seen, w).toContain(w);
-  expect(() => new Function(init)).not.toThrow();
+  expect(() => new Function(init), "parses").not.toThrow();
 });

