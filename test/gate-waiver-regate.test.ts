@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadReviewWaivers, parseReviewArgs } from "../src/cli.ts";
+import { gateWaivers, loadReviewWaivers, parseReviewArgs } from "../src/cli.ts";
 import { MARKER, runGate, verdictLine, type Change } from "../src/gate.ts";
 import type { Forge, Pull, StatusState } from "../src/adapters/forge/types.ts";
 import type { ReviewResult } from "../src/review.ts";
@@ -136,7 +136,7 @@ describe("a verdict is kept only while the waivers that apply to the PR's packag
   test("a read of the lockfile that fails for a PR with a final verdict does not keep the verdict by guesswork: the PR is held and says why", async () => {
     const { forge } = forgeWith("failure", line("failure"));
     const broken = { ...forge, readFile: async () => { throw new Error("forge unreachable"); } } as Forge;
-    const out = await runGate({ forge: broken, repo: "o/r", waivers: [], review: hold });
+    const out = await runGate({ forge: broken, repo: "o/r", waivers: [waiver({ name: "left-pad", version: "1.0.0" })], review: hold }); // a store with a waiver: the packages must be read to know it does not apply
     expect(out.map((p) => p.state)).toEqual(["pending"]);
   });
 });
@@ -206,5 +206,45 @@ describe("remove finds a waiver by the key as typed, spaces and all", () => {
     const key = { eco: "npm" as const, name: " p ", version: "\t2.0.0 ", sha256: waiver().sha256 };
     expect(removeWaiver(d, key)).toBe(1);
     expect(listWaivers(d)).toEqual([]);
+  });
+});
+
+describe("keeping a verdict with no waivers reads no lockfile", () => {
+  for (const [label, list] of [["no store", undefined], ["an empty store", []]] as [string, Waiver[] | undefined][]) {
+    for (const state of ["success", "failure"] as const) {
+      test(`a kept ${state} with ${label} makes no lockfile read and survives a failing read`, async () => {
+        const { forge } = forgeWith(state, line(state));
+        let reads = 0, listed = 0;
+        const counted: Forge = { ...forge, readFile: async () => { reads++; throw new Error("forge unreachable"); }, changedFiles: async () => { listed++; throw new Error("forge unreachable"); } };
+        const out = await runGate({ forge: counted, repo: "o/r", waivers: list, review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+        expect(out.map((p) => p.state)).toEqual(["skipped"]);
+        expect([reads, listed]).toEqual([0, 0]);
+      });
+    }
+  }
+
+  test("a final verdict whose comment is missing, or names another head, is still reviewed", async () => {
+    const { forge } = forgeWith("failure", verdictLine("h0", "failure"));
+    const seen: string[] = [];
+    await runGate({ forge, repo: "o/r", review: async (c) => (seen.push(c.name), result(c, "hold")) });
+    expect(seen).toEqual(["yaml"]);
+  });
+});
+
+describe("a gate run reads the waiver store at the start", () => {
+  test("no state dir means no list; a state dir gives its list", () => {
+    expect(gateWaivers({})).toBeUndefined();
+    const d = tmp();
+    expect(gateWaivers({ stateDir: d })).toEqual([]);
+    addWaiver(d, waiver());
+    expect(gateWaivers({ stateDir: d })).toHaveLength(1);
+  });
+
+  test("a damaged waivers.json fails the read, naming the file, so the run stops before any pull request", () => {
+    const d = tmp();
+    writeFileSync(waiversPath(d), "x");
+    expect(() => gateWaivers({ stateDir: d })).toThrow(/waivers\.json/);
+    writeFileSync(waiversPath(d), "{}");
+    expect(() => gateWaivers({ stateDir: d })).toThrow(/waivers\.json/);
   });
 });

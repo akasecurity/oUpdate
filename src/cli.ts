@@ -369,11 +369,14 @@ export function gateForge(g: GateCliArgs, token: string, f?: typeof fetch): Forg
   return g.forge === "github" ? githubForge({ endpoint: g.endpoint, token, login: g.gateLogin, fetch: f }) : giteaForge({ endpoint: g.endpoint!, token, login: g.gateLogin, fetch: f });
 }
 
+/** The waivers of a gate run, read once at the start: a damaged store fails the run before any pull request is touched. Undefined without a state dir. */
+export const gateWaivers = (g: Pick<GateCliArgs, "stateDir">): Waiver[] | undefined => (g.stateDir ? listWaivers(g.stateDir) : undefined);
+
 async function gateMain(argv: string[]): Promise<number> {
   const g = parseGateArgs(argv);
   const token = await gateToken(g);
   // Read once: this list is the one every review uses and the one the verdicts' fingerprints cover, so a waiver changed mid-run cannot land a PR under a fingerprint that predates it.
-  const waivers = g.stateDir ? listWaivers(g.stateDir) : undefined;
+  const waivers = gateWaivers(g);
   const pulls = await runGate({
     forge: gateForge(g, token),
     repo: g.repo,

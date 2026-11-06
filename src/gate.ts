@@ -625,9 +625,15 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
   if (prior && (prior.state === "success" || prior.state === "failure") && same(prior.creator, self)) {
     const own = await a.forge.ownComment(a.repo, pr.number, MARKER);
     if (own) {
-      // The verdict records the waivers that apply to this PR's packages, so the packages are read first. A read that fails here is not a reason to keep the verdict: the review below reads again and reports it.
-      read = await lockChanges(a, pr, paths).catch(() => undefined);
-      if (read && own.split("\n").includes(verdictLine(pr.headSha, prior.state, waiverPrint(a.waivers, read.changes)))) return { number: pr.number, state: "skipped", results: [] };
+      const lines = own.split("\n");
+      if (!a.waivers?.length) {
+        // No waiver can apply, so the verdict carries the plain line and no lockfile is read to keep it.
+        if (lines.includes(verdictLine(pr.headSha, prior.state))) return { number: pr.number, state: "skipped", results: [] };
+      } else {
+        // The verdict records the waivers that apply to this PR's packages, so the packages are read first. A read that fails here is not a reason to keep the verdict: the review below reads again and reports it.
+        read = await lockChanges(a, pr, paths).catch(() => undefined);
+        if (read && lines.includes(verdictLine(pr.headSha, prior.state, waiverPrint(a.waivers, read.changes)))) return { number: pr.number, state: "skipped", results: [] };
+      }
     }
   }
   let found: string[], deleted: string[], changes: Change[], covers: Map<string, Cover[]>;
