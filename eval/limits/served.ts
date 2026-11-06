@@ -2,11 +2,11 @@
 // and the same code then scores differently. Counts only; the results file stays free of where the reviewer is reached.
 
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Reviewer } from "../../src/review.ts";
 
 export interface ServedTally {
-  /** Answered calls. */
+  /** Answered reviewer calls: one call is one chunk sent to the reviewer, so a review of a large release counts several. */
   calls: number;
   /** Answered calls per served-by value, as the endpoint wrote it. */
   by_value: Record<string, number>;
@@ -49,7 +49,7 @@ export function servedValuesRefusal(withValues: boolean, out: string | undefined
 function realish(p: string): string {
   const rest: string[] = [];
   let cur = resolve(p);
-  while (!existsSync(cur) && dirname(cur) !== cur) { rest.unshift(cur.slice(dirname(cur).length + 1)); cur = dirname(cur); }
+  while (!existsSync(cur) && dirname(cur) !== cur) { rest.unshift(basename(cur)); cur = dirname(cur); }
   return join(realpathSync(cur), ...rest);
 }
 
@@ -59,21 +59,34 @@ export function restoreTally(t: ServedTally, snap: ServedTally): void {
   Object.assign(t, snapshotTally(snap));
 }
 
-/** The reviewer with every answered call counted into `tally`; `requested` is the model the spec asked for (undefined: none to compare, so no call is "not requested"). */
+/**
+ * The reviewer with every answered call counted into `tally`; `requested` is the model the spec asked for (undefined: none to compare,
+ * so no call is "not requested"). The result is a view of the same reviewer: its methods run on the original object, so a class
+ * reviewer keeps its methods and fields. The served-by value is read after each call from that one reviewer, which is right while
+ * calls run one at a time; a parallel eval would have to capture it per call.
+ */
 export function trackServed(reviewer: Reviewer, requested: string | undefined, tally: ServedTally): Reviewer {
-  return {
-    ...reviewer,
-    review: async (prompt) => {
-      const text = await reviewer.review(prompt);
-      const by = reviewer.lastServedBy?.();
-      tally.calls++;
-      if (by === undefined) tally.unknown++;
-      else {
-        tally.by_value[by] = (tally.by_value[by] ?? 0) + 1;
-        // Names match exactly except for case; a router that names its worker differently from the model counts as not requested.
-        if (requested !== undefined && by.toLowerCase() !== requested.toLowerCase()) tally.not_requested++;
-      }
-      return text;
-    },
+  const review = async (prompt: string) => {
+    const text = await reviewer.review(prompt);
+    const by = reviewer.lastServedBy?.();
+    tally.calls++;
+    if (by === undefined) tally.unknown++;
+    else {
+      tally.by_value[by] = (tally.by_value[by] ?? 0) + 1;
+      // Names match exactly except for case; a router that names its worker differently from the model counts as not requested.
+      if (requested !== undefined && by.toLowerCase() !== requested.toLowerCase()) tally.not_requested++;
+    }
+    return text;
   };
+  return new Proxy(reviewer, {
+    get(target, prop) {
+      if (prop === "review") return review;
+      const v = Reflect.get(target, prop, target);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
 }
+
+/** The one-line summary of a tally for the results report. */
+export const servedLine = (t: ReturnType<typeof publicTally>): string =>
+  `served by: ${t.calls} reviewer calls (each call is one chunk sent to the reviewer, not one review); ${t.not_requested} not served by the requested model; ${t.unknown} with no served-by header${t.by_value && Object.keys(t.by_value).length ? `; by value ${Object.entries(t.by_value).map(([k, n]) => `${k} ${n}`).join(", ")}` : ""}`;

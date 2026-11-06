@@ -21,7 +21,7 @@ import { HELDOUT } from "./heldout-cases.ts";
 import { GAP } from "./gap-cases.ts";
 import { evasionReport, writeEvasions } from "./evasions.ts";
 import { INSTALL_ATTACKS, INSTALL_CLEAN } from "./install-cases.ts";
-import { addTallies, newTally, publicTally, restoreTally, servedValuesRefusal, snapshotTally, trackServed, type ServedTally } from "./served.ts";
+import { addTallies, newTally, publicTally, restoreTally, servedLine, servedValuesRefusal, snapshotTally, trackServed, type ServedTally } from "./served.ts";
 import { stampSpec, thinkingOf } from "./stamp.ts";
 
 /** An attack with the date it became public. Add new write-ups here; never use them to tune prompts. */
@@ -146,7 +146,6 @@ const out = arg("out") ?? join(here, "results");
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, `${version}.json`), JSON.stringify({ summary, rows, clean_rows: cleanRows }, null, 2) + "\n");
 const evasions = evasionReport(await writeEvasions(version, out));
-const servedLine = (t: ReturnType<typeof publicTally>) => `served by: ${t.calls} reviewer calls; ${t.not_requested} not served by the requested model; ${t.unknown} with no served-by header${t.by_value && Object.keys(t.by_value).length ? `; by value ${Object.entries(t.by_value).map(([k, n]) => `${k} ${n}`).join(", ")}` : ""}`;
 const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 const line = (n: string, s: { k: number; n: number; lo: number; hi: number }) => `${n}: ${s.k}/${s.n} runs flagged, ${pct(s.k / (s.n || 1))} (95% interval ${pct(s.lo)}-${pct(s.hi)})`;
 const md = [

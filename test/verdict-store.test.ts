@@ -23,6 +23,25 @@ const counting = (name: string, answer = "APPROVE\nfine") => {
   return r;
 };
 
+describe("cachedReviewer served-by", () => {
+  test("it passes the inner reviewer's served-by through, and a store hit has none", async () => {
+    const d = dir();
+    try {
+      let cur: string | undefined;
+      const inner: Reviewer = { name: "m", review: async () => { cur = "worker-1"; return "FLAG\nbad"; }, lastServedBy: () => cur };
+      const c = cachedReviewer(inner, d, "h", "f1");
+      await c.review("p");
+      expect(c.lastServedBy?.()).toBe("worker-1");
+      await c.review("p"); // the FLAG is in the store now
+      expect(c.storeHits).toBe(1);
+      expect(c.lastServedBy?.()).toBeUndefined();
+      const plain = cachedReviewer(counting("n"), d, "h", "f1");
+      await plain.review("q");
+      expect(plain.lastServedBy).toBeUndefined();
+    } finally { rmSync(d, { recursive: true }); }
+  });
+});
+
 describe("verdictKey", () => {
   test("same reviewer and prompt give the same key; either changing gives another", () => {
     expect(verdictKey("m", "p")).toBe(verdictKey("m", "p"));
