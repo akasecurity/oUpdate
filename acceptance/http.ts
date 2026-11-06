@@ -1,5 +1,7 @@
-// The acceptance run's one download helper. Every request has a time limit that covers the headers and the whole body, so a
-// stalled download ends with an error naming the url instead of holding the run until an outer cap.
+// The download helper of acceptance/run.ts: the direct downloads (package files, the dataset sample) and the JSON lookups it makes
+// itself. Each has a time limit that covers the headers and the whole body, so a stall ends with an error naming the url.
+// Not covered: the registry lookups (npm artifact urls, publish dates) and the OSV advisory calls the run makes through
+// src/adapters, which still use a fetch without a time limit.
 export const FILE_TIMEOUT_MS = 120_000;
 export const JSON_TIMEOUT_MS = 30_000;
 

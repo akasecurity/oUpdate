@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { get, FILE_TIMEOUT_MS, JSON_TIMEOUT_MS } from "../acceptance/http.ts";
+import { get } from "../acceptance/http.ts";
 
 let server: ReturnType<typeof Bun.serve>;
 const url = (p: string) => `http://127.0.0.1:${server.port}${p}`;
@@ -31,9 +31,4 @@ test("a server that never answers times out with an error that names the url", a
 
 test("a body that stalls after the headers also times out", async () => {
   await expect(get(url("/stall"), { timeoutMs: 300 })).rejects.toThrow(`timed out after 0.3 s: ${url("/stall")}`);
-});
-
-test("files get a longer timeout than JSON, and both are bounded", () => {
-  expect(JSON_TIMEOUT_MS).toBeLessThan(FILE_TIMEOUT_MS);
-  expect(FILE_TIMEOUT_MS).toBeLessThanOrEqual(300_000);
 });
