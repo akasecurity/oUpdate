@@ -269,7 +269,7 @@ oUpdate has no other package-manager backend. After Homebrew stops on Intel, eac
    }
    ```
 
-   The openai reviewer also takes optional `headers` and `expectHeaders`. `headers` are sent on the request. `expectHeaders` names response headers a 2xx answer must carry: the name is compared case-insensitively and the value exactly. A mismatch discards that answer (`<base>: answer <header> <got>, expected <want>`, or `missing` when the header is absent) and the next base is tried. It is not retried. To refuse an answer a model proxy served from its cloud fallback, set `"expectHeaders": {"x-served-by": "local"}` (the header your proxy sets).
+   The openai reviewer also takes optional `headers` and `expectHeaders`. `headers` are sent on the request. `expectHeaders` names response headers a 2xx answer must carry: the name is compared case-insensitively and the value exactly. A mismatch discards that answer (`<base>: answer <header> <got>, expected <want>`, or `missing` when the header is absent) and the next base is tried. It is not retried. To refuse an answer a model proxy served from its cloud fallback, set `"expectHeaders": {"x-served-by": "local"}` (the header your proxy sets). `servedByHeader` (optional) names the response header that says who served an answer; the limits eval counts its values per run, and without it served-by stays unknown.
 
 2. `oupdate host --apply --dry-run` prints the run and a dry-run summary. Read the tier split, the holds and the notices it would have sent. It writes `dry-run-<log file name>` beside the log, never the dated log itself, and its header and summary are named so that nothing reading a log takes a dry run for a run.
 3. `oupdate host --apply` is the live run. The exit code is 1 when anything failed.

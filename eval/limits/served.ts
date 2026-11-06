@@ -1,7 +1,8 @@
 // Who served each reviewer call in a limits run: the router can answer a call from a fallback model when the requested one is busy,
 // and the same code then scores differently. Counts only; the results file stays free of where the reviewer is reached.
 
-import { isAbsolute, relative, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Reviewer } from "../../src/review.ts";
 
 export interface ServedTally {
@@ -39,8 +40,17 @@ export function servedValuesRefusal(withValues: boolean, out: string | undefined
   if (!withValues) return undefined;
   const msg = "--served-values needs --out <dir> outside the repo: served-by values must not land in a tracked results folder";
   if (!out) return msg;
-  const rel = relative(resolve(repoRoot), resolve(out));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel)) ? msg : undefined;
+  const rel = relative(realish(repoRoot), realish(out));
+  const inside = rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  return inside ? msg : undefined;
+}
+
+// The path with symlinks resolved as far as it exists, the rest appended as written: a folder not made yet still lands where its parent really is.
+function realish(p: string): string {
+  const rest: string[] = [];
+  let cur = resolve(p);
+  while (!existsSync(cur) && dirname(cur) !== cur) { rest.unshift(cur.slice(dirname(cur).length + 1)); cur = dirname(cur); }
+  return join(realpathSync(cur), ...rest);
 }
 
 export const snapshotTally = (t: ServedTally): ServedTally => ({ ...t, by_value: { ...t.by_value } });

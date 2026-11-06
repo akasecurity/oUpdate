@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Reviewer } from "../../src/review.ts";
 import { addTallies, newTally, publicTally, restoreTally, servedValuesRefusal, snapshotTally, trackServed } from "./served.ts";
 
@@ -65,4 +68,19 @@ test("a tally restored from a snapshot drops the calls of a failed attempt", asy
   expect(t).toEqual({ calls: 1, by_value: { m1: 1 }, not_requested: 0, unknown: 0 });
   await r.review("x");
   expect(t.calls).toBe(2);
+});
+
+test("an in-repo folder whose name starts with two dots is refused, and a symlink into the repo is refused", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "served-")));
+  const repo = join(dir, "repo");
+  mkdirSync(join(repo, "eval/limits/results"), { recursive: true });
+  mkdirSync(join(repo, "..out"));
+  mkdirSync(join(dir, "outside"));
+  symlinkSync(join(repo, "eval/limits/results"), join(dir, "outside/link"));
+  expect(servedValuesRefusal(true, join(repo, "..out"), repo)).toContain("--out");
+  expect(servedValuesRefusal(true, join(repo, "..out/not-yet"), repo)).toContain("--out");
+  expect(servedValuesRefusal(true, join(dir, "outside/link"), repo)).toContain("--out");
+  expect(servedValuesRefusal(true, join(dir, "outside/link/not-yet"), repo)).toContain("--out");
+  expect(servedValuesRefusal(true, join(dir, "outside"), repo)).toBeUndefined();
+  expect(servedValuesRefusal(true, join(dir, "outside/not-yet"), repo)).toBeUndefined();
 });

@@ -4,7 +4,8 @@
 // The reviewer is stochastic, so each held-out attack runs N times and is reported as k/N with a Wilson 95%
 // interval. The deterministic pre-pass runs once per case. Every run starts fresh and writes
 // results/<version>.{json,md}; nothing is copied forward from an earlier release.
-//   usage: bun eval/limits/run.ts --reviewer <spec.json> [--repeats N] [--out <dir>]
+//   usage: bun eval/limits/run.ts --reviewer <spec.json> [--repeats N] [--out <dir>] [--served-values --out <dir outside the repo>]
+//   --served-values adds the served-by values (where answers came from) to the results; it is refused unless --out is outside the repo.
 // <spec.json> is one reviewer spec (the same JSON the gate takes); keep it outside the repo.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";

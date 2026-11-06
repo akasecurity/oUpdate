@@ -6,7 +6,7 @@ const server = Bun.serve({
   async fetch(req) {
     const body = (await req.json()) as { model: string };
     const headers: Record<string, string> = body.model === "bare" ? {} : { "x-served-by": body.model === "fallback" ? "other-model" : body.model };
-    if (body.model === "fail") return new Response("no", { status: 500, headers });
+    if (body.model === "fail" || (body as { messages?: { content?: string }[] }).messages?.[0]?.content === "fail") return new Response("no", { status: 500, headers });
     return Response.json({ choices: [{ message: { content: "APPROVE\nno attack indicators found" } }] }, { headers });
   },
 });
@@ -56,8 +56,10 @@ describe("openaiReviewer served-by", () => {
   });
 
   test("a failed call clears the value", async () => {
-    const r = make("fail");
-    await expect(r.review("x")).rejects.toThrow();
+    const r = make("m1");
+    await r.review("x");
+    expect(r.lastServedBy?.()).toBe("m1");
+    await expect(r.review("fail")).rejects.toThrow();
     expect(r.lastServedBy?.()).toBeUndefined();
   });
 });
