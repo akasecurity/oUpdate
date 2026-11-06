@@ -96,8 +96,8 @@ test("node-ipc style: no install hook, main loads the bundle, the payload is app
 });
 
 /**
- * Names of globals that reach the outside world. This is a text guard against accidental use, not a sandbox: a payload that gets
- * to real globals anyway, for example by building a name from pieces (a split-string constructor), by calling eval indirectly (an
+ * Names of globals that reach the outside world. This is a text guard against accidental use, not a sandbox: a payload can still
+ * get to real globals, for example by building a name from pieces (a split-string constructor), by calling eval indirectly (an
  * indirect eval runs in the global scope; a direct eval written with a unicode escape sees the shadowed names), or by reaching
  * Worker or navigator. The decoded payload must not name any of these and the run shadows the plain identifiers. "import(" is
  * matched as import followed by an opening parenthesis with any space between, and "constructor" is matched even after a dot (a
