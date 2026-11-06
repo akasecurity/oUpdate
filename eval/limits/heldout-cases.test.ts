@@ -1,0 +1,88 @@
+import { expect, test } from "bun:test";
+import { HELDOUT } from "./heldout-cases.ts";
+
+const text = (f: Map<string, Uint8Array>, k: string) => new TextDecoder().decode(f.get(k)!);
+const byId = (id: string) => HELDOUT.find((c) => c.id === id)!;
+/** The file text plus every hex string literal decoded and put back in quotes (a bare hostname then reads as a quoted one). Entries under 8 hex characters are skipped. */
+const unpacked = (s: string) => s + "\n" + (s.match(/"[0-9a-f]{8,}"/g) ?? []).map((h) => `"${Buffer.from(h.slice(1, -1), "hex").toString("latin1")}"`).join("\n");
+const FILE_EXT = /\.(js|cjs|mjs|json|ts|gyp|npmrc|md|txt|sh|out)$/;
+const hostsIn = (s: string) => [
+  ...(s.match(/https?:\/\/[^\s"'`/\\]+/g) ?? []),
+  ...[...s.matchAll(/["'`]([a-z0-9-]+(?:\.[a-z0-9-]+)+)["'`]/g)].map((m) => m[1]!).filter((t) => !FILE_EXT.test(t) && !/^\d+(\.\d+)+$/.test(t)),
+];
+// Words a keyword scan would key on; in the two obfuscated payloads they may only appear after the table is decoded.
+const PLAIN = ["child_process", ".npmrc", ".ssh", "readFileSync", "POST", "stage.example", "execFile", "spawn"];
+
+test("every held-out case is a dated attack with a source page and only .example addresses", () => {
+  expect(new Set(HELDOUT.map((c) => c.id)).size).toBe(HELDOUT.length);
+  for (const c of HELDOUT) {
+    expect(c.kind, c.id).toBe("attack");
+    expect(c.expect, c.id).toBe("hold");
+    expect(c.disclosed, c.id).toMatch(/^2026-\d\d-\d\d$/);
+    expect(c.source, c.id).toMatch(/^https:\/\/\S+$/);
+    for (const p of [...c.base, ...c.head]) for (const [k, v] of p.files) {
+      const body = unpacked(new TextDecoder().decode(v));
+      for (const host of hostsIn(body)) expect(host.replace(/^https?:\/\//, ""), `${c.id} ${k}`).toMatch(/\.example$/);
+      for (const m of body.matchAll(/github:([\w.-]+)\//g)) expect(m[1], `${c.id} ${k}`).toBe("example-org");
+    }
+  }
+});
+
+test("the host guard sees a hex-encoded real hostname", () => {
+  const hex = Buffer.from("sh.evil.com").toString("hex");
+  expect(hostsIn(unpacked(`const t = ["${hex}"];`))).toEqual(["sh.evil.com"]);
+  expect(hostsIn(unpacked(`const t = ["${Buffer.from("see https://up.evil.com/c now").toString("hex")}"];`))).toContain("https://up.evil.com");
+});
+
+test("the host guard sees a quoted bare hostname and ignores file names", () => {
+  expect(hostsIn(`x("sh.stage.example"); y("ipc.cjs"); z("1.2.3"); w("evil.test")`)).toEqual(["sh.stage.example", "evil.test"]);
+});
+
+test("node-ipc style: no install hook, main loads the bundle, the payload is appended after module.exports", () => {
+  const c = byId("node-ipc-style-appended-require-payload");
+  expect(c.disclosed).toBe("2026-05-14");
+  const [b] = c.base, [h] = c.head;
+  expect([b!.version, h!.version]).toEqual(["12.0.0", "12.0.1"]);
+  for (const p of [b!, h!]) {
+    const pj = JSON.parse(text(p.files, "package.json"));
+    expect(pj.scripts).toBeUndefined();
+    expect(pj.main).toBe("ipc.cjs");
+    expect(pj.exports["."]).toEqual({ import: "./index.mjs", require: "./ipc.cjs" });
+    expect(p.files.has("ipc.cjs") && p.files.has("index.mjs")).toBe(true);
+  }
+  const bundle = text(h!.files, "ipc.cjs"), old = text(b!.files, "ipc.cjs");
+  expect(bundle.startsWith(old)).toBe(true);
+  expect(old).toContain("module.exports");
+  const tail = bundle.slice(old.length);
+  for (const w of PLAIN) expect(tail, w).not.toContain(w);
+  const seen = unpacked(tail);
+  for (const w of ["child_process", "spawn", ".npmrc", ".ssh", "readFileSync", "POST", "sh.stage.example"]) expect(seen, w).toContain(w);
+  // the gate: a hash of the module file name that is the real name of this bundle
+  expect(tail).toContain(new Bun.CryptoHasher("sha256").update("ipc.cjs").digest("hex"));
+  expect(() => new Function(tail)).not.toThrow();
+  expect(text(h!.files, "index.mjs")).toBe(text(b!.files, "index.mjs"));
+});
+
+test("tanstack style: the only manifest change is a git-hosted optionalDependency, an obfuscated file sits outside files", () => {
+  const c = byId("tanstack-style-git-optional-dependency");
+  expect(c.disclosed).toBe("2026-05-11");
+  // the postmortem names only the two malicious versions, so the note must say where the clean base comes from
+  expect(c.note).toMatch(/registry/);
+  expect(c.note).toMatch(/postmortem/);
+  const [b] = c.base, [h] = c.head;
+  expect([b!.version, h!.version]).toEqual(["1.161.6", "1.161.9"]);
+  const bp = JSON.parse(text(b!.files, "package.json")), hp = JSON.parse(text(h!.files, "package.json"));
+  expect(hp.scripts).toBeUndefined();
+  expect(hp.optionalDependencies["@route/setup"]).toMatch(/^github:example-org\/example-router#[0-9a-f]{40}$/);
+  expect({ ...hp, version: "", optionalDependencies: undefined }).toEqual({ ...bp, version: "" });
+  expect(hp.files).toContain("dist");
+  expect(hp.files).not.toContain("router_init.js");
+  expect(h!.files.has("router_init.js")).toBe(true);
+  expect(b!.files.has("router_init.js")).toBe(false);
+  const init = text(h!.files, "router_init.js");
+  expect(init.length).toBeGreaterThan(1500);
+  for (const w of PLAIN) expect(init, w).not.toContain(w);
+  const seen = unpacked(init);
+  for (const w of ["child_process", "execFile"]) expect(seen, w).toContain(w);
+  expect(() => new Function(init)).not.toThrow();
+});
