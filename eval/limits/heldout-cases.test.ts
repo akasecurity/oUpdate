@@ -59,7 +59,7 @@ test("the host guard sees a quoted bare hostname and ignores file names with kno
   // documented limit: a quoted four-part number that fits 0 to 255 reads as an address; one with a part over 255 is a version
   expect(hostsIn(`x("1.2.3.4"); y("12.0.1.1000"); z("1.2.3.256")`)).toEqual(["1.2.3.4"]);
   // a part with a leading zero is read as octal by many resolvers ("0177.0.0.1" is a loopback address), so it is an address whatever its length
-  expect(hostsIn(`x("0177.0.0.1"); y("1.2.3.0400"); z("10.0.1.1000")`)).toEqual(["0177.0.0.1", "1.2.3.0400"]);
+  expect(hostsIn(`x("0177.0.0.1"); y("1.2.3.0400"); z("10.0.1.1000"); w("1.2.3.089")`)).toEqual(["0177.0.0.1", "1.2.3.0400", "1.2.3.089"]); // 8 and 9 are not octal digits and still count
   expect(hostsIn(`x("run.sh"); y("go.md")`)).toEqual(["run.sh", "go.md"]);
 });
 
@@ -281,4 +281,10 @@ test("antv wave style: a version jump with a preinstall that runs bun on a new f
   for (const w of ["readFileSync", "POST", "/v1/traces"]) expect(seen, w).toContain(w);
   expect(ioGlobals(unpacked(payload)), "I/O globals").toEqual([]);
   expect(() => new Function(payload), "parses").not.toThrow();
+});
+
+test("the Mastra dropper is about the size the write-up gives", () => {
+  const setup = text(byId("mastra-style-typosquat-dependency-postinstall").head[1]!.files, "setup.cjs");
+  expect(setup.length).toBeGreaterThan(4572 * 0.95);
+  expect(setup.length).toBeLessThan(4572 * 1.05);
 });
