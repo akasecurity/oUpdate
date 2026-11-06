@@ -13,7 +13,7 @@ const FILE_EXT = /\.(js|cjs|mjs|json|ts|gyp|npmrc|txt|out)$/;
 // A quoted four-part number whose parts are each 0 to 255, such as "1.2.3.4", counts as an address and is checked as a host: a
 // fixture that needs such a version string must build it (for example "1.2.3" + ".4") or write it with another form. Three-part
 // versions, and four-part ones with a part over 255 and no leading zero, are not addresses and are skipped. A part with a leading
-// zero counts as an address whatever its length (octal forms).
+// zero counts as an address whatever its length (octal forms). Short forms such as "127.1" and "0177.1" stay out of scope.
 const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d|0\d+)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d|0\d+)$/;
 const hostsIn = (s: string) => [
   ...(s.match(/https?:\/\/[^\s"'`/\\]+/g) ?? []),
@@ -93,9 +93,19 @@ test("node-ipc style: no install hook, main loads the bundle, the payload is app
   expect(text(h!.files, "index.mjs")).toBe(text(b!.files, "index.mjs"));
 });
 
-/** Names of globals that reach the outside world; the decoded payload must not use them and the run shadows them. */
-const IO_GLOBALS = ["globalThis", "Bun", "fetch", "import(", "eval", "Function", "XMLHttpRequest", "WebSocket", "process.binding", "process.dlopen"];
-const ioGlobals = (src: string) => IO_GLOBALS.filter((n) => (n.endsWith("(") ? src.includes(n) : new RegExp(`(?<![\\w$.])${n.replace(".", "\\.")}(?![\\w$])`).test(src)));
+/**
+ * Names of globals that reach the outside world; the decoded payload must not use them and the run shadows the plain identifiers.
+ * "import(" is matched as import followed by an opening parenthesis with any space between, and "constructor" is matched even after a
+ * dot (a function's constructor is the real Function). process.binding and process.dlopen are text-checked only: process is a stub.
+ */
+const IO_GLOBALS = ["globalThis", "global", "self", "Bun", "fetch", "import(", "eval", "Function", "constructor", "XMLHttpRequest", "WebSocket", "process.binding", "process.dlopen"];
+const ioGlobals = (src: string) =>
+  IO_GLOBALS.filter((n) =>
+    n === "import(" ? /(?<![\w$.])import\s*\(/.test(src)
+    : n === "constructor" ? /(?<![\w$])constructor(?![\w$])/.test(src)
+    : new RegExp(`(?<![\\w$.])${n.replace(".", "\\.")}(?![\\w$])`).test(src));
+/** The names shadowed with undefined in the run: the plain identifiers of IO_GLOBALS, less eval, which a strict function cannot bind (the guard refuses the word instead). */
+const shadowNames = () => IO_GLOBALS.filter((n) => /^[A-Za-z_$][\w$]*$/.test(n) && n !== "eval");
 
 interface Run { calls: string[]; spawns: { cmd: string; args: string[]; detached?: boolean; marked: boolean }[]; bodies: string[] }
 /** Runs the appended payload. Every require is stubbed, the I/O globals are shadowed with undefined, and a payload that names one is refused before it runs, so nothing real is read, spawned or sent. */
@@ -112,8 +122,8 @@ function runTail(tail: string, env: Record<string, string>, filename = "/pkg/ipc
     https: { request: (o: { host: string; method: string }) => (out.calls.push(`request ${o.method} ${o.host}`), { on: () => {}, end: (b: string) => (out.bodies.push(b), out.calls.push(`end ${b.includes("TOKEN") ? "with-env" : "no-env"}`)) }) },
   };
   const req = (n: string) => { if (!(n in stubs)) throw new Error(`unexpected require ${n}`); return stubs[n]; };
-  const shadow = ["globalThis", "Bun", "fetch", "eval", "Function", "XMLHttpRequest", "WebSocket"];
-  new Function("require", "process", "__filename", ...shadow, tail)(req, { env, execPath: "node", argv: ["node", "app.js"] }, filename, ...shadow.map(() => undefined));
+  const shadow = shadowNames();
+  new Function("require", "process", "__filename", ...shadow, `"use strict";\n${tail}`)(req, { env, execPath: "node", argv: ["node", "app.js"] }, filename, ...shadow.map(() => undefined));
   return out;
 }
 
@@ -122,6 +132,14 @@ test("the I/O guard names a global used by a payload, plain or hex-encoded", () 
   expect(ioGlobals(`myfetch(); x.eval(); Functional; nofetch`)).toEqual([]);
   expect(ioGlobals(unpacked(`const t = ["${Buffer.from("globalThis.fetch").toString("hex")}"];`))).toEqual(["globalThis"]);
   expect(() => runTail(`fetch("https://x.example");`, {})).toThrow("fetch");
+  // other ways to the real globals are refused or fail inside the strict, shadowed function (each payload only names the function, it never calls the network)
+  for (const body of [`const f = global.fetch;`, `const f = self.fetch;`, `const f = this.fetch;`, `(() => {}).constructor("return 1")();`, `const m = import ("x");`, `const f = globalThis["fe" + "tch"];`])
+    expect(() => runTail(body, {}), body).toThrow();
+  expect(ioGlobals("import  ( 'm' )")).toEqual(["import("]);
+  expect(ioGlobals("a.constructor(1)")).toEqual(["constructor"]);
+  expect(ioGlobals("global.x; self.y")).toEqual(["global", "self"]);
+  // the shadow list comes from IO_GLOBALS: plain identifiers only, and never eval (a strict function cannot bind it; the guard refuses the word)
+  expect(shadowNames()).toEqual(["globalThis", "global", "self", "Bun", "fetch", "Function", "constructor", "XMLHttpRequest", "WebSocket"]);
 });
 
 test("node-ipc style behavior: unmarked it only detaches a marked copy; marked it reads then sends; a wrong file name does nothing", () => {
