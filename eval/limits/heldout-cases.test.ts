@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { HELDOUT } from "./heldout-cases.ts";
 import models from "./models.json";
+import { INSTALL_ATTACKS } from "./install-cases.ts";
 
 const text = (f: Map<string, Uint8Array>, k: string) => new TextDecoder().decode(f.get(k)!);
 const byId = (id: string) => HELDOUT.find((c) => c.id === id)!;
@@ -9,12 +10,17 @@ const unpacked = (s: string) => s + "\n" + (s.match(/"[0-9a-f]{8,}"/g) ?? []).ma
 // File names the guard skips: only these extensions. sh and md are not here because they are real country-code
 // domains; a fixture that quotes a file name ending in either must be renamed or checked as a host.
 const FILE_EXT = /\.(js|cjs|mjs|json|ts|gyp|npmrc|txt|out)$/;
-// A quoted four-part number such as "1.2.3.4" counts as an address, not a version; three-part versions are skipped.
-const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+// A quoted four-part number whose parts are each 0 to 255, such as "1.2.3.4", counts as an address and is checked as a host: a
+// fixture that needs such a version string must build it (for example "1.2.3" + ".4") or write it with another form. Three-part
+// versions, and four-part ones with a part over 255, are not addresses and are skipped.
+const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
 const hostsIn = (s: string) => [
   ...(s.match(/https?:\/\/[^\s"'`/\\]+/g) ?? []),
   ...[...s.matchAll(/["'`]([a-z0-9-]+(?:\.[a-z0-9-]+)+)["'`]/g)].map((m) => m[1]!).filter((t) => !FILE_EXT.test(t) && (IPV4.test(t) || !/^\d+(\.\d+)+$/.test(t))),
 ];
+/** run.ts counts a case as held out only when it was disclosed after the reviewer cutoff; the message says what to do when the cutoff moves. */
+const cutoffProblem = (id: string, disclosed: string, cutoff: string) =>
+  disclosed > cutoff ? undefined : `${id} was disclosed ${disclosed}, not after the reviewer cutoff ${cutoff} in models.json: it no longer measures an unseen attack. Re-date it only if the write-up is newer; otherwise move it out of HELDOUT into the earlier attacks.`;
 // Words a keyword scan would key on; in the two obfuscated payloads they may only appear after the table is decoded.
 const PLAIN = ["child_process", ".npmrc", ".ssh", "readFileSync", "POST", "stage.example", "execFile", "spawn"];
 
@@ -24,8 +30,7 @@ test("every held-out case is a dated attack with a source page and only .example
     expect(c.kind, c.id).toBe("attack");
     expect(c.expect, c.id).toBe("hold");
     expect(c.disclosed, c.id).toMatch(/^\d{4}-\d\d-\d\d$/);
-    // run.ts counts a case as held out only when it was disclosed after the reviewer cutoff
-    expect(c.disclosed > models.reviewer.cutoff, c.id).toBe(true);
+    expect(cutoffProblem(c.id, c.disclosed, models.reviewer.cutoff), c.id).toBeUndefined();
     expect(c.source, c.id).toMatch(/^https:\/\/\S+$/);
     for (const p of [...c.base, ...c.head]) for (const [k, v] of p.files) {
       const body = unpacked(new TextDecoder().decode(v));
@@ -33,6 +38,11 @@ test("every held-out case is a dated attack with a source page and only .example
       for (const m of body.matchAll(/github:([\w.-]+)\//g)) expect(m[1], `${c.id} ${k}`).toBe("example-org");
     }
   }
+});
+
+test("a case at or before the reviewer cutoff fails with what to do", () => {
+  expect(cutoffProblem("x", "2026-04-15", "2026-04-15")).toMatch(/Re-date.*move it out of HELDOUT/);
+  expect(cutoffProblem("x", "2026-04-16", "2026-04-15")).toBeUndefined();
 });
 
 test("the host guard sees a hex-encoded real hostname", () => {
@@ -44,6 +54,8 @@ test("the host guard sees a hex-encoded real hostname", () => {
 test("the host guard sees a quoted bare hostname and ignores file names with known extensions", () => {
   expect(hostsIn(`x("sh.stage.example"); y("ipc.cjs"); z("1.2.3"); w("evil.test")`)).toEqual(["sh.stage.example", "evil.test"]);
   expect(hostsIn(`x("203.0.113.7"); y("1.2.3")`)).toEqual(["203.0.113.7"]);
+  // documented limit: a quoted four-part number that fits 0 to 255 reads as an address; one with a part over 255 is a version
+  expect(hostsIn(`x("1.2.3.4"); y("12.0.1.1000"); z("1.2.3.256")`)).toEqual(["1.2.3.4"]);
   expect(hostsIn(`x("run.sh"); y("go.md")`)).toEqual(["run.sh", "go.md"]);
 });
 
@@ -78,6 +90,33 @@ test("node-ipc style: no install hook, main loads the bundle, the payload is app
   expect(text(h!.files, "index.mjs")).toBe(text(b!.files, "index.mjs"));
 });
 
+/** Runs the appended payload with every module stubbed, so nothing real is read, spawned or sent. */
+function runTail(tail: string, env: Record<string, string>, filename = "/pkg/ipc.cjs") {
+  const calls: string[] = [];
+  const crypto = require("node:crypto"), path = require("node:path");
+  const stubs: Record<string, unknown> = {
+    crypto, path,
+    child_process: { spawn: (cmd: string, args: string[], o: { detached?: boolean; env: Record<string, string> }) => (calls.push(`spawn detached=${o.detached} marked=${Boolean(o.env.__ipc_marker)}`), { unref: () => calls.push("unref") }) },
+    fs: { readFileSync: (p: string) => (calls.push(`read ${path.basename(p)}`), "secret") },
+    os: { homedir: () => "/stub-home" },
+    https: { request: (o: { host: string; method: string }) => (calls.push(`request ${o.method} ${o.host}`), { on: () => {}, end: (b: string) => calls.push(`end ${b.includes("TOKEN") ? "with-env" : "no-env"}`) }) },
+  };
+  const req = (n: string) => { if (!(n in stubs)) throw new Error(`unexpected require ${n}`); return stubs[n]; };
+  new Function("require", "process", "__filename", tail)(req, { env, execPath: "node", argv: ["node", "app.js"] }, filename);
+  return calls;
+}
+
+test("node-ipc style behavior: unmarked it only detaches a marked copy; marked it reads then sends; a wrong file name does nothing", () => {
+  const c = byId("node-ipc-style-appended-require-payload");
+  const tail = text(c.head[0]!.files, "ipc.cjs").slice(text(c.base[0]!.files, "ipc.cjs").length);
+  expect(runTail(tail, { TOKEN: "t" })).toEqual(["spawn detached=true marked=true", "unref"]);
+  const marked = runTail(tail, { TOKEN: "t", __ipc_marker: "1" });
+  expect(marked.slice(0, 3).sort()).toEqual(["read .npmrc", "read credentials", "read id_rsa"]);
+  expect(marked.slice(3)).toEqual(["request POST sh.stage.example", "end with-env"]);
+  expect(marked.some((x) => x.startsWith("spawn"))).toBe(false);
+  expect(runTail(tail, { TOKEN: "t" }, "/pkg/other.cjs")).toEqual([]);
+});
+
 test("tanstack style: the only manifest change is a git-hosted optionalDependency, an obfuscated file sits outside files", () => {
   const c = byId("tanstack-style-git-optional-dependency");
   expect(c.disclosed).toBe("2026-05-11");
@@ -88,8 +127,8 @@ test("tanstack style: the only manifest change is a git-hosted optionalDependenc
   // host package only: the git dependency's own code is not in the reviewed set, so the case measures the manifest change
   expect(c.base).toHaveLength(1);
   expect(c.head).toHaveLength(1);
-  expect(c.note).toMatch(/not modeled/);
-  expect(c.note).toMatch(/install-dependency-git-url/);
+  // the note compares the case with an existing install-time attack by its id
+  expect(INSTALL_ATTACKS.some((x) => c.note.includes(x.id))).toBe(true);
   expect([b!.version, h!.version]).toEqual(["1.161.6", "1.161.9"]);
   const bp = JSON.parse(text(b!.files, "package.json")), hp = JSON.parse(text(h!.files, "package.json"));
   expect(hp.scripts).toBeUndefined();
