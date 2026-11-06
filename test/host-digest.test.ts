@@ -294,6 +294,14 @@ describe("renderDigest: summary parts", () => {
     expect(waiting).not.toContain("unrecognized");
   });
 
+  test("a version string cannot fake its own run count", () => {
+    const text = digest("=== studio summary ===\n  brew: STUCK: x=1(9 runs, since evil)(4 runs, since 2026-10-01)\n");
+    const waiting = section(text, "Waiting on you");
+    expect(waiting).not.toContain("pending for 9 runs");
+    expect(waiting).toContain("unrecognized: STUCK:");
+    expect(waiting).toContain("x=1(9 runs, since evil)(4 runs");
+  });
+
   test("STUCK text that is no item shows as unrecognized next to the items that parse", () => {
     const text = digest("=== studio summary ===\n  brew: STUCK: a=1(4 runs, since 2026-10-01) b=2(x runs, since y)\n");
     const waiting = section(text, "Waiting on you");

@@ -72,7 +72,7 @@ interface Part {
   on: (m: RegExpMatchArray, o: Out, lane: string) => void;
 }
 
-const STUCK_PART_ITEM = new RegExp(`(?:^|\\s)([^\\s=]+)=\\S*?${STUCK_SINCE}`, "g");
+const STUCK_PART_ITEM = new RegExp(`(?:^|\\s)([^\\s=]+)=\\S*${STUCK_SINCE}(?=\\s|$)`, "g");
 const each = (s: string, f: (n: string) => string) => words(s).map((n) => f(one(n)));
 const TAP_ITEM = /^(\(unresolved tap\)|\S+) \((\S+) /;
 
