@@ -22,7 +22,7 @@ const hostsIn = (s: string) => [
 /** run.ts counts a case as held out only when it was disclosed after the reviewer cutoff; the message says what to do when the cutoff moves. */
 const cutoffProblem = (id: string, disclosed: string, cutoff: string) =>
   disclosed > cutoff ? undefined : `${id} was disclosed ${disclosed}, not after the reviewer cutoff ${cutoff} in models.json: it no longer measures an unseen attack. Re-date it only if the write-up is newer; otherwise move it out of HELDOUT into the earlier attacks.`;
-// Words a keyword scan would key on; in the two obfuscated payloads they may only appear after the table is decoded.
+// Words a keyword scan would key on; in the obfuscated payloads they may only appear after the table is decoded.
 const PLAIN = ["child_process", ".npmrc", ".ssh", "readFileSync", "POST", "stage.example", "execFile", "spawn"];
 
 test("every held-out case is a dated attack with a source page and only .example addresses", () => {
@@ -204,7 +204,7 @@ test("mastra style: a new typosquat dependency whose patch release gains a posti
   expect(bp.dependencies).toBeUndefined();
   expect(hp.dependencies).toEqual({ [dep!.name]: "^1.11.21" });
   expect({ ...hp, version: "", dependencies: undefined }).toEqual({ ...bp, version: "" });
-  // the dependency name sits one edit away from a popular library and the resolved patch is the weaponized one
+  // the dependency name is a look-alike of a popular date library with a prefix added, and the resolved patch is the weaponized one
   expect(dep!.name).toMatch(/day-js$/);
   expect(dep!.version).toBe("1.11.22");
   const dp = JSON.parse(text(dep!.files, "package.json"));
@@ -248,8 +248,12 @@ test("antv wave style: a version jump with a preinstall that runs bun on a new f
   expect(c.head).toHaveLength(1);
   expect([b!.version, h!.version]).toEqual(["2.2.0", "2.4.0"]); // the write-up gives the jump from 2.2.0 to 2.4.0
   const bp = JSON.parse(text(b!.files, "package.json")), hp = JSON.parse(text(h!.files, "package.json"));
+  // main is the library file in both releases: index.js is the payload and must not be what a require loads
+  expect(bp.main).toBe("lib.js");
+  expect(hp.main).toBe("lib.js");
   expect(bp.scripts).toBeUndefined();
   expect(hp.scripts).toEqual({ preinstall: "bun run index.js" });
+  expect({ ...hp, version: "", scripts: undefined, dependencies: undefined, optionalDependencies: undefined }).toEqual({ ...bp, version: "" });
   expect(bp.dependencies?.bun).toBeUndefined();
   expect(hp.dependencies.bun).toMatch(/^\d/);
   expect(hp.optionalDependencies[Object.keys(hp.optionalDependencies)[0]!]).toMatch(/^github:example-org\/example-chart#[0-9a-f]{40}$/);

