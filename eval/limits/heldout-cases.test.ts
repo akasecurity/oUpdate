@@ -12,8 +12,9 @@ const unpacked = (s: string) => s + "\n" + (s.match(/"[0-9a-f]{8,}"/g) ?? []).ma
 const FILE_EXT = /\.(js|cjs|mjs|json|ts|gyp|npmrc|txt|out)$/;
 // A quoted four-part number whose parts are each 0 to 255, such as "1.2.3.4", counts as an address and is checked as a host: a
 // fixture that needs such a version string must build it (for example "1.2.3" + ".4") or write it with another form. Three-part
-// versions, and four-part ones with a part over 255, are not addresses and are skipped.
-const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
+// versions, and four-part ones with a part over 255 and no leading zero, are not addresses and are skipped. A part with a leading
+// zero counts as an address whatever its length (octal forms). Short forms such as "127.1" and "0177.1" stay out of scope.
+const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d|0\d+)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d|0\d+)$/;
 const hostsIn = (s: string) => [
   ...(s.match(/https?:\/\/[^\s"'`/\\]+/g) ?? []),
   ...[...s.matchAll(/["'`]([a-z0-9-]+(?:\.[a-z0-9-]+)+)["'`]/g)].map((m) => m[1]!).filter((t) => !FILE_EXT.test(t) && (IPV4.test(t) || !/^\d+(\.\d+)+$/.test(t))),
@@ -56,6 +57,8 @@ test("the host guard sees a quoted bare hostname and ignores file names with kno
   expect(hostsIn(`x("203.0.113.7"); y("1.2.3")`)).toEqual(["203.0.113.7"]);
   // documented limit: a quoted four-part number that fits 0 to 255 reads as an address; one with a part over 255 is a version
   expect(hostsIn(`x("1.2.3.4"); y("12.0.1.1000"); z("1.2.3.256")`)).toEqual(["1.2.3.4"]);
+  // a part with a leading zero is read as octal by many resolvers ("0177.0.0.1" is a loopback address), so it is an address whatever its length
+  expect(hostsIn(`x("0177.0.0.1"); y("1.2.3.04"); z("10.0.1.1000")`)).toEqual(["0177.0.0.1", "1.2.3.04"]);
   expect(hostsIn(`x("run.sh"); y("go.md")`)).toEqual(["run.sh", "go.md"]);
 });
 
@@ -90,31 +93,72 @@ test("node-ipc style: no install hook, main loads the bundle, the payload is app
   expect(text(h!.files, "index.mjs")).toBe(text(b!.files, "index.mjs"));
 });
 
-/** Runs the appended payload with every module stubbed, so nothing real is read, spawned or sent. */
-function runTail(tail: string, env: Record<string, string>, filename = "/pkg/ipc.cjs") {
-  const calls: string[] = [];
+/**
+ * Names of globals that reach the outside world; the decoded payload must not use them and the run shadows the plain identifiers.
+ * "import(" is matched as import followed by an opening parenthesis with any space between, and "constructor" is matched even after a
+ * dot (a function's constructor is the real Function). process.binding and process.dlopen are text-checked only: process is a stub.
+ */
+const IO_GLOBALS = ["globalThis", "global", "self", "Bun", "fetch", "import(", "eval", "Function", "constructor", "XMLHttpRequest", "WebSocket", "process.binding", "process.dlopen"];
+const ioGlobals = (src: string) =>
+  IO_GLOBALS.filter((n) =>
+    n === "import(" ? /(?<![\w$.])import\s*\(/.test(src)
+    : n === "constructor" ? /(?<![\w$])constructor(?![\w$])/.test(src)
+    : new RegExp(`(?<![\\w$.])${n.replace(".", "\\.")}(?![\\w$])`).test(src));
+/** The names shadowed with undefined in the run: the plain identifiers of IO_GLOBALS, less eval, which a strict function cannot bind (the guard refuses the word instead). */
+const shadowNames = () => IO_GLOBALS.filter((n) => /^[A-Za-z_$][\w$]*$/.test(n) && n !== "eval");
+
+interface Run { calls: string[]; spawns: { cmd: string; args: string[]; detached?: boolean; marked: boolean }[]; bodies: string[] }
+/** Runs the appended payload. Every require is stubbed, the I/O globals are shadowed with undefined, and a payload that names one is refused before it runs, so nothing real is read, spawned or sent. */
+function runTail(tail: string, env: Record<string, string>, filename = "/pkg/ipc.cjs"): Run {
+  const named = ioGlobals(unpacked(tail));
+  if (named.length) throw new Error(`payload names I/O globals: ${named.join(", ")}`);
+  const out: Run = { calls: [], spawns: [], bodies: [] };
   const crypto = require("node:crypto"), path = require("node:path");
   const stubs: Record<string, unknown> = {
     crypto, path,
-    child_process: { spawn: (cmd: string, args: string[], o: { detached?: boolean; env: Record<string, string> }) => (calls.push(`spawn detached=${o.detached} marked=${Boolean(o.env.__ipc_marker)}`), { unref: () => calls.push("unref") }) },
-    fs: { readFileSync: (p: string) => (calls.push(`read ${path.basename(p)}`), "secret") },
+    child_process: { spawn: (cmd: string, args: string[], o: { detached?: boolean; env: Record<string, string> }) => (out.calls.push(`spawn detached=${o.detached} marked=${Boolean(o.env.__ipc_marker)}`), out.spawns.push({ cmd, args, detached: o.detached, marked: Boolean(o.env.__ipc_marker) }), { unref: () => out.calls.push("unref") }) },
+    fs: { readFileSync: (p: string) => (out.calls.push(`read ${path.basename(p)}`), `content-of-${path.basename(p)}`) },
     os: { homedir: () => "/stub-home" },
-    https: { request: (o: { host: string; method: string }) => (calls.push(`request ${o.method} ${o.host}`), { on: () => {}, end: (b: string) => calls.push(`end ${b.includes("TOKEN") ? "with-env" : "no-env"}`) }) },
+    https: { request: (o: { host: string; method: string }) => (out.calls.push(`request ${o.method} ${o.host}`), { on: () => {}, end: (b: string) => (out.bodies.push(b), out.calls.push(`end ${b.includes("TOKEN") ? "with-env" : "no-env"}`)) }) },
   };
   const req = (n: string) => { if (!(n in stubs)) throw new Error(`unexpected require ${n}`); return stubs[n]; };
-  new Function("require", "process", "__filename", tail)(req, { env, execPath: "node", argv: ["node", "app.js"] }, filename);
-  return calls;
+  const shadow = shadowNames();
+  new Function("require", "process", "__filename", ...shadow, `"use strict";\n${tail}`)(req, { env, execPath: "node", argv: ["node", "app.js"] }, filename, ...shadow.map(() => undefined));
+  return out;
 }
+
+test("the I/O guard names a global used by a payload, plain or hex-encoded", () => {
+  expect(ioGlobals(`fetch("x"); const g = globalThis; Bun.spawn(); eval("1"); import("m"); new Function("a")`)).toEqual(["globalThis", "Bun", "fetch", "import(", "eval", "Function"]);
+  expect(ioGlobals(`myfetch(); x.eval(); Functional; nofetch`)).toEqual([]);
+  expect(ioGlobals(unpacked(`const t = ["${Buffer.from("globalThis.fetch").toString("hex")}"];`))).toEqual(["globalThis"]);
+  expect(() => runTail(`fetch("https://x.example");`, {})).toThrow("fetch");
+  // other ways to the real globals are refused or fail inside the strict, shadowed function (each payload only names the function, it never calls the network)
+  for (const body of [`const f = global.fetch;`, `const f = self.fetch;`, `const f = this.fetch;`, `(() => {}).constructor("return 1")();`, `const m = import ("x");`, `const f = globalThis["fe" + "tch"];`])
+    expect(() => runTail(body, {}), body).toThrow();
+  expect(ioGlobals("import  ( 'm' )")).toEqual(["import("]);
+  expect(ioGlobals("a.constructor(1)")).toEqual(["constructor"]);
+  expect(ioGlobals("global.x; self.y")).toEqual(["global", "self"]);
+  // the shadow list comes from IO_GLOBALS: plain identifiers only, and never eval (a strict function cannot bind it; the guard refuses the word)
+  expect(shadowNames()).toEqual(["globalThis", "global", "self", "Bun", "fetch", "Function", "constructor", "XMLHttpRequest", "WebSocket"]);
+});
 
 test("node-ipc style behavior: unmarked it only detaches a marked copy; marked it reads then sends; a wrong file name does nothing", () => {
   const c = byId("node-ipc-style-appended-require-payload");
   const tail = text(c.head[0]!.files, "ipc.cjs").slice(text(c.base[0]!.files, "ipc.cjs").length);
-  expect(runTail(tail, { TOKEN: "t" })).toEqual(["spawn detached=true marked=true", "unref"]);
-  const marked = runTail(tail, { TOKEN: "t", __ipc_marker: "1" });
-  expect(marked.slice(0, 3).sort()).toEqual(["read .npmrc", "read credentials", "read id_rsa"]);
-  expect(marked.slice(3)).toEqual(["request POST sh.stage.example", "end with-env"]);
-  expect(marked.some((x) => x.startsWith("spawn"))).toBe(false);
-  expect(runTail(tail, { TOKEN: "t" }, "/pkg/other.cjs")).toEqual([]);
+  const first = runTail(tail, { TOKEN: "t" });
+  expect(first.calls).toEqual(["spawn detached=true marked=true", "unref"]);
+  // the detached copy is this same program: the node binary and the script it was started with
+  expect(first.spawns).toEqual([{ cmd: "node", args: ["app.js"], detached: true, marked: true }]);
+  const m = runTail(tail, { TOKEN: "t", __ipc_marker: "1" });
+  expect(m.calls.slice(0, 3).sort()).toEqual(["read .npmrc", "read credentials", "read id_rsa"]);
+  expect(m.calls.slice(3)).toEqual(["request POST sh.stage.example", "end with-env"]);
+  expect(m.spawns).toEqual([]);
+  // the body carries what was read and the environment
+  expect(m.bodies).toHaveLength(1);
+  const body = JSON.parse(m.bodies[0]!);
+  expect(body.env.TOKEN).toBe("t");
+  for (const f of [".npmrc", "id_rsa", "credentials"]) expect(Object.values(body).join("\n")).toContain(`content-of-${f}`);
+  expect(runTail(tail, { TOKEN: "t" }, "/pkg/other.cjs").calls).toEqual([]);
 });
 
 test("tanstack style: the only manifest change is a git-hosted optionalDependency, an obfuscated file sits outside files", () => {
@@ -127,6 +171,8 @@ test("tanstack style: the only manifest change is a git-hosted optionalDependenc
   // host package only: the git dependency's own code is not in the reviewed set, so the case measures the manifest change
   expect(c.base).toHaveLength(1);
   expect(c.head).toHaveLength(1);
+  // the git dependency is deliberately not in the reviewed set, and the note says so
+  expect(c.note).toMatch(/not modeled/);
   // the note compares the case with an existing install-time attack by its id
   expect(INSTALL_ATTACKS.some((x) => c.note.includes(x.id))).toBe(true);
   expect([b!.version, h!.version]).toEqual(["1.161.6", "1.161.9"]);
