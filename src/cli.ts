@@ -35,7 +35,7 @@ import { realDockerSource } from "./targets/pins/docker.ts";
 import { realGithubSource } from "./targets/pins/github.ts";
 import { realSnapshotSource } from "./targets/pins/oci.ts";
 import { dockerHubSource, parseImageRef, registrySource, type ImageRef } from "./adapters/oci/registry.ts";
-import { listWaivers, stateDirOutsideRepo, waiverFingerprint, type Waiver } from "./waiver.ts";
+import { listWaivers, stateDirOutsideRepo, type Waiver } from "./waiver.ts";
 import { parseWaiveArgs, waiveMain } from "./waive-cli.ts";
 import { checkImage, renderImage } from "./image.ts";
 
@@ -369,17 +369,11 @@ export function gateForge(g: GateCliArgs, token: string, f?: typeof fetch): Forg
   return g.forge === "github" ? githubForge({ endpoint: g.endpoint, token, login: g.gateLogin, fetch: f }) : giteaForge({ endpoint: g.endpoint!, token, login: g.gateLogin, fetch: f });
 }
 
-/** The waivers of a gate run, read once, and their fingerprint: the same list is the one every review uses and the one the verdict line records, so a waiver changed mid-run cannot land a PR under a fingerprint that predates it. */
-export function gateWaiverState(g: Pick<GateCliArgs, "stateDir">): { waivers?: Waiver[]; waiverPrint?: string } {
-  if (!g.stateDir) return {};
-  const waivers = listWaivers(g.stateDir);
-  return { waivers, waiverPrint: waiverFingerprint(waivers) };
-}
-
 async function gateMain(argv: string[]): Promise<number> {
   const g = parseGateArgs(argv);
   const token = await gateToken(g);
-  const { waivers, waiverPrint } = gateWaiverState(g);
+  // Read once: this list is the one every review uses and the one the verdicts' fingerprints cover, so a waiver changed mid-run cannot land a PR under a fingerprint that predates it.
+  const waivers = g.stateDir ? listWaivers(g.stateDir) : undefined;
   const pulls = await runGate({
     forge: gateForge(g, token),
     repo: g.repo,
@@ -387,7 +381,7 @@ async function gateMain(argv: string[]): Promise<number> {
     botLogins: g.botLogins,
     lockPaths: g.lockPaths,
     privateRegistry: g.privateRegistry,
-    waiverPrint,
+    waivers,
     log: (line) => console.log(line),
     review: (c) => runReview({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, oldIntegrity: c.fromIntegrity, newIntegrity: c.toIntegrity, lockedFiles: c.toArtifacts, now: new Date(), cooldownDays: g.cooldownDays, advisoryFix: false, reviewer: g.reviewer, scanner: g.scanner, waivers, verdictDir: g.verdictDir }),
   });
