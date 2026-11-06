@@ -34,6 +34,8 @@ test("a body that stalls after the headers also times out", async () => {
 });
 
 // The next tests replace fetch to look at how get() calls it and what it does with the body; the local server above covers the real stalls.
+// withFetch swaps the global fetch for the length of one call, so it is only safe while this file's tests run one at a time (bun's default); a concurrent test would see the stub.
+// Bun's own fetch init type (BunFetchRequestInit) has no `timeout` field, so the stub types the option itself.
 const withFetch = async (impl: (u: string | URL | Request, init?: RequestInit & { timeout?: boolean }) => Promise<Response>, fn: () => Promise<void>) => {
   const real = globalThis.fetch;
   globalThis.fetch = impl as unknown as typeof fetch;
@@ -44,7 +46,8 @@ test("the runtime's own 300 s fetch limit is switched off so the helper's limit 
   let seen: (RequestInit & { timeout?: boolean }) | undefined;
   await withFetch(async (_u, init) => ((seen = init), new Response("x")), async () => { await get("http://x.example/a"); });
   expect(seen?.timeout).toBe(false);
-  expect(seen?.signal).toBeDefined();
+  expect(seen?.signal).toBeInstanceOf(AbortSignal);
+  expect(seen?.signal?.aborted).toBe(false); // a live deadline, not one already spent
 });
 
 test("a bad status cancels the unread body", async () => {
