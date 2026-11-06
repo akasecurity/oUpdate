@@ -96,7 +96,7 @@ test("node-ipc style: no install hook, main loads the bundle, the payload is app
 
 /**
  * Names of globals that reach the outside world. This is a text guard against accidental use, not a sandbox: a payload that builds a
- * name from pieces (a split-string constructor), or reaches Worker or navigator, still gets to real globals. The decoded payload must
+ * name from pieces (a split-string constructor), writes eval or constructor with a unicode escape (eval cannot be shadowed), or reaches Worker or navigator, still gets to real globals. The decoded payload must
  * not name any of these and the run shadows the plain identifiers. "import(" is matched as import followed by an opening
  * parenthesis with any space between, and "constructor" is matched even after a dot (a function's constructor is the real Function);
  * both, and self, also flag harmless code that happens to use the word. process.binding and process.dlopen are text-checked only:
@@ -148,9 +148,8 @@ test("the I/O guard names a global used by a payload, plain or hex-encoded", () 
   ] as const) expect(() => runTail(body, {}), body).toThrow(message);
   // passes the text check (an escaped identifier hides the word) and is stopped only by the hidden name: fetch is shadowed with undefined
   let hidden = "";
-  try { runTail(`\\u0066etch("https://x.example");`, {}); } catch (e) { hidden = (e as Error).message; }
-  expect(hidden).toContain("u0066etch is not a function");
-  expect(hidden).toContain("is undefined");
+  try { runTail(`\\u0066etch.call;`, {}); } catch (e) { hidden = (e as Error).message; } // names the function without calling it, so nothing reaches the network if the shadow ever breaks
+  expect(hidden).toContain("undefined is not an object");
   expect(hidden).not.toContain("names I/O globals");
   expect(ioGlobals("import  ( 'm' )")).toEqual(["import("]);
   expect(ioGlobals("a.constructor(1)")).toEqual(["constructor"]);
