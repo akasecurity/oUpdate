@@ -116,7 +116,7 @@ test("the served line says a call is one chunk sent to the reviewer", () => {
 });
 
 test("a served-by header with spaces around it counts as the trimmed value, and one that is only spaces counts as unknown", async () => {
-  // The endpoint sends the header padded with spaces, or with nothing but spaces. The fetch transport already strips the spaces around a header value, so this pins the end-to-end result, not the trim in the adapter.
+  // The server sets the header padded with spaces, or with nothing but spaces. Bun's Headers and fetch strip the spaces around a header value before the adapter reads it, so this pins the end-to-end result (padded counts as the value, blank as unknown), not the trim in the adapter.
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
