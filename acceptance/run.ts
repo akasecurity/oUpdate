@@ -26,6 +26,7 @@ import { pypiRegistry } from "../src/adapters/ecosystem/pypi.ts";
 import { osvFeed } from "../src/adapters/advisory/osv.ts";
 import { makeReviewer, validateReviewerSpec, type ReviewerSpec } from "../src/adapters/reviewer/spec.ts";
 import { makeScanner, parseScannerSpec } from "../src/adapters/scanner/spec.ts";
+import { get, JSON_TIMEOUT_MS } from "./http.ts";
 import { scorecard, type ScoreRow } from "./scorecard.ts";
 import { inSet, parseSet, setCounts, type CaseSet } from "./sets.ts";
 import { syntheticPair, type SyntheticKind } from "./synthetic/generate.ts";
@@ -76,19 +77,13 @@ const all = [...cases.map((c) => ({ c, malicious: true })), ...controls.map((c) 
 
 const registries: Record<Ecosystem, Registry> = { npm: npmRegistry(), pypi: pypiRegistry() };
 
-async function get(url: string, accept?: string): Promise<Uint8Array> {
-  const r = await fetch(url, { headers: { "user-agent": "oupdate-acceptance", ...(accept ? { accept } : {}) } });
-  if (!r.ok) throw new Error(`${r.status} ${url}`);
-  return new Uint8Array(await r.arrayBuffer());
-}
-
 function onlyFile(dir: string, prefix: string): string | undefined {
   return existsSync(dir) ? readdirSync(dir).filter((f) => f.startsWith(prefix)).map((f) => join(dir, f))[0] : undefined;
 }
 
 // PyPI: pick the artifact of the same kind as the other side (wheel or sdist).
 async function pypiArtifactUrl(name: string, version: string, kind: "wheel" | "sdist"): Promise<string> {
-  const d = JSON.parse(new TextDecoder().decode(await get(`https://pypi.org/pypi/${name}/${version}/json`))) as { urls: { url: string; filename: string; packagetype: string }[] };
+  const d = JSON.parse(new TextDecoder().decode(await get(`https://pypi.org/pypi/${name}/${version}/json`, { timeoutMs: JSON_TIMEOUT_MS }))) as { urls: { url: string; filename: string; packagetype: string }[] };
   const fit = d.urls.filter((u) => (kind === "wheel" ? u.packagetype === "bdist_wheel" : u.packagetype === "sdist"));
   const pick = fit.find((u) => u.filename.includes("py3-none-any")) ?? fit.find((u) => u.filename.includes("macosx")) ?? fit[0];
   if (!pick) throw new Error(`no ${kind} for ${name} ${version}`);
@@ -114,7 +109,7 @@ async function loadPair(c: Case, malicious: boolean): Promise<{ old: FileMap; ne
     if (!zip) {
       if (offline) throw new Error(`offline: no sample in ${dir}/bad`);
       const src = c.source as { type: "datadog"; path: string };
-      const listing = JSON.parse(new TextDecoder().decode(await get(`${DATASET_API}/${src.path}`, "application/vnd.github+json"))) as { name: string; download_url: string }[];
+      const listing = JSON.parse(new TextDecoder().decode(await get(`${DATASET_API}/${src.path}`, { accept: "application/vnd.github+json", timeoutMs: JSON_TIMEOUT_MS }))) as { name: string; download_url: string }[];
       const z = listing.find((x) => x.name.endsWith(".zip"));
       if (!z) throw new Error(`no zip in dataset path ${src.path}`);
       mkdirSync(join(dir, "bad"), { recursive: true });
