@@ -11,7 +11,7 @@ const isStrMap = (v: unknown): v is Record<string, string> => !!v && typeof v ==
 
 // Same refusal as apply/config.ts and targets/strict.ts. expectHeaders and retryDelaysMs are accepted ahead of the code that reads them, so that merge does not refuse a config that already sets them.
 const COMMAND_KEYS = ["type", "name", "argv", "timeoutMs", "workRoot"];
-const OPENAI_KEYS = ["type", "name", "baseUrls", "model", "apiKeyEnv", "maxTokens", "timeoutMs", "extraBody", "headers", "expectHeaders", "retryDelaysMs"];
+const OPENAI_KEYS = ["type", "name", "baseUrls", "model", "apiKeyEnv", "maxTokens", "timeoutMs", "extraBody", "headers", "expectHeaders", "retryDelaysMs", "servedByHeader"];
 
 function refuseUnknown(o: Record<string, unknown>, block: string, keys: readonly string[]): void {
   for (const k of Object.keys(o)) if (!keys.includes(k)) throw new Error(`${block}: unknown key ${k} (valid keys: ${keys.join(", ")})`);
@@ -33,6 +33,7 @@ export function validateReviewerSpec(v: unknown): ReviewerSpec {
   if (o.type === "openai") {
     if (!isStrArray(o.baseUrls) || typeof o.model !== "string") throw new Error("openai reviewer needs baseUrls (string array) and model");
     if (o.expectHeaders !== undefined && !isStrMap(o.expectHeaders)) throw new Error("openai reviewer expectHeaders must be an object of string to string");
+    if (o.servedByHeader !== undefined && (typeof o.servedByHeader !== "string" || !o.servedByHeader)) throw new Error("openai reviewer servedByHeader must be a non-empty string");
     return o as unknown as ReviewerSpec;
   }
   throw new Error(`reviewer type must be command or openai, got ${String(o.type)}`);

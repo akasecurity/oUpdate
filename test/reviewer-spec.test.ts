@@ -12,6 +12,7 @@ const openai = {
   extraBody: { temperature: 0 },
   headers: { "X-Key": "k" },
   expectHeaders: { "x-served-by": "local" },
+  servedByHeader: "x-served-by",
   retryDelaysMs: [1, 2],
 };
 
@@ -23,7 +24,7 @@ const command = {
   workRoot: "/tmp/oupdate-review",
 };
 
-const OPENAI_VALID = "type, name, baseUrls, model, apiKeyEnv, maxTokens, timeoutMs, extraBody, headers, expectHeaders, retryDelaysMs";
+const OPENAI_VALID = "type, name, baseUrls, model, apiKeyEnv, maxTokens, timeoutMs, extraBody, headers, expectHeaders, retryDelaysMs, servedByHeader";
 const COMMAND_VALID = "type, name, argv, timeoutMs, workRoot";
 
 const keysOf = (v: object) => Object.keys(v).sort();
@@ -33,10 +34,15 @@ describe("reviewer spec keys", () => {
     const got = validateReviewerSpec(openai);
     expect(got).toMatchObject(openai);
     expect(keysOf(got)).toEqual(keysOf(openai));
-    for (const key of ["apiKeyEnv", "maxTokens", "timeoutMs", "extraBody", "headers", "expectHeaders", "retryDelaysMs"] as const) {
+    for (const key of ["apiKeyEnv", "maxTokens", "timeoutMs", "extraBody", "headers", "expectHeaders", "retryDelaysMs", "servedByHeader"] as const) {
       const spec = { type: "openai", name: "local", baseUrls: ["http://127.0.0.1:8080/v1"], model: "m", [key]: openai[key] };
       expect(validateReviewerSpec(spec)).toMatchObject({ [key]: openai[key] });
     }
+  });
+
+  test("servedByHeader must be a non-empty string", () => {
+    const base = { type: "openai", name: "local", baseUrls: ["http://127.0.0.1:8080/v1"], model: "m" };
+    for (const bad of [1, "", ["x"]]) expect(() => validateReviewerSpec({ ...base, servedByHeader: bad })).toThrow("servedByHeader");
   });
 
   test("each command key is accepted", () => {
