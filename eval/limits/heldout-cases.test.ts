@@ -191,3 +191,74 @@ test("tanstack style: the only manifest change is a git-hosted optionalDependenc
   for (const w of ["child_process", "execFile"]) expect(seen, w).toContain(w);
   expect(() => new Function(init), "parses").not.toThrow();
 });
+
+test("mastra style: a new typosquat dependency whose patch release gains a postinstall dropper", () => {
+  const c = byId("mastra-style-typosquat-dependency-postinstall");
+  expect(c.disclosed).toBe("2026-06-17");
+  expect(c.source).toContain("microsoft.com/en-us/security/blog/2026/06/17/");
+  const [host, dep] = c.head;
+  expect(c.base).toHaveLength(1);
+  expect(c.head).toHaveLength(2);
+  expect([c.base[0]!.version, host!.version]).toEqual(["1.13.0", "1.13.1"]);
+  const bp = JSON.parse(text(c.base[0]!.files, "package.json")), hp = JSON.parse(text(host!.files, "package.json"));
+  expect(bp.dependencies).toBeUndefined();
+  expect(hp.dependencies).toEqual({ [dep!.name]: "^1.11.21" });
+  expect({ ...hp, version: "", dependencies: undefined }).toEqual({ ...bp, version: "" });
+  // the dependency name sits one edit away from a popular library and the resolved patch is the weaponized one
+  expect(dep!.name).toMatch(/day-js$/);
+  expect(dep!.version).toBe("1.11.22");
+  const dp = JSON.parse(text(dep!.files, "package.json"));
+  expect(dp.scripts).toEqual({ postinstall: "node setup.cjs --no-warnings" });
+  const setup = text(dep!.files, "setup.cjs");
+  for (const w of PLAIN) expect(setup, w).not.toContain(w);
+  const seen = unpacked(setup);
+  for (const w of ["NODE_TLS_REJECT_UNAUTHORIZED", "child_process", "spawn", "POST"]) expect(seen, w).toContain(w);
+  expect(ioGlobals(unpacked(setup)), "I/O globals").toEqual([]);
+  expect(() => new Function(setup), "parses").not.toThrow();
+  expect(dep!.files.has("dayjs.min.js")).toBe(true);
+});
+
+test("red hat wave style: the main file is replaced by a much larger obfuscated bundle and the manifest only changes its version", () => {
+  const c = byId("redhat-wave-style-main-replaced");
+  expect(c.disclosed).toBe("2026-06-01");
+  expect(c.source).toContain("unit42.paloaltonetworks.com");
+  const [b] = c.base, [h] = c.head;
+  expect(c.base).toHaveLength(1);
+  expect(c.head).toHaveLength(1);
+  expect([b!.version, h!.version]).toEqual(["7.7.1", "7.7.2"]);
+  const bp = JSON.parse(text(b!.files, "package.json")), hp = JSON.parse(text(h!.files, "package.json"));
+  expect(hp.scripts).toBeUndefined();
+  expect({ ...hp, version: "" }).toEqual({ ...bp, version: "" });
+  const old = text(b!.files, "index.js"), now = text(h!.files, "index.js");
+  expect(now.length).toBeGreaterThan(old.length * 10);
+  expect(now).not.toContain(old.slice(0, 80)); // replaced, not appended to
+  for (const w of PLAIN) expect(now, w).not.toContain(w);
+  const seen = unpacked(now);
+  for (const w of ["readFileSync", "POST", ".npmrc"]) expect(seen, w).toContain(w);
+  expect(ioGlobals(unpacked(now)), "I/O globals").toEqual([]);
+  expect(() => new Function(now), "parses").not.toThrow();
+});
+
+test("antv wave style: a version jump with a preinstall that runs bun on a new file, bun as a dependency and a git optionalDependency", () => {
+  const c = byId("antv-wave-style-preinstall-bun");
+  expect(c.disclosed).toBe("2026-05-19");
+  expect(c.source).toContain("unit42.paloaltonetworks.com");
+  const [b] = c.base, [h] = c.head;
+  expect(c.base).toHaveLength(1);
+  expect(c.head).toHaveLength(1);
+  expect([b!.version, h!.version]).toEqual(["2.2.0", "2.4.0"]); // the write-up gives the jump from 2.2.0 to 2.4.0
+  const bp = JSON.parse(text(b!.files, "package.json")), hp = JSON.parse(text(h!.files, "package.json"));
+  expect(bp.scripts).toBeUndefined();
+  expect(hp.scripts).toEqual({ preinstall: "bun run index.js" });
+  expect(bp.dependencies?.bun).toBeUndefined();
+  expect(hp.dependencies.bun).toMatch(/^\d/);
+  expect(hp.optionalDependencies[Object.keys(hp.optionalDependencies)[0]!]).toMatch(/^github:example-org\/example-chart#[0-9a-f]{40}$/);
+  expect(b!.files.has("index.js")).toBe(false);
+  const payload = text(h!.files, "index.js");
+  expect(payload.length).toBeGreaterThan(8000);
+  for (const w of PLAIN) expect(payload, w).not.toContain(w);
+  const seen = unpacked(payload);
+  for (const w of ["readFileSync", "POST", "/v1/traces"]) expect(seen, w).toContain(w);
+  expect(ioGlobals(unpacked(payload)), "I/O globals").toEqual([]);
+  expect(() => new Function(payload), "parses").not.toThrow();
+});
