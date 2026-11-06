@@ -7,6 +7,7 @@ test("AGENTS.md carries the README's served-by sentences", () => {
   const readme = readFileSync(join(import.meta.dir, "..", "README.md"), "utf8"), agents = readFileSync(join(import.meta.dir, "..", "AGENTS.md"), "utf8");
   const m = /`servedByHeader` \(optional\)[^\n]*?an `--out` folder outside the repo\./.exec(readme);
   expect(m).not.toBeNull();
-  expect(m![0]).toContain("it never refuses an answer");
+  expect(m![0]).toContain("never refuses an answer");
+  expect(m![0]).toContain("The value is trimmed, and an empty value counts as no served-by header");
   expect(agents).toContain(m![0]);
 });
