@@ -2,11 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { gateWaiverState, loadReviewWaivers, parseReviewArgs } from "../src/cli.ts";
-import { MARKER, WAIVER_FREE, runGate, verdictLine, type Change } from "../src/gate.ts";
+import { gateWaivers, loadReviewWaivers, parseReviewArgs } from "../src/cli.ts";
+import { MARKER, runGate, verdictLine, type Change } from "../src/gate.ts";
 import type { Forge, Pull, StatusState } from "../src/adapters/forge/types.ts";
 import type { ReviewResult } from "../src/review.ts";
-import { addWaiver, findWaiver, saveWaivers, listWaivers, removeWaiver, sha256Hex, waiverFingerprint, waiversPath, type Waiver } from "../src/waiver.ts";
+import { addWaiver, findWaiver, saveWaivers, listWaivers, removeWaiver, sha256Hex, waiverFingerprint, waiversFor, waiversPath, type Waiver } from "../src/waiver.ts";
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), "regate-")); dirs.push(d); return d; };
@@ -55,44 +55,89 @@ function forgeWith(state: StatusState, line: string, fileset: Record<string, str
 }
 const result = (c: Change, decision: "land" | "hold"): ReviewResult => ({ eco: c.eco, name: c.name, from: c.from ?? "", to: c.to, decision, layers: decision === "hold" ? [{ layer: "reviewer", verdict: "stop", detail: "binary file(s) engine.wasm" }] : [], flagged: false } as unknown as ReviewResult);
 
-describe("a verdict reached under other waivers is reviewed again", () => {
-  test("the same fingerprint keeps the final verdict", async () => {
-    const { forge } = forgeWith("failure", verdictLine("h1", "failure", "aaaa"));
+/** A waiver for the one package change these PRs carry (yaml 2.8.1 -> 2.8.3), and the line a verdict reached under it records. */
+const mine = (over: Partial<Waiver> = {}) => waiver({ name: "yaml", version: "2.8.3", ...over });
+const line = (state: StatusState, ...list: Waiver[]) => verdictLine("h1", state, list.length ? waiverFingerprint(list) : undefined);
+
+describe("a verdict is kept only while the waivers that apply to the PR's packages are unchanged", () => {
+  const hold = async (c: Change) => result(c, "hold");
+
+  test("the same relevant waivers keep the final verdict, with no review", async () => {
+    const { forge } = forgeWith("failure", line("failure", mine()));
     const seen: string[] = [];
-    const out = await runGate({ forge, repo: "o/r", waiverPrint: "aaaa", review: async (c) => (seen.push(c.name), result(c, "hold")) });
+    const out = await runGate({ forge, repo: "o/r", waivers: [mine()], review: async (c) => (seen.push(c.name), result(c, "hold")) });
     expect(out.map((p) => p.state)).toEqual(["skipped"]);
     expect(seen).toEqual([]);
   });
 
-  test("a waiver added after a hold re-gates the PR, the review lands it, and the new comment records the new fingerprint", async () => {
-    const { forge, body } = forgeWith("failure", verdictLine("h1", "failure", "aaaa"));
+  test("a waiver for a package in the PR, added after a plain-line hold, re-gates it, and the landing records the fingerprint", async () => {
+    const { forge, body } = forgeWith("failure", line("failure"));
     const seen: string[] = [];
-    const out = await runGate({ forge, repo: "o/r", waiverPrint: "bbbb", review: async (c) => (seen.push(c.name), result(c, "land")) });
+    const out = await runGate({ forge, repo: "o/r", waivers: [mine()], review: async (c) => (seen.push(c.name), result(c, "land")) });
     expect(seen).toEqual(["yaml"]);
     expect(out.map((p) => p.state)).toEqual(["success"]);
-    expect(body()).toContain(verdictLine("h1", "success", "bbbb"));
+    expect(body()).toContain(line("success", mine()));
   });
 
-  test("a verdict written before fingerprints existed is reviewed again once the run has a waiver store", async () => {
-    const { forge } = forgeWith("failure", verdictLine("h1", "failure"));
+  test("a relevant waiver removed after a landing recorded with its fingerprint re-gates, and a hold fails closed", async () => {
+    const { forge, body } = forgeWith("success", line("success", mine()));
+    const out = await runGate({ forge, repo: "o/r", waivers: [], review: hold });
+    expect(out.map((p) => p.state)).toEqual(["failure"]);
+    expect(body()).toContain(line("failure"));
+    expect(body()).not.toContain("waivers:");
+  });
+
+  test("a waiver for another package, another version or another ecosystem is not relevant: adding or removing it keeps the verdict", async () => {
+    const others = [waiver({ name: "left-pad", version: "1.0.0" }), mine({ version: "2.8.4" }), mine({ eco: "pypi" })];
+    for (const [state, kept] of [["failure", line("failure")], ["success", line("success")]] as const) {
+      for (const list of [undefined, [], others]) {
+        const { forge } = forgeWith(state, kept);
+        const out = await runGate({ forge, repo: "o/r", waivers: list, review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+        expect(out.map((p) => p.state)).toEqual(["skipped"]);
+      }
+    }
+    // and the same from the other side: a verdict recorded under a relevant waiver does not stand once only unrelated ones are left
+    const { forge } = forgeWith("failure", line("failure", mine()));
     const seen: string[] = [];
-    await runGate({ forge, repo: "o/r", waiverPrint: "aaaa", review: async (c) => (seen.push(c.name), result(c, "hold")) });
+    await runGate({ forge, repo: "o/r", waivers: others, review: async (c) => (seen.push(c.name), result(c, "hold")) });
     expect(seen).toEqual(["yaml"]);
   });
 
-  test("a waiver removed after a landing re-gates the PR and a hold fails closed", async () => {
-    const { forge, body } = forgeWith("success", verdictLine("h1", "success", "bbbb"));
-    const out = await runGate({ forge, repo: "o/r", waiverPrint: "aaaa", review: async (c) => result(c, "hold") });
-    expect(out.map((p) => p.state)).toEqual(["failure"]);
-    expect(body()).toContain(verdictLine("h1", "failure", "aaaa"));
+  test("a hold written before fingerprints existed is reviewed again once a relevant waiver is in the store, and only then", async () => {
+    const { forge } = forgeWith("failure", line("failure"));
+    const seen: string[] = [];
+    await runGate({ forge, repo: "o/r", waivers: [mine()], review: async (c) => (seen.push(c.name), result(c, "hold")) });
+    expect(seen).toEqual(["yaml"]);
+    const again: string[] = [];
+    const fresh = forgeWith("failure", line("failure"));
+    await runGate({ forge: fresh.forge, repo: "o/r", waivers: [], review: async (c) => (again.push(c.name), result(c, "hold")) });
+    expect(again).toEqual([]); // an empty store changes nothing after an upgrade
   });
 
-  test("a run with no waiver store keeps a final verdict and writes the plain line, as before", async () => {
-    const kept = forgeWith("failure", verdictLine("h1", "failure"));
-    expect((await runGate({ forge: kept.forge, repo: "o/r", review: async (c) => result(c, "hold") })).map((p) => p.state)).toEqual(["skipped"]);
-    const fresh = forgeWith("failure", verdictLine("h0", "failure"));
-    await runGate({ forge: fresh.forge, repo: "o/r", review: async (c) => result(c, "hold") });
-    expect(fresh.body()).toContain("<!-- oupdate-verdict: h1 failure -->");
+  test("relevance reads names as the store does: trimmed, and PyPI spellings as one package", async () => {
+    const trimmed = mine({ name: " yaml ", version: " 2.8.3 " });
+    const { forge } = forgeWith("failure", line("failure"));
+    const seen: string[] = [];
+    await runGate({ forge, repo: "o/r", waivers: [trimmed], review: async (c) => (seen.push(c.name), result(c, "hold")) });
+    expect(seen).toEqual(["yaml"]); // a waiver typed with spaces still applies, so the plain-line hold is reviewed again
+    expect(waiversFor([waiver({ eco: "pypi", name: "My_Pkg.Core", version: "1.0" })], [{ eco: "pypi", name: "my-pkg-core", version: "1.0" }])).toHaveLength(1);
+    expect(waiversFor([waiver({ eco: "pypi", name: "My_Pkg.Core", version: "1.0" })], [{ eco: "pypi", name: "my-pkg-other", version: "1.0" }])).toHaveLength(0);
+    expect(waiversFor([waiver({ name: "Left_Pad", version: "1.0" })], [{ eco: "npm", name: "left-pad", version: "1.0" }])).toHaveLength(0); // npm names match exactly
+  });
+
+  test("a PR with no relevant waiver is written with the plain line, whatever the store holds", async () => {
+    for (const list of [undefined, [], [waiver({ name: "left-pad", version: "1.0.0" })]]) {
+      const { forge, body } = forgeWith("failure", verdictLine("h0", "failure"));
+      await runGate({ forge, repo: "o/r", waivers: list, review: hold });
+      expect(body()).toContain("<!-- oupdate-verdict: h1 failure -->");
+    }
+  });
+
+  test("a read of the lockfile that fails for a PR with a final verdict does not keep the verdict by guesswork: the PR is held and says why", async () => {
+    const { forge } = forgeWith("failure", line("failure"));
+    const broken = { ...forge, readFile: async () => { throw new Error("forge unreachable"); } } as Forge;
+    const out = await runGate({ forge: broken, repo: "o/r", waivers: [waiver({ name: "left-pad", version: "1.0.0" })], review: hold }); // a store with a waiver: the packages must be read to know it does not apply
+    expect(out.map((p) => p.state)).toEqual(["pending"]);
   });
 });
 
@@ -140,29 +185,17 @@ describe("the waiver store", () => {
   });
 });
 
-describe("a gate run reads the waiver store once", () => {
-  test("the fingerprint and the list the reviews use come from one read, and a waiver added after it changes neither", () => {
+describe("a review uses the list a gate run read", () => {
+  test("a list given to a review is the one it uses, whatever the store holds later", () => {
     const d = tmp();
     addWaiver(d, waiver());
-    const state = gateWaiverState({ stateDir: d });
-    expect(state.waivers).toHaveLength(1);
-    expect(state.waiverPrint).toBe(waiverFingerprint(state.waivers!));
+    const given = listWaivers(d);
     addWaiver(d, waiver({ name: "q" })); // added while the run is going
     const review = parseReviewArgs(["npm", "p", "1.0.0", "2.0.0"]);
     review.stateDir = d;
-    review.waivers = state.waivers;
-    expect(loadReviewWaivers(review)).toHaveLength(1); // the store now has two; the review still uses the one the fingerprint covers
+    review.waivers = given;
+    expect(loadReviewWaivers(review)).toHaveLength(1); // the store now has two; the review still uses the list the run read
     expect(loadReviewWaivers({ ...review, waivers: undefined })).toHaveLength(2);
-  });
-
-  test("a run with no state dir has neither a list nor a fingerprint", () => {
-    expect(gateWaiverState({})).toEqual({});
-  });
-
-  test("an unreadable store fails the run at the start", () => {
-    const d = tmp();
-    writeFileSync(waiversPath(d), "x");
-    expect(() => gateWaiverState({ stateDir: d })).toThrow(/waivers\.json/);
   });
 });
 
@@ -176,43 +209,42 @@ describe("remove finds a waiver by the key as typed, spaces and all", () => {
   });
 });
 
-describe("a verdict no waiver can change is not re-gated when the waivers change", () => {
-  const noChange = { "b:bun.lock": LOCK("2.8.1"), "h1:bun.lock": LOCK("2.8.1") };
-  const deleted = { "b:bun.lock": LOCK("2.8.1") };
-  const never = async (c: Change) => { throw new Error(`reviewed ${c.name}`); };
-
-  test("a run with a store writes the waiver-free line for a PR with no package changes and for one with a deleted lockfile", async () => {
-    for (const [fileset, state] of [[noChange, "success"], [deleted, "failure"]] as const) {
-      const { forge, body } = forgeWith(state, verdictLine("h0", state), fileset);
-      const out = await runGate({ forge, repo: "o/r", waiverPrint: "aaaa", review: never });
-      expect(out.map((p) => p.state)).toEqual([state]);
-      expect(body()).toContain(verdictLine("h1", state, WAIVER_FREE));
-      expect(body()).not.toContain("waivers:aaaa");
-    }
-  });
-
-  test("that verdict stands under another fingerprint, and under none", async () => {
-    for (const [fileset, state] of [[noChange, "success"], [deleted, "failure"]] as const) {
-      for (const print of ["bbbb", undefined]) {
-        const { forge } = forgeWith(state, verdictLine("h1", state, WAIVER_FREE), fileset);
-        const out = await runGate({ forge, repo: "o/r", waiverPrint: print, review: never });
+describe("keeping a verdict with no waivers reads no lockfile", () => {
+  for (const [label, list] of [["no store", undefined], ["an empty store", []]] as [string, Waiver[] | undefined][]) {
+    for (const state of ["success", "failure"] as const) {
+      test(`a kept ${state} with ${label} makes no lockfile read and survives a failing read`, async () => {
+        const { forge } = forgeWith(state, line(state));
+        let reads = 0, listed = 0;
+        const counted: Forge = { ...forge, readFile: async () => { reads++; throw new Error("forge unreachable"); }, changedFiles: async () => { listed++; throw new Error("forge unreachable"); } };
+        const out = await runGate({ forge: counted, repo: "o/r", waivers: list, review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
         expect(out.map((p) => p.state)).toEqual(["skipped"]);
-      }
+        expect([reads, listed]).toEqual([0, 0]);
+      });
     }
+  }
+
+  test("a final verdict whose comment is missing, or names another head, is still reviewed", async () => {
+    const { forge } = forgeWith("failure", verdictLine("h0", "failure"));
+    const seen: string[] = [];
+    await runGate({ forge, repo: "o/r", review: async (c) => (seen.push(c.name), result(c, "hold")) });
+    expect(seen).toEqual(["yaml"]);
+  });
+});
+
+describe("a gate run reads the waiver store at the start", () => {
+  test("no state dir means no list; a state dir gives its list", () => {
+    expect(gateWaivers({})).toBeUndefined();
+    const d = tmp();
+    expect(gateWaivers({ stateDir: d })).toEqual([]);
+    addWaiver(d, waiver());
+    expect(gateWaivers({ stateDir: d })).toHaveLength(1);
   });
 
-  test("a hold that carries a fingerprint, or no marker at all, is still reviewed again under another fingerprint", async () => {
-    for (const line of [verdictLine("h1", "failure", "aaaa"), verdictLine("h1", "failure")]) {
-      const { forge } = forgeWith("failure", line);
-      const seen: string[] = [];
-      await runGate({ forge, repo: "o/r", waiverPrint: "bbbb", review: async (c) => (seen.push(c.name), result(c, "hold")) });
-      expect(seen).toEqual(["yaml"]);
-    }
-  });
-
-  test("a run with no store still writes the plain line for those verdicts", async () => {
-    const { forge, body } = forgeWith("success", verdictLine("h0", "success"), noChange);
-    await runGate({ forge, repo: "o/r", review: never });
-    expect(body()).toContain("<!-- oupdate-verdict: h1 success -->");
+  test("a damaged waivers.json fails the read, naming the file, so the run stops before any pull request", () => {
+    const d = tmp();
+    writeFileSync(waiversPath(d), "x");
+    expect(() => gateWaivers({ stateDir: d })).toThrow(/waivers\.json/);
+    writeFileSync(waiversPath(d), "{}");
+    expect(() => gateWaivers({ stateDir: d })).toThrow(/waivers\.json/);
   });
 });

@@ -15,6 +15,7 @@ import { pep503 } from "./lockfile/pylock.ts";
 import type { Ecosystem } from "./prepass.ts";
 import { badName, badVersion, inert, shown } from "./ident.ts";
 import type { ReviewResult } from "./review.ts";
+import { waiverFingerprint, waiversFor, type Waiver } from "./waiver.ts";
 
 /** A package version a PR brings in, with the ecosystem of the lockfile that pins it. */
 export type Change = LockChange & { eco: Ecosystem };
@@ -32,8 +33,8 @@ export interface GateArgs {
   /** What a version from a private registry gets; default PRIVATE_REGISTRY_DEFAULT. */
   privateRegistry?: PrivateRegistryPolicy;
   context?: string;
-  /** waiverFingerprint of the waiver store this run reads. A final verdict stands only when its comment records the same fingerprint, so a waiver added or removed after a verdict re-gates the PR; none when the run has no waiver store. */
-  waiverPrint?: string;
+  /** The waivers this run reads, the same list its reviews use. A final verdict stands only while the waivers that apply to the PR's packages are the ones it was reached under (its comment records their fingerprint), so a relevant waiver added or removed re-gates that PR; none when the run has no waiver store. */
+  waivers?: Waiver[];
   /** Where to say why a PR is not gated (its branch, author or fork), one line each; default nowhere. */
   log?: (line: string) => void;
 }
@@ -73,8 +74,11 @@ export interface GatePull {
 
 export const MARKER = "<!-- oupdate-gate -->";
 
-/** Written in place of a fingerprint on a verdict no waiver can change (nothing to review, or dependency changes the gate cannot see): such a verdict stands whatever the waivers are. */
-export const WAIVER_FREE = "any";
+/** The fingerprint of the waivers that apply to a PR's package changes, or none when no waiver does: a verdict then carries the plain line, and a waiver for some other package never touches it. */
+const waiverPrint = (waivers: Waiver[] | undefined, changes: Change[]): string | undefined => {
+  const mine = waiversFor(waivers, changes.map((c) => ({ eco: c.eco, name: c.name, version: c.to })));
+  return mine.length ? waiverFingerprint(mine) : undefined;
+};
 
 /** The line in the gate's comment that binds a verdict to the head it was given for. With a waiver fingerprint it also binds the verdict to the set of waivers it was reached under; without one (no waiver store) the line is the plain one. */
 export const verdictLine = (sha: string, state: StatusState, waivers?: string) => `<!-- oupdate-verdict: ${sha} ${state}${waivers ? ` waivers:${waivers}` : ""} -->`;
@@ -617,14 +621,24 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
   // this head: anyone can post a status with our context, and a token shared with other workflows (the Actions
   // GITHUB_TOKEN) can post one as us.
   const prior = await a.forge.statusOf(a.repo, pr.headSha, context);
+  let read: Awaited<ReturnType<typeof lockChanges>> | undefined;
   if (prior && (prior.state === "success" || prior.state === "failure") && same(prior.creator, self)) {
     const own = await a.forge.ownComment(a.repo, pr.number, MARKER);
-    const lines = own?.split("\n") ?? [];
-    if (lines.includes(verdictLine(pr.headSha, prior.state, a.waiverPrint)) || lines.includes(verdictLine(pr.headSha, prior.state, WAIVER_FREE))) return { number: pr.number, state: "skipped", results: [] };
+    if (own) {
+      const lines = own.split("\n");
+      if (!a.waivers?.length) {
+        // No waiver can apply, so the verdict carries the plain line and no lockfile is read to keep it.
+        if (lines.includes(verdictLine(pr.headSha, prior.state))) return { number: pr.number, state: "skipped", results: [] };
+      } else {
+        // The verdict records the waivers that apply to this PR's packages, so the packages are read first. A read that fails here is not a reason to keep the verdict: the review below reads again and reports it.
+        read = await lockChanges(a, pr, paths).catch(() => undefined);
+        if (read && lines.includes(verdictLine(pr.headSha, prior.state, waiverPrint(a.waivers, read.changes)))) return { number: pr.number, state: "skipped", results: [] };
+      }
+    }
   }
   let found: string[], deleted: string[], changes: Change[], covers: Map<string, Cover[]>;
   try {
-    ({ found, deleted, changes, covers } = await lockChanges(a, pr, paths));
+    ({ found, deleted, changes, covers } = read ?? (await lockChanges(a, pr, paths)));
   } catch (e) {
     // A lockfile that does not parse is never read as "no changes": hold the PR and say why.
     const why = e instanceof Error ? e.message : String(e);
@@ -632,6 +646,7 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
     await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, `**oupdate: pending** (${paths.map(codeDetail).join(", ")})`, "", codeDetail(why)].join("\n"));
     return { number: pr.number, state: "pending", results: [] };
   }
+  const print = waiverPrint(a.waivers, changes);
   const locks = found.join(", ");
   const shownLocks = found.map(codeDetail).join(", ");
   // What the gate cannot see is never a pass: a deleted lockfile, or any changed file it does not read.
@@ -640,13 +655,13 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
     const blind = [...deleted.map((p) => `${codeDetail(p)}: deleted`), ...hidden.map((h) => `${codeDetail(h.path)}: ${codeDetail(h.why)}`)];
     const description = `cannot see dependency changes: ${[...deleted.map((p) => `${p} deleted`), ...hidden.map((h) => h.path)].join(", ")}`;
     await a.forge.setStatus(a.repo, pr.headSha, { state: "failure", context, description: description.slice(0, 200) });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "failure", a.waiverPrint && WAIVER_FREE), `**oupdate: failure** (${shownLocks || "no lockfile read"})`, "", "A person reviews these dependency changes; oupdate cannot:", ...blind.map((b) => `- ${b}`)].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "failure", print), `**oupdate: failure** (${shownLocks || "no lockfile read"})`, "", "A person reviews these dependency changes; oupdate cannot:", ...blind.map((b) => `- ${b}`)].join("\n"));
     return { number: pr.number, state: "failure", results: [] };
   }
   if (!changes.length) {
     const description = found.length ? `no package changes in ${locks}` : "no dependency files changed";
     await a.forge.setStatus(a.repo, pr.headSha, { state: "success", context, description });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "success", a.waiverPrint && WAIVER_FREE), `**oupdate: success** (${shownLocks || "no lockfile read"})`, "", found.length ? `no package changes in ${shownLocks}` : description].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "success", print), `**oupdate: success** (${shownLocks || "no lockfile read"})`, "", found.length ? `no package changes in ${shownLocks}` : description].join("\n"));
     return { number: pr.number, state: "success", results: [] };
   }
   // A git, url or file source has no registry release to review; the same version with another source or hash
@@ -673,6 +688,6 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
   const land = results.filter((r) => r.decision === "land").length;
   const skipped = unreviewed.length ? `, ${unreviewed.length} not reviewed (private registry)` : "";
   await a.forge.setStatus(a.repo, pr.headSha, { state, context, description: `${results.length} package${results.length === 1 ? "" : "s"}: ${land} land, ${results.length - land} hold${skipped}` });
-  if (state !== "pending" || priv.length || results.some((r) => r.layers.some((l) => l.verdict === "stop"))) await a.forge.upsertComment(a.repo, pr.number, MARKER, comment(pr.headSha, shownLocks, state, results, unreviewed, a.waiverPrint));
+  if (state !== "pending" || priv.length || results.some((r) => r.layers.some((l) => l.verdict === "stop"))) await a.forge.upsertComment(a.repo, pr.number, MARKER, comment(pr.headSha, shownLocks, state, results, unreviewed, print));
   return { number: pr.number, state, results };
 }

@@ -29,6 +29,12 @@ const nameOf = (k: Pick<WaiverKey, "eco" | "name">) => (k.eco === "pypi" ? k.nam
 /** Keys compare as stored: name and version trimmed, as check() stores them, so a key typed with spaces still finds its record. */
 const same = (a: WaiverKey, b: WaiverKey) => a.eco === b.eco && nameOf(a) === nameOf(b) && a.version.trim() === b.version.trim() && a.sha256 === b.sha256;
 
+/** The waivers recorded for any of these package versions: eco and version match, and the name by the store's own rule (trimmed, PyPI names normalized). */
+export function waiversFor(list: Waiver[] | undefined, pkgs: { eco: string; name: string; version: string }[]): Waiver[] {
+  if (!list?.length) return [];
+  return list.filter((w) => pkgs.some((p) => p.eco === w.eco && nameOf({ eco: w.eco, name: p.name }) === nameOf(w) && p.version.trim() === w.version.trim()));
+}
+
 /**
  * A short fingerprint of which binaries are waived: the package, version and hash of every record, in a fixed order, so a change of
  * reason, person or time leaves it alone while an added or removed waiver changes it. The gate writes it into its verdict line, so a
@@ -61,7 +67,7 @@ export function listWaivers(stateDir: string): Waiver[] {
   }
 }
 
-/** Writes the list to a temporary file and renames it over the store; `rename` is a seam for the test of a failed rename. */
+/** Writes the list to a temporary file and renames it over the store. Exported for the test of a failed rename: `rename` is a seam so the test can make the rename fail after the temporary file is written. */
 export function saveWaivers(stateDir: string, list: Waiver[], rename: (from: string, to: string) => void = renameSync) {
   const p = waiversPath(stateDir);
   mkdirSync(dirname(p), { recursive: true });
