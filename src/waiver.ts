@@ -2,6 +2,7 @@
 // it cannot read, and a waiver names that binary by its hash. It covers exactly the package, version and bytes recorded here;
 // a new version or any change to the bytes is not covered. The store is one JSON file in the state directory that `oupdate review` and `oupdate gate` read with --state-dir; the host and targets paths do not read it.
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -23,7 +24,19 @@ export const waiversPath = (stateDir: string) => join(stateDir, "waivers.json");
 
 export const sha256Hex = (b: Uint8Array) => new Bun.CryptoHasher("sha256").update(b).digest("hex");
 
-const same = (a: WaiverKey, b: WaiverKey) => a.eco === b.eco && a.name === b.name && a.version === b.version && a.sha256 === b.sha256;
+/** PyPI names are equal when they match after lowercasing with each run of `-`, `_` and `.` read as one `-` (so My_Pkg and my-pkg are one package); npm names match exactly. */
+const nameOf = (k: Pick<WaiverKey, "eco" | "name">) => (k.eco === "pypi" ? k.name.toLowerCase().replace(/[-_.]+/g, "-") : k.name);
+const same = (a: WaiverKey, b: WaiverKey) => a.eco === b.eco && nameOf(a) === nameOf(b) && a.version === b.version && a.sha256 === b.sha256;
+
+/**
+ * A short fingerprint of which binaries are waived: the package, version and hash of every record, in a fixed order, so a change of
+ * reason, person or time leaves it alone while an added or removed waiver changes it. The gate writes it into its verdict line, so a
+ * verdict reached under another set of waivers is reviewed again.
+ */
+export function waiverFingerprint(list: Waiver[]): string {
+  const keys = list.map((w) => `${w.eco} ${nameOf(w)} ${w.version} ${w.sha256}`).sort();
+  return sha256Hex(new TextEncoder().encode(keys.join("\n"))).slice(0, 16);
+}
 
 function check(w: unknown, where: string): Waiver {
   const o = (w ?? {}) as Record<string, unknown>;
@@ -31,7 +44,7 @@ function check(w: unknown, where: string): Waiver {
   if (o.eco !== "npm" && o.eco !== "pypi") throw new Error(`${where}: eco must be npm or pypi`);
   if (!/^[0-9a-f]{64}$/.test(s("sha256"))) throw new Error(`${where}: sha256 must be 64 lowercase hex digits`);
   for (const k of ["name", "version", "reason", "who", "at"]) if (!s(k).trim()) throw new Error(`${where}: ${k} is required`);
-  return { eco: o.eco, name: s("name"), version: s("version"), sha256: s("sha256"), reason: s("reason").trim(), who: s("who").trim(), at: s("at") };
+  return { eco: o.eco, name: s("name").trim(), version: s("version").trim(), sha256: s("sha256"), reason: s("reason").trim(), who: s("who").trim(), at: s("at") };
 }
 
 /** The records of a state dir; [] only when the file is missing. A file that cannot be read or parsed throws, so a damaged store never reads as no waivers and never as every waiver. */
@@ -50,8 +63,10 @@ export function listWaivers(stateDir: string): Waiver[] {
 function save(stateDir: string, list: Waiver[]) {
   const p = waiversPath(stateDir);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(`${p}.tmp`, JSON.stringify(list, null, 2) + "\n");
-  renameSync(`${p}.tmp`, p);
+  // A temporary name of its own, so two writers never share one; the rename then replaces the store whole.
+  const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(tmp, JSON.stringify(list, null, 2) + "\n");
+  renameSync(tmp, p);
 }
 
 /** Records a waiver; the same package, version and hash again replaces the earlier record. */
