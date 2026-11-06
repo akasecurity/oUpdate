@@ -73,6 +73,9 @@ export interface GatePull {
 
 export const MARKER = "<!-- oupdate-gate -->";
 
+/** Written in place of a fingerprint on a verdict no waiver can change (nothing to review, or dependency changes the gate cannot see): such a verdict stands whatever the waivers are. */
+export const WAIVER_FREE = "any";
+
 /** The line in the gate's comment that binds a verdict to the head it was given for. With a waiver fingerprint it also binds the verdict to the set of waivers it was reached under; without one (no waiver store) the line is the plain one. */
 export const verdictLine = (sha: string, state: StatusState, waivers?: string) => `<!-- oupdate-verdict: ${sha} ${state}${waivers ? ` waivers:${waivers}` : ""} -->`;
 
@@ -616,7 +619,8 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
   const prior = await a.forge.statusOf(a.repo, pr.headSha, context);
   if (prior && (prior.state === "success" || prior.state === "failure") && same(prior.creator, self)) {
     const own = await a.forge.ownComment(a.repo, pr.number, MARKER);
-    if (own?.split("\n").includes(verdictLine(pr.headSha, prior.state, a.waiverPrint))) return { number: pr.number, state: "skipped", results: [] };
+    const lines = own?.split("\n") ?? [];
+    if (lines.includes(verdictLine(pr.headSha, prior.state, a.waiverPrint)) || lines.includes(verdictLine(pr.headSha, prior.state, WAIVER_FREE))) return { number: pr.number, state: "skipped", results: [] };
   }
   let found: string[], deleted: string[], changes: Change[], covers: Map<string, Cover[]>;
   try {
@@ -636,13 +640,13 @@ async function gatePull(a: GateArgs, pr: Pull, self: string, paths: string[], co
     const blind = [...deleted.map((p) => `${codeDetail(p)}: deleted`), ...hidden.map((h) => `${codeDetail(h.path)}: ${codeDetail(h.why)}`)];
     const description = `cannot see dependency changes: ${[...deleted.map((p) => `${p} deleted`), ...hidden.map((h) => h.path)].join(", ")}`;
     await a.forge.setStatus(a.repo, pr.headSha, { state: "failure", context, description: description.slice(0, 200) });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "failure", a.waiverPrint), `**oupdate: failure** (${shownLocks || "no lockfile read"})`, "", "A person reviews these dependency changes; oupdate cannot:", ...blind.map((b) => `- ${b}`)].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "failure", a.waiverPrint && WAIVER_FREE), `**oupdate: failure** (${shownLocks || "no lockfile read"})`, "", "A person reviews these dependency changes; oupdate cannot:", ...blind.map((b) => `- ${b}`)].join("\n"));
     return { number: pr.number, state: "failure", results: [] };
   }
   if (!changes.length) {
     const description = found.length ? `no package changes in ${locks}` : "no dependency files changed";
     await a.forge.setStatus(a.repo, pr.headSha, { state: "success", context, description });
-    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "success", a.waiverPrint), `**oupdate: success** (${shownLocks || "no lockfile read"})`, "", found.length ? `no package changes in ${shownLocks}` : description].join("\n"));
+    await a.forge.upsertComment(a.repo, pr.number, MARKER, [MARKER, verdictLine(pr.headSha, "success", a.waiverPrint && WAIVER_FREE), `**oupdate: success** (${shownLocks || "no lockfile read"})`, "", found.length ? `no package changes in ${shownLocks}` : description].join("\n"));
     return { number: pr.number, state: "success", results: [] };
   }
   // A git, url or file source has no registry release to review; the same version with another source or hash

@@ -61,14 +61,15 @@ export function listWaivers(stateDir: string): Waiver[] {
   }
 }
 
-function save(stateDir: string, list: Waiver[]) {
+/** Writes the list to a temporary file and renames it over the store; `rename` is a seam for the test of a failed rename. */
+export function saveWaivers(stateDir: string, list: Waiver[], rename: (from: string, to: string) => void = renameSync) {
   const p = waiversPath(stateDir);
   mkdirSync(dirname(p), { recursive: true });
   // Only the temporary name is unique; two adds or removes at once still end with the last write.
   const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
   try {
     writeFileSync(tmp, JSON.stringify(list, null, 2) + "\n");
-    renameSync(tmp, p);
+    rename(tmp, p);
   } catch (e) {
     rmSync(tmp, { force: true });
     throw e;
@@ -78,14 +79,14 @@ function save(stateDir: string, list: Waiver[]) {
 /** Records a waiver; the same package, version and hash again replaces the earlier record. */
 export function addWaiver(stateDir: string, w: Waiver): void {
   const rec = check(w, "waiver");
-  save(stateDir, [...listWaivers(stateDir).filter((x) => !same(x, rec)), rec]);
+  saveWaivers(stateDir, [...listWaivers(stateDir).filter((x) => !same(x, rec)), rec]);
 }
 
 /** Removes the matching record; returns how many were removed. */
 export function removeWaiver(stateDir: string, k: WaiverKey): number {
   const all = listWaivers(stateDir);
   const kept = all.filter((x) => !same(x, k));
-  if (kept.length !== all.length) save(stateDir, kept);
+  if (kept.length !== all.length) saveWaivers(stateDir, kept);
   return all.length - kept.length;
 }
 

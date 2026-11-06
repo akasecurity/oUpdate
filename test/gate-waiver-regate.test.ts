@@ -3,10 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { gateWaiverState, loadReviewWaivers, parseReviewArgs } from "../src/cli.ts";
-import { MARKER, runGate, verdictLine, type Change } from "../src/gate.ts";
+import { MARKER, WAIVER_FREE, runGate, verdictLine, type Change } from "../src/gate.ts";
 import type { Forge, Pull, StatusState } from "../src/adapters/forge/types.ts";
 import type { ReviewResult } from "../src/review.ts";
-import { addWaiver, findWaiver, listWaivers, removeWaiver, sha256Hex, waiverFingerprint, waiversPath, type Waiver } from "../src/waiver.ts";
+import { addWaiver, findWaiver, saveWaivers, listWaivers, removeWaiver, sha256Hex, waiverFingerprint, waiversPath, type Waiver } from "../src/waiver.ts";
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), "regate-")); dirs.push(d); return d; };
@@ -37,14 +37,14 @@ const LOCK = (v: string) => `{"lockfileVersion":1,"packages":{"yaml":["yaml@${v}
 const files: Record<string, string> = { "b:bun.lock": LOCK("2.8.1"), "h1:bun.lock": LOCK("2.8.3") };
 
 /** One renovate PR whose head already has a final status and the gate's own comment. */
-function forgeWith(state: StatusState, line: string) {
+function forgeWith(state: StatusState, line: string, fileset: Record<string, string> = files) {
   const pr: Pull = { number: 1, headRef: "renovate/yaml", headSha: "h1", baseSha: "b", author: "renovate[bot]", headRepo: "o/r", baseRepo: "o/r" };
   let status: StatusState = state;
   let body = `${MARKER}\n${line}\n`;
   const forge: Forge = {
     self: async () => "gate",
     openPulls: async () => [pr],
-    readFile: async (_r, sha, path) => files[`${sha}:${path}`],
+    readFile: async (_r, sha, path) => fileset[`${sha}:${path}`],
     changedFiles: async () => ["bun.lock"],
     statusOf: async () => ({ state: status, creator: "gate" }),
     setStatus: async (_r, _s, s) => void (status = s.state),
@@ -112,11 +112,13 @@ describe("the waiver store", () => {
     expect(existsSync(waiversPath(d))).toBe(true);
   });
 
-  test("a save that fails removes its temporary file", () => {
+  test("a save whose rename fails removes its temporary file and reports the error", () => {
     const d = tmp();
-    mkdirSync(join(waiversPath(d), "keep"), { recursive: true }); // the store path is a directory, so the rename fails
-    expect(() => addWaiver(d, waiver())).toThrow();
-    expect(readdirSync(d)).toEqual(["waivers.json"]);
+    addWaiver(d, waiver());
+    const before = readdirSync(d);
+    expect(() => saveWaivers(d, [], () => { throw new Error("rename failed"); })).toThrow("rename failed");
+    expect(readdirSync(d)).toEqual(before);
+    expect(listWaivers(d)).toHaveLength(1); // the store is untouched
   });
 
   test("a name and version are stored trimmed and found without the spaces", () => {
@@ -171,5 +173,46 @@ describe("remove finds a waiver by the key as typed, spaces and all", () => {
     const key = { eco: "npm" as const, name: " p ", version: "\t2.0.0 ", sha256: waiver().sha256 };
     expect(removeWaiver(d, key)).toBe(1);
     expect(listWaivers(d)).toEqual([]);
+  });
+});
+
+describe("a verdict no waiver can change is not re-gated when the waivers change", () => {
+  const noChange = { "b:bun.lock": LOCK("2.8.1"), "h1:bun.lock": LOCK("2.8.1") };
+  const deleted = { "b:bun.lock": LOCK("2.8.1") };
+  const never = async (c: Change) => { throw new Error(`reviewed ${c.name}`); };
+
+  test("a run with a store writes the waiver-free line for a PR with no package changes and for one with a deleted lockfile", async () => {
+    for (const [fileset, state] of [[noChange, "success"], [deleted, "failure"]] as const) {
+      const { forge, body } = forgeWith(state, verdictLine("h0", state), fileset);
+      const out = await runGate({ forge, repo: "o/r", waiverPrint: "aaaa", review: never });
+      expect(out.map((p) => p.state)).toEqual([state]);
+      expect(body()).toContain(verdictLine("h1", state, WAIVER_FREE));
+      expect(body()).not.toContain("waivers:aaaa");
+    }
+  });
+
+  test("that verdict stands under another fingerprint, and under none", async () => {
+    for (const [fileset, state] of [[noChange, "success"], [deleted, "failure"]] as const) {
+      for (const print of ["bbbb", undefined]) {
+        const { forge } = forgeWith(state, verdictLine("h1", state, WAIVER_FREE), fileset);
+        const out = await runGate({ forge, repo: "o/r", waiverPrint: print, review: never });
+        expect(out.map((p) => p.state)).toEqual(["skipped"]);
+      }
+    }
+  });
+
+  test("a hold that carries a fingerprint, or no marker at all, is still reviewed again under another fingerprint", async () => {
+    for (const line of [verdictLine("h1", "failure", "aaaa"), verdictLine("h1", "failure")]) {
+      const { forge } = forgeWith("failure", line);
+      const seen: string[] = [];
+      await runGate({ forge, repo: "o/r", waiverPrint: "bbbb", review: async (c) => (seen.push(c.name), result(c, "hold")) });
+      expect(seen).toEqual(["yaml"]);
+    }
+  });
+
+  test("a run with no store still writes the plain line for those verdicts", async () => {
+    const { forge, body } = forgeWith("success", verdictLine("h0", "success"), noChange);
+    await runGate({ forge, repo: "o/r", review: never });
+    expect(body()).toContain("<!-- oupdate-verdict: h1 success -->");
   });
 });
