@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { openaiReviewer } from "../../src/adapters/reviewer/openai.ts";
 import type { Reviewer } from "../../src/review.ts";
 import { addTallies, newTally, publicTally, restoreTally, servedLine, servedValuesRefusal, snapshotTally, trackServed } from "./served.ts";
 
@@ -112,4 +113,33 @@ test("the served line says a call is one chunk sent to the reviewer", () => {
   const line = servedLine({ calls: 7, not_requested: 1, unknown: 2 });
   expect(line).toBe("served by: 7 reviewer calls (each call is one chunk sent to the reviewer, not one review); 1 not served by the requested model; 2 with no served-by header");
   expect(servedLine({ calls: 1, not_requested: 0, unknown: 0, by_value: { a: 1 } })).toContain("; by value a 1");
+});
+
+test("a served-by header with spaces around it counts as the trimmed value, and one that is only spaces counts as unknown", async () => {
+  // The server sets the header padded with spaces, or with nothing but spaces. Bun's Headers and fetch strip the spaces around a header value before the adapter reads it, so this pins the end-to-end result (padded counts as the value, blank as unknown), not the trim in the adapter.
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const { model } = (await req.json()) as { model: string };
+      return Response.json({ choices: [{ message: { content: "APPROVE\nno attack indicators found" } }] }, { headers: { "x-served-by": model === "blank" ? "   " : " local " } });
+    },
+  });
+  try {
+    const run = async (model: string, requested: string) => {
+      const tally = newTally();
+      const r = trackServed(openaiReviewer({ name: "r", baseUrls: [`http://127.0.0.1:${server.port}`], model, retryDelaysMs: [], servedByHeader: "x-served-by" }), requested, tally);
+      await r.review("x");
+      return tally;
+    };
+    const padded = await run("local", "local");
+    expect(padded.by_value).toEqual({ local: 1 });
+    expect(padded.not_requested).toBe(0);
+    expect(padded.unknown).toBe(0);
+    const blank = await run("blank", "blank");
+    expect(blank.by_value).toEqual({});
+    expect(blank.unknown).toBe(1);
+    expect(blank.not_requested).toBe(0);
+  } finally {
+    server.stop(true);
+  }
 });
