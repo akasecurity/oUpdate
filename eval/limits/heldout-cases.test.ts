@@ -59,7 +59,8 @@ test("the host guard sees a quoted bare hostname and ignores file names with kno
   // documented limit: a quoted four-part number that fits 0 to 255 reads as an address; one with a part over 255 is a version
   expect(hostsIn(`x("1.2.3.4"); y("12.0.1.1000"); z("1.2.3.256")`)).toEqual(["1.2.3.4"]);
   // a part with a leading zero is read as octal by many resolvers ("0177.0.0.1" is a loopback address), so it is an address whatever its length
-  expect(hostsIn(`x("0177.0.0.1"); y("1.2.3.0400"); z("10.0.1.1000"); w("1.2.3.089")`)).toEqual(["0177.0.0.1", "1.2.3.0400", "1.2.3.089"]); // 8 and 9 are not octal digits and still count
+  expect(hostsIn(`x("0177.0.0.1"); y("1.2.3.0400"); z("10.0.1.1000"); w("1.2.3.089"); v("1.2.3.09")`)).toEqual(["0177.0.0.1", "1.2.3.0400", "1.2.3.089", "1.2.3.09"]);
+  // 8 and 9 are not octal digits and still count, in a short part as in a long one; "1.2.3.089" is a deliberate over-match, not a valid address
   expect(hostsIn(`x("run.sh"); y("go.md")`)).toEqual(["run.sh", "go.md"]);
 });
 
@@ -95,12 +96,13 @@ test("node-ipc style: no install hook, main loads the bundle, the payload is app
 });
 
 /**
- * Names of globals that reach the outside world. This is a text guard against accidental use, not a sandbox: a payload that builds a
- * name from pieces (a split-string constructor), writes eval or constructor with a unicode escape (eval cannot be shadowed), or reaches Worker or navigator, still gets to real globals. The decoded payload must
- * not name any of these and the run shadows the plain identifiers. "import(" is matched as import followed by an opening
- * parenthesis with any space between, and "constructor" is matched even after a dot (a function's constructor is the real Function);
- * both, and self, also flag harmless code that happens to use the word. process.binding and process.dlopen are text-checked only:
- * process is a stub.
+ * Names of globals that reach the outside world. This is a text guard against accidental use, not a sandbox: a payload that gets
+ * to real globals anyway, for example by building a name from pieces (a split-string constructor), by calling eval indirectly (an
+ * indirect eval runs in the global scope; a direct eval written with a unicode escape sees the shadowed names), or by reaching
+ * Worker or navigator. The decoded payload must not name any of these and the run shadows the plain identifiers. "import(" is
+ * matched as import followed by an opening parenthesis with any space between, and "constructor" is matched even after a dot (a
+ * function's constructor is the real Function); both, and self, also flag harmless code that happens to use the word.
+ * process.binding and process.dlopen are text-checked only: process is a stub.
  */
 const IO_GLOBALS = ["globalThis", "global", "self", "Bun", "fetch", "import(", "eval", "Function", "constructor", "XMLHttpRequest", "WebSocket", "process.binding", "process.dlopen"];
 const ioGlobals = (src: string) =>
@@ -147,10 +149,9 @@ test("the I/O guard names a global used by a payload, plain or hex-encoded", () 
     [`const f = this.fetch;`, "this.fetch"], // passes the text check (a dotted name); stopped by the strict function, where this is undefined
   ] as const) expect(() => runTail(body, {}), body).toThrow(message);
   // passes the text check (an escaped identifier hides the word) and is stopped only by the hidden name: fetch is shadowed with undefined
-  let hidden = "";
-  try { runTail(`\\u0066etch.call;`, {}); } catch (e) { hidden = (e as Error).message; } // names the function without calling it, so nothing reaches the network if the shadow ever breaks
-  expect(hidden).toContain("undefined is not an object");
-  expect(hidden).not.toContain("names I/O globals");
+  // The payload names the function without calling it, so nothing reaches the network if the shadow ever breaks. The regex is anchored, so it
+  // matches the engine's error for evaluating the escaped fetch.call name and neither the text check's refusal nor any other undefined.
+  expect(() => runTail(`\\u0066etch.call;`, {})).toThrow(/^undefined is not an object \(evaluating '\\u0066etch\.call'\)$/);
   expect(ioGlobals("import  ( 'm' )")).toEqual(["import("]);
   expect(ioGlobals("a.constructor(1)")).toEqual(["constructor"]);
   expect(ioGlobals("global.x; self.y")).toEqual(["global", "self"]);
@@ -284,7 +285,8 @@ test("antv wave style: a version jump with a preinstall that runs bun on a new f
 });
 
 test("the Mastra dropper is about the size the write-up gives", () => {
-  const setup = text(byId("mastra-style-typosquat-dependency-postinstall").head[1]!.files, "setup.cjs");
-  expect(setup.length).toBeGreaterThan(4572 * 0.95);
-  expect(setup.length).toBeLessThan(4572 * 1.05);
+  const dropper = byId("mastra-style-typosquat-dependency-postinstall").head.find((p) => p.name === "swift-day-js")!;
+  const bytes = dropper.files.get("setup.cjs")!.byteLength; // bytes, as the write-up counts them, not string length
+  expect(bytes).toBeGreaterThan(4572 * 0.95);
+  expect(bytes).toBeLessThan(4572 * 1.05);
 });
