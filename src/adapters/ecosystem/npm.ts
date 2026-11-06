@@ -13,7 +13,7 @@ export function npmRegistry(deps: RegistryDeps = {}): Registry {
   const doc = (name: string) => {
     let p = cache.get(name);
     if (!p) {
-      p = getJson(f, `${base}/${name.replace("/", "%2f")}`) as Promise<Packument | undefined>;
+      p = getJson(f, `${base}/${name.replace("/", "%2f")}`, deps.timeoutMs) as Promise<Packument | undefined>;
       cache.set(name, p);
     }
     return p;
@@ -65,6 +65,6 @@ export function npmRegistry(deps: RegistryDeps = {}): Registry {
 export async function npmIntegrity(name: string, version: string, deps: RegistryDeps = {}): Promise<string | undefined> {
   const f = deps.fetch ?? fetch;
   const base = deps.base ?? "https://registry.npmjs.org";
-  const doc = (await getJson(f, `${base}/${name}/${encodeURIComponent(version)}`)) as { dist?: { integrity?: string } } | undefined;
+  const doc = (await getJson(f, `${base}/${name}/${encodeURIComponent(version)}`, deps.timeoutMs)) as { dist?: { integrity?: string } } | undefined;
   return doc?.dist?.integrity;
 }

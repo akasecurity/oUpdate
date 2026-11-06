@@ -2,6 +2,8 @@
 // distinct vuln id for severity and fixed versions. Any HTTP error throws:
 // a failed lookup must never read as "no advisories".
 
+import { timed } from "../http.ts";
+
 export interface PackageRef {
   ecosystem: string; // OSV ecosystem name: npm, PyPI, Go, crates.io, SwiftURL
   name: string;
@@ -38,7 +40,7 @@ const MALWARE_WORDING = /\bmalware\b|\b(contain(s|ed)?|embedded|with) malicious 
 
 const BATCH = 1000;
 
-export function osvFeed(deps: { fetch?: typeof fetch; base?: string } = {}): AdvisoryFeed {
+export function osvFeed(deps: { fetch?: typeof fetch; base?: string; timeoutMs?: number } = {}): AdvisoryFeed {
   const f = deps.fetch ?? fetch;
   const base = deps.base ?? "https://api.osv.dev/v1";
   const details = new Map<string, Promise<OsvVuln>>();
@@ -46,9 +48,12 @@ export function osvFeed(deps: { fetch?: typeof fetch; base?: string } = {}): Adv
     let p = details.get(id);
     if (!p) {
       p = (async () => {
-        const r = await f(`${base}/vulns/${encodeURIComponent(id)}`);
-        if (!r.ok) throw new Error(`osv ${r.status} for vuln ${id}`);
-        return (await r.json()) as OsvVuln;
+        const url = `${base}/vulns/${encodeURIComponent(id)}`;
+        return timed(url, async (init) => {
+          const r = await f(url, init);
+          if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`osv ${r.status} for vuln ${id}`); }
+          return (await r.json()) as OsvVuln;
+        }, deps.timeoutMs);
       })();
       details.set(id, p);
     }
@@ -60,13 +65,17 @@ export function osvFeed(deps: { fetch?: typeof fetch; base?: string } = {}): Adv
       const out: Advisory[] = [];
       for (let i = 0; i < pkgs.length; i += BATCH) {
         const chunk = pkgs.slice(i, i + BATCH);
-        const r = await f(`${base}/querybatch`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ queries: chunk.map((p) => ({ package: { ecosystem: p.ecosystem, name: p.name }, version: p.version })) }),
-        });
-        if (!r.ok) throw new Error(`osv ${r.status} for querybatch`);
-        const body = (await r.json()) as { results?: { vulns?: { id: string }[] }[] };
+        const url = `${base}/querybatch`;
+        const body = await timed(url, async (init) => {
+          const r = await f(url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ queries: chunk.map((p) => ({ package: { ecosystem: p.ecosystem, name: p.name }, version: p.version })) }),
+            ...init,
+          });
+          if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`osv ${r.status} for querybatch`); }
+          return (await r.json()) as { results?: { vulns?: { id: string }[] }[] };
+        }, deps.timeoutMs);
         const results = body.results ?? [];
         if (results.length !== chunk.length) throw new Error(`osv querybatch returned ${results.length} results for ${chunk.length} queries`);
         for (let j = 0; j < chunk.length; j++) {
