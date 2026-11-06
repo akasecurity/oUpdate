@@ -45,6 +45,7 @@ describe("reviewer fingerprint", () => {
   test("where it runs does not matter: url, timeout, headers, key variable, work root, key order", () => {
     const f = reviewerFingerprint(oa);
     expect(reviewerFingerprint({ ...oa, baseUrls: ["http://b", "http://c"], timeoutMs: 99, headers: { a: "b" }, apiKeyEnv: "K", retryDelaysMs: [1] } as never)).toBe(f);
+    expect(reviewerFingerprint({ ...oa, expectHeaders: { "x-served-by": "local" }, servedByHeader: "x-served-by" } as never)).toBe(f);
     expect(reviewerFingerprint({ timeoutMs: 5, maxTokens: 100, model: "x1", baseUrls: ["z"], name: "m", type: "openai" })).toBe(f);
     const c = { type: "command" as const, name: "m", argv: ["rv"] };
     expect(reviewerFingerprint({ ...c, workRoot: "/tmp/a", timeoutMs: 1 })).toBe(reviewerFingerprint(c));
