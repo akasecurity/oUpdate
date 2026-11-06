@@ -3,7 +3,7 @@
 // a new version or any change to the bytes is not covered. The store is one JSON file in the state directory that `oupdate review` and `oupdate gate` read with --state-dir; the host and targets paths do not read it.
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface Waiver {
@@ -25,8 +25,9 @@ export const waiversPath = (stateDir: string) => join(stateDir, "waivers.json");
 export const sha256Hex = (b: Uint8Array) => new Bun.CryptoHasher("sha256").update(b).digest("hex");
 
 /** PyPI names are equal when they match after lowercasing with each run of `-`, `_` and `.` read as one `-` (so My_Pkg and my-pkg are one package); npm names match exactly. */
-const nameOf = (k: Pick<WaiverKey, "eco" | "name">) => (k.eco === "pypi" ? k.name.toLowerCase().replace(/[-_.]+/g, "-") : k.name);
-const same = (a: WaiverKey, b: WaiverKey) => a.eco === b.eco && nameOf(a) === nameOf(b) && a.version === b.version && a.sha256 === b.sha256;
+const nameOf = (k: Pick<WaiverKey, "eco" | "name">) => (k.eco === "pypi" ? k.name.trim().toLowerCase().replace(/[-_.]+/g, "-") : k.name.trim());
+/** Keys compare as stored: name and version trimmed, as check() stores them, so a key typed with spaces still finds its record. */
+const same = (a: WaiverKey, b: WaiverKey) => a.eco === b.eco && nameOf(a) === nameOf(b) && a.version.trim() === b.version.trim() && a.sha256 === b.sha256;
 
 /**
  * A short fingerprint of which binaries are waived: the package, version and hash of every record, in a fixed order, so a change of
@@ -34,7 +35,7 @@ const same = (a: WaiverKey, b: WaiverKey) => a.eco === b.eco && nameOf(a) === na
  * verdict reached under another set of waivers is reviewed again.
  */
 export function waiverFingerprint(list: Waiver[]): string {
-  const keys = list.map((w) => `${w.eco} ${nameOf(w)} ${w.version} ${w.sha256}`).sort();
+  const keys = list.map((w) => `${w.eco} ${nameOf(w)} ${w.version.trim()} ${w.sha256}`).sort();
   return sha256Hex(new TextEncoder().encode(keys.join("\n"))).slice(0, 16);
 }
 
@@ -63,10 +64,15 @@ export function listWaivers(stateDir: string): Waiver[] {
 function save(stateDir: string, list: Waiver[]) {
   const p = waiversPath(stateDir);
   mkdirSync(dirname(p), { recursive: true });
-  // A temporary name of its own, so two writers never share one; the rename then replaces the store whole.
+  // Only the temporary name is unique; two adds or removes at once still end with the last write.
   const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(tmp, JSON.stringify(list, null, 2) + "\n");
-  renameSync(tmp, p);
+  try {
+    writeFileSync(tmp, JSON.stringify(list, null, 2) + "\n");
+    renameSync(tmp, p);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
 }
 
 /** Records a waiver; the same package, version and hash again replaces the earlier record. */

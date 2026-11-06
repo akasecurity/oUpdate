@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { gateWaiverState, loadReviewWaivers, parseReviewArgs } from "../src/cli.ts";
 import { MARKER, runGate, verdictLine, type Change } from "../src/gate.ts";
 import type { Forge, Pull, StatusState } from "../src/adapters/forge/types.ts";
 import type { ReviewResult } from "../src/review.ts";
-import { addWaiver, findWaiver, listWaivers, sha256Hex, waiverFingerprint, waiversPath, type Waiver } from "../src/waiver.ts";
+import { addWaiver, findWaiver, listWaivers, removeWaiver, sha256Hex, waiverFingerprint, waiversPath, type Waiver } from "../src/waiver.ts";
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), "regate-")); dirs.push(d); return d; };
@@ -111,6 +112,13 @@ describe("the waiver store", () => {
     expect(existsSync(waiversPath(d))).toBe(true);
   });
 
+  test("a save that fails removes its temporary file", () => {
+    const d = tmp();
+    mkdirSync(join(waiversPath(d), "keep"), { recursive: true }); // the store path is a directory, so the rename fails
+    expect(() => addWaiver(d, waiver())).toThrow();
+    expect(readdirSync(d)).toEqual(["waivers.json"]);
+  });
+
   test("a name and version are stored trimmed and found without the spaces", () => {
     const d = tmp();
     addWaiver(d, waiver({ name: " p ", version: " 2.0.0\n" }));
@@ -127,5 +135,41 @@ describe("the waiver store", () => {
     expect(findWaiver(py, key("my-pkg-other", "pypi"))).toBeUndefined();
     const npm = [waiver({ name: "Left_Pad" })];
     expect(findWaiver(npm, { ...key("left-pad", "npm"), sha256: npm[0]!.sha256 })).toBeUndefined();
+  });
+});
+
+describe("a gate run reads the waiver store once", () => {
+  test("the fingerprint and the list the reviews use come from one read, and a waiver added after it changes neither", () => {
+    const d = tmp();
+    addWaiver(d, waiver());
+    const state = gateWaiverState({ stateDir: d });
+    expect(state.waivers).toHaveLength(1);
+    expect(state.waiverPrint).toBe(waiverFingerprint(state.waivers!));
+    addWaiver(d, waiver({ name: "q" })); // added while the run is going
+    const review = parseReviewArgs(["npm", "p", "1.0.0", "2.0.0"]);
+    review.stateDir = d;
+    review.waivers = state.waivers;
+    expect(loadReviewWaivers(review)).toHaveLength(1); // the store now has two; the review still uses the one the fingerprint covers
+    expect(loadReviewWaivers({ ...review, waivers: undefined })).toHaveLength(2);
+  });
+
+  test("a run with no state dir has neither a list nor a fingerprint", () => {
+    expect(gateWaiverState({})).toEqual({});
+  });
+
+  test("an unreadable store fails the run at the start", () => {
+    const d = tmp();
+    writeFileSync(waiversPath(d), "x");
+    expect(() => gateWaiverState({ stateDir: d })).toThrow(/waivers\.json/);
+  });
+});
+
+describe("remove finds a waiver by the key as typed, spaces and all", () => {
+  test("a key with spaces around the name and version removes the stored record", () => {
+    const d = tmp();
+    addWaiver(d, waiver());
+    const key = { eco: "npm" as const, name: " p ", version: "\t2.0.0 ", sha256: waiver().sha256 };
+    expect(removeWaiver(d, key)).toBe(1);
+    expect(listWaivers(d)).toEqual([]);
   });
 });

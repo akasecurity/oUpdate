@@ -73,8 +73,7 @@ export interface GatePull {
 
 export const MARKER = "<!-- oupdate-gate -->";
 
-/** The line in the gate's comment that binds a verdict to the head it was given for. */
-/** The line that binds a verdict to a head. With a waiver fingerprint it also binds the verdict to the set of waivers it was reached under; without one (no waiver store) the line is the plain one. */
+/** The line in the gate's comment that binds a verdict to the head it was given for. With a waiver fingerprint it also binds the verdict to the set of waivers it was reached under; without one (no waiver store) the line is the plain one. */
 export const verdictLine = (sha: string, state: StatusState, waivers?: string) => `<!-- oupdate-verdict: ${sha} ${state}${waivers ? ` waivers:${waivers}` : ""} -->`;
 
 /** The logins the Renovate and Dependabot apps open PRs as on GitHub; a `[bot]` login cannot be taken by a user. */
