@@ -60,16 +60,20 @@ export interface CachedReviewer extends Reviewer {
 
 /** The reviewer, answering from the store when the same prompt was FLAGged before. Only a FLAG is stored and only a FLAG is served: the store can add a hold, never an approval, so a planted entry cannot land a release. */
 export function cachedReviewer(inner: Reviewer, dir: string, host: string, fingerprint = "", release?: Release): CachedReviewer {
+  let fromStore = false; // the latest answer came from the store, so no endpoint served it
   const out: CachedReviewer = {
     name: inner.name,
     storeHits: 0,
     ...(inner.ready ? { ready: () => inner.ready!() } : {}),
+    ...(inner.lastServedBy ? { lastServedBy: () => (fromStore ? undefined : inner.lastServedBy!()) } : {}),
     async review(prompt) {
+      fromStore = false;
       const file = join(dir, `${verdictKey(inner.name, prompt, fingerprint)}.json`);
       try {
         const hit = JSON.parse(readRegular(file));
         if (isFlag(hit?.text)) {
           out.storeHits++;
+          fromStore = true;
           return hit.text;
         }
       } catch {} // absent or damaged: a miss

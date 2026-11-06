@@ -29,7 +29,7 @@ export interface Reviewer {
   review(prompt: string): Promise<string>;
   /** A cheap check before a run: undefined when the reviewer can answer now, else why not. Absent: assumed ready. */
   ready?(): Promise<string | undefined>;
-  /** Who served the latest answer, when the reviewer's endpoint says (the router's served-by header); undefined when it did not say or the call failed. */
+  /** Who served the latest answer, when the reviewer's endpoint says (the router's served-by header); undefined when it did not say or the call failed. One value per reviewer instance: calls running at the same time on one instance overwrite it, so a parallel caller must capture it per call. */
   lastServedBy?(): string | undefined;
 }
 

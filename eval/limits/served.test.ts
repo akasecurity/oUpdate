@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Reviewer } from "../../src/review.ts";
-import { addTallies, newTally, publicTally, restoreTally, servedValuesRefusal, snapshotTally, trackServed } from "./served.ts";
+import { addTallies, newTally, publicTally, restoreTally, servedLine, servedValuesRefusal, snapshotTally, trackServed } from "./served.ts";
 
 const fake = (served: (string | undefined)[]): Reviewer => {
   let i = 0, cur: string | undefined;
@@ -83,4 +83,33 @@ test("an in-repo folder whose name starts with two dots is refused, and a symlin
   expect(servedValuesRefusal(true, join(dir, "outside/link/not-yet"), repo)).toContain("--out");
   expect(servedValuesRefusal(true, join(dir, "outside"), repo)).toBeUndefined();
   expect(servedValuesRefusal(true, join(dir, "outside/not-yet"), repo)).toBeUndefined();
+});
+
+test("a missing folder directly under the root keeps its whole name", () => {
+  // both paths are missing; a name cut by one character would make the second equal the first and be refused
+  expect(servedValuesRefusal(true, "/ab-missing", "/b-missing")).toBeUndefined();
+  expect(servedValuesRefusal(true, "/ab-missing/out", "/ab-missing")).toContain("--out");
+});
+
+test("a reviewer that is a class instance keeps its methods and fields when tracked", async () => {
+  class Served implements Reviewer {
+    name = "cls";
+    private cur: string | undefined;
+    async review() { this.cur = "m1"; return "APPROVE"; }
+    lastServedBy() { return this.cur; }
+    describe() { return `reviewer ${this.name}`; }
+  }
+  const t = newTally();
+  const r = trackServed(new Served(), "m1", t) as Served;
+  await r.review();
+  expect(t).toEqual({ calls: 1, by_value: { m1: 1 }, not_requested: 0, unknown: 0 });
+  expect(r.describe()).toBe("reviewer cls");
+  expect(r.name).toBe("cls");
+  expect(r.lastServedBy()).toBe("m1");
+});
+
+test("the served line says a call is one chunk sent to the reviewer", () => {
+  const line = servedLine({ calls: 7, not_requested: 1, unknown: 2 });
+  expect(line).toBe("served by: 7 reviewer calls (each call is one chunk sent to the reviewer, not one review); 1 not served by the requested model; 2 with no served-by header");
+  expect(servedLine({ calls: 1, not_requested: 0, unknown: 0, by_value: { a: 1 } })).toContain("; by value a 1");
 });
