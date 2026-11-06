@@ -289,9 +289,48 @@ describe("read time budget", () => {
     const d = r.layers.find((l) => l.layer === "reviewer")!.detail;
     expect(prompts.length).toBeLessThan(3);
     expect(d).toMatch(/^\d+ of \d+ part\(s\) read, the read time budget of 1 ms ran out; \d+ file\(s\) not reviewed; too large for model review: \d+ parts > 3 \(full diff\); too large for model review: \d+ parts > 3 \(signal files alone\); \d+ ranked parts not reviewed; needs a human$/);
-    expect(Number(/; (\d+) ranked parts not reviewed/.exec(d)![1])).toBeGreaterThan(10);
+    // the count is the ranked parts less the prompts actually sent, the same ranked total the tier reason names
+    const total = Number(/(\d+) parts > 3 \(signal files alone\)/.exec(d)![1]);
+    expect(total).toBeGreaterThan(10);
+    expect(Number(/; (\d+) ranked parts not reviewed/.exec(d)![1])).toBe(total - prompts.length);
     expect(r.decision).toBe("hold");
     expect(classifyOutcome(r)).toBe("held-human");
+  });
+
+  // The tiers below the ranked one: the review was narrowed to the priority files, or to the signal files, and the budget then ran out.
+  describe("a spent budget keeps the tier that narrowed the review", () => {
+    const plainFiles = (v: string) => Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`lib/m${i}.py`, `x = ${v}\n`.repeat(20)]));
+    const newFiles = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`lib/n${i}.py`, `y = ${i}\n`.repeat(30)]));
+    const net = (pad: number) => "a = 1\nimport subprocess; subprocess.run(['sh'])\n" + "b = 2\n".repeat(pad);
+    const spent = async (added: Record<string, string>, maxParts: number) => {
+      const art = { old: files({ ...plainFiles("1"), "setup.py": "v = 1\n", "lib/net.py": "a = 1\n" }), new: files({ ...plainFiles("2"), "setup.py": "v = 2\n", "lib/net.py": net(0), ...added }) };
+      const prompts: string[] = [];
+      const r = await reviewUpdate({
+        eco: "npm", name: "lib", from: "1.0.0", to: "1.0.1",
+        registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+        advisories: { query: async () => [] },
+        reviewer: { name: "fake", review: async (t) => (prompts.push(t), await Bun.sleep(10), "APPROVE\nno attack indicators found") },
+        cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"),
+        loadArtifacts: async () => art, chunkChars: 200, maxParts, maxStages: 1, maxReadMs: 1,
+      });
+      return { r, prompts, d: r.layers.find((l) => l.layer === "reviewer")!.detail };
+    };
+
+    test("priority files: the full-diff reason stays, no ranked count", async () => {
+      const { r, prompts, d } = await spent(newFiles(3), 8);
+      expect(prompts).toHaveLength(1);
+      expect(d).toMatch(/^1 of \d+ part\(s\) read, the read time budget of 1 ms ran out; \d+ file\(s\) not reviewed; too large for model review: \d+ parts > 8 \(full diff\); needs a human$/);
+      expect(r.decision).toBe("hold");
+      expect(classifyOutcome(r)).toBe("held-human");
+    });
+
+    test("signal files: both reasons stay, no ranked count", async () => {
+      const { r, prompts, d } = await spent({ ...newFiles(8), "lib/net.py": net(120) }, 6);
+      expect(prompts).toHaveLength(1);
+      expect(d).toMatch(/^1 of \d+ part\(s\) read, the read time budget of 1 ms ran out; \d+ file\(s\) not reviewed; too large for model review: \d+ parts > 6 \(full diff\); too large for model review: \d+ parts > 6 \(priority files alone\); needs a human$/);
+      expect(r.decision).toBe("hold");
+      expect(classifyOutcome(r)).toBe("held-human");
+    });
   });
 
   test("a budget the read fits in changes nothing", async () => {
