@@ -72,6 +72,7 @@ interface Part {
   on: (m: RegExpMatchArray, o: Out, lane: string) => void;
 }
 
+const STUCK_PART_ITEM = new RegExp(`(?:^|\\s)([^\\s=]+)=\\S*?${STUCK_SINCE}`, "g");
 const each = (s: string, f: (n: string) => string) => words(s).map((n) => f(one(n)));
 const TAP_ITEM = /^(\(unresolved tap\)|\S+) \((\S+) /;
 
@@ -151,7 +152,17 @@ const PARTS: Part[] = [
   },
   { re: /^FLAGGED(?: \(see notifications\))?$/, lane: "brew", on: (_m, o) => void (o.plainFlag = true) },
   { re: /^PINNED:(.*)$/, on: (m, o) => { for (const s of m[1]!.matchAll(/([^\s(]+)\(([^)]*)\)/g)) o.held.push(`${one(s[1]!)}: pinned (${one(s[2]!)})`); } },
-  { re: /^STUCK:(.*)$/, on: (m, o) => { for (const s of m[1]!.matchAll(new RegExp(`(?:^|\\s)([^\\s=]+)=[^\\s(]*${STUCK_SINCE}`, "g"))) o.waiting.push(`${one(s[1]!)}: pending for ${s[2]} runs since ${one(s[3]!)}; upgrade it by hand or find what blocks it`); } },
+  {
+    // "<name>=<version>(<runs> runs, since <date>)", space-joined; a version can hold "(" itself. Text that is no item is shown, never dropped.
+    re: /^STUCK:(.*)$/,
+    on: (m, o) => {
+      const rest = m[1]!.replace(STUCK_PART_ITEM, (_all, name: string, runs: string, since: string) => {
+        o.waiting.push(`${one(name)}: pending for ${runs} runs since ${one(since)}; upgrade it by hand or find what blocks it`);
+        return " ";
+      });
+      if (rest.trim()) o.waiting.push(`unrecognized: STUCK: ${one(rest)}`);
+    },
+  },
   {
     // src/apply/run-brew.ts: "<name> <version>", "<name> (record unreadable)", "<name> (hold unreadable)", space-joined.
     re: /^HELD by release check:(.*)$/,
@@ -306,6 +317,8 @@ export function renderDigest(a: DigestInput): string {
 
   // Every lane line, a repeated one too: a hold is never hidden by a later line.
   for (const { lane, text } of run.lanes) readLine(text, lane, o);
+  // A line of the block that is no lane line (a hold text that broke across lines): shown, never dropped.
+  for (const l of run.other) o.waiting.push(`unrecognized: ${one(l)}`);
 
   // A Type B flag or tap-approval item already says what the review held: no second, generic line.
   if (o.plainFlag && !heldNames.size && !o.flagExplained) o.waiting.push("brew: the review held something this run; read the notifications and the run log");

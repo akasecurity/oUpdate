@@ -67,20 +67,36 @@ export interface RunBlock {
   excluded: string[];
   /** Every lane line of the summary block, in order (a repeated lane is kept, never overwritten). */
   lanes: { lane: "brew" | "npm"; text: string }[];
+  /** Lines of the summary block that are no lane line (brew, npm or mas) and not blank, such as a lane text that broke across lines. */
+  other: string[];
   /** An "=== ABORTED" line in the run, before or after its summary: the run did not complete. */
   aborted: boolean;
   /** The run header's date, when `dated` was given and found. */
   date?: string;
 }
 
+// Lines the run itself writes after its lane lines, which are not strays: the mas lane's fixed text,
+// the two notice lines makeNotify writes ("[notify] ..." and "[dry-run — not notified] ...") and,
+// directly after a "[notify] " line, its send-failure note. A continuation that matches one of these
+// exactly is skipped too; the summary writer puts each lane on one line, so a new log has none.
+const MAS_TEXT = /^\s+mas:\s+not checked — the App Store phase is not in oupdate$/;
+const NOTICE = /^\[(?:notify|dry-run — not notified)\] /;
+const runOwnLine = (l: string, prev: string | undefined) =>
+  MAS_TEXT.test(l) || NOTICE.test(l) || (/^\s+the notice could not be sent$/.test(l) && prev !== undefined && /^\[notify\] /.test(prev));
+
 /**
  * Reads the run log around the summary line at `at`: the body before it, back to the host's own
  * run header when `dated` (capturing host, then date) is given, else to the start; then the summary
  * block after it until a line `end` matches ("=== ABORTED" never ends it). The one reader for the
  * shadow report and the digest.
+ *
+ * Without `dated` (the digest passes none), or when no earlier line is the host's own dated run
+ * header, the body scan has no start line and runs back to the first line of `lines`: a Type B
+ * notice, a CASK_EXCLUDE skip or an "=== ABORTED" line from an earlier run in the same text is
+ * then read as this run's. Pass a log that holds only this run (or give `dated`) to bound it.
  */
 export function readRunBlock(lines: string[], at: number, o: { host: string; dated?: RegExp; end: (l: string) => boolean }): RunBlock {
-  const r: RunBlock = { typeB: [], excluded: [], lanes: [], aborted: false };
+  const r: RunBlock = { typeB: [], excluded: [], lanes: [], other: [], aborted: false };
   for (let i = at - 1; i >= 0; i--) {
     const l = lines[i]!;
     const h = o.dated && l.match(o.dated);
@@ -105,6 +121,7 @@ export function readRunBlock(lines: string[], at: number, o: { host: string; dat
     if (o.end(l)) break;
     const m = l.match(/^\s+(brew|npm):\s+(.*)$/);
     if (m) r.lanes.push({ lane: m[1] as "brew" | "npm", text: m[2]! });
+    else if (l.trim() && !runOwnLine(l, lines[i - 1])) r.other.push(l);
   }
   return r;
 }

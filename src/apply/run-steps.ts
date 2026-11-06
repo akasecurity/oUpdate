@@ -180,6 +180,21 @@ export async function postUpgradeChecks(rt: RunCtx, npmRun: NpmRun): Promise<voi
   }
 }
 
+/**
+ * The summary block's lines. A status can carry free text (a reviewer's reason) with line breaks;
+ * each lane stays one line, so a reader never meets a continuation line of its own.
+ */
+export function summaryLines(host: string, dryRun: boolean, brewStatus: string, npmLine: string, mas: string): string[] {
+  const flat = (t: string) => t.replace(/\s*[\r\n\u2028\u2029]+\s*/g, " ");
+  return [
+    "",
+    dryRun ? `=== ${host} dry-run summary (nothing applied) ===` : `=== ${host} summary ===`,
+    `  brew: ${flat(brewStatus)}`,
+    `  npm:  ${flat(npmLine)}`,
+    `  mas:  ${flat(mas)}`,
+  ];
+}
+
 /** The summary block, the done notice and the result. */
 export async function finishRun(rt: RunCtx, a: { npmRun: NpmRun; npmStatus: string; ccPart: string | undefined; prevName: string }): Promise<ApplyResult> {
   const { opts, dryRun, host, log, b, notify, npmFailed } = rt;
@@ -198,13 +213,7 @@ export async function finishRun(rt: RunCtx, a: { npmRun: NpmRun; npmStatus: stri
   const npmLine = [...npmParts, ...(ccPart ? [ccPart] : [])].join("; ");
   const mas = "not checked — the App Store phase is not in oupdate";
   const rc: 0 | 1 = b.failed.length || /FAILED|ERROR/.test(npmLine) ? 1 : 0;
-  const summary = [
-    "",
-    dryRun ? `=== ${host} dry-run summary (nothing applied) ===` : `=== ${host} summary ===`,
-    `  brew: ${brewStatus}`,
-    `  npm:  ${npmLine}`,
-    `  mas:  ${mas}`,
-  ];
+  const summary = summaryLines(host, dryRun, brewStatus, npmLine, mas);
   for (const l of summary) sink?.(l);
   // A run being stopped by a signal sends no done notice: its ABORTED line is the last word.
   if (!dryRun && !opts.isStopping?.()) await notify(`📋 <b>${host} ${prevName} done (oupdate)</b>\nbrew: ${brewStatus}\nnpm:  ${npmLine}\nmas:  ${mas}`);
