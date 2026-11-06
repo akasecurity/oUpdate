@@ -96,7 +96,8 @@ test("node-ipc style: no install hook, main loads the bundle, the payload is app
 
 /**
  * Names of globals that reach the outside world. This is a text guard against accidental use, not a sandbox: a payload can still
- * get to real globals, for example by building a name from pieces (a split-string constructor), by calling eval indirectly (an
+ * get to real globals, for example by building a name from pieces (a split-string constructor), by writing constructor with a
+ * unicode escape (a function's constructor is the real Function, which reaches the real fetch), by calling eval indirectly (an
  * indirect eval runs in the global scope; a direct eval written with a unicode escape sees the shadowed names), or by reaching
  * Worker or navigator. The decoded payload must not name any of these and the run shadows the plain identifiers. "import(" is
  * matched as import followed by an opening parenthesis with any space between, and "constructor" is matched even after a dot (a
@@ -150,6 +151,7 @@ test("the I/O guard names a global used by a payload, plain or hex-encoded", () 
   // passes the text check (an escaped identifier hides the word) and is stopped only by the hidden name: fetch is shadowed with undefined
   // The payload names the function without calling it, so nothing reaches the network if the shadow ever breaks. The regex is anchored, so it
   // matches the engine's error for evaluating the escaped fetch.call name and neither the text check's refusal nor any other undefined.
+  // The message is the wording of Bun's engine (JavaScriptCore) for this error; another engine words it differently, and the regex would need its text.
   expect(() => runTail(`\\u0066etch.call;`, {})).toThrow(/^undefined is not an object \(evaluating '\\u0066etch\.call'\)$/);
   expect(ioGlobals("import  ( 'm' )")).toEqual(["import("]);
   expect(ioGlobals("a.constructor(1)")).toEqual(["constructor"]);
