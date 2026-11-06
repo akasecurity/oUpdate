@@ -1,6 +1,6 @@
 // Attacks disclosed after the reviewer's training cutoff (models.json). Each is a synthetic reduction of a public
 // write-up: the trigger shape is kept, every body is written for this eval and hosts use the reserved .example domain.
-// Never use these to tune prompts.
+// Never use these to tune prompts. Hosts are .example and any git dependency is on example-org.
 import type { FileMap } from "../../src/prepass.ts";
 import type { Case, Pkg } from "../2026-10-28-function-color-postinstall-hidden-download/cases.ts";
 
@@ -99,6 +99,6 @@ export const HELDOUT: HeldOutCase[] = [
     source: "https://tanstack.com/blog/npm-supply-chain-compromise-postmortem",
     note: "1.161.6 to 1.161.9: the postmortem names only the two malicious versions, so 1.161.6 (the last release before them) comes from the registry timeline, not the postmortem; no scripts entry; the only manifest change is an optionalDependencies entry on a git commit, and a large obfuscated router_init.js sits at the package root outside the files list (the postmortem's indicators entry for that file gives the files-list detail)",
     base: [tsHistory("1.161.6", {}, {})],
-    head: [tsHistory("1.161.9", { optionalDependencies: { "@route/setup": "github:route-org/router#79ac49eedf774dd4b0cfa308722bc463cfe5885c" } }, { "router_init.js": ROUTER_INIT })],
+    head: [tsHistory("1.161.9", { optionalDependencies: { "@route/setup": "github:example-org/example-router#79ac49eedf774dd4b0cfa308722bc463cfe5885c" } }, { "router_init.js": ROUTER_INIT })],
   },
 ];

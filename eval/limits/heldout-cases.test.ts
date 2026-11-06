@@ -3,8 +3,8 @@ import { HELDOUT } from "./heldout-cases.ts";
 
 const text = (f: Map<string, Uint8Array>, k: string) => new TextDecoder().decode(f.get(k)!);
 const byId = (id: string) => HELDOUT.find((c) => c.id === id)!;
-/** The file text plus every hex string literal decoded, which is what a reader sees after the table is unpacked. */
-const unpacked = (s: string) => s + "\n" + (s.match(/"[0-9a-f]{8,}"/g) ?? []).map((h) => Buffer.from(h.slice(1, -1), "hex").toString("latin1")).join("\n");
+/** The file text plus every hex string literal decoded and put back in quotes (a bare hostname then reads as a quoted one). Entries under 8 hex characters are skipped. */
+const unpacked = (s: string) => s + "\n" + (s.match(/"[0-9a-f]{8,}"/g) ?? []).map((h) => `"${Buffer.from(h.slice(1, -1), "hex").toString("latin1")}"`).join("\n");
 const FILE_EXT = /\.(js|cjs|mjs|json|ts|gyp|npmrc|md|txt|sh|out)$/;
 const hostsIn = (s: string) => [
   ...(s.match(/https?:\/\/[^\s"'`/\\]+/g) ?? []),
@@ -20,9 +20,18 @@ test("every held-out case is a dated attack with a source page and only .example
     expect(c.expect, c.id).toBe("hold");
     expect(c.disclosed, c.id).toMatch(/^2026-\d\d-\d\d$/);
     expect(c.source, c.id).toMatch(/^https:\/\/\S+$/);
-    for (const p of [...c.base, ...c.head]) for (const [k, v] of p.files)
-      for (const host of hostsIn(unpacked(new TextDecoder().decode(v)))) expect(host.replace(/^https?:\/\//, ""), `${c.id} ${k}`).toMatch(/\.example$/);
+    for (const p of [...c.base, ...c.head]) for (const [k, v] of p.files) {
+      const body = unpacked(new TextDecoder().decode(v));
+      for (const host of hostsIn(body)) expect(host.replace(/^https?:\/\//, ""), `${c.id} ${k}`).toMatch(/\.example$/);
+      for (const m of body.matchAll(/github:([\w.-]+)\//g)) expect(m[1], `${c.id} ${k}`).toBe("example-org");
+    }
   }
+});
+
+test("the host guard sees a hex-encoded real hostname", () => {
+  const hex = Buffer.from("sh.evil.com").toString("hex");
+  expect(hostsIn(unpacked(`const t = ["${hex}"];`))).toEqual(["sh.evil.com"]);
+  expect(hostsIn(unpacked(`const t = ["${Buffer.from("see https://up.evil.com/c now").toString("hex")}"];`))).toContain("https://up.evil.com");
 });
 
 test("the host guard sees a quoted bare hostname and ignores file names", () => {
@@ -64,7 +73,7 @@ test("tanstack style: the only manifest change is a git-hosted optionalDependenc
   expect([b!.version, h!.version]).toEqual(["1.161.6", "1.161.9"]);
   const bp = JSON.parse(text(b!.files, "package.json")), hp = JSON.parse(text(h!.files, "package.json"));
   expect(hp.scripts).toBeUndefined();
-  expect(hp.optionalDependencies["@route/setup"]).toMatch(/^github:[\w-]+\/[\w-]+#[0-9a-f]{40}$/);
+  expect(hp.optionalDependencies["@route/setup"]).toMatch(/^github:example-org\/example-router#[0-9a-f]{40}$/);
   expect({ ...hp, version: "", optionalDependencies: undefined }).toEqual({ ...bp, version: "" });
   expect(hp.files).toContain("dist");
   expect(hp.files).not.toContain("router_init.js");
