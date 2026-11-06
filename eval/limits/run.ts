@@ -20,7 +20,7 @@ import { HELDOUT } from "./heldout-cases.ts";
 import { GAP } from "./gap-cases.ts";
 import { evasionReport, writeEvasions } from "./evasions.ts";
 import { INSTALL_ATTACKS, INSTALL_CLEAN } from "./install-cases.ts";
-import { addTallies, newTally, publicTally, trackServed, type ServedTally } from "./served.ts";
+import { addTallies, newTally, publicTally, restoreTally, servedValuesRefusal, snapshotTally, trackServed, type ServedTally } from "./served.ts";
 import { stampSpec, thinkingOf } from "./stamp.ts";
 
 /** An attack with the date it became public. Add new write-ups here; never use them to tune prompts. */
@@ -55,7 +55,12 @@ const requestedModel = spec.type === "openai" ? spec.model : undefined;
 /** The served-by values name where answers came from, so they stay out of the results files unless --served-values asks for them. */
 const withValues = process.argv.includes("--served-values");
 const allServed: ServedTally[] = [];
-const withTally = (): ServedTally => { const t = newTally(); allServed.push(t); reviewer = trackServed(baseReviewer, requestedModel, t); return t; };
+let activeTally: ServedTally | undefined;
+{
+  const refusal = servedValuesRefusal(withValues, arg("out"), join(here, "../.."));
+  if (refusal) { console.error(refusal); process.exit(2); }
+}
+const withTally = (): ServedTally => { const t = newTally(); allServed.push(t); activeTally = t; reviewer = trackServed(baseReviewer, requestedModel, t); return t; };
 /** Which reviewer settings produced these results, without where or how the reviewer is reached. */
 const stamp = stampSpec(spec);
 
@@ -99,8 +104,10 @@ async function heldOnce(c: Case, layers: "prepass" | "reviewer"): Promise<{ stop
 /** The router answers 502 now and then; a reviewer error is retried before it aborts the run, so one blip does not cost the whole run. */
 async function held(c: Case, layers: "prepass" | "reviewer"): Promise<{ stop: boolean; scope: Scope }> {
   for (let i = 1; ; i++) {
+    // A failed attempt's calls are dropped from the served-by tally, so its calls stay within the reviews behind k/N.
+    const before = activeTally && snapshotTally(activeTally);
     try { return await heldOnce(c, layers); }
-    catch (e) { if (i >= 4) throw e; console.error(`retry ${i} on ${c.id}: ${String(e).slice(0, 200)}`); await Bun.sleep(30_000 * i); }
+    catch (e) { if (activeTally && before) restoreTally(activeTally, before); if (i >= 4) throw e; console.error(`retry ${i} on ${c.id}: ${String(e).slice(0, 200)}`); await Bun.sleep(30_000 * i); }
   }
 }
 

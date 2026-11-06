@@ -105,6 +105,16 @@ async function probeOutage(cfg: OpenAIReviewerConfig): Promise<string | undefine
   return `reviewer ${cfg.name} not reachable: ${errors.join("; ")}`;
 }
 
+// A name the headers object refuses leaves served-by unknown; it never costs the answer.
+function readServedBy(headers: Headers, name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  try {
+    return headers.get(name)?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
   let served: string | undefined;
   return {
@@ -194,7 +204,7 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
             errors.push(`${base}: empty answer`);
             continue;
           }
-          served = (cfg.servedByHeader ? r.headers.get(cfg.servedByHeader)?.trim() : undefined) || undefined;
+          served = readServedBy(r.headers, cfg.servedByHeader);
           return text;
         } catch (e) {
           errors.push(`${base}: ${e instanceof Error ? e.message : String(e)}`);

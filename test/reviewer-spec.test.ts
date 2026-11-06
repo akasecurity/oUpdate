@@ -45,6 +45,12 @@ describe("reviewer spec keys", () => {
     for (const bad of [1, "", ["x"]]) expect(() => validateReviewerSpec({ ...base, servedByHeader: bad })).toThrow("servedByHeader");
   });
 
+  test("servedByHeader must be a legal HTTP header name", () => {
+    const base = { type: "openai", name: "local", baseUrls: ["http://127.0.0.1:8080/v1"], model: "m" };
+    for (const bad of ["x served by", "x-served-by:", "x\nserved", "é-header"]) expect(() => validateReviewerSpec({ ...base, servedByHeader: bad })).toThrow("servedByHeader");
+    for (const good of ["x-served-by", "X_Served.By", "served~by"]) expect(validateReviewerSpec({ ...base, servedByHeader: good })).toMatchObject({ servedByHeader: good });
+  });
+
   test("each command key is accepted", () => {
     const got = validateReviewerSpec(command);
     expect(got).toMatchObject(command);

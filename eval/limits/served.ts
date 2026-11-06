@@ -1,6 +1,7 @@
 // Who served each reviewer call in a limits run: the router can answer a call from a fallback model when the requested one is busy,
 // and the same code then scores differently. Counts only; the results file stays free of where the reviewer is reached.
 
+import { isAbsolute, relative, resolve } from "node:path";
 import type { Reviewer } from "../../src/review.ts";
 
 export interface ServedTally {
@@ -33,6 +34,21 @@ export function publicTally(t: ServedTally, withValues: boolean): Omit<ServedTal
   return withValues ? t : counts;
 }
 
+/** Why --served-values cannot run, or undefined when it can: the values name where answers came from, so they go only to an --out folder outside the repo (results under eval/limits are tracked and public). */
+export function servedValuesRefusal(withValues: boolean, out: string | undefined, repoRoot: string): string | undefined {
+  if (!withValues) return undefined;
+  const msg = "--served-values needs --out <dir> outside the repo: served-by values must not land in a tracked results folder";
+  if (!out) return msg;
+  const rel = relative(resolve(repoRoot), resolve(out));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel)) ? msg : undefined;
+}
+
+export const snapshotTally = (t: ServedTally): ServedTally => ({ ...t, by_value: { ...t.by_value } });
+/** Puts `t` back to `snap`, in place (a retried attempt must not count the calls of the failed one). */
+export function restoreTally(t: ServedTally, snap: ServedTally): void {
+  Object.assign(t, snapshotTally(snap));
+}
+
 /** The reviewer with every answered call counted into `tally`; `requested` is the model the spec asked for (undefined: none to compare, so no call is "not requested"). */
 export function trackServed(reviewer: Reviewer, requested: string | undefined, tally: ServedTally): Reviewer {
   return {
@@ -44,6 +60,7 @@ export function trackServed(reviewer: Reviewer, requested: string | undefined, t
       if (by === undefined) tally.unknown++;
       else {
         tally.by_value[by] = (tally.by_value[by] ?? 0) + 1;
+        // Names match exactly except for case; a router that names its worker differently from the model counts as not requested.
         if (requested !== undefined && by.toLowerCase() !== requested.toLowerCase()) tally.not_requested++;
       }
       return text;
