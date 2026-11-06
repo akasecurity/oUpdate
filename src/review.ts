@@ -2584,7 +2584,14 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         if (outOfTime) {
           // The parts left unread can carry the attack, so an APPROVE on the rest never lands.
           const seen = filesRead(chunks, texts.length);
-          layers.push({ layer: "reviewer", verdict: "stop", detail: `${texts.length} of ${chunks.length} part(s) read, the read time budget of ${budget} ms ran out; ${leftOut(seen)} file(s) not reviewed${[overFull, overPriority].filter(Boolean).map((x) => `; ${x}`).join("")}${scope === "ranked" ? `; ${rankedTotal - texts.length} ranked parts not reviewed` : ""}; needs a human` });
+          const budgetParts = [
+            `${texts.length} of ${chunks.length} part(s) read, the read time budget of ${budget} ms ran out`,
+            `${leftOut(seen)} file(s) not reviewed`,
+            ...[overFull, overPriority].filter(Boolean),
+            ...(scope === "ranked" ? [`${rankedTotal - texts.length} ranked parts not reviewed`] : []),
+            "needs a human",
+          ];
+          layers.push({ layer: "reviewer", verdict: "stop", detail: budgetParts.join("; ") });
         } else if (scope === "ranked")
           layers.push(
             flagged.length

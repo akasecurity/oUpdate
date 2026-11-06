@@ -16,3 +16,12 @@ const NO_READ = /^(not model-reviewable: 0 parts to review|too large for model r
 const BUDGET_STOP = /^\d+ of \d+ part\(s\) read, the read time budget/;
 export const readScope = (detail: string): Scope => (BUDGET_STOP.test(detail) ? "partial" : NO_READ.test(detail) ? "none" : /\branked part/.test(detail) ? "ranked" : /\bsignal (part|files)/.test(detail) ? "signal" : /\bpriority files/.test(detail) ? "priority" : "full");
 export const scopeNote = (counts: Record<string, number>) => Object.entries(counts).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(", ") || "full 0";
+
+/** The read time budget of a limits run, in milliseconds. A budgeted run is not comparable with the committed baseline, so it must name its own --out directory and never overwrite results/<version>.* . */
+export function parseReadBudget(raw: string | undefined, out: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (raw === "" || !Number.isInteger(n) || n < 1 || n > 86_400_000) throw new Error("--max-read-ms must be a whole number of milliseconds from 1 to 86400000");
+  if (!out) throw new Error("--max-read-ms needs --out <dir>, so a budgeted run never overwrites the committed baseline results");
+  return n;
+}

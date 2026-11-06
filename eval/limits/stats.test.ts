@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { readScope, scopeNote, wilson } from "./stats.ts";
+import { parseReadBudget, readScope, scopeNote, wilson } from "./stats.ts";
 
 test("wilson interval matches known values", () => {
   const a = wilson(10, 10);
@@ -27,4 +27,12 @@ test("readScope names a narrowed review and defaults to a full read", () => {
   expect(readScope("m FLAG on part(s) 1 of 2: no priority files to review")).toBe("priority");
   expect(readScope("over budget; m APPROVE on the priority files (2 part(s)); needs a human")).toBe("priority");
   expect(scopeNote({ full: 8, priority: 2, signal: 0, ranked: 0 })).toBe("full 8, priority 2");
+});
+
+test("a read budget is a whole number of milliseconds and needs its own output directory", () => {
+  expect(parseReadBudget(undefined, undefined)).toBeUndefined();
+  expect(parseReadBudget(undefined, "out")).toBeUndefined();
+  expect(parseReadBudget("600000", "out")).toBe(600000);
+  expect(() => parseReadBudget("600000", undefined)).toThrow("--out");
+  for (const bad of ["0", "1.5", "x", "86400001", "-2", ""]) expect(() => parseReadBudget(bad, "out")).toThrow("--max-read-ms");
 });

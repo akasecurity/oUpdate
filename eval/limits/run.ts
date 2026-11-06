@@ -14,7 +14,7 @@ import { reviewUpdate, type Reviewer } from "../../src/review.ts";
 import type { Registry } from "../../src/adapters/ecosystem/types.ts";
 import type { Forge } from "../../src/adapters/forge/types.ts";
 import { CASES as FC_CASES, type Case, type Pkg } from "../2026-10-28-function-color-postinstall-hidden-download/cases.ts";
-import { readScope, scopeNote, wilson, type Scope } from "./stats.ts";
+import { parseReadBudget, readScope, scopeNote, wilson, type Scope } from "./stats.ts";
 import { MORE_CLEAN } from "./clean-cases.ts";
 import { HELDOUT } from "./heldout-cases.ts";
 import { GAP } from "./gap-cases.ts";
@@ -41,6 +41,9 @@ const here = dirname(new URL(import.meta.url).pathname);
 const models = await Bun.file(join(here, "models.json")).json() as { reviewer: { label: string; cutoff: string }; repeats: number };
 const version = (await Bun.file(join(here, "../../package.json")).json()).version as string;
 const repeats = Number(arg("repeats") ?? models.repeats);
+/** Optional read time budget per review in milliseconds, so a spent budget (a `partial` read) can be measured; unset reads every part. */
+let maxReadMs: number | undefined;
+try { maxReadMs = parseReadBudget(arg("max-read-ms"), arg("out")); } catch (e) { console.error((e as Error).message); process.exit(2); }
 const specFile = arg("reviewer");
 if (!specFile) { console.error("--reviewer <spec.json> is required"); process.exit(2); }
 const spec = parseReviewerSpec(await Bun.file(specFile).text());
@@ -70,7 +73,7 @@ async function heldOnce(c: Case, layers: "prepass" | "reviewer"): Promise<{ stop
     review: (ch) => reviewUpdate({
       eco: ch.eco, name: ch.name, from: ch.from ?? "", to: ch.to, registry,
       advisories: { query: async () => [] }, reviewer: layers === "reviewer" ? reviewer : undefined,
-      cooldownDays: 0, now: new Date("2026-10-28T12:00:00Z"),
+      cooldownDays: 0, now: new Date("2026-10-28T12:00:00Z"), maxReadMs: layers === "reviewer" ? maxReadMs : undefined,
       loadArtifacts: async () => ({ old: ch.from ? byKey.get(`${ch.name}@${ch.from}`)! : new Map(), new: byKey.get(`${ch.name}@${ch.to}`)! }),
       only: layers === "reviewer" ? ["prepass", "reviewer"] : ["prepass"],
     }),
@@ -81,6 +84,7 @@ async function heldOnce(c: Case, layers: "prepass" | "reviewer"): Promise<{ stop
   if (bad) throw new Error(`${layers} layer error on ${c.id}: ${bad.detail}`);
   if (process.env.LIMITS_VERBOSE) for (const l of ls) if (l.verdict === "stop") console.error(`[${c.id}] ${l.layer}: ${String(l.detail).slice(0, 1500)}`);
   const stop = ls.filter((l) => l.verdict === "stop");
+  // The details of every stopping package are joined. Only the partial and none checks in readScope anchor on the start of the text, so only the first stopping package can yield those; the narrowed-scope checks (ranked, signal, priority) match any package.
   return { stop: stop.length > 0, scope: readScope(stop.map((l) => String(l.detail)).join(" ")) };
 }
 
@@ -117,7 +121,7 @@ const sum = (rs: typeof rows) => { const k = rs.reduce((a, r) => a + r.k, 0), n 
 const tot = (rs: typeof cleanRows) => { const k = rs.reduce((a, r) => a + r.k, 0), n = rs.reduce((a, r) => a + r.n, 0); return { k, n, ...wilson(k, n) }; };
 const cleanTotal = tot(cleanRows.filter((r) => !r.policy_hold));
 const policyTotal = tot(cleanRows.filter((r) => r.policy_hold));
-const summary = { tool_version: version, reviewer: models.reviewer.label, cutoff, repeats, held_out: sum(rows.filter((r) => r.held_out)), earlier: sum(rows.filter((r) => !r.held_out && !r.gap)), gap: sum(rows.filter((r) => r.gap)), false_holds: cleanTotal, policy_holds: policyTotal, reviewer_spec: stamp };
+const summary = { tool_version: version, max_read_ms: maxReadMs ?? null, reviewer: models.reviewer.label, cutoff, repeats, held_out: sum(rows.filter((r) => r.held_out)), earlier: sum(rows.filter((r) => !r.held_out && !r.gap)), gap: sum(rows.filter((r) => r.gap)), false_holds: cleanTotal, policy_holds: policyTotal, reviewer_spec: stamp };
 
 const out = arg("out") ?? join(here, "results");
 mkdirSync(out, { recursive: true });
@@ -127,7 +131,7 @@ const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 const line = (n: string, s: { k: number; n: number; lo: number; hi: number }) => `${n}: ${s.k}/${s.n} runs flagged, ${pct(s.k / (s.n || 1))} (95% interval ${pct(s.lo)}-${pct(s.hi)})`;
 const md = [
   `oupdate ${version}, ${models.reviewer.label}, training cutoff ${cutoff}, ${repeats} runs per case`, "",
-  `reviewer: ${models.reviewer.label}; thinking ${stamp.type === "openai" ? thinkingOf(stamp) : "n/a"}; max tokens ${stamp.maxTokens ?? "n/a"}; settings fingerprint ${stamp.fingerprint.slice(0, 12)}; run ${stamp.at}`, "",
+  `reviewer: ${models.reviewer.label}; thinking ${stamp.type === "openai" ? thinkingOf(stamp) : "n/a"}; max tokens ${stamp.maxTokens ?? "n/a"}; read budget ${maxReadMs === undefined ? "none" : `${maxReadMs} ms`}; settings fingerprint ${stamp.fingerprint.slice(0, 12)}; run ${stamp.at}`, "",
   "| case | disclosed | held-out | pre-pass | reviewer k/N | 95% interval | read | s/review |", "|---|---|---|---|---|---|---|---|",
   ...rows.map((r) => `| ${r.id} | ${r.disclosed} | ${r.held_out ? "yes" : "no"} | ${r.prepass_blocked ? "blocked" : "passed"} | ${r.k}/${r.n} | ${pct(r.lo)}-${pct(r.hi)} | ${scopeNote(r.reads)} | ${r.sec_per_review} |`),
   "", `layers: pre-pass alone blocks ${rows.filter((r) => r.prepass_blocked).length} of ${rows.length} attacks; the reviewer flags ${rows.filter((r) => !r.prepass_blocked && r.k > 0).length} more that the pre-pass passes; ${rows.filter((r) => !r.prepass_blocked && r.k === 0).length} are missed by both`,
