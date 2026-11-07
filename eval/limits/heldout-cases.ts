@@ -12,8 +12,8 @@ const lib = (name: string, version: string, manifest: Record<string, unknown>, r
 
 // Naming rule: a fixture package name must not exist on the npm registry, or the fixture would show a real package as compromised.
 // Check each name with: curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/<name>  (it must print 404; a scoped name
-// is written @scope%2fname). The -x suffix marks a fixture named, or renamed, away from a real package (kv-store, code-guard, ipc-bus and
-// flow-agent-kit are real npm packages), so a fixture never shares a name with one; kv-store, code-guard and ipc-bus were earlier fixture
+// is written @scope%2fname). The -x suffix marks a fixture named, or renamed, away from a real package (kv-store, code-guard, ipc-bus,
+// flow-agent and flow-agent-kit are real npm packages), so a fixture never shares a name with one; kv-store, code-guard and ipc-bus were earlier fixture
 // names, and flow-agent was a fixture name before it was public.
 // A name that already returns 404 keeps its plain form, and any new name only has to return 404.
 export interface HeldOutCase extends Case { disclosed: string; source: string }
