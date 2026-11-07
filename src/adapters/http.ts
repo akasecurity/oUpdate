@@ -28,7 +28,7 @@ export async function fetchIdle(f: typeof fetch, url: string | URL, init: Reques
   why.name = "TimeoutError";
   let timer: ReturnType<typeof setTimeout> | undefined;
   const stop = () => clearTimeout(timer);
-  const arm = () => { stop(); timer = setTimeout(() => ctl.abort(why), ms); };
+  const arm = () => { stop(); timer = setTimeout(() => ctl.abort(why), ms); timer.unref?.(); };
   arm();
   let r: Response;
   try {

@@ -50,7 +50,9 @@ export function giteaForge(deps: GiteaDeps): Forge {
           if (!u.login) throw new Error("forge GET /user: no login");
           return u.login;
         });
-    return me;
+    const mine = me;
+    mine.catch(() => { if (me === mine) me = undefined; });
+    return mine;
   }
 
   /** The token's own comment that starts with `marker`, if any. */

@@ -78,7 +78,9 @@ export function githubForge(deps: GithubDeps): Forge {
           if (!u.login) throw new Error("forge GET /user: no login");
           return u.login;
         });
-    return me;
+    const mine = me;
+    mine.catch(() => { if (me === mine) me = undefined; });
+    return mine;
   }
 
   type Comment = { id: number; body: string; user?: { login?: string } | null };

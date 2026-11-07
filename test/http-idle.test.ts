@@ -145,3 +145,34 @@ describe("a failed lookup is not kept for the rest of the sweep", () => {
     expect(detail).toBe(2); // a good answer is kept
   });
 });
+
+describe("a dropped response does not hold the process", () => {
+  test("an unread response with a long limit lets the process exit at once", async () => {
+    const httpTs = new URL("../src/adapters/http.ts", import.meta.url).pathname;
+    const code = `
+      import { fetchIdle } from ${JSON.stringify(httpTs)};
+      const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("x".repeat(10), { status: 401 }) });
+      await fetchIdle(fetch, "http://127.0.0.1:" + s.port + "/", {}, 4000);
+      s.stop(true);
+    `;
+    const t0 = Date.now();
+    const p = Bun.spawn([process.execPath, "-e", code], { stdout: "ignore", stderr: "ignore" });
+    expect(await p.exited).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(3000);
+  });
+
+  test("a forge login that failed once is asked for again", async () => {
+    let users = 0;
+    const base = serve((req) => {
+      const path = new URL(req.url).pathname;
+      if (path.endsWith("/user")) return ++users === 1 ? new Promise<Response>(() => {}) : Response.json({ login: "bot" });
+      return Response.json([]);
+    });
+    for (const forge of [giteaForge({ endpoint: `${base}/api/v1`, token: "t", timeoutMs: MS }), githubForge({ endpoint: base, token: "t", timeoutMs: MS })]) {
+      users = 0;
+      expect(await refusal(forge.ownComment("o/r", 1, "m"))).toMatch(quiet);
+      expect(await forge.ownComment("o/r", 1, "m")).toBeUndefined();
+      expect(users).toBe(2);
+    }
+  });
+});
