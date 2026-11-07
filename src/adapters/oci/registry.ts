@@ -43,16 +43,28 @@ interface IndexDoc {
   manifests?: { digest?: string; platform?: { os?: string; architecture?: string; variant?: string } }[];
 }
 
-/** The document in `b`. It must be a JSON object, not null, an array or a scalar, unless `anyValue`: the caller then checks the shape itself. */
-function parseJson<T>(b: Uint8Array, what: string, anyValue = false): T {
-  let v: unknown;
+/** The JSON value in `b`, of any type: the caller checks its shape. */
+function parseJsonValue(b: Uint8Array, what: string): unknown {
   try {
-    v = JSON.parse(dec.decode(b));
+    return JSON.parse(dec.decode(b));
   } catch {
     throw new Error(`${what} is not JSON`);
   }
-  if (!anyValue && (typeof v !== "object" || v === null || Array.isArray(v))) throw new Error(`${what} is not a JSON object`);
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** The document in `b`: a JSON object, not null, an array or a scalar. */
+function parseJson<T>(b: Uint8Array, what: string): T {
+  const v = parseJsonValue(b, what);
+  if (!isObject(v)) throw new Error(`${what} is not a JSON object`);
   return v as T;
+}
+
+/** The fields of a token answer; any JSON that is not an object has none, so it reads as a missing token. */
+function tokenAnswer(b: Uint8Array): { token?: unknown; access_token?: unknown } {
+  const v = parseJsonValue(b, "registry token answer");
+  return isObject(v) ? v : {};
 }
 
 function when(s: string | undefined): Date | undefined {
@@ -68,8 +80,7 @@ export function dockerHubSource(deps: { fetch?: typeof fetch; timeoutMs?: number
       if (!TAG.test(tag)) throw new Error(`not an image tag: ${tag}`);
       const tr = await fetchIdle(f, `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull`, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
       if (!tr.ok) { await tr.body?.cancel().catch(() => {}); throw new Error(`registry token HTTP ${tr.status}`); }
-      const answer = parseJson<{ token?: unknown } | null>(new Uint8Array(await tr.arrayBuffer()), "registry token answer", true);
-      const token = typeof answer === "object" && answer !== null ? answer.token : undefined;
+      const token = tokenAnswer(new Uint8Array(await tr.arrayBuffer())).token;
       if (typeof token !== "string" || !token) throw new Error("registry token missing");
       const get = async (path: string, accept: string[]) => {
         const r = await fetchIdle(f, `https://registry-1.docker.io/v2/${repository}/${path}`, {
@@ -269,8 +280,7 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
         if (challenge.scope) u.searchParams.set("scope", challenge.scope);
         const tr = await fetchIdle(f, u, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
         if (!tr.ok) { await tr.body?.cancel().catch(() => {}); throw new Error(`registry token HTTP ${tr.status}`); }
-        const t = parseJson<{ token?: unknown; access_token?: unknown } | null>(new Uint8Array(await tr.arrayBuffer()), "registry token answer", true);
-        const answer = typeof t === "object" && t !== null ? t : {};
+        const answer = tokenAnswer(new Uint8Array(await tr.arrayBuffer()));
         const got = typeof answer.token === "string" && answer.token ? answer.token : answer.access_token;
         if (typeof got !== "string" || !got) throw new Error("registry token missing");
         token = got;
