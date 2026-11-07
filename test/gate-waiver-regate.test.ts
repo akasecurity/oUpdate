@@ -142,6 +142,74 @@ describe("a verdict is kept only while the waivers that apply to the PR's packag
   });
 });
 
+describe("keeping a verdict with no waivers reads no lockfile", () => {
+  for (const [label, list] of [["no store", undefined], ["an empty store", []]] as [string, Waiver[] | undefined][]) {
+    for (const state of ["success", "failure"] as const) {
+      test(`a kept ${state} with ${label} makes no lockfile read and survives a failing read`, async () => {
+        const { forge } = forgeWith(state, line(state));
+        let reads = 0, listed = 0;
+        const counted: Forge = { ...forge, readFile: async () => { reads++; throw new Error("forge unreachable"); }, changedFiles: async () => { listed++; throw new Error("forge unreachable"); } };
+        const out = await runGate({ forge: counted, repo: "o/r", waivers: list, review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+        expect(out.map((p) => p.state)).toEqual(["skipped"]);
+        expect([reads, listed]).toEqual([0, 0]);
+      });
+    }
+  }
+
+  test("a final verdict whose comment is missing, or names another head, is still reviewed", async () => {
+    const { forge } = forgeWith("failure", verdictLine("h0", "failure"));
+    const seen: string[] = [];
+    await runGate({ forge, repo: "o/r", review: async (c) => (seen.push(c.name), result(c, "hold")) });
+    expect(seen).toEqual(["yaml"]);
+  });
+});
+
+describe("lockfile reads when a PR is reviewed again", () => {
+  /** A forge whose readFile calls are counted. */
+  const counting = (state: StatusState, kept: string, fileset?: Record<string, string>) => {
+    const f = forgeWith(state, kept, fileset);
+    const paths: string[] = [];
+    const readFile = f.forge.readFile;
+    return { ...f, paths, forge: { ...f.forge, readFile: async (r: string, sha: string, p: string) => (paths.push(`${sha}:${p}`), readFile(r, sha, p)) } as Forge };
+  };
+
+  test("a PR reviewed again because a relevant waiver changed reads its lockfiles once, as a first review does", async () => {
+    const first = counting("failure", verdictLine("h0", "failure"));
+    await runGate({ forge: first.forge, repo: "o/r", waivers: [], review: async (c) => result(c, "hold") });
+    const again = counting("failure", line("failure"));
+    const out = await runGate({ forge: again.forge, repo: "o/r", waivers: [mine()], review: async (c) => result(c, "land") });
+    expect(out.map((p) => p.state)).toEqual(["success"]);
+    expect(first.paths.length).toBeGreaterThan(0);
+    expect(again.paths).toEqual(first.paths); // the read made to compare the fingerprint is the one the review uses
+  });
+
+  test("a PR whose verdict is kept reads its lockfiles once", async () => {
+    const kept = counting("failure", line("failure", mine()));
+    const out = await runGate({ forge: kept.forge, repo: "o/r", waivers: [mine()], review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+    expect(out.map((p) => p.state)).toEqual(["skipped"]);
+    const first = counting("failure", verdictLine("h0", "failure"));
+    await runGate({ forge: first.forge, repo: "o/r", waivers: [], review: async (c) => result(c, "hold") });
+    expect(kept.paths).toEqual(first.paths);
+  });
+});
+
+describe("a PR with a deleted lockfile", () => {
+  const deleted = { "b:bun.lock": LOCK("2.8.1") };
+
+  test("is held for a person with the plain line, and a waiver for a package the lockfile once had does not change that", async () => {
+    const fresh = forgeWith("failure", verdictLine("h0", "failure"), deleted);
+    const out = await runGate({ forge: fresh.forge, repo: "o/r", waivers: [mine({ version: "2.8.1" }), mine()], review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+    expect(out.map((p) => p.state)).toEqual(["failure"]);
+    expect(fresh.body()).toContain("<!-- oupdate-verdict: h1 failure -->");
+    // kept under the same store, and under a different one
+    for (const list of [[mine({ version: "2.8.1" }), mine()], [waiver({ name: "left-pad", version: "1.0.0" })], [mine({ name: "other" })]]) {
+      const kept = forgeWith("failure", verdictLine("h1", "failure"), deleted);
+      const r = await runGate({ forge: kept.forge, repo: "o/r", waivers: list, review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
+      expect(r.map((p) => p.state)).toEqual(["skipped"]);
+    }
+  });
+});
+
 describe("the waiver store", () => {
   test("a leftover file at the old fixed temporary name does not block a save", () => {
     const d = tmp();
@@ -200,38 +268,6 @@ describe("a review uses the list a gate run read", () => {
   });
 });
 
-describe("remove finds a waiver by the key as typed, spaces and all", () => {
-  test("a key with spaces around the name and version removes the stored record", () => {
-    const d = tmp();
-    addWaiver(d, waiver());
-    const key = { eco: "npm" as const, name: " p ", version: "\t2.0.0 ", sha256: waiver().sha256 };
-    expect(removeWaiver(d, key)).toBe(1);
-    expect(listWaivers(d)).toEqual([]);
-  });
-});
-
-describe("keeping a verdict with no waivers reads no lockfile", () => {
-  for (const [label, list] of [["no store", undefined], ["an empty store", []]] as [string, Waiver[] | undefined][]) {
-    for (const state of ["success", "failure"] as const) {
-      test(`a kept ${state} with ${label} makes no lockfile read and survives a failing read`, async () => {
-        const { forge } = forgeWith(state, line(state));
-        let reads = 0, listed = 0;
-        const counted: Forge = { ...forge, readFile: async () => { reads++; throw new Error("forge unreachable"); }, changedFiles: async () => { listed++; throw new Error("forge unreachable"); } };
-        const out = await runGate({ forge: counted, repo: "o/r", waivers: list, review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
-        expect(out.map((p) => p.state)).toEqual(["skipped"]);
-        expect([reads, listed]).toEqual([0, 0]);
-      });
-    }
-  }
-
-  test("a final verdict whose comment is missing, or names another head, is still reviewed", async () => {
-    const { forge } = forgeWith("failure", verdictLine("h0", "failure"));
-    const seen: string[] = [];
-    await runGate({ forge, repo: "o/r", review: async (c) => (seen.push(c.name), result(c, "hold")) });
-    expect(seen).toEqual(["yaml"]);
-  });
-});
-
 describe("a gate run reads the waiver store at the start", () => {
   test("no state dir means no list; a state dir gives its list", () => {
     expect(gateWaivers({})).toBeUndefined();
@@ -250,48 +286,12 @@ describe("a gate run reads the waiver store at the start", () => {
   });
 });
 
-describe("lockfile reads when a PR is reviewed again", () => {
-  /** A forge whose readFile calls are counted. */
-  const counting = (state: StatusState, kept: string, fileset?: Record<string, string>) => {
-    const f = forgeWith(state, kept, fileset);
-    const paths: string[] = [];
-    const readFile = f.forge.readFile;
-    return { ...f, paths, forge: { ...f.forge, readFile: async (r: string, sha: string, p: string) => (paths.push(`${sha}:${p}`), readFile(r, sha, p)) } as Forge };
-  };
-
-  test("a PR reviewed again because a relevant waiver changed reads its lockfiles once, as a first review does", async () => {
-    const first = counting("failure", verdictLine("h0", "failure"));
-    await runGate({ forge: first.forge, repo: "o/r", waivers: [], review: async (c) => result(c, "hold") });
-    const again = counting("failure", line("failure"));
-    const out = await runGate({ forge: again.forge, repo: "o/r", waivers: [mine()], review: async (c) => result(c, "land") });
-    expect(out.map((p) => p.state)).toEqual(["success"]);
-    expect(first.paths.length).toBeGreaterThan(0);
-    expect(again.paths).toEqual(first.paths); // the read made to compare the fingerprint is the one the review uses
-  });
-
-  test("a PR whose verdict is kept reads its lockfiles once", async () => {
-    const kept = counting("failure", line("failure", mine()));
-    const out = await runGate({ forge: kept.forge, repo: "o/r", waivers: [mine()], review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
-    expect(out.map((p) => p.state)).toEqual(["skipped"]);
-    const first = counting("failure", verdictLine("h0", "failure"));
-    await runGate({ forge: first.forge, repo: "o/r", waivers: [], review: async (c) => result(c, "hold") });
-    expect(kept.paths).toEqual(first.paths);
-  });
-});
-
-describe("a PR with a deleted lockfile", () => {
-  const deleted = { "b:bun.lock": LOCK("2.8.1") };
-
-  test("is held for a person with the plain line, and a waiver for a package the lockfile once had does not change that", async () => {
-    const fresh = forgeWith("failure", verdictLine("h0", "failure"), deleted);
-    const out = await runGate({ forge: fresh.forge, repo: "o/r", waivers: [mine({ version: "2.8.1" }), mine()], review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
-    expect(out.map((p) => p.state)).toEqual(["failure"]);
-    expect(fresh.body()).toContain("<!-- oupdate-verdict: h1 failure -->");
-    // kept under the same store, and under a different one
-    for (const list of [[mine({ version: "2.8.1" }), mine()], [waiver({ name: "left-pad", version: "1.0.0" })], [mine({ name: "other" })]]) {
-      const kept = forgeWith("failure", verdictLine("h1", "failure"), deleted);
-      const r = await runGate({ forge: kept.forge, repo: "o/r", waivers: list, review: async (c) => { throw new Error(`reviewed ${c.name}`); } });
-      expect(r.map((p) => p.state)).toEqual(["skipped"]);
-    }
+describe("remove finds a waiver by the key as typed, spaces and all", () => {
+  test("a key with spaces around the name and version removes the stored record", () => {
+    const d = tmp();
+    addWaiver(d, waiver());
+    const key = { eco: "npm" as const, name: " p ", version: "\t2.0.0 ", sha256: waiver().sha256 };
+    expect(removeWaiver(d, key)).toBe(1);
+    expect(listWaivers(d)).toEqual([]);
   });
 });
