@@ -111,3 +111,25 @@ describe("imageLayers", () => {
     expect(e.entrypoint).toBe("null");
   });
 });
+
+describe("a layer download has a limit in total", () => {
+  test("a blob that keeps arriving without end fails at the total the source was given", async () => {
+    const A = enc.encode("a".repeat(500)); // larger than what arrives before the total
+    const routes = image([A]);
+    const real = fakeRegistry(routes);
+    const endless = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes(`blobs/${sha256Digest(A)}`)) {
+        const sig = init?.signal;
+        return new Response(new ReadableStream({
+          start(c) { sig?.addEventListener("abort", () => c.error(sig.reason)); },
+          async pull(c) { await Bun.sleep(20); if (!sig?.aborted) c.enqueue(enc.encode("x")); },
+        }));
+      }
+      return real(input, init);
+    }) as typeof fetch;
+    const got = await registrySource({ fetch: endless, downloadTimeoutMs: 5000, downloadTotalMs: 300 }).imageLayers!(REF, "linux/amd64");
+    await tmp(async (dir) => {
+      await expect(got.fetchLayer(got.layers[0]!, join(dir, "a"))).rejects.toThrow(/timed out after 300 ms in total/);
+    });
+  });
+});

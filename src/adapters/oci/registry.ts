@@ -229,7 +229,7 @@ function bearerChallenge(h: string | null): Record<string, string> | undefined {
   return params.realm ? params : undefined;
 }
 
-export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number; downloadTimeoutMs?: number } = {}): OciImageSource {
+export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number; downloadTimeoutMs?: number; downloadTotalMs?: number } = {}): OciImageSource {
   const f = deps.fetch ?? fetch;
   const open = async (ref: ImageRef, platform: string) => {
     const [os, arch, variant] = platform.split("/");
@@ -246,8 +246,8 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
         const r = await fetchIdle(f, url, { headers: { ...auth, accept: accept.join(", "), "user-agent": "oupdate" }, redirect: "manual" }, idleMs ?? deps.timeoutMs, totalMs);
         const to = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
         if (!to) return r;
-        if (hop >= MAX_REDIRECTS) throw new Error(`registry: over ${MAX_REDIRECTS} redirects for ${path}`);
         await r.body?.cancel().catch(() => {});
+        if (hop >= MAX_REDIRECTS) throw new Error(`registry: over ${MAX_REDIRECTS} redirects for ${path}`);
         url = new URL(to, url);
         if (url.protocol !== "https:") throw new Error(`registry redirect to a non-https URL for ${path}`);
       }
@@ -333,7 +333,7 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
         layers,
         async fetchLayer(layer, dest) {
           if (!DIGEST.test(layer.digest)) throw new Error(`not a sha256 digest: ${layer.digest}`);
-          const r = await send(`blobs/${layer.digest}`, ["application/octet-stream", "*/*"], deps.downloadTimeoutMs ?? downloadIdleMs(), downloadTotalMs());
+          const r = await send(`blobs/${layer.digest}`, ["application/octet-stream", "*/*"], deps.downloadTimeoutMs ?? downloadIdleMs(), deps.downloadTotalMs ?? downloadTotalMs());
           if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`registry HTTP ${r.status} for blobs/${layer.digest}`); }
           if (!r.body) throw new Error(`registry sent no body for blobs/${layer.digest}`);
           const hasher = new Bun.CryptoHasher("sha256");
