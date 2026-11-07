@@ -256,6 +256,7 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
       let r = await send(path, accept);
       const challenge = r.status === 401 && !token ? bearerChallenge(r.headers.get("www-authenticate")) : undefined;
       if (challenge) {
+        await r.body?.cancel().catch(() => {}); // the 401 is replaced by the retry, whether or not the token step works
         const u = new URL(challenge.realm!);
         if (u.protocol !== "https:") throw new Error(`registry token realm is not https: ${u.origin}`);
         if (challenge.service) u.searchParams.set("service", challenge.service);
@@ -266,7 +267,6 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
         const got = typeof t.token === "string" && t.token ? t.token : t.access_token;
         if (typeof got !== "string" || !got) throw new Error("registry token missing");
         token = got;
-        await r.body?.cancel().catch(() => {});
         r = await send(path, accept);
       }
       if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`registry HTTP ${r.status} for ${path}`); }

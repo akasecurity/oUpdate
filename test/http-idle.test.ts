@@ -244,12 +244,12 @@ describe("a failed answer's body is released", () => {
         await forge.readFile("o/r", "abc", "a.txt").catch(() => {});
         expect(seen.cancelled).toBe(1);
       }
-      const { seen, res } = cancelled();
-      const forge = make((async () => res(500)) as unknown as typeof fetch);
-      await refusal(forge.openPulls("o/r"));
-      expect(seen.cancelled).toBe(1);
-      await refusal(forge.changedFiles("o/r", 1));
-      expect(seen.cancelled).toBe(2);
+      const pulls = cancelled();
+      await refusal(make((async () => pulls.res(500)) as unknown as typeof fetch).openPulls("o/r"));
+      expect(pulls.seen.cancelled).toBe(1);
+      const files = cancelled();
+      await refusal(make((async () => files.res(500)) as unknown as typeof fetch).changedFiles("o/r", 1));
+      expect(files.seen.cancelled).toBe(1);
     }
   });
 
@@ -280,6 +280,20 @@ describe("a failed answer's body is released", () => {
     }) as unknown as typeof fetch;
     await refusal(registrySource({ fetch: challenge, timeoutMs: MS }).imageEvidence(parseImageRef("registry.example/app:1"), "linux/amd64"));
     expect(first.seen.cancelled).toBe(1); // the 401 that was replaced by the retry
+
+    // a token step that fails leaves the replaced 401 canceled too: a refused token, a body with no token, a realm that is not https
+    const realms = ['https://auth.example/token', 'https://auth.example/token', 'http://auth.example/token'];
+    for (const [i, realm] of realms.entries()) {
+      const c = cancelled();
+      let seenToken = false;
+      const failing = (async (url: unknown) => {
+        if (String(url).startsWith("https://auth.example/")) { seenToken = true; return i === 0 ? new Response("no", { status: 503 }) : Response.json({}); }
+        return new Response(c.res(401).body, { status: 401, headers: { "www-authenticate": `Bearer realm="${realm}",service="r"` } });
+      }) as unknown as typeof fetch;
+      await refusal(registrySource({ fetch: failing, timeoutMs: MS }).imageEvidence(parseImageRef("registry.example/app:1"), "linux/amd64"));
+      expect(seenToken).toBe(i !== 2);
+      expect(c.seen.cancelled, realm + " " + i).toBe(1);
+    }
 
     const tok = cancelled();
     await refusal(dockerHubSource({ fetch: (async () => tok.res(403)) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"));
