@@ -17,7 +17,7 @@ afterAll(() => { for (const s of servers) s.stop(true); });
 
 const MS = 300;
 const enc = new TextEncoder();
-/** A body that arrives in `parts` pieces, one every `gap` ms: slower in all than the idle limit, steady within it. */
+/** A body that arrives in `parts` pieces, one every `gap` ms: slower in total than the idle limit, steady within it. */
 const trickle = (text: string, parts: number, gap: number, headers: Record<string, string> = {}) => {
   const size = Math.ceil(text.length / parts);
   let i = 0;
@@ -34,7 +34,7 @@ const never = serve(() => new Promise<Response>(() => {}));
 /** Sends the headers and half a body, then nothing. */
 const stall = serve(() => new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode('{"dist-tags":')); } }), { headers: { "content-type": "application/json" } }));
 const packument = JSON.stringify({ "dist-tags": { latest: "2.8.3" }, time: {}, versions: {}, pad: "x".repeat(200) });
-const slowButSteady = serve(() => trickle(packument, 8, 100, { "content-type": "application/json" })); // about 800 ms in all, never 300 ms quiet
+const slowButSteady = serve(() => trickle(packument, 8, 100, { "content-type": "application/json" })); // about 800 ms in total, never 300 ms quiet
 
 const refusal = async (p: Promise<unknown>) => p.then(() => { throw new Error("resolved"); }, (e: Error) => e.message);
 const quiet = new RegExp(`^timed out after ${MS} ms without data: `);
@@ -236,22 +236,20 @@ describe("a failed answer's body is released", () => {
     const res = (status: number) => new Response(new ReadableStream({ pull(c) { c.enqueue(enc.encode("x")); }, cancel() { seen.cancelled++; } }), { status });
     return { seen, res };
   };
-  const settle = () => Bun.sleep(20);
-
   test("forge json, readFile and the file list", async () => {
     for (const make of [(f: typeof fetch) => giteaForge({ endpoint: "https://forge.example/api/v1", token: "t", login: "bot", fetch: f }), (f: typeof fetch) => githubForge({ endpoint: "https://forge.example", token: "t", login: "bot", fetch: f })]) {
       for (const status of [500, 404]) {
         const { seen, res } = cancelled();
         const forge = make((async () => res(status)) as unknown as typeof fetch);
         await forge.readFile("o/r", "abc", "a.txt").catch(() => {});
-        await settle();
         expect(seen.cancelled).toBe(1);
       }
       const { seen, res } = cancelled();
       const forge = make((async () => res(500)) as unknown as typeof fetch);
       await refusal(forge.openPulls("o/r"));
-      await settle();
       expect(seen.cancelled).toBe(1);
+      await refusal(forge.changedFiles("o/r", 1));
+      expect(seen.cancelled).toBe(2);
     }
   });
 
@@ -259,24 +257,37 @@ describe("a failed answer's body is released", () => {
     const { seen, res } = cancelled();
     const reg = registrySource({ fetch: (async () => res(500)) as unknown as typeof fetch, timeoutMs: MS });
     await refusal(reg.imageEvidence(parseImageRef("registry.example/app:1"), "linux/amd64"));
-    await settle();
     expect(seen.cancelled).toBe(1);
 
     const hub = cancelled();
     let n = 0;
     const hubFetch = (async () => (++n === 1 ? Response.json({ token: "t" }) : hub.res(500))) as unknown as typeof fetch;
     await refusal(dockerHubSource({ fetch: hubFetch, timeoutMs: MS }).index("library/alpine", "3"));
-    await settle();
     expect(hub.seen.cancelled).toBe(1);
+
+    const redir = cancelled();
+    const loop = (async () => new Response(new ReadableStream({ pull(c) { c.enqueue(enc.encode("x")); }, cancel() { redir.seen.cancelled++; } }), { status: 302, headers: { location: "https://registry.example/elsewhere" } })) as unknown as typeof fetch;
+    expect(await refusal(registrySource({ fetch: loop, timeoutMs: MS }).imageEvidence(parseImageRef("registry.example/app:1"), "linux/amd64"))).toMatch(/over 5 redirects/);
+    expect(redir.seen.cancelled).toBe(6); // every 3xx body, the last one before the error
+
+    const first = cancelled();
+    let calls = 0;
+    const challenge = (async (url: unknown) => {
+      calls++;
+      if (String(url).startsWith("https://auth.example/")) return Response.json({ token: "t" });
+      if (calls === 1) return new Response(first.res(401).body, { status: 401, headers: { "www-authenticate": 'Bearer realm="https://auth.example/token",service="r"' } });
+      return new Response("no", { status: 500 });
+    }) as unknown as typeof fetch;
+    await refusal(registrySource({ fetch: challenge, timeoutMs: MS }).imageEvidence(parseImageRef("registry.example/app:1"), "linux/amd64"));
+    expect(first.seen.cancelled).toBe(1); // the 401 that was replaced by the retry
 
     const tok = cancelled();
     await refusal(dockerHubSource({ fetch: (async () => tok.res(403)) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"));
-    await settle();
     expect(tok.seen.cancelled).toBe(1);
   });
 });
 
-describe("a call has a limit in all, however steadily data arrives", () => {
+describe("a call has a limit in total, however steadily data arrives", () => {
   const whole = (n: number) => new RegExp(`^timed out after ${n} ms in total: `);
   /** A body that never stalls (a piece every 50 ms, far under any idle limit) and never ends. */
   const endless = serve(() => new Response(new ReadableStream({ async pull(c) { await Bun.sleep(50); c.enqueue(enc.encode("x")); } })));
@@ -294,10 +305,24 @@ describe("a call has a limit in all, however steadily data arrives", () => {
     expect(await refusal(fetchIdle(fetch, never, {}, MS, 5000))).toMatch(quiet);
   });
 
-  test("a call that finishes inside the total is not cut off, and nothing fires later", async () => {
-    const r = await fetchIdle(fetch, slowButSteady, {}, 5000, 3000);
-    expect(JSON.parse(await r.text()).pad.length).toBe(200);
-    await Bun.sleep(50);
+  test("a call that finishes inside the total is not cut off, and both of its timers are cleared", async () => {
+    const live = new Set<unknown>();
+    const { setTimeout: set, clearTimeout: clear } = globalThis;
+    globalThis.setTimeout = ((fn: () => void, ms?: number, ...a: unknown[]) => {
+      const h = set(fn, ms, ...a);
+      if (ms === 5000 || ms === 3000) live.add(h);
+      return h;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((h?: Parameters<typeof clear>[0]) => { live.delete(h); return clear(h); }) as typeof clearTimeout;
+    try {
+      const r = await fetchIdle(fetch, slowButSteady, {}, 5000, 3000);
+      expect(JSON.parse(await r.text()).pad.length).toBe(200);
+      expect(live.size).toBe(0);
+    } finally {
+      globalThis.setTimeout = set;
+      globalThis.clearTimeout = clear;
+      for (const h of live) clear(h as Parameters<typeof clear>[0]);
+    }
   });
 
   test("the totals are read from the environment, and a bad value falls back to the default", () => {
