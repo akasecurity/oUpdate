@@ -3,6 +3,7 @@
 
 import type { Forge, Pull, Status, StatusState } from "./types.ts";
 import { keySafeUrl } from "../reviewer/openai.ts";
+import { fetchIdle } from "../http.ts";
 
 export interface GiteaDeps {
   endpoint: string; // e.g. https://forge.example/api/v1
@@ -10,6 +11,8 @@ export interface GiteaDeps {
   /** The login the token acts as; unset, it is read from GET /user. */
   login?: string;
   fetch?: typeof fetch;
+  /** How long a request may go without data, in milliseconds; the default is httpIdleMs(). */
+  timeoutMs?: number;
 }
 
 interface ApiPull {
@@ -28,7 +31,7 @@ export function giteaForge(deps: GiteaDeps): Forge {
     if (!keySafeUrl(base)) throw new Error("forge: the token is not sent over plain http to a non-loopback host (use https)");
     const init: RequestInit = { method, headers: body === undefined ? headers : { ...headers, "content-type": "application/json" } };
     if (body !== undefined) init.body = JSON.stringify(body);
-    return f(base + path, init);
+    return fetchIdle(f, base + path, init, deps.timeoutMs);
   }
 
   async function json<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -47,7 +50,9 @@ export function giteaForge(deps: GiteaDeps): Forge {
           if (!u.login) throw new Error("forge GET /user: no login");
           return u.login;
         });
-    return me;
+    const mine = me;
+    mine.catch(() => { if (me === mine) me = undefined; });
+    return mine;
   }
 
   /** The token's own comment that starts with `marker`, if any. */

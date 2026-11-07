@@ -15,6 +15,9 @@ export function npmRegistry(deps: RegistryDeps = {}): Registry {
     if (!p) {
       p = getJson(f, `${base}/${name.replace("/", "%2f")}`, deps.timeoutMs) as Promise<Packument | undefined>;
       cache.set(name, p);
+      // A failed fetch is not kept: one timeout or error must not fail this package for the rest of the sweep.
+      const mine = p;
+      mine.catch(() => { if (cache.get(name) === mine) cache.delete(name); });
     }
     return p;
   };

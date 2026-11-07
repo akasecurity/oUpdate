@@ -2,7 +2,7 @@
 // distinct vuln id for severity and fixed versions. Any HTTP error throws:
 // a failed lookup must never read as "no advisories".
 
-import { timed } from "../http.ts";
+import { fetchIdle } from "../http.ts";
 
 export interface PackageRef {
   ecosystem: string; // OSV ecosystem name: npm, PyPI, Go, crates.io, SwiftURL
@@ -47,15 +47,16 @@ export function osvFeed(deps: { fetch?: typeof fetch; base?: string; timeoutMs?:
   const detail = (id: string) => {
     let p = details.get(id);
     if (!p) {
+      const url = `${base}/vulns/${encodeURIComponent(id)}`;
       p = (async () => {
-        const url = `${base}/vulns/${encodeURIComponent(id)}`;
-        return timed(url, async (init) => {
-          const r = await f(url, init);
-          if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`osv ${r.status} for vuln ${id}`); }
-          return (await r.json()) as OsvVuln;
-        }, deps.timeoutMs);
+        const r = await fetchIdle(f, url, {}, deps.timeoutMs);
+        if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`osv ${r.status} for vuln ${id}`); }
+        return (await r.json()) as OsvVuln;
       })();
       details.set(id, p);
+      // A failed lookup is not kept: one timeout or error must not fail this id for the rest of the sweep.
+      const mine = p;
+      mine.catch(() => { if (details.get(id) === mine) details.delete(id); });
     }
     return p;
   };
@@ -66,16 +67,13 @@ export function osvFeed(deps: { fetch?: typeof fetch; base?: string; timeoutMs?:
       for (let i = 0; i < pkgs.length; i += BATCH) {
         const chunk = pkgs.slice(i, i + BATCH);
         const url = `${base}/querybatch`;
-        const body = await timed(url, async (init) => {
-          const r = await f(url, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ queries: chunk.map((p) => ({ package: { ecosystem: p.ecosystem, name: p.name }, version: p.version })) }),
-            ...init,
-          });
-          if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`osv ${r.status} for querybatch`); }
-          return (await r.json()) as { results?: { vulns?: { id: string }[] }[] };
+        const r = await fetchIdle(f, url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ queries: chunk.map((p) => ({ package: { ecosystem: p.ecosystem, name: p.name }, version: p.version })) }),
         }, deps.timeoutMs);
+        if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`osv ${r.status} for querybatch`); }
+        const body = (await r.json()) as { results?: { vulns?: { id: string }[] }[] };
         const results = body.results ?? [];
         if (results.length !== chunk.length) throw new Error(`osv querybatch returned ${results.length} results for ${chunk.length} queries`);
         for (let j = 0; j < chunk.length; j++) {

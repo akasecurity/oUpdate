@@ -5,11 +5,14 @@
 
 import type { Forge, Pull, Status, StatusState } from "./types.ts";
 import { keySafeUrl } from "../reviewer/openai.ts";
+import { fetchIdle } from "../http.ts";
 
 export interface GithubDeps {
   /** API base, e.g. https://ghe.example/api/v3. Default https://api.github.com. */
   endpoint?: string;
   token: string;
+  /** How long a request may go without data, in milliseconds; the default is httpIdleMs(). */
+  timeoutMs?: number;
   /**
    * The login the token acts as; unset, it is read from GET /user. The Actions GITHUB_TOKEN cannot read /user:
    * pass "github-actions[bot]" for it.
@@ -43,7 +46,7 @@ export function githubForge(deps: GithubDeps): Forge {
     if (body !== undefined) h["content-type"] = "application/json";
     const init: RequestInit = { method, headers: h };
     if (body !== undefined) init.body = JSON.stringify(body);
-    return f(base + path, init);
+    return fetchIdle(f, base + path, init, deps.timeoutMs);
   }
 
   async function json<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -75,7 +78,9 @@ export function githubForge(deps: GithubDeps): Forge {
           if (!u.login) throw new Error("forge GET /user: no login");
           return u.login;
         });
-    return me;
+    const mine = me;
+    mine.catch(() => { if (me === mine) me = undefined; });
+    return mine;
   }
 
   type Comment = { id: number; body: string; user?: { login?: string } | null };

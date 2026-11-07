@@ -6,6 +6,7 @@
 // registrySource reads one platform's image from any registry that allows anonymous pulls (the 401 bearer challenge,
 // followed with no credentials) and maps its config blob to the ImageEvidence a broker reach sends, for `oupdate image`.
 
+import { downloadIdleMs, fetchIdle } from "../http.ts";
 import { jsonArgv, type ImageEvidence } from "../../targets/broker/answer.ts";
 
 export interface OciImage {
@@ -32,7 +33,6 @@ const CONFIG_TYPES = ["application/vnd.oci.image.config.v1+json", "application/v
 export const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const TAG = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 const ARCHES = ["amd64", "arm64"];
-const TIMEOUT_MS = 60_000;
 const MAX_REDIRECTS = 5;
 const dec = new TextDecoder();
 
@@ -57,20 +57,19 @@ function when(s: string | undefined): Date | undefined {
   return Number.isNaN(d.getTime()) ? undefined : d;
 }
 
-export function dockerHubSource(deps: { fetch?: typeof fetch } = {}): OciSource {
+export function dockerHubSource(deps: { fetch?: typeof fetch; timeoutMs?: number } = {}): OciSource {
   const f = deps.fetch ?? fetch;
   return {
     async index(repository, tag) {
       if (!TAG.test(tag)) throw new Error(`not an image tag: ${tag}`);
-      const tr = await f(`https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull`, { headers: { "user-agent": "oupdate" }, signal: AbortSignal.timeout(TIMEOUT_MS) });
+      const tr = await fetchIdle(f, `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull`, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
       if (!tr.ok) throw new Error(`registry token HTTP ${tr.status}`);
       const token = ((await tr.json()) as { token?: unknown }).token;
       if (typeof token !== "string" || !token) throw new Error("registry token missing");
       const get = async (path: string, accept: string[]) => {
-        const r = await f(`https://registry-1.docker.io/v2/${repository}/${path}`, {
+        const r = await fetchIdle(f, `https://registry-1.docker.io/v2/${repository}/${path}`, {
           headers: { authorization: `Bearer ${token}`, accept: accept.join(", "), "user-agent": "oupdate" },
-          signal: AbortSignal.timeout(TIMEOUT_MS),
-        });
+        }, deps.timeoutMs);
         if (!r.ok) throw new Error(`registry HTTP ${r.status} for ${path}`);
         return { bytes: new Uint8Array(await r.arrayBuffer()), type: (r.headers.get("content-type") ?? "").split(";")[0]!.trim(), said: r.headers.get("docker-content-digest") ?? undefined };
       };
@@ -230,7 +229,7 @@ function bearerChallenge(h: string | null): Record<string, string> | undefined {
   return params.realm ? params : undefined;
 }
 
-export function registrySource(deps: { fetch?: typeof fetch } = {}): OciImageSource {
+export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number; downloadTimeoutMs?: number } = {}): OciImageSource {
   const f = deps.fetch ?? fetch;
   const open = async (ref: ImageRef, platform: string) => {
     const [os, arch, variant] = platform.split("/");
@@ -240,14 +239,15 @@ export function registrySource(deps: { fetch?: typeof fetch } = {}): OciImageSou
     // Redirects are followed by hand (a blob usually moves to a CDN): https only, a few hops, and the token goes only to
     // the registry's own origin, never to the host a redirect names.
     const origin = new URL(base).origin;
-    const send = async (path: string, accept: string[]): Promise<Response> => {
+    const send = async (path: string, accept: string[], idleMs?: number): Promise<Response> => {
       let url = new URL(base + path);
       for (let hop = 0; ; hop++) {
         const auth: Record<string, string> = token && url.origin === origin ? { authorization: `Bearer ${token}` } : {};
-        const r = await f(url, { headers: { ...auth, accept: accept.join(", "), "user-agent": "oupdate" }, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) });
+        const r = await fetchIdle(f, url, { headers: { ...auth, accept: accept.join(", "), "user-agent": "oupdate" }, redirect: "manual" }, idleMs ?? deps.timeoutMs);
         const to = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
         if (!to) return r;
         if (hop >= MAX_REDIRECTS) throw new Error(`registry: over ${MAX_REDIRECTS} redirects for ${path}`);
+        await r.body?.cancel().catch(() => {});
         url = new URL(to, url);
         if (url.protocol !== "https:") throw new Error(`registry redirect to a non-https URL for ${path}`);
       }
@@ -260,7 +260,7 @@ export function registrySource(deps: { fetch?: typeof fetch } = {}): OciImageSou
         if (u.protocol !== "https:") throw new Error(`registry token realm is not https: ${u.origin}`);
         if (challenge.service) u.searchParams.set("service", challenge.service);
         if (challenge.scope) u.searchParams.set("scope", challenge.scope);
-        const tr = await f(u, { headers: { "user-agent": "oupdate" }, signal: AbortSignal.timeout(TIMEOUT_MS) });
+        const tr = await fetchIdle(f, u, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
         if (!tr.ok) throw new Error(`registry token HTTP ${tr.status}`);
         const t = (await tr.json()) as { token?: unknown; access_token?: unknown };
         const got = typeof t.token === "string" && t.token ? t.token : t.access_token;
@@ -332,7 +332,7 @@ export function registrySource(deps: { fetch?: typeof fetch } = {}): OciImageSou
         layers,
         async fetchLayer(layer, dest) {
           if (!DIGEST.test(layer.digest)) throw new Error(`not a sha256 digest: ${layer.digest}`);
-          const r = await send(`blobs/${layer.digest}`, ["application/octet-stream", "*/*"]);
+          const r = await send(`blobs/${layer.digest}`, ["application/octet-stream", "*/*"], deps.downloadTimeoutMs ?? downloadIdleMs());
           if (!r.ok) throw new Error(`registry HTTP ${r.status} for blobs/${layer.digest}`);
           if (!r.body) throw new Error(`registry sent no body for blobs/${layer.digest}`);
           const hasher = new Bun.CryptoHasher("sha256");
