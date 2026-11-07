@@ -282,18 +282,19 @@ describe("a failed answer's body is released", () => {
     expect(first.seen.cancelled).toBe(1); // the 401 that was replaced by the retry
 
     // a token step that fails leaves the replaced 401 canceled too, and each case fails at the step it means to test
-    const cases: { realm: string; token?: () => Response; fails: RegExp }[] = [
+    const cases: { realm: string; token?: (sig?: AbortSignal | null) => Response; fails: RegExp }[] = [
       { realm: "https://auth.example/token", token: () => new Response("no", { status: 503 }), fails: /token HTTP 503/ },
       { realm: "https://auth.example/token", token: () => Response.json({}), fails: /token missing/ },
-      { realm: "https://auth.example/token", token: () => new Response("not json", { status: 200 }), fails: /JSON|Unexpected|parse/i },
+      { realm: "https://auth.example/token", token: () => new Response("not json", { status: 200 }), fails: /^registry token answer is not JSON$/ },
+      { realm: "https://auth.example/token", token: (sig) => new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode('{"tok')); sig?.addEventListener("abort", () => c.error(sig.reason)); } }), { status: 200 }), fails: /timed out after 300 ms without data/ }, // a stalled token body keeps its own message
       { realm: "http://auth.example/token", fails: /not https/ },
-      { realm: "not a url", fails: /Invalid URL|invalid/i },
+      { realm: "not a url", fails: /^registry token realm is not a URL: not a url$/ },
     ];
     for (const [i, k] of cases.entries()) {
       const c = cancelled();
       let askedToken = false;
-      const failing = (async (url: unknown) => {
-        if (String(url).startsWith("https://auth.example/")) { askedToken = true; return k.token!(); }
+      const failing = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).startsWith("https://auth.example/")) { askedToken = true; return k.token!(init?.signal); }
         return new Response(c.res(401).body, { status: 401, headers: { "www-authenticate": `Bearer realm="${k.realm}",service="r"` } });
       }) as unknown as typeof fetch;
       const msg = await refusal(registrySource({ fetch: failing, timeoutMs: MS }).imageEvidence(parseImageRef("registry.example/app:1"), "linux/amd64"));
@@ -301,6 +302,8 @@ describe("a failed answer's body is released", () => {
       expect(askedToken, `case ${i}`).toBe(k.token !== undefined);
       expect(c.seen.cancelled, `case ${i}`).toBe(1);
     }
+
+    expect(await refusal(dockerHubSource({ fetch: (async () => new Response("not json")) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"))).toBe("registry token answer is not JSON");
 
     const tok = cancelled();
     await refusal(dockerHubSource({ fetch: (async () => tok.res(403)) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"));
@@ -381,6 +384,7 @@ describe("a call has a limit in total, however steadily data arrives", () => {
 
 describe("the Docker Hub token stays with the registry", () => {
   test("a redirect to another origin (a CDN) is followed without the authorization header", async () => {
+    // guards the runtime dropping Authorization on a cross-origin redirect: the source relies on it
     const seenAtCdn: (string | null)[] = [];
     const seenAtRegistry: (string | null)[] = [];
     const manifest = JSON.stringify({ schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: [] });
@@ -392,7 +396,7 @@ describe("the Docker Hub token stays with the registry", () => {
       if (u.startsWith("https://auth.docker.io/")) return Promise.resolve(Response.json({ token: "secret-token" }));
       return fetch(u.replace("https://registry-1.docker.io", registry), init);
     }) as typeof fetch;
-    await refusal(dockerHubSource({ fetch: real, timeoutMs: 2000 }).index("library/alpine", "3"));
+    expect(await refusal(dockerHubSource({ fetch: real, timeoutMs: 2000 }).index("library/alpine", "3"))).toMatch(/has 0 linux\/amd64 images/); // the CDN manifest was read and parsed
     expect(seenAtRegistry).toEqual(["Bearer secret-token"]);
     expect(seenAtCdn.length).toBe(1);
     expect(seenAtCdn[0]).toBeNull();
