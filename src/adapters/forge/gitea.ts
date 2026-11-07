@@ -36,7 +36,7 @@ export function giteaForge(deps: GiteaDeps): Forge {
 
   async function json<T>(method: string, path: string, body?: unknown): Promise<T> {
     const r = await call(method, path, body);
-    if (!r.ok) throw new Error(`forge ${method} ${path.split("?")[0]}: ${r.status}`);
+    if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`forge ${method} ${path.split("?")[0]}: ${r.status}`); }
     return (await r.json()) as T;
   }
 
@@ -76,8 +76,8 @@ export function giteaForge(deps: GiteaDeps): Forge {
     },
     async readFile(repo, sha, path) {
       const r = await call("GET", `/repos/${enc(repo)}/raw/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(sha)}`);
-      if (r.status === 404) return undefined;
-      if (!r.ok) throw new Error(`forge GET raw ${path}: ${r.status}`);
+      if (r.status === 404) { await r.body?.cancel().catch(() => {}); return undefined; }
+      if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`forge GET raw ${path}: ${r.status}`); }
       return r.text();
     },
     async changedFiles(repo, pr) {
@@ -90,7 +90,7 @@ export function giteaForge(deps: GiteaDeps): Forge {
       for (let page = 1; ; page++) {
         const path = `/repos/${enc(repo)}/pulls/${pr}/files?limit=50&page=${page}`;
         const r = await call("GET", path);
-        if (!r.ok) throw new Error(`forge GET ${path.split("?")[0]}: ${r.status}`);
+        if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`forge GET ${path.split("?")[0]}: ${r.status}`); }
         const raw = r.headers.get("x-total-count");
         if (raw !== null && raw.trim() !== "") {
           const n = Number(raw.trim());

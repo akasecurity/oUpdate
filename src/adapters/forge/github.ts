@@ -51,7 +51,7 @@ export function githubForge(deps: GithubDeps): Forge {
 
   async function json<T>(method: string, path: string, body?: unknown): Promise<T> {
     const r = await call(method, path, body);
-    if (!r.ok) throw new Error(`forge ${method} ${path.split("?")[0]}: ${r.status}`);
+    if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`forge ${method} ${path.split("?")[0]}: ${r.status}`); }
     return (await r.json()) as T;
   }
 
@@ -73,7 +73,7 @@ export function githubForge(deps: GithubDeps): Forge {
     me ??= deps.login
       ? Promise.resolve(deps.login)
       : call("GET", "/user").then(async (r) => {
-          if (!r.ok) throw new Error(`forge GET /user: ${r.status}; the Actions GITHUB_TOKEN cannot read it, pass --gate-login github-actions[bot]`);
+          if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`forge GET /user: ${r.status}; the Actions GITHUB_TOKEN cannot read it, pass --gate-login github-actions[bot]`); }
           const u = (await r.json()) as { login?: string };
           if (!u.login) throw new Error("forge GET /user: no login");
           return u.login;
@@ -106,8 +106,8 @@ export function githubForge(deps: GithubDeps): Forge {
       // The raw media type returns the bytes themselves, up to 100 MB; the default JSON response carries base64
       // content only up to 1 MB, which a large package-lock.json passes.
       const r = await call("GET", `/repos/${enc(repo)}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(sha)}`, undefined, "application/vnd.github.raw+json");
-      if (r.status === 404) return undefined;
-      if (!r.ok) throw new Error(`forge GET contents ${path}: ${r.status}`);
+      if (r.status === 404) { await r.body?.cancel().catch(() => {}); return undefined; }
+      if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`forge GET contents ${path}: ${r.status}`); }
       return r.text();
     },
     async changedFiles(repo, pr) {
