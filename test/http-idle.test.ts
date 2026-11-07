@@ -176,3 +176,21 @@ describe("a dropped response does not hold the process", () => {
     }
   });
 });
+
+describe("the limit starts over when the headers arrive", () => {
+  test("a gap before the headers and a gap before the first byte are each under the limit", async () => {
+    const slow = (async (_url: unknown, init?: RequestInit) => {
+      await Bun.sleep(200);
+      const sig = init?.signal;
+      return new Response(new ReadableStream({
+        async start(c) {
+          sig?.addEventListener("abort", () => c.error(sig.reason));
+          await Bun.sleep(200);
+          if (!sig?.aborted) { c.enqueue(enc.encode("ok")); c.close(); }
+        },
+      }));
+    }) as typeof fetch;
+    const r = await fetchIdle(slow, "http://example.invalid/", {}, MS);
+    expect(await r.text()).toBe("ok");
+  });
+});

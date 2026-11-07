@@ -247,6 +247,7 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
         const to = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
         if (!to) return r;
         if (hop >= MAX_REDIRECTS) throw new Error(`registry: over ${MAX_REDIRECTS} redirects for ${path}`);
+        await r.body?.cancel().catch(() => {});
         url = new URL(to, url);
         if (url.protocol !== "https:") throw new Error(`registry redirect to a non-https URL for ${path}`);
       }

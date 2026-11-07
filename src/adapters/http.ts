@@ -33,6 +33,7 @@ export async function fetchIdle(f: typeof fetch, url: string | URL, init: Reques
   let r: Response;
   try {
     r = await f(url, { ...init, signal: ctl.signal, timeout: false } as RequestInit);
+    arm();
   } catch (e) {
     stop();
     throw e;
