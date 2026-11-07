@@ -64,7 +64,8 @@ export function dockerHubSource(deps: { fetch?: typeof fetch; timeoutMs?: number
       if (!TAG.test(tag)) throw new Error(`not an image tag: ${tag}`);
       const tr = await fetchIdle(f, `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull`, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
       if (!tr.ok) { await tr.body?.cancel().catch(() => {}); throw new Error(`registry token HTTP ${tr.status}`); }
-      const token = parseJson<{ token?: unknown }>(new Uint8Array(await tr.arrayBuffer()), "registry token answer").token;
+      const answer = parseJson<{ token?: unknown } | null>(new Uint8Array(await tr.arrayBuffer()), "registry token answer");
+      const token = typeof answer === "object" && answer !== null ? answer.token : undefined;
       if (typeof token !== "string" || !token) throw new Error("registry token missing");
       const get = async (path: string, accept: string[]) => {
         const r = await fetchIdle(f, `https://registry-1.docker.io/v2/${repository}/${path}`, {
@@ -264,8 +265,8 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
         if (challenge.scope) u.searchParams.set("scope", challenge.scope);
         const tr = await fetchIdle(f, u, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
         if (!tr.ok) { await tr.body?.cancel().catch(() => {}); throw new Error(`registry token HTTP ${tr.status}`); }
-        const t = parseJson<{ token?: unknown; access_token?: unknown }>(new Uint8Array(await tr.arrayBuffer()), "registry token answer");
-        const got = typeof t.token === "string" && t.token ? t.token : t.access_token;
+        const t = parseJson<{ token?: unknown; access_token?: unknown } | null>(new Uint8Array(await tr.arrayBuffer()), "registry token answer");
+        const got = typeof t !== "object" || t === null ? undefined : typeof t.token === "string" && t.token ? t.token : t.access_token;
         if (typeof got !== "string" || !got) throw new Error("registry token missing");
         token = got;
         r = await send(path, accept);

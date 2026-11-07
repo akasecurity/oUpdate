@@ -287,6 +287,8 @@ describe("a failed answer's body is released", () => {
       { realm: "https://auth.example/token", token: () => Response.json({}), fails: /token missing/ },
       { realm: "https://auth.example/token", token: () => new Response("not json", { status: 200 }), fails: /^registry token answer is not JSON$/ },
       { realm: "https://auth.example/token", token: (sig) => new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode('{"tok')); sig?.addEventListener("abort", () => c.error(sig.reason)); } }), { status: 200 }), fails: /timed out after 300 ms without data/ }, // a stalled token body keeps its own message
+      { realm: "https://auth.example/token", token: () => Response.json(null), fails: /^registry token missing$/ },
+      { realm: "https://auth.example/token", token: () => Response.json([1]), fails: /^registry token missing$/ },
       { realm: "http://auth.example/token", fails: /not https/ },
       { realm: "not a url", fails: /^registry token realm is not a URL: not a url$/ },
     ];
@@ -304,6 +306,10 @@ describe("a failed answer's body is released", () => {
     }
 
     expect(await refusal(dockerHubSource({ fetch: (async () => new Response("not json")) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"))).toBe("registry token answer is not JSON");
+
+    expect(await refusal(dockerHubSource({ fetch: (async () => Response.json(null)) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"))).toBe("registry token missing");
+    const stalledToken = ((_u: unknown, init?: RequestInit) => Promise.resolve(new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode('{"tok')); init?.signal?.addEventListener("abort", () => c.error(init.signal!.reason)); } }), { status: 200 }))) as typeof fetch;
+    expect(await refusal(dockerHubSource({ fetch: stalledToken, timeoutMs: MS }).index("library/alpine", "3"))).toMatch(quiet);
 
     const tok = cancelled();
     await refusal(dockerHubSource({ fetch: (async () => tok.res(403)) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"));
