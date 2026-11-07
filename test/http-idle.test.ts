@@ -408,3 +408,34 @@ describe("the Docker Hub token stays with the registry", () => {
     expect(seenAtCdn[0]).toBeNull();
   });
 });
+
+describe("Docker Hub documents that are JSON but not objects", () => {
+  const NULL = enc.encode("null");
+  const nullDigest = `sha256:${new Bun.CryptoHasher("sha256").update(NULL).digest("hex")}`;
+  const INDEX_TYPE = "application/vnd.oci.image.index.v1+json";
+  const hub = (docs: Record<string, string>) => dockerHubSource({
+    timeoutMs: MS,
+    fetch: (async (url: unknown) => {
+      const u = String(url);
+      if (u.startsWith("https://auth.docker.io/")) return Response.json({ token: "t" });
+      const path = u.replace("https://registry-1.docker.io/v2/library/alpine/", "");
+      return path in docs ? new Response(docs[path], { headers: { "content-type": INDEX_TYPE } }) : new Response("no", { status: 404 });
+    }) as unknown as typeof fetch,
+  }).index("library/alpine", "3");
+
+  test("the tag lookup, a platform manifest and a config", async () => {
+    expect(await refusal(hub({ "manifests/3": "null" }))).toBe("index is not a JSON object");
+    const entry = (arch: string) => ({ digest: nullDigest, platform: { os: "linux", architecture: arch } });
+    const index = JSON.stringify({ mediaType: INDEX_TYPE, manifests: ["amd64", "arm64", "arm", "386"].map(entry) });
+    expect(await refusal(hub({ "manifests/3": index, [`manifests/${nullDigest}`]: "null" }))).toMatch(/^linux\/\w+ manifest is not a JSON object$/);
+    const manifest = JSON.stringify({ config: { digest: nullDigest } });
+    const mDigest = `sha256:${new Bun.CryptoHasher("sha256").update(manifest).digest("hex")}`;
+    const withConfig = JSON.stringify({ mediaType: INDEX_TYPE, manifests: ["amd64", "arm64", "arm", "386"].map((a) => ({ digest: mDigest, platform: { os: "linux", architecture: a } })) });
+    expect(await refusal(hub({ "manifests/3": withConfig, [`manifests/${mDigest}`]: manifest, [`blobs/${nullDigest}`]: "null" }))).toMatch(/^linux\/\w+ config is not a JSON object$/);
+  });
+
+  test("a token answer that is an array reads as a missing token", async () => {
+    const f = (async () => Response.json([1])) as unknown as typeof fetch;
+    expect(await refusal(dockerHubSource({ fetch: f, timeoutMs: MS }).index("library/alpine", "3"))).toBe("registry token missing");
+  });
+});

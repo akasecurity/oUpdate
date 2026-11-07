@@ -133,3 +133,34 @@ describe("a layer download has a limit in total", () => {
     });
   });
 });
+
+describe("a document that is JSON but not an object is refused by name", () => {
+  const NULL = enc.encode("null");
+  const nullDigest = sha256Digest(NULL);
+  const base = "https://example.com/v2/app/";
+  const INDEX_TYPE = "application/vnd.oci.image.index.v1+json";
+  const read = (routes: Record<string, Route>) => registrySource({ fetch: fakeRegistry(routes) }).imageEvidence(REF, "linux/amd64");
+  const message = (p: Promise<unknown>) => p.then(() => "resolved", (e: Error) => e.message);
+
+  test("a tag that serves null", async () => {
+    expect(await message(read({ [`${base}manifests/1`]: { body: NULL, type: MAN_TYPE } }))).toBe("manifest is not a JSON object");
+  });
+
+  test("an array or a scalar is refused the same way", async () => {
+    for (const body of ["[1]", "5", '"s"']) {
+      expect(await message(read({ [`${base}manifests/1`]: { body, type: MAN_TYPE } })), body).toBe("manifest is not a JSON object");
+    }
+  });
+
+  test("an index entry that serves null", async () => {
+    const index = JSON.stringify({ schemaVersion: 2, mediaType: INDEX_TYPE, manifests: [{ digest: nullDigest, platform: { os: "linux", architecture: "amd64" } }] });
+    const routes = { [`${base}manifests/1`]: { body: index, type: INDEX_TYPE }, [`${base}manifests/${nullDigest}`]: { body: NULL, type: MAN_TYPE } };
+    expect(await message(read(routes))).toBe("linux/amd64 manifest is not a JSON object");
+  });
+
+  test("a config that serves null", async () => {
+    const manifest = JSON.stringify({ schemaVersion: 2, mediaType: MAN_TYPE, config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: nullDigest, size: 4 }, layers: [] });
+    const routes = { [`${base}manifests/1`]: { body: manifest, type: MAN_TYPE }, [`${base}blobs/${nullDigest}`]: { body: NULL } };
+    expect(await message(read(routes))).toBe("linux/amd64 config is not a JSON object");
+  });
+});
