@@ -282,18 +282,19 @@ describe("a failed answer's body is released", () => {
     expect(first.seen.cancelled).toBe(1); // the 401 that was replaced by the retry
 
     // a token step that fails leaves the replaced 401 canceled too, and each case fails at the step it means to test
-    const cases: { realm: string; token?: () => Response; fails: RegExp }[] = [
+    const cases: { realm: string; token?: (sig?: AbortSignal | null) => Response; fails: RegExp }[] = [
       { realm: "https://auth.example/token", token: () => new Response("no", { status: 503 }), fails: /token HTTP 503/ },
       { realm: "https://auth.example/token", token: () => Response.json({}), fails: /token missing/ },
       { realm: "https://auth.example/token", token: () => new Response("not json", { status: 200 }), fails: /^registry token answer is not JSON$/ },
+      { realm: "https://auth.example/token", token: (sig) => new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode('{"tok')); sig?.addEventListener("abort", () => c.error(sig.reason)); } }), { status: 200 }), fails: /timed out after 300 ms without data/ }, // a stalled token body keeps its own message
       { realm: "http://auth.example/token", fails: /not https/ },
       { realm: "not a url", fails: /^registry token realm is not a URL: not a url$/ },
     ];
     for (const [i, k] of cases.entries()) {
       const c = cancelled();
       let askedToken = false;
-      const failing = (async (url: unknown) => {
-        if (String(url).startsWith("https://auth.example/")) { askedToken = true; return k.token!(); }
+      const failing = (async (url: unknown, init?: RequestInit) => {
+        if (String(url).startsWith("https://auth.example/")) { askedToken = true; return k.token!(init?.signal); }
         return new Response(c.res(401).body, { status: 401, headers: { "www-authenticate": `Bearer realm="${k.realm}",service="r"` } });
       }) as unknown as typeof fetch;
       const msg = await refusal(registrySource({ fetch: failing, timeoutMs: MS }).imageEvidence(parseImageRef("registry.example/app:1"), "linux/amd64"));
