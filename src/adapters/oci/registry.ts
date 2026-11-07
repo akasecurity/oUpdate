@@ -6,7 +6,7 @@
 // registrySource reads one platform's image from any registry that allows anonymous pulls (the 401 bearer challenge,
 // followed with no credentials) and maps its config blob to the ImageEvidence a broker reach sends, for `oupdate image`.
 
-import { downloadIdleMs, fetchIdle } from "../http.ts";
+import { downloadIdleMs, downloadTotalMs, fetchIdle } from "../http.ts";
 import { jsonArgv, type ImageEvidence } from "../../targets/broker/answer.ts";
 
 export interface OciImage {
@@ -63,14 +63,14 @@ export function dockerHubSource(deps: { fetch?: typeof fetch; timeoutMs?: number
     async index(repository, tag) {
       if (!TAG.test(tag)) throw new Error(`not an image tag: ${tag}`);
       const tr = await fetchIdle(f, `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull`, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
-      if (!tr.ok) throw new Error(`registry token HTTP ${tr.status}`);
+      if (!tr.ok) { await tr.body?.cancel().catch(() => {}); throw new Error(`registry token HTTP ${tr.status}`); }
       const token = ((await tr.json()) as { token?: unknown }).token;
       if (typeof token !== "string" || !token) throw new Error("registry token missing");
       const get = async (path: string, accept: string[]) => {
         const r = await fetchIdle(f, `https://registry-1.docker.io/v2/${repository}/${path}`, {
           headers: { authorization: `Bearer ${token}`, accept: accept.join(", "), "user-agent": "oupdate" },
         }, deps.timeoutMs);
-        if (!r.ok) throw new Error(`registry HTTP ${r.status} for ${path}`);
+        if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`registry HTTP ${r.status} for ${path}`); }
         return { bytes: new Uint8Array(await r.arrayBuffer()), type: (r.headers.get("content-type") ?? "").split(";")[0]!.trim(), said: r.headers.get("docker-content-digest") ?? undefined };
       };
       const idx = await get(`manifests/${tag}`, [...INDEX_TYPES, ...MANIFEST_TYPES]);
@@ -239,11 +239,11 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
     // Redirects are followed by hand (a blob usually moves to a CDN): https only, a few hops, and the token goes only to
     // the registry's own origin, never to the host a redirect names.
     const origin = new URL(base).origin;
-    const send = async (path: string, accept: string[], idleMs?: number): Promise<Response> => {
+    const send = async (path: string, accept: string[], idleMs?: number, totalMs?: number): Promise<Response> => {
       let url = new URL(base + path);
       for (let hop = 0; ; hop++) {
         const auth: Record<string, string> = token && url.origin === origin ? { authorization: `Bearer ${token}` } : {};
-        const r = await fetchIdle(f, url, { headers: { ...auth, accept: accept.join(", "), "user-agent": "oupdate" }, redirect: "manual" }, idleMs ?? deps.timeoutMs);
+        const r = await fetchIdle(f, url, { headers: { ...auth, accept: accept.join(", "), "user-agent": "oupdate" }, redirect: "manual" }, idleMs ?? deps.timeoutMs, totalMs);
         const to = r.status >= 300 && r.status < 400 ? r.headers.get("location") : null;
         if (!to) return r;
         if (hop >= MAX_REDIRECTS) throw new Error(`registry: over ${MAX_REDIRECTS} redirects for ${path}`);
@@ -261,14 +261,15 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
         if (challenge.service) u.searchParams.set("service", challenge.service);
         if (challenge.scope) u.searchParams.set("scope", challenge.scope);
         const tr = await fetchIdle(f, u, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
-        if (!tr.ok) throw new Error(`registry token HTTP ${tr.status}`);
+        if (!tr.ok) { await tr.body?.cancel().catch(() => {}); throw new Error(`registry token HTTP ${tr.status}`); }
         const t = (await tr.json()) as { token?: unknown; access_token?: unknown };
         const got = typeof t.token === "string" && t.token ? t.token : t.access_token;
         if (typeof got !== "string" || !got) throw new Error("registry token missing");
         token = got;
+        await r.body?.cancel().catch(() => {});
         r = await send(path, accept);
       }
-      if (!r.ok) throw new Error(`registry HTTP ${r.status} for ${path}`);
+      if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`registry HTTP ${r.status} for ${path}`); }
       return { bytes: new Uint8Array(await r.arrayBuffer()), type: (r.headers.get("content-type") ?? "").split(";")[0]!.trim(), said: r.headers.get("docker-content-digest") ?? undefined };
     };
 
@@ -332,8 +333,8 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
         layers,
         async fetchLayer(layer, dest) {
           if (!DIGEST.test(layer.digest)) throw new Error(`not a sha256 digest: ${layer.digest}`);
-          const r = await send(`blobs/${layer.digest}`, ["application/octet-stream", "*/*"], deps.downloadTimeoutMs ?? downloadIdleMs());
-          if (!r.ok) throw new Error(`registry HTTP ${r.status} for blobs/${layer.digest}`);
+          const r = await send(`blobs/${layer.digest}`, ["application/octet-stream", "*/*"], deps.downloadTimeoutMs ?? downloadIdleMs(), downloadTotalMs());
+          if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`registry HTTP ${r.status} for blobs/${layer.digest}`); }
           if (!r.body) throw new Error(`registry sent no body for blobs/${layer.digest}`);
           const hasher = new Bun.CryptoHasher("sha256");
           const out = Bun.file(dest).writer();

@@ -4,7 +4,7 @@ import { osvFeed } from "../src/adapters/advisory/osv.ts";
 import { giteaForge } from "../src/adapters/forge/gitea.ts";
 import { githubForge } from "../src/adapters/forge/github.ts";
 import { dockerHubSource, registrySource, parseImageRef } from "../src/adapters/oci/registry.ts";
-import { DOWNLOAD_IDLE_MS, HTTP_IDLE_MS, downloadIdleMs, fetchIdle, httpIdleMs } from "../src/adapters/http.ts";
+import { DOWNLOAD_IDLE_MS, HTTP_IDLE_MS, downloadIdleMs, fetchIdle, httpIdleMs, HTTP_TOTAL_MS, DOWNLOAD_TOTAL_MS, httpTotalMs, downloadTotalMs } from "../src/adapters/http.ts";
 import { fetchVerified } from "../src/targets/pins/npm.ts";
 
 const servers: ReturnType<typeof Bun.serve>[] = [];
@@ -144,22 +144,6 @@ describe("a failed lookup is not kept for the rest of the sweep", () => {
     await feed.query(pkg);
     expect(detail).toBe(2); // a good answer is kept
   });
-});
-
-describe("a dropped response does not hold the process", () => {
-  test("an unread response with a long limit lets the process exit at once", async () => {
-    const httpTs = new URL("../src/adapters/http.ts", import.meta.url).pathname;
-    const code = `
-      import { fetchIdle } from ${JSON.stringify(httpTs)};
-      const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("x".repeat(10), { status: 401 }) });
-      await fetchIdle(fetch, "http://127.0.0.1:" + s.port + "/", {}, 4000);
-      s.stop(true);
-    `;
-    const t0 = Date.now();
-    const p = Bun.spawn([process.execPath, "-e", code], { stdout: "ignore", stderr: "ignore" });
-    expect(await p.exited).toBe(0);
-    expect(Date.now() - t0).toBeLessThan(3000);
-  });
 
   test("a forge login that failed once is asked for again", async () => {
     let users = 0;
@@ -177,20 +161,174 @@ describe("a dropped response does not hold the process", () => {
   });
 });
 
+describe("a dropped response does not hold the process", () => {
+  test("an unread response with a long limit lets the process exit at once", async () => {
+    const httpTs = new URL("../src/adapters/http.ts", import.meta.url).pathname;
+    const code = `
+      import { fetchIdle } from ${JSON.stringify(httpTs)};
+      const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("x".repeat(10), { status: 401 }) });
+      await fetchIdle(fetch, "http://127.0.0.1:" + s.port + "/", {}, 4000);
+      s.stop(true);
+    `;
+    const t0 = Date.now();
+    const p = Bun.spawn([process.execPath, "-e", code], { stdout: "ignore", stderr: "ignore" });
+    expect(await p.exited).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(3000);
+  });
+});
+
 describe("the limit starts over when the headers arrive", () => {
-  test("a gap before the headers and a gap before the first byte are each under the limit", async () => {
+  test("a gap before the headers and a gap before the first byte are each under the limit, though together over it", async () => {
     const slow = (async (_url: unknown, init?: RequestInit) => {
-      await Bun.sleep(200);
+      await Bun.sleep(400);
       const sig = init?.signal;
       return new Response(new ReadableStream({
         async start(c) {
           sig?.addEventListener("abort", () => c.error(sig.reason));
-          await Bun.sleep(200);
+          await Bun.sleep(400);
           if (!sig?.aborted) { c.enqueue(enc.encode("ok")); c.close(); }
         },
       }));
     }) as typeof fetch;
-    const r = await fetchIdle(slow, "http://example.invalid/", {}, MS);
+    const r = await fetchIdle(slow, "http://example.invalid/", {}, 600);
     expect(await r.text()).toBe("ok");
+  });
+});
+
+describe("the response it returns still describes the request", () => {
+  test("the url and the redirect flag of the real response are kept", async () => {
+    const real = new Response("ok");
+    Object.defineProperties(real, { url: { value: "http://example.invalid/final" }, redirected: { value: true } });
+    const r = await fetchIdle((async () => real) as unknown as typeof fetch, "http://example.invalid/start", {}, MS);
+    expect(r.url).toBe("http://example.invalid/final");
+    expect(r.redirected).toBe(true);
+    expect(await r.text()).toBe("ok");
+  });
+
+  test("a decoded body does not keep the encoding or the length of the encoded one", async () => {
+    const real = new Response("hello", { headers: { "content-encoding": "gzip", "content-length": "25", "content-type": "text/plain" } });
+    const r = await fetchIdle((async () => real) as unknown as typeof fetch, "http://example.invalid/", {}, MS);
+    expect(r.headers.get("content-encoding")).toBeNull();
+    expect(r.headers.get("content-length")).toBeNull();
+    expect(r.headers.get("content-type")).toBe("text/plain");
+  });
+
+  test("a length with no encoding is kept", async () => {
+    const r = await fetchIdle((async () => new Response("hello", { headers: { "content-length": "5" } })) as unknown as typeof fetch, "http://example.invalid/", {}, MS);
+    expect(r.headers.get("content-length")).toBe("5");
+  });
+});
+
+describe("a caller's own signal still works", () => {
+  test("aborting it aborts the fetch with its reason, and the idle limit still applies", async () => {
+    const hang = ((_url: unknown, init?: RequestInit) => new Promise<Response>((_, no) => init?.signal?.addEventListener("abort", () => no(init.signal!.reason)))) as typeof fetch;
+    const mine = new AbortController();
+    const p = fetchIdle(hang, "http://example.invalid/", { signal: mine.signal }, 5000);
+    mine.abort(new Error("mine"));
+    expect(await refusal(p)).toBe("mine");
+    expect(await refusal(fetchIdle(hang, "http://example.invalid/", { signal: new AbortController().signal }, MS))).toMatch(quiet);
+  });
+});
+
+describe("a failed answer's body is released", () => {
+  const cancelled = () => {
+    const seen = { cancelled: 0 };
+    const res = (status: number) => new Response(new ReadableStream({ pull(c) { c.enqueue(enc.encode("x")); }, cancel() { seen.cancelled++; } }), { status });
+    return { seen, res };
+  };
+  const settle = () => Bun.sleep(20);
+
+  test("forge json, readFile and the file list", async () => {
+    for (const make of [(f: typeof fetch) => giteaForge({ endpoint: "https://forge.example/api/v1", token: "t", login: "bot", fetch: f }), (f: typeof fetch) => githubForge({ endpoint: "https://forge.example", token: "t", login: "bot", fetch: f })]) {
+      for (const status of [500, 404]) {
+        const { seen, res } = cancelled();
+        const forge = make((async () => res(status)) as unknown as typeof fetch);
+        await forge.readFile("o/r", "abc", "a.txt").catch(() => {});
+        await settle();
+        expect(seen.cancelled).toBe(1);
+      }
+      const { seen, res } = cancelled();
+      const forge = make((async () => res(500)) as unknown as typeof fetch);
+      await refusal(forge.openPulls("o/r"));
+      await settle();
+      expect(seen.cancelled).toBe(1);
+    }
+  });
+
+  test("a registry manifest and token, and a Docker Hub manifest", async () => {
+    const { seen, res } = cancelled();
+    const reg = registrySource({ fetch: (async () => res(500)) as unknown as typeof fetch, timeoutMs: MS });
+    await refusal(reg.imageEvidence(parseImageRef("registry.example/app:1"), "linux/amd64"));
+    await settle();
+    expect(seen.cancelled).toBe(1);
+
+    const hub = cancelled();
+    let n = 0;
+    const hubFetch = (async () => (++n === 1 ? Response.json({ token: "t" }) : hub.res(500))) as unknown as typeof fetch;
+    await refusal(dockerHubSource({ fetch: hubFetch, timeoutMs: MS }).index("library/alpine", "3"));
+    await settle();
+    expect(hub.seen.cancelled).toBe(1);
+
+    const tok = cancelled();
+    await refusal(dockerHubSource({ fetch: (async () => tok.res(403)) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"));
+    await settle();
+    expect(tok.seen.cancelled).toBe(1);
+  });
+});
+
+describe("a call has a limit in all, however steadily data arrives", () => {
+  const whole = (n: number) => new RegExp(`^timed out after ${n} ms in total: `);
+  /** A body that never stalls (a piece every 50 ms, far under any idle limit) and never ends. */
+  const endless = serve(() => new Response(new ReadableStream({ async pull(c) { await Bun.sleep(50); c.enqueue(enc.encode("x")); } })));
+
+  test("a body that keeps coming without end is cut off at the total, naming it", async () => {
+    const r = await fetchIdle(fetch, endless, {}, 5000, 400);
+    expect(await refusal(r.arrayBuffer())).toMatch(whole(400));
+  });
+
+  test("a call that never answers fails at the total when the idle limit is longer", async () => {
+    expect(await refusal(fetchIdle(fetch, never, {}, 5000, MS))).toMatch(whole(MS));
+  });
+
+  test("the idle limit still fires first when it is the shorter one", async () => {
+    expect(await refusal(fetchIdle(fetch, never, {}, MS, 5000))).toMatch(quiet);
+  });
+
+  test("a call that finishes inside the total is not cut off, and nothing fires later", async () => {
+    const r = await fetchIdle(fetch, slowButSteady, {}, 5000, 3000);
+    expect(JSON.parse(await r.text()).pad.length).toBe(200);
+    await Bun.sleep(50);
+  });
+
+  test("the totals are read from the environment, and a bad value falls back to the default", () => {
+    expect(httpTotalMs({})).toBe(HTTP_TOTAL_MS);
+    expect(downloadTotalMs({})).toBe(DOWNLOAD_TOTAL_MS);
+    expect(HTTP_TOTAL_MS).toBe(600_000);
+    expect(DOWNLOAD_TOTAL_MS).toBe(3_600_000);
+    expect(httpTotalMs({ OUPDATE_HTTP_TOTAL_MS: "1500" })).toBe(1500);
+    expect(downloadTotalMs({ OUPDATE_DOWNLOAD_TOTAL_MS: "900000" })).toBe(900000);
+    for (const bad of ["", "0", "-5", "1.5", "abc", "99999999999"]) {
+      expect(httpTotalMs({ OUPDATE_HTTP_TOTAL_MS: bad }), bad).toBe(HTTP_TOTAL_MS);
+      expect(downloadTotalMs({ OUPDATE_DOWNLOAD_TOTAL_MS: bad }), bad).toBe(DOWNLOAD_TOTAL_MS);
+    }
+  });
+
+  test("a request and a download pick up their own environment limit by default", async () => {
+    const was = { h: process.env.OUPDATE_HTTP_TOTAL_MS, d: process.env.OUPDATE_DOWNLOAD_TOTAL_MS };
+    try {
+      process.env.OUPDATE_HTTP_TOTAL_MS = "400";
+      process.env.OUPDATE_DOWNLOAD_TOTAL_MS = "3000";
+      // the request is cut at 400 ms; a download of the same shape (about 800 ms) is not
+      expect(await refusal(npmRegistry({ base: slowButSteady, timeoutMs: 5000 }).latest("yaml"))).toMatch(whole(400));
+      const tar = "t".repeat(64);
+      const steady = serve(() => trickle(tar, 8, 100));
+      expect(new TextDecoder().decode(await fetchVerified(fetch, steady, undefined, 5000))).toBe(tar);
+      process.env.OUPDATE_DOWNLOAD_TOTAL_MS = "400";
+      expect(await refusal(fetchVerified(fetch, steady, undefined, 5000))).toMatch(whole(400));
+    } finally {
+      for (const [k, v] of [["OUPDATE_HTTP_TOTAL_MS", was.h], ["OUPDATE_DOWNLOAD_TOTAL_MS", was.d]] as const) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+    }
   });
 });

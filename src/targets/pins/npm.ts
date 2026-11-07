@@ -3,7 +3,7 @@
 // than the pin is a bump, so a registry answer can never propose a downgrade or a prerelease.
 
 import { createHash } from "node:crypto";
-import { downloadIdleMs, fetchIdle } from "../../adapters/http.ts";
+import { downloadIdleMs, downloadTotalMs, fetchIdle } from "../../adapters/http.ts";
 import { newer } from "../../apply/appbundle.ts";
 import { npmIntegrity, npmRegistry } from "../../adapters/ecosystem/npm.ts";
 import type { NpmGroup } from "./config.ts";
@@ -53,7 +53,7 @@ export function sriHashes(field: string): { alg: string; sri: string }[] {
  */
 export async function fetchVerified(f: typeof fetch, url: string, sri: string | undefined, idleMs: number = downloadIdleMs()): Promise<Uint8Array> {
   const hashes = sri === undefined ? [] : sriHashes(sri);
-  const r = await fetchIdle(f, url, {}, idleMs);
+  const r = await fetchIdle(f, url, {}, idleMs, downloadTotalMs());
   if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`download ${r.status} for ${url}`); }
   const bytes = new Uint8Array(await r.arrayBuffer());
   for (const h of hashes) {
