@@ -76,6 +76,8 @@ Set up oUpdate (https://github.com/akasecurity/oupdate) on this machine for me. 
 
 Most commands take their settings as flags (`--reviewer`, `--scanner`, `--token-file`). The host commands read a JSON config from `$HOME/.config/oupdate/config.json` or the file you pass with `--config`; the `apply` object is described under [Host apply](#host-apply). `${NAME}` in any config value is read from the environment. `scripts/sample.config.example.json` is a minimal config with one local OpenAI-compatible reviewer and placeholders only.
 
+Requests to registries, forges and the advisory feed fail when the server goes quiet, not when they take long: the limit starts over whenever data arrives, so a large answer that keeps coming is read in full. It is 60 seconds without data (`OUPDATE_HTTP_IDLE_MS`, milliseconds), and 300 seconds for a tarball, wheel or image layer download (`OUPDATE_DOWNLOAD_IDLE_MS`). A stalled request fails like an unreachable source, naming the url.
+
 ## Gate update PRs on a forge
 
 Run after your update bot (Renovate or Dependabot): for each open PR the bot opened on a `renovate/` branch of the repo, oUpdate diffs the lockfiles between base and head and reviews every package version the PR brings in. It then posts a commit status `oupdate/review` and one comment carrying the per-layer verdicts.

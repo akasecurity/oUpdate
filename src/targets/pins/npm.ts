@@ -3,6 +3,7 @@
 // than the pin is a bump, so a registry answer can never propose a downgrade or a prerelease.
 
 import { createHash } from "node:crypto";
+import { downloadIdleMs, fetchIdle } from "../../adapters/http.ts";
 import { newer } from "../../apply/appbundle.ts";
 import { npmIntegrity, npmRegistry } from "../../adapters/ecosystem/npm.ts";
 import type { NpmGroup } from "./config.ts";
@@ -50,10 +51,10 @@ export function sriHashes(field: string): { alg: string; sri: string }[] {
  * proposal or the lockfile carry), so the artifact review reads the very bytes the install will fetch. No sri: no
  * check. A hash it cannot check throws.
  */
-export async function fetchVerified(f: typeof fetch, url: string, sri: string | undefined): Promise<Uint8Array> {
+export async function fetchVerified(f: typeof fetch, url: string, sri: string | undefined, idleMs: number = downloadIdleMs()): Promise<Uint8Array> {
   const hashes = sri === undefined ? [] : sriHashes(sri);
-  const r = await f(url);
-  if (!r.ok) throw new Error(`download ${r.status} for ${url}`);
+  const r = await fetchIdle(f, url, {}, idleMs);
+  if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`download ${r.status} for ${url}`); }
   const bytes = new Uint8Array(await r.arrayBuffer());
   for (const h of hashes) {
     const got = `${h.alg}-${createHash(h.alg).update(bytes).digest("base64")}`;

@@ -22,27 +22,27 @@ const timedOut = (p: Promise<unknown>) => p.then(() => { throw new Error("resolv
 describe("a stalled request fails instead of hanging", () => {
   test("npm packument: no answer", async () => {
     const t = Date.now();
-    expect(await timedOut(npmRegistry({ base: never, timeoutMs: MS }).latest("yaml"))).toMatch(/^timed out after 150 ms: /);
+    expect(await timedOut(npmRegistry({ base: never, timeoutMs: MS }).latest("yaml"))).toMatch(/^timed out after 150 ms without data: /);
     expect(Date.now() - t).toBeLessThan(5000);
   });
   test("npm packument: body stalls after the headers", async () => {
-    expect(await timedOut(npmRegistry({ base: stall, timeoutMs: MS }).latest("yaml"))).toMatch(/^timed out after 150 ms: /);
+    expect(await timedOut(npmRegistry({ base: stall, timeoutMs: MS }).latest("yaml"))).toMatch(/^timed out after 150 ms without data: /);
   });
   test("npm per-version document: no answer", async () => {
-    expect(await timedOut(npmIntegrity("yaml", "1.0.0", { base: never, timeoutMs: MS }))).toMatch(/^timed out after 150 ms: /);
+    expect(await timedOut(npmIntegrity("yaml", "1.0.0", { base: never, timeoutMs: MS }))).toMatch(/^timed out after 150 ms without data: /);
   });
   test("pypi: no answer and a stalled body", async () => {
-    expect(await timedOut(pypiRegistry({ base: never, timeoutMs: MS }).latest("requests"))).toMatch(/^timed out after 150 ms: /);
-    expect(await timedOut(pypiRegistry({ base: stall, timeoutMs: MS }).publishedAt("requests", "1.0.0"))).toMatch(/^timed out after 150 ms: /);
+    expect(await timedOut(pypiRegistry({ base: never, timeoutMs: MS }).latest("requests"))).toMatch(/^timed out after 150 ms without data: /);
+    expect(await timedOut(pypiRegistry({ base: stall, timeoutMs: MS }).publishedAt("requests", "1.0.0"))).toMatch(/^timed out after 150 ms without data: /);
   });
   test("osv querybatch: no answer and a stalled body", async () => {
     const pkg = [{ ecosystem: "npm", name: "yaml", version: "1.0.0" }];
-    expect(await timedOut(osvFeed({ base: never, timeoutMs: MS }).query(pkg))).toMatch(/^timed out after 150 ms: /);
-    expect(await timedOut(osvFeed({ base: stall, timeoutMs: MS }).query(pkg))).toMatch(/^timed out after 150 ms: /);
+    expect(await timedOut(osvFeed({ base: never, timeoutMs: MS }).query(pkg))).toMatch(/^timed out after 150 ms without data: /);
+    expect(await timedOut(osvFeed({ base: stall, timeoutMs: MS }).query(pkg))).toMatch(/^timed out after 150 ms without data: /);
   });
   test("osv vuln detail: no answer", async () => {
     const base = serve((req) => (new URL(req.url).pathname.endsWith("/querybatch") ? Response.json({ results: [{ vulns: [{ id: "GHSA-x" }] }] }) : new Promise<Response>(() => {})));
-    expect(await timedOut(osvFeed({ base, timeoutMs: MS }).query([{ ecosystem: "npm", name: "yaml", version: "1.0.0" }]))).toMatch(/^timed out after 150 ms: .*vulns\/GHSA-x/);
+    expect(await timedOut(osvFeed({ base, timeoutMs: MS }).query([{ ecosystem: "npm", name: "yaml", version: "1.0.0" }]))).toMatch(/^timed out after 150 ms without data: .*vulns\/GHSA-x/);
   });
   test("an error that is not a timeout keeps its own message", async () => {
     const refused = serve(() => new Response("x"));
@@ -58,7 +58,7 @@ describe("a stalled request fails instead of hanging", () => {
     for (const layer of ["cooldown", "advisory"]) {
       const l = r.layers.find((x) => x.layer === layer)!;
       expect(l.verdict).toBe("error");
-      expect(l.detail).toMatch(/timed out after 150 ms/);
+      expect(l.detail).toMatch(/timed out after 150 ms without data/);
     }
     expect(r.decision).not.toBe("land");
   });
