@@ -285,9 +285,9 @@ describe("a failed answer's body is released", () => {
     const cases: { realm: string; token?: () => Response; fails: RegExp }[] = [
       { realm: "https://auth.example/token", token: () => new Response("no", { status: 503 }), fails: /token HTTP 503/ },
       { realm: "https://auth.example/token", token: () => Response.json({}), fails: /token missing/ },
-      { realm: "https://auth.example/token", token: () => new Response("not json", { status: 200 }), fails: /JSON|Unexpected|parse/i },
+      { realm: "https://auth.example/token", token: () => new Response("not json", { status: 200 }), fails: /^registry token answer is not JSON$/ },
       { realm: "http://auth.example/token", fails: /not https/ },
-      { realm: "not a url", fails: /Invalid URL|invalid/i },
+      { realm: "not a url", fails: /^registry token realm is not a URL: not a url$/ },
     ];
     for (const [i, k] of cases.entries()) {
       const c = cancelled();
@@ -301,6 +301,8 @@ describe("a failed answer's body is released", () => {
       expect(askedToken, `case ${i}`).toBe(k.token !== undefined);
       expect(c.seen.cancelled, `case ${i}`).toBe(1);
     }
+
+    expect(await refusal(dockerHubSource({ fetch: (async () => new Response("not json")) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"))).toBe("registry token answer is not JSON");
 
     const tok = cancelled();
     await refusal(dockerHubSource({ fetch: (async () => tok.res(403)) as unknown as typeof fetch, timeoutMs: MS }).index("library/alpine", "3"));
@@ -381,6 +383,7 @@ describe("a call has a limit in total, however steadily data arrives", () => {
 
 describe("the Docker Hub token stays with the registry", () => {
   test("a redirect to another origin (a CDN) is followed without the authorization header", async () => {
+    // guards the runtime dropping Authorization on a cross-origin redirect: the source relies on it
     const seenAtCdn: (string | null)[] = [];
     const seenAtRegistry: (string | null)[] = [];
     const manifest = JSON.stringify({ schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: [] });
@@ -392,7 +395,7 @@ describe("the Docker Hub token stays with the registry", () => {
       if (u.startsWith("https://auth.docker.io/")) return Promise.resolve(Response.json({ token: "secret-token" }));
       return fetch(u.replace("https://registry-1.docker.io", registry), init);
     }) as typeof fetch;
-    await refusal(dockerHubSource({ fetch: real, timeoutMs: 2000 }).index("library/alpine", "3"));
+    expect(await refusal(dockerHubSource({ fetch: real, timeoutMs: 2000 }).index("library/alpine", "3"))).toMatch(/has 0 linux\/amd64 images/); // the CDN manifest was read and parsed
     expect(seenAtRegistry).toEqual(["Bearer secret-token"]);
     expect(seenAtCdn.length).toBe(1);
     expect(seenAtCdn[0]).toBeNull();

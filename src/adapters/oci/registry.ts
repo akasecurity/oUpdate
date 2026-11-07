@@ -64,7 +64,7 @@ export function dockerHubSource(deps: { fetch?: typeof fetch; timeoutMs?: number
       if (!TAG.test(tag)) throw new Error(`not an image tag: ${tag}`);
       const tr = await fetchIdle(f, `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull`, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
       if (!tr.ok) { await tr.body?.cancel().catch(() => {}); throw new Error(`registry token HTTP ${tr.status}`); }
-      const token = ((await tr.json()) as { token?: unknown }).token;
+      const token = ((await tr.json().catch(() => { throw new Error("registry token answer is not JSON"); })) as { token?: unknown }).token;
       if (typeof token !== "string" || !token) throw new Error("registry token missing");
       const get = async (path: string, accept: string[]) => {
         const r = await fetchIdle(f, `https://registry-1.docker.io/v2/${repository}/${path}`, {
@@ -257,13 +257,14 @@ export function registrySource(deps: { fetch?: typeof fetch; timeoutMs?: number;
       const challenge = r.status === 401 && !token ? bearerChallenge(r.headers.get("www-authenticate")) : undefined;
       if (challenge) {
         await r.body?.cancel().catch(() => {}); // the 401 is replaced by the retry, whether or not the token step works
-        const u = new URL(challenge.realm!);
+        let u: URL;
+        try { u = new URL(challenge.realm!); } catch { throw new Error(`registry token realm is not a URL: ${challenge.realm}`); }
         if (u.protocol !== "https:") throw new Error(`registry token realm is not https: ${u.origin}`);
         if (challenge.service) u.searchParams.set("service", challenge.service);
         if (challenge.scope) u.searchParams.set("scope", challenge.scope);
         const tr = await fetchIdle(f, u, { headers: { "user-agent": "oupdate" } }, deps.timeoutMs);
         if (!tr.ok) { await tr.body?.cancel().catch(() => {}); throw new Error(`registry token HTTP ${tr.status}`); }
-        const t = (await tr.json()) as { token?: unknown; access_token?: unknown };
+        const t = await tr.json().catch(() => { throw new Error("registry token answer is not JSON"); }) as { token?: unknown; access_token?: unknown };
         const got = typeof t.token === "string" && t.token ? t.token : t.access_token;
         if (typeof got !== "string" || !got) throw new Error("registry token missing");
         token = got;
