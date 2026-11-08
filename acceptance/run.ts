@@ -30,6 +30,7 @@ import { get, JSON_TIMEOUT_MS } from "./http.ts";
 import { scorecard, type ScoreRow } from "./scorecard.ts";
 import { inSet, parseSet, setCounts, type CaseSet } from "./sets.ts";
 import { syntheticPair, type SyntheticKind } from "./synthetic/generate.ts";
+import { corpusPair, isCorpus, type CorpusKind } from "./synthetic/corpus.ts";
 import type { Registry } from "../src/adapters/ecosystem/types.ts";
 import type { Ecosystem, FileMap } from "../src/prepass.ts";
 
@@ -39,7 +40,7 @@ interface Case {
   name: string;
   good: string;
   bad: string;
-  source?: { type: "datadog"; path: string } | { type: "replay"; script: string } | { type: "synthetic"; generator: SyntheticKind };
+  source?: { type: "datadog"; path: string } | { type: "replay"; script: string } | { type: "synthetic"; generator: SyntheticKind | CorpusKind };
   window?: { published?: string; removed?: string };
   set?: CaseSet;
 }
@@ -100,7 +101,7 @@ async function fetchSide(c: Case, version: string, dir: string, kind: "wheel" | 
 }
 
 async function loadPair(c: Case, malicious: boolean): Promise<{ old: FileMap; new: FileMap }> {
-  if (c.source?.type === "synthetic") return syntheticPair(c.source.generator);
+  if (c.source?.type === "synthetic") return isCorpus(c.source.generator) ? corpusPair(c.source.generator) : syntheticPair(c.source.generator);
   const dir = join(work, c.id);
   let badMap: FileMap;
   let kind: "wheel" | "sdist" | "npm";
