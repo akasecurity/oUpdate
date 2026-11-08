@@ -179,5 +179,167 @@
     "eco": "npm", "name": "synthetic-strkit", "good": "1.4.0", "bad": "1.4.1",
     "source": { "type": "synthetic", "generator": "env-exfil-refactor" },
     "what": "synthetic evasion case: a config refactor that posts process.env to a URL"
+  },
+  {
+    "id": "synthetic-npm-preinstall-curl-pipe-sh", "set": "extended",
+    "eco": "npm", "name": "synthetic-pad-kit", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-preinstall-curl-pipe-sh" },
+    "what": "synthetic: a preinstall script that pipes a downloaded shell script into sh"
+  },
+  {
+    "id": "synthetic-npm-postinstall-obfuscated-b64", "set": "extended",
+    "eco": "npm", "name": "synthetic-num-fmt", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-postinstall-obfuscated-b64" },
+    "what": "synthetic: postinstall runs a node one-liner that evals a base64 string"
+  },
+  {
+    "id": "synthetic-npm-typosquat-maintainer-swap", "set": "extended",
+    "eco": "npm", "name": "synthetic-date-math", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-typosquat-maintainer-swap" },
+    "what": "synthetic: new maintainer and author, a new dependency spelled like a popular package, and an install script"
+  },
+  {
+    "id": "synthetic-npm-ci-token-exfil", "set": "extended",
+    "eco": "npm", "name": "synthetic-list-ops", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-ci-token-exfil" },
+    "what": "synthetic: postinstall that fires only in CI and posts the npm and GitHub tokens from the environment"
+  },
+  {
+    "id": "synthetic-npm-lockfile-redirection", "set": "extended",
+    "eco": "npm", "name": "synthetic-map-kit", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-lockfile-redirection" },
+    "what": "synthetic: the shipped lockfile now resolves every package from a mirror host with changed integrity values"
+  },
+  {
+    "id": "synthetic-npm-binary-swap", "set": "extended",
+    "eco": "npm", "name": "synthetic-img-tool", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-binary-swap" },
+    "what": "synthetic: the bundled prebuilt binary is replaced by a different one and nothing in the source explains it"
+  },
+  {
+    "id": "synthetic-npm-install-time-dns-exfil", "set": "extended",
+    "eco": "npm", "name": "synthetic-str-utils", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-install-time-dns-exfil" },
+    "what": "synthetic: preinstall looks up host names that carry the machine's user and host name"
+  },
+  {
+    "id": "synthetic-npm-gyp-binding-build-hook", "set": "extended",
+    "eco": "npm", "name": "synthetic-fast-sum", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-gyp-binding-build-hook" },
+    "what": "synthetic: a new binding.gyp whose action runs a shell command at build time"
+  },
+  {
+    "id": "synthetic-npm-git-dependency-swap", "set": "extended",
+    "eco": "npm", "name": "synthetic-text-wrap", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-git-dependency-swap" },
+    "what": "synthetic: a registry dependency is replaced by a git URL pinned to a commit on another host"
+  },
+  {
+    "id": "synthetic-npm-bin-shim-hijack", "set": "extended",
+    "eco": "npm", "name": "synthetic-cli-sugar", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-bin-shim-hijack" },
+    "what": "synthetic: a new bin entry named like the package manager that wraps the real one and copies its arguments out"
+  },
+  {
+    "id": "synthetic-npm-vscode-tasks-autorun", "set": "extended",
+    "eco": "npm", "name": "synthetic-arr-kit", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-vscode-tasks-autorun" },
+    "what": "synthetic: a shipped .vscode/tasks.json that runs a download-and-run command when the folder opens"
+  },
+  {
+    "id": "synthetic-npm-env-gated-time-bomb", "set": "extended",
+    "eco": "npm", "name": "synthetic-sort-lite", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-env-gated-time-bomb" },
+    "what": "synthetic: library code that stays quiet until a date and only on a CI host, then runs a downloaded script"
+  },
+  {
+    "id": "synthetic-npm-require-hook-cred-theft", "set": "extended",
+    "eco": "npm", "name": "synthetic-obj-pick", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-require-hook-cred-theft" },
+    "what": "synthetic: on require, reads the npm, AWS and SSH credential files and posts them encoded"
+  },
+  {
+    "id": "synthetic-npm-dependency-confusion-internal-name", "set": "extended",
+    "eco": "npm", "name": "synthetic-queue-kit", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-dependency-confusion-internal-name" },
+    "what": "synthetic: a new dependency with a company-style scoped name at version 99.0.0 that no public registry owns"
+  },
+  {
+    "id": "synthetic-npm-authorized-keys-append", "set": "extended",
+    "eco": "npm", "name": "synthetic-set-ops", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-authorized-keys-append" },
+    "what": "synthetic: postinstall appends a public key to the user's authorized_keys"
+  },
+  {
+    "id": "synthetic-npm-shell-profile-persistence", "set": "extended",
+    "eco": "npm", "name": "synthetic-math-ext", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-shell-profile-persistence" },
+    "what": "synthetic: postinstall appends a line to the shell startup files that downloads and runs a script at every login"
+  },
+  {
+    "id": "synthetic-pypi-setup-py-cmdclass-install", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-pad", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-setup-py-cmdclass-install" },
+    "what": "synthetic: setup.py overrides the install command with a class that downloads and executes a script"
+  },
+  {
+    "id": "synthetic-pypi-conftest-test-time-payload", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-calc", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-conftest-test-time-payload" },
+    "what": "synthetic: a conftest.py shipped inside the package that posts CI secrets whenever pytest runs"
+  },
+  {
+    "id": "synthetic-pypi-obfuscated-setup-b64-exec", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-cast", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-obfuscated-setup-b64-exec" },
+    "what": "synthetic: setup.py executes a base64 string that fetches and runs a script"
+  },
+  {
+    "id": "synthetic-pypi-typosquat-dependency-added", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-fetch", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-typosquat-dependency-added" },
+    "what": "synthetic: a new install_requires entry spelled like a popular package (reqeusts) from a different author"
+  },
+  {
+    "id": "synthetic-pypi-wheel-binary-so-swap", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-fast", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-wheel-binary-so-swap" },
+    "what": "synthetic: the bundled compiled extension is replaced and the package now loads it through ctypes"
+  },
+  {
+    "id": "synthetic-pypi-entrypoint-console-script-hijack", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-tools", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-entrypoint-console-script-hijack" },
+    "what": "synthetic: a console script named pip that wraps the real one and copies its arguments out"
+  },
+  {
+    "id": "synthetic-pypi-ci-token-exfil", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-seq", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-ci-token-exfil" },
+    "what": "synthetic: import-time code that fires only in CI and posts the PyPI and GitHub tokens"
+  },
+  {
+    "id": "synthetic-pypi-requirements-index-url-redirect", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-conf", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-requirements-index-url-redirect" },
+    "what": "synthetic: a shipped requirements.txt and pip.conf that add an extra package index on another host"
+  },
+  {
+    "id": "synthetic-pypi-cloud-credential-file-read", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-cloud", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-cloud-credential-file-read" },
+    "what": "synthetic: import-time code that reads cloud and SSH credential files and posts them"
+  },
+  {
+    "id": "synthetic-pypi-pyproject-local-build-backend", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-build", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-pyproject-local-build-backend" },
+    "what": "synthetic: pyproject.toml switches the build backend to an in-tree module that runs a downloaded script before building"
+  },
+  {
+    "id": "synthetic-pypi-lazy-import-time-bomb", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-lazy", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-lazy-import-time-bomb" },
+    "what": "synthetic: a module-level __getattr__ that downloads and executes a script the first time an unknown attribute is read"
   }
 ]

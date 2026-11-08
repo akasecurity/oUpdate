@@ -40,5 +40,8 @@ test("the shipped JSON: core is the published 9 attacks and 8 controls plus two 
   expect([core.attacks, core.dataset, core.controls]).toEqual([9, 8, 10]);
   const ext = setCounts(sets, "extended");
   expect([ext.attacks, ext.dataset, ext.controls]).toEqual([17, 17, 17]);
-  expect(sets.cases.filter((c) => c.source?.type === "synthetic").every((c) => setOf(c) === "core")).toBe(true);
+  // the four evasion cases are core; the further synthetic corpus (acceptance/synthetic/corpus.ts) is extended
+  const synth = sets.cases.filter((c) => c.source?.type === "synthetic");
+  expect(synth.filter((c) => setOf(c) === "core").length).toBe(4);
+  expect(synth.filter((c) => !c.id.startsWith("synthetic-") || setOf(c) === "extended").length).toBe(synth.length - 4);
 });

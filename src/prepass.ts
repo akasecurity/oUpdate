@@ -2,6 +2,7 @@
 // Hard signals hold an update no matter what a model reviewer says; soft
 // signals are handed to the reviewer as pointers. It reads bytes only.
 
+import { dependencySignals } from "./dependency-signals.ts";
 import { installView, otherInstallEntry, prepareInert } from "./install-closure.ts";
 
 export type FileMap = Map<string, Uint8Array>;
@@ -1068,6 +1069,8 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
       }
     }
   }
+
+  soft.push(...dependencySignals(eco, oldFiles, newFiles));
 
   return { hard, soft, added, removed, changed };
 }

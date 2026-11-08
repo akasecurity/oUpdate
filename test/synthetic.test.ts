@@ -67,8 +67,8 @@ describe("synthetic evasion cases", () => {
   });
 
   test("the synthetic cases load in acceptance/run.ts with a stub reviewer, offline", () => {
-    const cases = JSON.parse(readFileSync(resolve(import.meta.dir, "../acceptance/cases.json"), "utf8")) as { id: string; source?: { type: string; generator?: string } }[];
-    const ids = cases.filter((c) => c.source?.type === "synthetic").map((c) => c.id);
+    const cases = JSON.parse(readFileSync(resolve(import.meta.dir, "../acceptance/cases.json"), "utf8")) as { id: string; set?: string; source?: { type: string; generator?: string } }[];
+    const ids = cases.filter((c) => c.source?.type === "synthetic" && !(c.set === "extended")).map((c) => c.id);
     expect(ids.length).toBe(4);
     const dir = mkdtempSync(join(tmpdir(), "oupdate-synth-"));
     try {
