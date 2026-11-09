@@ -72,6 +72,19 @@ test("synthetic evasion cases get their own line and stay out of the published a
   expect(scorecard(rows("local")).join("\n")).not.toContain("evasion");
 });
 
+test("the further synthetic corpus has its own line, apart from the evasion cases", () => {
+  const extra: ScoreRow[] = [
+    { id: "synthetic-a", kind: "synthetic", reviewer: "local", result: result("hold", "pass", flag, true) },
+    { id: "synthetic-x", kind: "corpus", reviewer: "local", result: result("hold", "pass", flag, true) },
+    { id: "synthetic-y", kind: "corpus", reviewer: "local", result: result("land", "pass", approve, true) },
+    { id: "synthetic-z", kind: "corpus", reviewer: "local", result: result("land", "pass", approve, true) },
+  ];
+  const out = scorecard([...rows("local"), ...extra]).join("\n");
+  expect(out).toMatch(/evasion cases stopped\s+1\/1\s+model FLAG 1\/1/);
+  expect(out).toMatch(/synthetic attacks stopped\s+1\/3\s+model FLAG 1\/3/);
+  expect(out).toMatch(/attacks stopped\s+9\/9/);
+});
+
 test("extended set: labeled, scored against the set's JSON counts, no bar or published column", () => {
   const ext: ScoreRow[] = [
     { id: "x-1", kind: "attack", reviewer: "local", result: result("hold", "pass", flag, true) },

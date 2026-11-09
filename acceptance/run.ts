@@ -171,7 +171,7 @@ for (const { c, malicious } of all) {
     writeFileSync(join(results, `${tag}.json`), JSON.stringify({ malicious, ...r }, null, 2) + "\n");
     const stoppedBy = r.layers.filter((l) => l.verdict === "stop").map((l) => l.layer);
     const outcome = classifyOutcome(r);
-    scored.push({ id: c.id, kind: synthetic ? "synthetic" : malicious ? "attack" : "control", reviewer: rv?.name, result: r });
+    scored.push({ id: c.id, kind: synthetic ? (isCorpus((c.source as { generator: string }).generator) ? "corpus" : "synthetic") : malicious ? "attack" : "control", reviewer: rv?.name, result: r });
     tally.push(`${kind} ${outcome}`);
     summary.push(`${kind} ${tag}: ${outcome.toUpperCase()} ${r.decision}${stoppedBy.length ? ` (stopped by ${stoppedBy.join(", ")})` : ""}`);
     for (const l of r.layers) summary.push(`    ${l.layer.padEnd(9)} ${l.verdict.padEnd(7)} ${l.detail.slice(0, 220)}`);

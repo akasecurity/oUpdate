@@ -1,7 +1,8 @@
 // Case sets. "core" is the published set: the bar (every attack stopped, every core control landed) and the 26 Oct
 // result are scored on it. "extended" holds further real compromised releases and their clean
 // controls, scored on their own counts. An entry in cases.json or controls.json without a
-// "set" key is core; the synthetic evasion cases are core and keep their own scorecard line.
+// "set" key is core; the four synthetic evasion cases are core and keep their own scorecard line, and the
+// further synthetic corpus (acceptance/synthetic/corpus.ts) is extended and has a line of its own.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

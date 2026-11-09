@@ -196,7 +196,7 @@
     "id": "synthetic-npm-typosquat-maintainer-swap", "set": "extended",
     "eco": "npm", "name": "synthetic-date-math", "good": "1.2.0", "bad": "1.2.1",
     "source": { "type": "synthetic", "generator": "npm-typosquat-maintainer-swap" },
-    "what": "synthetic: new maintainer and author, a new dependency spelled like a popular package, and an install script"
+    "what": "synthetic: new maintainer and author, a new dependency spelled one edit from a popular package (momnet for moment), and an install script"
   },
   {
     "id": "synthetic-npm-ci-token-exfil", "set": "extended",

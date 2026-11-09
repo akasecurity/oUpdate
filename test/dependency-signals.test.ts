@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { corpusPair } from "../acceptance/synthetic/corpus.ts";
-import { dependencySignals, lookalikeOf, oneEditApart } from "../src/dependency-signals.ts";
+import { dependencySignals, lookalikeOf, oneEditApart, stripHashComments } from "../src/dependency-signals.ts";
 import { prepass, type FileMap } from "../src/prepass.ts";
 
 const enc = new TextEncoder();
@@ -31,6 +31,16 @@ describe("lookalikeOf", () => {
     expect(lookalikeOf("npm", "vuex")).toBeUndefined();
     expect(lookalikeOf("npm", "left-pad-2")).toBeUndefined();
   });
+
+  test("real neighbors of popular names raise no lookalike, so they raise only dependency-added", () => {
+    expect(lookalikeOf("pypi", "scapy")).toBeUndefined();
+    expect(lookalikeOf("pypi", "markdown2")).toBeUndefined();
+    expect(lookalikeOf("npm", "preact")).toBeUndefined();
+    expect(lookalikeOf("npm", "reacts")).toBeUndefined();
+    expect(lookalikeOf("npm", "color")).toBeUndefined();
+    const s = dependencySignals("pypi", files({ "setup.py": "setup(install_requires=[])" }), files({ "setup.py": 'setup(install_requires=["scapy"])' }));
+    expect(s.map((x) => x.kind)).toEqual(["dependency-added"]);
+  });
 });
 
 describe("dependencySignals", () => {
@@ -53,9 +63,45 @@ describe("dependencySignals", () => {
     expect(dependencySignals("npm", old, nu)[0]!.detail).toBe("new dependency name(s): o, p");
   });
 
-  test("npm: an unreadable manifest and a first install give nothing", () => {
+  test("npm: an unreadable manifest gives nothing, and a manifest with no old copy counts every name as new", () => {
     expect(dependencySignals("npm", files({ "package.json": pj({}) }), files({ "package.json": "{" }))).toEqual([]);
-    expect(dependencySignals("npm", files({}), files({ "package.json": pj({ a: "1" }) }))).toEqual([]);
+    expect(dependencySignals("npm", files({}), files({ "package.json": pj({ a: "1", b: "2" }) }))).toEqual([
+      { kind: "dependency-added", path: "package.json", detail: "new dependency name(s): a, b" },
+    ]);
+  });
+
+  test("npm: only the root package.json is read", () => {
+    const nu = files({ "package.json": pj({}), "pkg/package.json": pj({ a: "1" }), "node_modules/x/package.json": pj({ b: "1" }) });
+    expect(dependencySignals("npm", files({ "package.json": pj({}) }), nu)).toEqual([]);
+  });
+
+  test("pypi: a manifest new to the release counts every name as new", () => {
+    const s = dependencySignals("pypi", files({}), files({ "requirements.txt": "a\nb\n" }));
+    expect(s).toEqual([{ kind: "dependency-added", path: "requirements.txt", detail: "new dependency name(s): a, b" }]);
+  });
+
+  test("pypi: a stray apostrophe in a # comment does not drop the names after it", () => {
+    const old = files({ "setup.py": 'setup(install_requires=["a"])' });
+    const nu = files({ "setup.py": 'setup(install_requires=[\n    "a",\n    # don\'t drop "x" quietly\n    "b",\n    "c",\n])' });
+    expect(dependencySignals("pypi", old, nu)[0]!.detail).toBe("new dependency name(s): b, c");
+    const toml = files({ "pyproject.toml": 'dependencies = [\n  "a", # it\'s here\n  "d",\n]\n' });
+    expect(dependencySignals("pypi", files({ "pyproject.toml": 'dependencies = ["a"]\n' }), toml)[0]!.detail).toBe("new dependency name(s): d");
+  });
+
+  test("stripHashComments keeps a # inside a quoted string", () => {
+    expect(stripHashComments('x = "a#b" # note\ny = 1')).toBe('x = "a#b" \ny = 1');
+  });
+
+  test("pypi: setup.cfg install_requires with the first requirement on the same line", () => {
+    const old = files({ "setup.cfg": "[options]\ninstall_requires = a\n" });
+    const nu = files({ "setup.cfg": "[options]\ninstall_requires = a>=1\n    b\n" });
+    expect(dependencySignals("pypi", old, nu)[0]!.detail).toBe("new dependency name(s): b");
+    expect(dependencySignals("pypi", files({ "setup.cfg": "[options]\n" }), files({ "setup.cfg": "[options]\ninstall_requires = reqeusts>=2\n" })).map((x) => x.kind)).toEqual(["dependency-added", "dependency-lookalike"]);
+  });
+
+  test("pypi: a url or path line in a requirements file is no dependency named for its scheme", () => {
+    const nu = files({ "requirements.txt": "git+https://example.invalid/r.git#egg=x\nhttps://example.invalid/p.whl\n./local\n-e .\nreal @ https://example.invalid/real.whl\nplain>=1\n" });
+    expect(dependencySignals("pypi", files({ "requirements.txt": "" }), nu)[0]!.detail).toBe("new dependency name(s): real, plain");
   });
 
   test("pypi: setup.py, pyproject.toml, setup.cfg, METADATA, requires.txt and requirements files are read", () => {
