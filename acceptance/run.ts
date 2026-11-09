@@ -28,6 +28,7 @@ import { makeReviewer, validateReviewerSpec, type ReviewerSpec } from "../src/ad
 import { makeScanner, parseScannerSpec } from "../src/adapters/scanner/spec.ts";
 import { get, JSON_TIMEOUT_MS } from "./http.ts";
 import { scorecard, type ScoreRow } from "./scorecard.ts";
+import { layerLines } from "./summary.ts";
 import { inSet, parseSet, setCounts, type CaseSet } from "./sets.ts";
 import { syntheticPair, type SyntheticKind } from "./synthetic/generate.ts";
 import { corpusPair, isCorpus, type CorpusKind } from "./synthetic/corpus.ts";
@@ -175,7 +176,7 @@ for (const { c, malicious } of all) {
     scored.push({ id: c.id, kind: corpus ? "corpus" : synthetic ? "synthetic" : malicious ? "attack" : "control", reviewer: rv?.name, result: r });
     tally.push(`${kind} ${outcome}`);
     summary.push(`${kind} ${tag}: ${outcome.toUpperCase()} ${r.decision}${stoppedBy.length ? ` (stopped by ${stoppedBy.join(", ")})` : ""}`);
-    for (const l of r.layers) summary.push(`    ${l.layer.padEnd(9)} ${l.verdict.padEnd(7)} ${l.detail.slice(0, 220)}`);
+    summary.push(...layerLines(r));
   }
 }
 const counts = new Map<string, number>();
