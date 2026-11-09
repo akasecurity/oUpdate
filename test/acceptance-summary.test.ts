@@ -28,6 +28,16 @@ describe("layerLines", () => {
     expect(layerLines(result([{ layer: "reviewer", verdict: "stop", detail: "m FLAG on part(s) 1 of 1" }]))).toHaveLength(1);
   });
 
+  test("a layer detail with a terminal escape, a line break or a bidi control prints as one clean line", () => {
+    const detail = "install script \u001b]0;pwned\u0007 and \u001b[2Jwipe\nsecond line \u202eevil\r\nthird";
+    const [line] = layerLines(result([{ layer: "prepass", verdict: "stop", detail }]));
+    expect(line).not.toMatch(/[\u0000-\u0008\u000a-\u001f\u007f\u202a-\u202e\u2066-\u2069]/);
+    expect(line).toContain("install script");
+    expect(line).toContain("second line");
+    expect(line).toContain("third");
+    expect(line!.startsWith("    prepass   stop    install script")).toBe(true);
+  });
+
   test("other layers keep their 220 character cut", () => {
     const lines = layerLines(result([{ layer: "prepass", verdict: "pass", detail: "x".repeat(300) }]));
     expect(lines[0]).toBe(`    prepass   pass    ${"x".repeat(220)}`);
