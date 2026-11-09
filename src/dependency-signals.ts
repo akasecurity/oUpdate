@@ -24,6 +24,12 @@ const PYPI_POPULAR = [
   "websockets", "markdown", "docker", "kubernetes", "azure-core", "google-api-core", "numba", "sympy", "networkx", "nltk", "spacy", "keras",
 ];
 
+/** Real packages that sit one edit from a popular one (scapy and scipy, preact and react, color and colors): a new dependency on one of these is no lookalike. */
+const REAL_NEIGHBORS: Record<Ecosystem, readonly string[]> = {
+  npm: ["preact", "reacts", "color"],
+  pypi: ["scapy", "markdown2"],
+};
+
 const norm = (eco: Ecosystem, n: string) => (eco === "pypi" ? n.toLowerCase().replace(/[-_.]+/g, "-") : n);
 
 /** True when `a` and `b` differ by one inserted, dropped or changed character, or one swap of neighbors. */
@@ -43,7 +49,7 @@ export function oneEditApart(a: string, b: string): boolean {
 export function lookalikeOf(eco: Ecosystem, name: string): string | undefined {
   const list = eco === "npm" ? NPM_POPULAR : PYPI_POPULAR;
   const n = norm(eco, name);
-  if (n.length < 5 || list.includes(n)) return undefined;
+  if (n.length < 5 || list.includes(n) || REAL_NEIGHBORS[eco].includes(n)) return undefined;
   return list.find((p) => p.length >= 5 && oneEditApart(n, norm(eco, p)));
 }
 
@@ -51,6 +57,10 @@ export function lookalikeOf(eco: Ecosystem, name: string): string | undefined {
 const LIST = String.raw`(?:[^\]"']|"[^"\n]*"|'[^'\n]*')*`;
 const REQ_NAME = /^\s*([A-Za-z0-9][A-Za-z0-9._-]*)/;
 const reqName = (s: string) => REQ_NAME.exec(s)?.[1];
+/** The text with # comments cut, quoted strings left whole (a "#" inside a string is no comment). */
+export function stripHashComments(text: string): string {
+  return text.replace(/("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|#[^\n]*/g, (m, q: string | undefined) => q ?? "");
+}
 const quoted = (block: string) => [...block.matchAll(/["']([^"'\n]+)["']/g)].map((m) => reqName(m[1]!));
 
 function npmNames(bytes: Uint8Array | undefined): Set<string> {
@@ -69,16 +79,17 @@ function npmNames(bytes: Uint8Array | undefined): Set<string> {
 function pypiNames(path: string, bytes: Uint8Array | undefined): Set<string> {
   const out = new Set<string>();
   if (!bytes) return out;
-  const text = dec.decode(bytes);
+  const raw = dec.decode(bytes);
   const base = path.split("/").pop()!;
   const add = (n: string | undefined) => n && out.add(n);
+  const text = base === "setup.py" || base === "pyproject.toml" ? stripHashComments(raw) : raw;
   if (base === "setup.py") {
     for (const m of text.matchAll(new RegExp(`install_requires\\s*=\\s*\\[(${LIST})\\]`, "g"))) quoted(m[1]!).forEach(add);
   } else if (base === "pyproject.toml") {
     for (const m of text.matchAll(new RegExp(`^dependencies\\s*=\\s*\\[(${LIST})\\]`, "gm"))) quoted(m[1]!).forEach(add);
   } else if (base === "setup.cfg") {
-    const m = /^install_requires\s*=[ \t]*\n?((?:[ \t]+\S.*\n?)*)/m.exec(text);
-    for (const l of (m?.[1] ?? "").split("\n")) add(reqName(l));
+    const m = /^install_requires[ \t]*=[ \t]*([^\n]*)\n?((?:[ \t]+\S.*\n?)*)/m.exec(text);
+    for (const l of [m?.[1] ?? "", ...(m?.[2] ?? "").split("\n")]) add(reqName(l));
   } else if (base === "METADATA" || base === "PKG-INFO") {
     for (const m of text.matchAll(/^Requires-Dist:\s*([A-Za-z0-9][A-Za-z0-9._-]*)/gm)) add(m[1]);
   } else if (base === "requires.txt") {
@@ -87,25 +98,25 @@ function pypiNames(path: string, bytes: Uint8Array | undefined): Set<string> {
       add(reqName(l));
     }
   } else if (/^requirements.*\.txt$/.test(base)) {
-    for (const l of text.split("\n")) if (!/^\s*(#|-)/.test(l)) add(reqName(l));
+    // A line with a scheme (git+https://..., https://...) or a path is no name; "name @ url" keeps the name.
+    for (const l of text.split("\n")) if (!/^\s*(#|-|\.|\/)/.test(l) && !/^\s*[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(l)) add(reqName(l));
   }
   return out;
 }
 
-const NPM_MANIFEST = (p: string) => p.split("/").length <= 2 && p.split("/").pop() === "package.json" && !p.split("/").includes("node_modules");
+const NPM_MANIFEST = (p: string) => p === "package.json";
 const PYPI_MANIFEST = (p: string) => /(^|\/)(setup\.py|pyproject\.toml|setup\.cfg|METADATA|PKG-INFO|requires\.txt|requirements[^/]*\.txt)$/.test(p);
 
 /**
  * Soft signals for dependency names the new release declares and the old one did not:
  * `dependency-added` for each manifest that gains a name, and `dependency-lookalike` for a new name that is one edit from a
- * popular package. Only an update (a manifest in both trees) is read; a first install has nothing to compare with.
+ * popular package. A manifest with no old copy counts all its names as new.
  */
 export function dependencySignals(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): Signal[] {
   const out: Signal[] = [];
   const isManifest = eco === "npm" ? NPM_MANIFEST : PYPI_MANIFEST;
   const names = (p: string, f: FileMap) => (eco === "npm" ? npmNames(f.get(p)) : pypiNames(p, f.get(p)));
   for (const p of [...newFiles.keys()].filter(isManifest)) {
-    if (!oldFiles.has(p)) continue;
     const before = new Set([...names(p, oldFiles)].map((n) => norm(eco, n)));
     const added = [...names(p, newFiles)].filter((n) => !before.has(norm(eco, n)));
     if (!added.length) continue;

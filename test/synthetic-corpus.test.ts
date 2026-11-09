@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CORPUS, CORPUS_SPECS, corpusPair, isCorpus } from "../acceptance/synthetic/corpus.ts";
+import { lookalikeOf } from "../src/dependency-signals.ts";
 import type { FileMap } from "../src/prepass.ts";
 
 const dec = new TextDecoder();
@@ -13,6 +14,18 @@ const cases = JSON.parse(readFileSync(resolve(import.meta.dir, "../acceptance/ca
 const CLEAN_HOSTS = new Set(["registry.npmjs.org"]);
 
 describe("the synthetic attack corpus", () => {
+  test("isCorpus knows its own kinds only, never an inherited property name", () => {
+    expect(isCorpus(CORPUS[0]!)).toBe(true);
+    for (const g of ["toString", "constructor", "__proto__", "hasOwnProperty", "nope"]) expect(isCorpus(g), g).toBe(false);
+  });
+
+  test("the npm typosquat fixture names a dependency one edit from a popular package", () => {
+    const p = corpusPair("npm-typosquat-maintainer-swap");
+    const deps = Object.keys(JSON.parse(dec.decode(p.new.get("package.json")!)).dependencies);
+    expect(deps).toEqual(["momnet"]);
+    expect(lookalikeOf("npm", "momnet")).toBe("moment");
+  });
+
   test("it has 20 to 30 cases, each listed in cases.json as an extended synthetic case with matching fields", () => {
     expect(CORPUS.length).toBeGreaterThanOrEqual(20);
     expect(CORPUS.length).toBeLessThanOrEqual(30);

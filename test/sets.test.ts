@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { inSet, loadSets, parseSet, setCounts, setOf } from "../acceptance/sets.ts";
+import { CORPUS, isCorpus } from "../acceptance/synthetic/corpus.ts";
 
 test("an entry without a set is core; an unknown set is an error", () => {
   expect(setOf({ id: "a" })).toBe("core");
@@ -43,5 +44,8 @@ test("the shipped JSON: core is the published 9 attacks and 8 controls plus two 
   // the four evasion cases are core; the further synthetic corpus (acceptance/synthetic/corpus.ts) is extended
   const synth = sets.cases.filter((c) => c.source?.type === "synthetic");
   expect(synth.filter((c) => setOf(c) === "core").length).toBe(4);
-  expect(synth.filter((c) => !c.id.startsWith("synthetic-") || setOf(c) === "extended").length).toBe(synth.length - 4);
+  const corpus = synth.filter((c) => isCorpus((c.source as unknown as { generator: string }).generator));
+  expect(corpus.length).toBe(CORPUS.length);
+  expect(corpus.every((c) => setOf(c) === "extended")).toBe(true);
+  expect(synth.length - corpus.length).toBe(4);
 });
