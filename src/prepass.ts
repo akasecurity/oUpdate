@@ -2,7 +2,7 @@
 // Hard signals hold an update no matter what a model reviewer says; soft
 // signals are handed to the reviewer as pointers. It reads bytes only.
 
-import { dependencySignals } from "./dependency-signals.ts";
+import { dependencySignals, isNpmManifest } from "./dependency-signals.ts";
 import { installView, otherInstallEntry, prepareInert } from "./install-closure.ts";
 
 export type FileMap = Map<string, Uint8Array>;
@@ -899,7 +899,7 @@ function floorSpan(ranges: string[]): { min: Floor; max: Floor } | "unread" {
 // and the surface scan and model review read what it is (OUP-57).
 export function dependencyDowngrades(oldFiles: FileMap, newFiles: FileMap): string[] {
   const names: string[] = [];
-  const paths = [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter((p) => p.split("/").length <= 2 && basename(p) === "package.json" && !p.split("/").includes("node_modules"));
+  const paths = [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter((p) => isNpmManifest(p));
   for (const p of paths) {
     const oldSide = depFields(oldFiles.get(p));
     const newSide = depFields(newFiles.get(p));

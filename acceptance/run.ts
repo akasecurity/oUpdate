@@ -141,7 +141,8 @@ for (const { c, malicious } of all) {
   const synthetic = c.source?.type === "synthetic";
   const base: Registry = synthetic ? { latest: async () => undefined, publishedAt: async () => new Date(now.getTime() - 30 * 86_400_000), artifactUrls: async () => [] } : registries[c.eco];
   const registry: Registry = c.window?.published ? { ...base, publishedAt: async () => new Date(c.window!.published!) } : base;
-  const kind = synthetic ? "SYN " : malicious ? "MAL " : "CTRL";
+  const corpus = c.source?.type === "synthetic" && isCorpus(c.source.generator);
+  const kind = corpus ? "CORP" : synthetic ? "SYN " : malicious ? "MAL " : "CTRL";
   let pair: { old: FileMap; new: FileMap } | undefined;
   let loadErr: unknown;
   try {
@@ -171,7 +172,7 @@ for (const { c, malicious } of all) {
     writeFileSync(join(results, `${tag}.json`), JSON.stringify({ malicious, ...r }, null, 2) + "\n");
     const stoppedBy = r.layers.filter((l) => l.verdict === "stop").map((l) => l.layer);
     const outcome = classifyOutcome(r);
-    scored.push({ id: c.id, kind: synthetic ? (isCorpus((c.source as { generator: string }).generator) ? "corpus" : "synthetic") : malicious ? "attack" : "control", reviewer: rv?.name, result: r });
+    scored.push({ id: c.id, kind: corpus ? "corpus" : synthetic ? "synthetic" : malicious ? "attack" : "control", reviewer: rv?.name, result: r });
     tally.push(`${kind} ${outcome}`);
     summary.push(`${kind} ${tag}: ${outcome.toUpperCase()} ${r.decision}${stoppedBy.length ? ` (stopped by ${stoppedBy.join(", ")})` : ""}`);
     for (const l of r.layers) summary.push(`    ${l.layer.padEnd(9)} ${l.verdict.padEnd(7)} ${l.detail.slice(0, 220)}`);

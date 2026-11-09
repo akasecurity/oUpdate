@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { corpusPair } from "../acceptance/synthetic/corpus.ts";
-import { dependencySignals, lookalikeOf, oneEditApart, stripHashComments } from "../src/dependency-signals.ts";
+import { dependencySignals, isNpmManifest, lookalikeOf, oneEditApart, stripHashComments } from "../src/dependency-signals.ts";
 import { prepass, type FileMap } from "../src/prepass.ts";
 
 const enc = new TextEncoder();
@@ -36,7 +36,7 @@ describe("lookalikeOf", () => {
     expect(lookalikeOf("pypi", "scapy")).toBeUndefined();
     expect(lookalikeOf("pypi", "markdown2")).toBeUndefined();
     expect(lookalikeOf("npm", "preact")).toBeUndefined();
-    expect(lookalikeOf("npm", "reacts")).toBeUndefined();
+    expect(lookalikeOf("npm", "reacts")).toBe("react");
     expect(lookalikeOf("npm", "color")).toBeUndefined();
     const s = dependencySignals("pypi", files({ "setup.py": "setup(install_requires=[])" }), files({ "setup.py": 'setup(install_requires=["scapy"])' }));
     expect(s.map((x) => x.kind)).toEqual(["dependency-added"]);
@@ -88,6 +88,49 @@ describe("dependencySignals", () => {
     expect(dependencySignals("pypi", files({ "pyproject.toml": 'dependencies = ["a"]\n' }), toml)[0]!.detail).toBe("new dependency name(s): d");
   });
 
+  test("pypi: only root files and a top-level dist-info METADATA are read, never a file deeper in the tree", () => {
+    const old = files({});
+    const nu = files({
+      "pkg/setup.py": 'setup(install_requires=["a"])',
+      "docs/requirements.txt": "b\n",
+      "tests/pyproject.toml": 'dependencies = ["c"]\n',
+      "a/b/x.egg-info/requires.txt": "d\n",
+      "a/b.dist-info/METADATA": "Requires-Dist: e\n",
+      "x.dist-info/METADATA": "Requires-Dist: f\n",
+      "requirements-dev.txt": "g\n",
+    });
+    expect(dependencySignals("pypi", old, nu).map((x) => `${x.path}: ${x.detail}`)).toEqual([
+      "x.dist-info/METADATA: new dependency name(s): f",
+      "requirements-dev.txt: new dependency name(s): g",
+    ]);
+  });
+
+  test("pypi: a setuptools sdist's egg-info is read, at the root or under src/, for requires.txt (and PKG-INFO at the root)", () => {
+    const nu = files({
+      "x.egg-info/requires.txt": "a\n[test]\nt\n",
+      "src/y.egg-info/requires.txt": "b\n",
+      "z.egg-info/PKG-INFO": "Requires-Dist: c\n",
+      "src/w.egg-info/PKG-INFO": "Requires-Dist: ignored\n",
+      "requires.txt": "never\n",
+    });
+    expect(dependencySignals("pypi", files({}), nu).map((x) => `${x.path}: ${x.detail}`).sort()).toEqual([
+      "src/y.egg-info/requires.txt: new dependency name(s): b",
+      "x.egg-info/requires.txt: new dependency name(s): a",
+      "z.egg-info/PKG-INFO: new dependency name(s): c",
+    ]);
+  });
+
+  test("pyproject: a single-quoted TOML string has no escapes, so a trailing backslash does not swallow the comment after it", () => {
+    const toml = files({ "pyproject.toml": "dependencies = [\n  'a\\', 'b', # it's\n  'c',\n]\n" });
+    expect(dependencySignals("pypi", files({}), toml)[0]!.detail).toBe("new dependency name(s): a, b, c");
+  });
+
+  test("stripHashComments: single-quoted strings take escapes in Python and none in TOML", () => {
+    const line = "l = ['a\\', 'b'] # it's";
+    expect(stripHashComments(line, { tomlLiteral: true })).toBe("l = ['a\\', 'b'] ");
+    expect(stripHashComments(line, { tomlLiteral: false })).toBe(line);
+  });
+
   test("stripHashComments keeps a # inside a quoted string", () => {
     expect(stripHashComments('x = "a#b" # note\ny = 1')).toBe('x = "a#b" \ny = 1');
   });
@@ -135,6 +178,17 @@ describe("dependencySignals", () => {
   test("pypi: names compare the way pip does (case, dash, underscore, dot)", () => {
     const old = files({ "setup.py": 'setup(install_requires=["Typing_Extensions"])' });
     expect(dependencySignals("pypi", old, files({ "setup.py": 'setup(install_requires=["typing-extensions>=4"])' }))).toEqual([]);
+  });
+});
+
+describe("isNpmManifest", () => {
+  test("the root package.json, and one directory down when asked, never under node_modules", () => {
+    expect(isNpmManifest("package.json", 1)).toBe(true);
+    expect(isNpmManifest("pkg/package.json", 1)).toBe(false);
+    expect(isNpmManifest("pkg/package.json")).toBe(true);
+    expect(isNpmManifest("a/b/package.json")).toBe(false);
+    expect(isNpmManifest("node_modules/package.json")).toBe(false);
+    expect(isNpmManifest("pkg/package.json.bak")).toBe(false);
   });
 });
 
