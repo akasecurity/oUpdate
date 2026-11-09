@@ -89,7 +89,7 @@ describe("the synthetic attack corpus", () => {
       const out = p.stdout.toString();
       for (const id of ids) {
         expect(existsSync(join(dir, "acceptance-results", `${id}-stub.json`)), id).toBe(true);
-        expect(out).toMatch(new RegExp(`^SYN  ${id}-stub: `, "m"));
+        expect(out).toMatch(new RegExp(`^CORP ${id}-stub: `, "m"));
         const r = JSON.parse(readFileSync(join(dir, "acceptance-results", `${id}-stub.json`), "utf8"));
         expect(r.layers.find((l: { layer: string }) => l.layer === "reviewer").verdict).not.toBe("error");
       }

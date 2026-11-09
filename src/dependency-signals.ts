@@ -26,7 +26,7 @@ const PYPI_POPULAR = [
 
 /** Real packages that sit one edit from a popular one (scapy and scipy, preact and react, color and colors): a new dependency on one of these is no lookalike. */
 const REAL_NEIGHBORS: Record<Ecosystem, readonly string[]> = {
-  npm: ["preact", "reacts", "color"],
+  npm: ["preact", "color"],
   pypi: ["scapy", "markdown2"],
 };
 
@@ -57,9 +57,12 @@ export function lookalikeOf(eco: Ecosystem, name: string): string | undefined {
 const LIST = String.raw`(?:[^\]"']|"[^"\n]*"|'[^'\n]*')*`;
 const REQ_NAME = /^\s*([A-Za-z0-9][A-Za-z0-9._-]*)/;
 const reqName = (s: string) => REQ_NAME.exec(s)?.[1];
-/** The text with # comments cut, quoted strings left whole (a "#" inside a string is no comment). */
-export function stripHashComments(text: string): string {
-  return text.replace(/("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|#[^\n]*/g, (m, q: string | undefined) => q ?? "");
+const STRIP_PY = /("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')|#[^\n]*/g;
+// A TOML literal string (single quotes) has no escapes: a backslash before the closing quote ends nothing.
+const STRIP_TOML = /("(?:[^"\\\n]|\\.)*"|'[^'\n]*')|#[^\n]*/g;
+/** The text with # comments cut, quoted strings left whole (a "#" inside a string is no comment). `tomlLiteral`: single-quoted strings take no escapes (TOML); off, they do (Python). */
+export function stripHashComments(text: string, o: { tomlLiteral: boolean } = { tomlLiteral: false }): string {
+  return text.replace(o.tomlLiteral ? STRIP_TOML : STRIP_PY, (_m, q: string | undefined) => q ?? "");
 }
 const quoted = (block: string) => [...block.matchAll(/["']([^"'\n]+)["']/g)].map((m) => reqName(m[1]!));
 
@@ -82,7 +85,7 @@ function pypiNames(path: string, bytes: Uint8Array | undefined): Set<string> {
   const raw = dec.decode(bytes);
   const base = path.split("/").pop()!;
   const add = (n: string | undefined) => n && out.add(n);
-  const text = base === "setup.py" || base === "pyproject.toml" ? stripHashComments(raw) : raw;
+  const text = base === "setup.py" || base === "pyproject.toml" ? stripHashComments(raw, { tomlLiteral: base === "pyproject.toml" }) : raw;
   if (base === "setup.py") {
     for (const m of text.matchAll(new RegExp(`install_requires\\s*=\\s*\\[(${LIST})\\]`, "g"))) quoted(m[1]!).forEach(add);
   } else if (base === "pyproject.toml") {
@@ -104,8 +107,16 @@ function pypiNames(path: string, bytes: Uint8Array | undefined): Set<string> {
   return out;
 }
 
-const NPM_MANIFEST = (p: string) => p === "package.json";
-const PYPI_MANIFEST = (p: string) => /(^|\/)(setup\.py|pyproject\.toml|setup\.cfg|METADATA|PKG-INFO|requires\.txt|requirements[^/]*\.txt)$/.test(p);
+/** A package.json the package itself declares: at the root, or (by default) one directory down, never inside node_modules. */
+export function isNpmManifest(p: string, maxDepth = 2): boolean {
+  const parts = p.split("/");
+  return parts.length <= maxDepth && parts[parts.length - 1] === "package.json" && !parts.includes("node_modules");
+}
+const NPM_MANIFEST = (p: string) => isNpmManifest(p, 1);
+// Root files, the METADATA of a top-level dist-info directory, and the egg-info of a setuptools sdist (the artifact is re-rooted at its PKG-INFO folder, so
+// its dependencies sit in <name>.egg-info/requires.txt, or src/<name>.egg-info/requires.txt): a file deeper in the tree (docs, tests, vendored code) declares nothing of this package.
+const PYPI_MANIFEST = (p: string) =>
+  /^(setup\.py|pyproject\.toml|setup\.cfg|PKG-INFO|requirements[^/]*\.txt|[^/]+\.dist-info\/METADATA|[^/]+\.egg-info\/(requires\.txt|PKG-INFO)|src\/[^/]+\.egg-info\/requires\.txt)$/.test(p);
 
 /**
  * Soft signals for dependency names the new release declares and the old one did not:
