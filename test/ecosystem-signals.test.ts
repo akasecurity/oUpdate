@@ -156,9 +156,9 @@ describe("review fixes, round 2", () => {
     expect(ecosystemSignals(wf(top), wf(none))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "permissions removed, the repository default applies: workflow" }]);
     const job = "on: push\njobs:\n  a:\n    runs-on: x\n    permissions: {}\n";
     expect(permissionsRemoved(job, none)).toEqual(["job a"]);
-    // Moved from the workflow level into every job, a renamed job, or a workflow block kept: no fallback.
+    // Moved from the workflow level into every job, or a workflow block kept: no fallback. A renamed job that lost its block falls back.
     expect(permissionsRemoved(top, "on: push\njobs:\n  a:\n    runs-on: x\n    permissions:\n      contents: read\n")).toEqual([]);
-    expect(permissionsRemoved(job, "on: push\njobs:\n  b:\n    runs-on: x\n")).toEqual([]);
+    expect(permissionsRemoved(job, "on: push\njobs:\n  b:\n    runs-on: x\n")).toEqual(["job b"]);
     expect(permissionsRemoved(job, "on: push\npermissions: read-all\njobs:\n  a:\n    runs-on: x\n")).toEqual([]);
     expect(permissionsRemoved("on: push\npermissions: write-all\njobs:\n  a:\n    runs-on: x\n", none)).toEqual([]);
   });
@@ -396,6 +396,8 @@ describe("guard: every line reader stays linear on 1 MB of repeated input", () =
     spaces: " ", tabs: "\t", newlines: "\n", "[": "[", "{": "{", quotes: '"', "import ": "import ", "permissions:": "permissions:", letters: "a",
     "//\\r\\n": "//\r\n", "//a\\r\\n": "//a\r\n", "\\r\\n": "\r\n", "\\r": "\r", "mixed //a\\r\\n \\t\\r\\n": "//a\r\n \t\r\n",
     "\\t#": "\t#", "\\t#\\r": "\t#\r", '"C"/*\\r': ' "C"/*\r', "-:\\t\\r": "-:\t\r",
+    // Lone carriage returns, a line end for YAML only.
+    "a\\r": "a\r", "  a:\\r": "  a:\r", "- a\\r": "- a\r", '_ "C"\\r': '_ "C"\r', "`\\r": "`\r", "//`\\r": "//`\r", "/*\\r": "/*\r", "import (": "import (", 'import _"': 'import _"', '"\\\\\\r': '"\\\r',
   };
   const fill = (p: string) => p.repeat(Math.ceil(SIZE / p.length));
   // Each entry wraps the filler so the line reader (not only the parser) reads it: a Go file, a Cargo.toml the TOML
@@ -450,5 +452,76 @@ describe("prepass carries the build and CI signals as soft, never hard", () => {
   test("a release with none of these raises none of them", () => {
     const r = prepass("npm", files({ "package.json": "{}" }), files({ "package.json": "{}", "src/a.go": "package a\n", "lib.rs": "fn x() {}" }));
     expect(r.soft.filter((s) => /^(rust|go|workflow)-/.test(s.kind))).toEqual([]);
+  });
+});
+
+describe("soft-signal misses: Go import forms, new jobs without a block, more triggers, a named build.rs, lone CR", () => {
+  const go = (body: string) => files({ "main.go": `package main\n${body}\nfunc main() {}\n` });
+  const cgo = (body: string) => kinds(ecosystemSignals(go(""), go(body)));
+  test('import "C" under a name: _, . or an identifier, alone or in a group', () => {
+    for (const b of ['import _ "C"', 'import . "C"', 'import c "C"', 'import (\n\t_ "C"\n)', 'import (\n\t"fmt"\n\tc "C"\n)', 'import ( _ "C" )'])
+      expect(cgo(b), b).toEqual(["go-cgo-added"]);
+  });
+  test("no space where Go needs none: import\"C\", import.\"C\", a name glued to a raw `C`", () => {
+    for (const b of ['import"C"', "import _`C`", "import .`C`", "import x`C`", 'import."C"', 'import(_"C")', 'import ("C"\n)', 'import ("fmt")\nimport(`C`)'])
+      expect(cgo(b), b).toEqual(["go-cgo-added"]);
+    // Not an import: another identifier ending in import, a selector, a string that holds the words.
+    for (const b of ['reimport "C"', 'x.import "C"', 'var s = "import (\\"C\\")"', "var r = '\"'\nvar q = \"C\""])
+      expect(cgo(b), b).toEqual([]);
+  });
+  test("the raw-string import path `C`", () => {
+    expect(cgo("import `C`")).toEqual(["go-cgo-added"]);
+    expect(cgo("import (\n\t`fmt`\n\t`C`\n)")).toEqual(["go-cgo-added"]);
+    expect(cgo("var s = `\nimport \"C\"\n`")).toEqual([]);
+  });
+  test("a lone carriage return is a space in Go, not a line end", () => {
+    expect(cgo('import ("C"\r)')).toEqual(["go-cgo-added"]);
+    expect(cgo('import (\r"fmt"\r"C"\r)')).toEqual(["go-cgo-added"]);
+    expect(cgo('import\r"C"')).toEqual(["go-cgo-added"]);
+  });
+  test('a backquote inside a comment or a string does not hide import "C"', () => {
+    expect(cgo('// use `go build` here\nimport "C"\n// and `this`')).toEqual(["go-cgo-added"]);
+    expect(cgo('/* a ` b */\nimport "C"\nvar x = "`"')).toEqual(["go-cgo-added"]);
+    expect(cgo('var a = "`"\nimport "C"\nvar b = \'`\'')).toEqual(["go-cgo-added"]);
+    // Still no import: in a comment, or in a string.
+    expect(cgo('// import "C"')).toEqual([]);
+    expect(cgo('/*\nimport "C"\n*/')).toEqual([]);
+    expect(cgo('var s = "import \\"C\\""')).toEqual([]);
+  });
+
+  const wf = (src: string) => files({ [WF]: src });
+  test("a new or renamed job with no permissions block, where every old job had one, falls back to the default", () => {
+    const old = "on: push\njobs:\n  a:\n    runs-on: x\n    permissions:\n      contents: read\n";
+    expect(ecosystemSignals(wf(old), wf(old + "  b:\n    runs-on: x\n"))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "permissions removed, the repository default applies: job b" }]);
+    expect(permissionsRemoved(old, "on: push\njobs:\n  c:\n    runs-on: x\n")).toEqual(["job c"]);
+    // Not when an old job already ran on the default, or a workflow block covers the new job.
+    const mixed = old + "  d:\n    runs-on: x\n";
+    expect(permissionsRemoved(mixed, mixed + "  e:\n    runs-on: x\n")).toEqual([]);
+    expect(permissionsRemoved(old, "on: push\npermissions: read-all\njobs:\n  c:\n    runs-on: x\n")).toEqual([]);
+  });
+  test("issues, discussion and discussion_comment are risky triggers", () => {
+    for (const t of ["issues", "discussion", "discussion_comment"]) {
+      expect(ecosystemSignals(wf("on: push\njobs: {}\n"), wf(`on: [push, ${t}]\njobs: {}\n`)), t).toEqual([{ kind: "workflow-trigger-added", path: WF, detail: `new trigger: ${t}` }]);
+      expect([...workflowTriggers(`on:\n  ${t}:\n    types: [opened]\nbroken: [\n`)]).toEqual([t]);
+    }
+  });
+  test("a Cargo.toml newly naming a build.rs that is shipped but not at the crate root", () => {
+    const toml = (b = "") => `[package]\nname = "x"\n${b}`;
+    const s = ecosystemSignals(files({ "Cargo.toml": toml(), "tools/build.rs": "fn main() {}" }), files({ "Cargo.toml": toml('build = "tools/build.rs"\n'), "tools/build.rs": "fn main() {}" }));
+    expect(s).toEqual([{ kind: "rust-build-script-added", path: "tools/build.rs", detail: "new custom build script named in Cargo.toml; it runs at build time" }]);
+    // The crate root's build.rs runs anyway; an already-named one unchanged is none; a new one is raised on its own path once.
+    expect(ecosystemSignals(files({ "Cargo.toml": toml(), "build.rs": "a" }), files({ "Cargo.toml": toml('build = "build.rs"\n'), "build.rs": "a" }))).toEqual([]);
+    const named = toml('build = "tools/build.rs"\n');
+    expect(ecosystemSignals(files({ "Cargo.toml": named, "tools/build.rs": "a" }), files({ "Cargo.toml": named, "tools/build.rs": "a" }))).toEqual([]);
+    expect(kinds(ecosystemSignals(files({ "Cargo.toml": toml() }), files({ "Cargo.toml": named, "tools/build.rs": "a" })))).toEqual(["rust-build-script-added"]);
+    // Named and changed in the same release: one signal, from its own path. Two manifests newly naming it: one signal.
+    expect(kinds(ecosystemSignals(files({ "Cargo.toml": toml(), "tools/build.rs": "a" }), files({ "Cargo.toml": named, "tools/build.rs": "b" })))).toEqual(["rust-build-script-changed"]);
+    const sub = `[package]\nname = "y"\nbuild = "../tools/build.rs"\n`;
+    expect(kinds(ecosystemSignals(files({ "Cargo.toml": toml(), "y/Cargo.toml": `[package]\nname = "y"\n`, "tools/build.rs": "a" }), files({ "Cargo.toml": named, "y/Cargo.toml": sub, "tools/build.rs": "a" })))).toEqual(["rust-build-script-added"]);
+  });
+  test("the YAML line reader splits on a lone carriage return", () => {
+    const src = "on: push\rpermissions: write-all\rjobs:\r  a:\r    runs-on: x\rbroken: [\n";
+    expect([...workflowWriteGrants(src)]).toEqual(["write-all"]);
+    expect([...workflowTriggers("on:\r  - issues\r  - pull_request_target\rbroken: [\n")].sort()).toEqual(["issues", "pull_request_target"]);
   });
 });

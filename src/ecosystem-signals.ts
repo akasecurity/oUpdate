@@ -23,20 +23,59 @@ const isGoTest = (p: string) => p.endsWith("_test.go");
 export const isWorkflowFile = (p: string) => /(^|\/)\.github\/workflows\/[^/]+\.ya?ml$/.test(p) || /(^|\/)action\.ya?ml$/.test(p);
 
 const GO_GENERATE = /^\s*\/\/go:generate\b/;
-// `import "C"` alone, in an import block line (beside other paths after a `;`), or in a one-line `import ( ... )`, with a trailing comment allowed.
-// Spaces are [ \t], never \s: with the m flag a \s after ^ would run across every following blank line, retried from each.
-// Every "rest of line" class also stops at \r, which ^ and $ treat as a line end: a match attempt then stays inside one line.
-const GO_C_LINE = /^[ \t]*(?:import[ \t]+)?(?:"[^"\r\n]*"[ \t]*;[ \t]*)*"C"[ \t]*(?:;[^\r\n]*)?(?:\/\/[^\r\n]*|\/\*[^\r\n]*?\*\/[ \t]*)?$/m;
-// Between import and ( : whole lines (spaces, an optional // comment, the line end), then spaces. Each repeat ends at a
-// newline and nothing after it can take a newline, so one run of spaces has one split (no two [ \t]* around an optional \n);
-// the comment stops before \r, so a CRLF line end is taken by \r?\n alone (a \r both could take doubles the work per line).
-const GO_C_GROUP = /^[ \t]*import(?:[ \t]*(?:\/\/[^\r\n]*)?\r?\n)*[ \t]*\(([^)\r\n]*)\)/m;
-// Raw strings (backquoted) are blanked first, so a "C" line inside one is no import.
+// Read on goCode's output, where every string is "" except the path "C". A one-path import: `import`, an optional name
+// (`.`, which needs no space, or `_` or an identifier after one), then "C". An import group: its contents to the closing
+// paren, split into tokens; a path with its name may be one token (`_"C"`). Both start only at the keyword, and the group
+// stops at any paren, so a scan costs linear time.
+const GO_IMPORT_C = /(?<![\w.])import(?:\s*\.|\s+(?:_|[A-Za-z_]\w*))?\s*"C"/;
+const GO_IMPORT_GROUP = /(?<![\w.])import\s*\(([^()]*)\)/g;
+const GO_C_TOKEN = /^(?:[_.]|[A-Za-z_]\w*)?"C"$/;
+/**
+ * Go source with its comments taken out (a block comment's newlines kept) and every string and rune turned into "" or ''
+ * ("C" for a string that is exactly C, raw or not: the same import path), read in one pass the way the Go scanner reads
+ * it: a backquote or a quote inside a comment or another string opens nothing. A carriage return is no line end in Go, so
+ * it reads as a space.
+ */
+function goCode(src: string): string {
+  let out = "";
+  let i = 0;
+  let from = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i]!;
+    if (c === "/" && src[i + 1] === "/") {
+      out += src.slice(from, i);
+      const e = src.indexOf("\n", i);
+      i = from = e < 0 ? n : e;
+    } else if (c === "/" && src[i + 1] === "*") {
+      out += src.slice(from, i) + " ";
+      const e = src.indexOf("*/", i + 2);
+      const end = e < 0 ? n : e + 2;
+      out += src.slice(i, end).replace(/[^\n]+/g, "");
+      i = from = end;
+    } else if (c === "`") {
+      out += src.slice(from, i);
+      const e = src.indexOf("`", i + 1);
+      const end = e < 0 ? n : e + 1;
+      out += src.slice(i + 1, end - 1).replace(/\r/g, "") === "C" ? '"C"' : '""';
+      i = from = end;
+    } else if (c === '"' || c === "'") {
+      // An interpreted string or a rune: to its closing quote, past escapes, never past a newline.
+      out += src.slice(from, i);
+      let j = i + 1;
+      while (j < n && src[j] !== c && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
+      out += c === '"' && src.slice(i + 1, j) === "C" ? '"C"' : c + c;
+      i = from = Math.min(j + 1, n);
+    } else i++;
+  }
+  return (out + src.slice(from)).replace(/\r/g, " ");
+}
 // Known limit: a .c, .s or .h file added beside an existing import "C" is compiled by cgo but raises nothing here.
 const hasImportC = (src: string) => {
-  const t = src.replace(/`[^`]*`/g, "``");
-  const g = GO_C_GROUP.exec(t);
-  return GO_C_LINE.test(t) || (!!g && /(^|[\s;])"C"(?=[\s;]|$)/.test(g[1]!));
+  const t = goCode(src);
+  if (GO_IMPORT_C.test(t)) return true;
+  for (const g of t.matchAll(GO_IMPORT_GROUP)) if (g[1]!.split(/[\s;]+/).some((tok) => GO_C_TOKEN.test(tok))) return true;
+  return false;
 };
 const GO_CGO_LINE = /^(?:\/\/\s*)?#cgo\b/;
 
@@ -84,12 +123,15 @@ function cargoSignals(oldFiles: FileMap, newFiles: FileMap, p: string, seen: Set
   if (!script) return [];
   const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
   const sp = posix.normalize(dir + script);
-  // A build.rs is read on its own path; only a script under another name, shipped in this release, is followed from here.
-  if (isRustBuildScript(sp) || !newFiles.has(sp)) return [];
+  if (!newFiles.has(sp)) return [];
   const named = cargoBuildScript(text(oldFiles, p)) === script;
   const prev = oldFiles.get(sp);
+  // A build.rs is read on its own path (a new or changed one is raised there), and the crate root's build.rs runs with or
+  // without the key. Followed from here: a script under another name, and a build.rs elsewhere that the manifest newly
+  // names while it was already shipped (it did not run before, and its own path raises nothing when it is unchanged).
+  if (isRustBuildScript(sp) && (sp === posix.normalize(dir + "build.rs") || named || !prev || !sameBytes(prev, newFiles.get(sp)))) return [];
   // A manifest that newly names the script is still reported; otherwise the script's bytes are compared once per path.
-  if (named && seen.has(sp)) return [];
+  if ((named || isRustBuildScript(sp)) && seen.has(sp)) return [];
   seen.add(sp);
   if (named && sameBytes(prev, newFiles.get(sp))) return [];
   const added = !named || !prev;
@@ -156,7 +198,8 @@ const MAX_FLOW_JOIN = 200;
  * unclosed bracket costs linear time and does not swallow the rest of the file.
  */
 function yamlLogical(src: string): string[] {
-  const raw = lines(src).map(stripComment);
+  // YAML ends a line at a lone \r too (a Go or TOML reader does not).
+  const raw = src.split(/\r\n|\r|\n/).map(stripComment);
   const out: string[] = [];
   let scalarCol = -1;
   for (let i = 0; i < raw.length; i++) {
@@ -195,8 +238,9 @@ interface Workflow {
   triggers: Set<string>;
 }
 
-// Triggers that run with the base repository's token and secrets on an event an outside user can cause.
-const RISKY = new Set(["pull_request_target", "workflow_run", "issue_comment", "pull_request_review_comment"]);
+// Triggers that run with the base repository's token and secrets on an event an outside user can cause (opening an issue
+// or a discussion, or commenting on one, needs no write access).
+const RISKY = new Set(["pull_request_target", "workflow_run", "issue_comment", "pull_request_review_comment", "issues", "discussion", "discussion_comment"]);
 const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** "write-all" and "<scope> write" from a parsed permissions value. */
@@ -302,7 +346,8 @@ function widenedGrants(o: Permissions, n: Permissions): string[] {
 /**
  * Where the new file drops a permissions block the old one had, so the repository or organization default (which can
  * be read-write) applies: the workflow level when a job is left with no block of its own (unless the old workflow
- * block was write-all, which no default exceeds), and a job still present when the workflow level has none.
+ * block was write-all, which no default exceeds), a job still present when the workflow level has none, and a new or
+ * renamed job with no block when every old job had one.
  */
 export function permissionsRemoved(oldSrc: string, newSrc: string): string[] {
   return removedBlocks(readWorkflow(oldSrc).perms, readWorkflow(newSrc).perms);
@@ -312,10 +357,13 @@ function removedBlocks(o: Permissions, n: Permissions): string[] {
   const out: string[] = [];
   if (o.workflow && !o.workflow.has("write-all") && [...n.jobs.values()].some((s) => !s)) out.push("workflow");
   for (const [j, s] of o.jobs) if (s && n.jobs.has(j) && !n.jobs.get(j)) out.push(`job ${j}`);
+  // A new or renamed job with no block of its own, where every old job had one (and no workflow block): the default
+  // applies to a job where none did before.
+  if (!o.workflow && o.jobs.size && [...o.jobs.values()].every((s) => s)) for (const [j, s] of n.jobs) if (!s && !o.jobs.has(j)) out.push(`job ${j}`);
   return out;
 }
 
-/** The risky triggers (pull_request_target, workflow_run, issue_comment, pull_request_review_comment) the file names under its top-level `on:` key. */
+/** The risky triggers (pull_request_target, workflow_run, issue_comment, pull_request_review_comment, issues, discussion, discussion_comment) the file names under its top-level `on:` key. */
 export const workflowTriggers = (src: string | undefined): Set<string> => readWorkflow(src ?? "").triggers;
 
 /** The line reader's triggers, in the scalar, flow list, flow map, block list or block map form of `on:`. */
