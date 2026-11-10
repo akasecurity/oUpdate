@@ -4,7 +4,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
-import { readArtifact, normalizePaths, mergeArtifactPair } from "./artifact.ts";
+import { readArtifact, normalizePaths, mergeArtifactPair, mergeUnpairedNotes } from "./artifact.ts";
 import { cachedReviewer, forgetEntries, FORGET_USAGE, markStoreAnswer, recordResult, reviewerFingerprint, rollupHolds, storeEntries, verdictDirOutsideRepo, type CachedReviewer } from "./verdict-store.ts";
 import { reviewUpdate, stripTerminal, LAYERS, type LayerName, type LayerVerdict, type ReviewResult } from "./review.ts";
 import type { Ecosystem, FileMap } from "./prepass.ts";
@@ -183,17 +183,57 @@ async function loadPypiRelease(a: ReviewArgs, registry: Registry, work: string, 
     writeFileSync(file, bytes);
     return normalizePaths(await readArtifact(file));
   };
-  const oldBy = new Map(before.map((x) => [pairLabel(x), x]));
+  // A file's counterpart is the old file of the same kind and format, independent of listing order: the project name
+  // (PEP 503-normalized, so Foo-Bar-1.0.tar.gz pairs with foo_bar-2.0.tar.gz) and "-<version>" are cut off the start,
+  // the version must end at a boundary ("." before an sdist extension, "-" before wheel tags, so x-10 is not x-1), and
+  // what is left must match: the sdist extension, or the wheel tags with a build tag dropped. A new file with no such
+  // old file, or one whose key repeats on either side, has no old side: all its notes hold.
+  const pep503 = (s: string) => s.toLowerCase().replace(/[-_.]+/g, "_");
+  const counterpartKey = (x: ArtifactFile, version: string) => {
+    const f = x.filename;
+    for (let i = f.indexOf("-"); i > 0; i = f.indexOf("-", i + 1)) {
+      if (pep503(f.slice(0, i)) !== pep503(a.name) || !f.startsWith(`-${version}`, i)) continue;
+      const rest = f.slice(i + 1 + version.length);
+      if (x.packagetype === "sdist") return rest.startsWith(".") ? `sdist\0${rest.toLowerCase()}` : undefined;
+      if (!rest.startsWith("-") || !rest.endsWith(".whl")) return undefined;
+      const tags = rest.slice(1, -4).split("-");
+      if (tags.length === 4 && /^\d/.test(tags[0]!)) tags.shift();
+      return tags.length === 3 ? `wheel\0${tags.join("-")}` : undefined;
+    }
+    return undefined;
+  };
+  const tally = (files: ArtifactFile[], version: string) => {
+    const m = new Map<string, ArtifactFile[]>();
+    for (const x of files) {
+      const k = counterpartKey(x, version);
+      if (k !== undefined) m.set(k, [...(m.get(k) ?? []), x]);
+    }
+    return m;
+  };
+  const oldKeys = tally(before, a.from ?? "");
+  const newKeys = tally(now, a.to);
+  const counterpart = (x: ArtifactFile) => {
+    const k = counterpartKey(x, a.to);
+    const o = k === undefined ? undefined : oldKeys.get(k);
+    return k !== undefined && o?.length === 1 && newKeys.get(k)?.length === 1 ? o[0] : undefined;
+  };
   // Paired files first; a file in an unpaired one is read again unless the same bytes were already shown whole.
-  const ordered = [...now.filter((x) => oldBy.has(pairLabel(x))), ...now.filter((x) => !oldBy.has(pairLabel(x)))];
+  const ordered = [...now.filter((x) => counterpart(x)), ...now.filter((x) => !counterpart(x))];
   const merged = { old: new Map() as FileMap, new: new Map() as FileMap };
-  const seen = new Set<string>();
+  const seen = new Map<string, FileMap>();
   for (const x of ordered) {
-    if (x.sha256 && seen.has(x.sha256.toLowerCase())) continue;
     const label = pairLabel(x);
-    const o = oldBy.get(label);
-    mergeArtifactPair(merged, label, o ? await read(o) : new Map(), await read(x));
-    seen.add(x.sha256!.toLowerCase());
+    const sha = (x.sha256 ?? "").toLowerCase();
+    // Bytes another merged file has are read once; this artifact's notes still go in as its own, with no old side.
+    const dup = seen.get(sha);
+    if (dup) {
+      mergeUnpairedNotes(merged, label, dup);
+      continue;
+    }
+    const o = counterpart(x);
+    const now = await read(x);
+    mergeArtifactPair(merged, label, o ? await read(o) : new Map(), now);
+    seen.set(sha, now);
     let total = 0;
     for (const m of [merged.old, merged.new]) for (const b of m.values()) total += b.length;
     if (total > MAX_RELEASE_BYTES) throw new Error(`release files over ${MAX_RELEASE_BYTES} bytes: ${a.name} ${a.to}`);
