@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { foldKey, markUnstored, mergeArtifactPair, normalizePaths, readArtifact, unstoredMembers } from "../src/artifact.ts";
+import { foldKey, markUnstored, mergeArtifactPair, normalizePaths, readArtifact, unescapeMember, unstoredMembers } from "../src/artifact.ts";
 import { prepass, tarNoteEntries } from "../src/prepass.ts";
 import { carriedNote } from "../src/review.ts";
 import { loadArtifacts, type ReviewArgs } from "../src/cli.ts";
@@ -453,7 +453,8 @@ describe("carried tar notes after review (each lets a new or changed note pass i
     const [oldTar, newTar] = localePair();
     const r = prepassIn(lacking("all"), oldTar, newTar);
     expect(r.holds).toContain("unreadable tar entry names (bsdtar has no UTF-8 locale)");
-    expect(r.carried.some((c) => c.includes("pkg/"))).toBe(false);
+    // The escapes are read back to the name's bytes, so the note is on the right name; the listing still holds.
+    expect(r.carried).toEqual(["non-ascii x-1.0.1/pkg/\u00e9.py"]);
   });
 
   // Codex round 8: an inner "./" or a repeated "/" is collapsed on disk, so the member is found and the twin seen.
@@ -466,9 +467,76 @@ describe("carried tar notes after review (each lets a new or changed note pass i
     });
   }
 
-  test("a zip's case twins add no fold note: twins are read from a tar's member list only", () => {
+  test("case twins in a map with no tar member list still get a fold note after the move", () => {
     const zip: Map<string, Uint8Array> = new Map([["pkg/Foo.py", new Uint8Array([1])], ["pkg/foo.py", new Uint8Array([2])]]);
-    expect(tarNoteEntries(normalizePaths(zip))).toEqual([]);
+    expect(tarNoteEntries(normalizePaths(zip)).map((t) => [t.note, !!t.collided])).toEqual([["case-fold Foo.py foo.py", true]]);
+  });
+
+  // A stored (uncompressed) zip with UTF-8 names, members in the order given: two names a folding filesystem writes as one.
+  const zipBytes = (entries: { name: string; data: string }[]): Uint8Array => {
+    const enc = new TextEncoder();
+    const parts: Uint8Array[] = [];
+    const central: Uint8Array[] = [];
+    let off = 0;
+    for (const e of entries) {
+      const name = enc.encode(e.name);
+      const data = enc.encode(e.data);
+      const crc = Bun.hash.crc32(data) >>> 0;
+      const local = new DataView(new ArrayBuffer(30));
+      [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [8, 0, 2], [10, 0, 2], [12, 0x21, 2], [14, crc, 4], [18, data.length, 4], [22, data.length, 4], [26, name.length, 2], [28, 0, 2]].forEach(([o, v, w]) => (w === 4 ? local.setUint32(o!, v!, true) : local.setUint16(o!, v!, true)));
+      const cd = new DataView(new ArrayBuffer(46));
+      [[0, 0x02014b50, 4], [4, 0x0314, 2], [6, 20, 2], [8, 0x0800, 2], [10, 0, 2], [12, 0, 2], [14, 0x21, 2], [16, crc, 4], [20, data.length, 4], [24, data.length, 4], [28, name.length, 2], [30, 0, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2], [38, (0o100644 << 16) >>> 0, 4], [42, off, 4]].forEach(([o, v, w]) => (w === 4 ? cd.setUint32(o!, v!, true) : cd.setUint16(o!, v!, true)));
+      parts.push(new Uint8Array(local.buffer), name, data);
+      central.push(new Uint8Array(cd.buffer), name);
+      off += 30 + name.length + data.length;
+    }
+    const cdSize = central.reduce((n, c) => n + c.length, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    [[0, 0x06054b50, 4], [4, 0, 2], [6, 0, 2], [8, entries.length, 2], [10, entries.length, 2], [12, cdSize, 4], [16, off, 4], [20, 0, 2]].forEach(([o, v, w]) => (w === 4 ? end.setUint32(o!, v!, true) : end.setUint16(o!, v!, true)));
+    const all = [...parts, ...central, new Uint8Array(end.buffer)];
+    const out = new Uint8Array(all.reduce((n, c) => n + c.length, 0));
+    let at = 0;
+    for (const c of all) {
+      out.set(c, at);
+      at += c.length;
+    }
+    return out;
+  };
+  const readZip = async (bytes: Uint8Array) => {
+    const p = join(dir, `${n++}-w.zip`);
+    writeFileSync(p, bytes);
+    return normalizePaths(await readArtifact(p));
+  };
+
+  // A wheel's twins unpack to one file on a folding filesystem; a Linux install writes both, and imports either.
+  for (const [label, a, b] of [["NFC/NFD", "pkg/\u00e9.py", "pkg/e\u0301.py"], ["case", "pkg/foo.py", "pkg/FOO.py"]] as const) {
+    for (const payloadFirst of [true, false]) {
+      test(`zip ${label} twins hold with the payload member ${payloadFirst ? "first" : "second"}`, async () => {
+        const wheel = (evil: boolean) => {
+          const one = { name: a, data: evil && payloadFirst ? payload : "BENIGN\n" };
+          const two = { name: b, data: evil && !payloadFirst ? payload : "BENIGN\n" };
+          return zipBytes([one, two, { name: "pkg/__init__.py", data: "" }]);
+        };
+        const r = prepass("pypi", await readZip(wheel(false)), await readZip(wheel(true)));
+        // bsdtar on macOS lists both forms of a zip name in one form (a repeated name); elsewhere they are twins.
+        expect(holds(r).some((d) => d.startsWith("case-fold ") || d.startsWith("duplicate path "))).toBe(true);
+        expect(r.carriedTarNotes ?? []).toEqual([]);
+      });
+    }
+  }
+
+  test("a zip with no twins gets no name note: its root module and non-ascii name are what a wheel holds", async () => {
+    const wheel = () => zipBytes([{ name: "six.py", data: "x" }, { name: "pkg/\u00e9.py", data: "y" }]);
+    const r = prepass("pypi", await readZip(wheel()), await readZip(wheel()));
+    expect(holds(r)).toEqual([]);
+  });
+
+  // Opus round 9: bsdtar prints a backslash as \\ and a control character as \ooo even under a UTF-8 locale.
+  test("a member name with a backslash or a tab is read back to its own name, so it is not an unstored member", async () => {
+    const files = () => rel("1.0.0", [{ name: "pkg/a\\b.py", type: "file", data: "x" }, { name: "pkg/c\td.py", type: "file", data: "y" }]);
+    const r = prepass("pypi", await read(files()), await read(files()));
+    expect(holds(r)).toEqual([]);
+    expect(unescapeMember("pkg/a\\\\b\\011c\\303\\251\\td.py")).toBe("pkg/a\\b\tc\u00e9\td.py");
   });
 
   test("an unchanged non-ascii file that folds into the same copy in a second artifact still carries", async () => {

@@ -86,7 +86,7 @@ function versionless(p: string): string {
 // A note's paths (and a hardlink's target) moved the way the step moved the files, with the key recomputed. `sources`
 // are every path the step moved: where two distinct ones land on one path, a note touching it is marked collided, and
 // the path gets a "path collision" note of its own, which always holds.
-function movedNotes(notes: readonly TarNote[], move: (p: string) => string, sources: Iterable<string>, fromRaw = false, foldTwins = true): TarNote[] {
+function movedNotes(notes: readonly TarNote[], move: (p: string) => string, sources: Iterable<string>, fromRaw = false): TarNote[] {
   const from = new Map<string, Set<string>>();
   for (const s of sources) {
     const to = move(s);
@@ -97,7 +97,7 @@ function movedNotes(notes: readonly TarNote[], move: (p: string) => string, sour
   // a filesystem that folds them writes one path. Every destination component path, directories too, is grouped by
   // foldKey; each group of twins gets a case-fold note, and a note on or under a twin is collided.
   const fold = new Map<string, Set<string>>();
-  if (foldTwins) for (const to of from.keys()) {
+  for (const to of from.keys()) {
     const parts = to.split("/");
     for (let j = 1; j <= parts.length; j++) {
       const p = parts.slice(0, j).join("/");
@@ -164,9 +164,9 @@ export function normalizePaths(files: FileMap): FileMap {
   const out: FileMap = new Map();
   const move = (k: string) => versionless(strip ? k.slice(k.indexOf("/") + 1) : k);
   for (const [k, v] of src) out.set(move(k), v);
-  // Twins are read from a tar's member list only: a zip has no member checks (an unpacked zip on a folding filesystem
-  // has already merged them), so its Foo.py and foo.py would hold on a host that keeps both and not on one that does not.
-  markTarNotes(out, movedNotes(tarNoteEntries(src), move, src.keys(), false, NPM_MEMBERS.has(files)));
+  // Twins the move makes are checked for every archive: twins in the archive itself are already a note from its
+  // member list (a tar's or a zip's), which a folding filesystem cannot merge away.
+  markTarNotes(out, movedNotes(tarNoteEntries(src), move, src.keys()));
   return out;
 }
 
@@ -203,6 +203,29 @@ export function foldKey(name: string): string {
   return s;
 }
 
+// bsdtar prints a backslash in a member name as `\\`, a control character as a C escape (`\t`, `\n`) or `\ooo`, and an
+// invalid UTF-8 byte as `\ooo`, even under a UTF-8 locale. Read back, those are the name's own bytes; a byte that is not UTF-8 stays unmatched (U+FFFD).
+const C_ESCAPES: Record<string, number> = { "\\": 0x5c, a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
+export function unescapeMember(listed: string): string {
+  if (!listed.includes("\\")) return listed;
+  const bytes: number[] = [];
+  const enc = new TextEncoder();
+  for (let i = 0; i < listed.length; ) {
+    const m = /^\\(\\|[0-7]{3}|[abfnrtv])/.exec(listed.slice(i, i + 4));
+    if (m) {
+      const c = C_ESCAPES[m[1]!];
+      if (c !== undefined) bytes.push(c);
+      else bytes.push(parseInt(m[1]!, 8) & 0xff);
+      i += m[0].length;
+    } else {
+      const ch = String.fromCodePoint(listed.codePointAt(i)!);
+      bytes.push(...enc.encode(ch));
+      i += ch.length;
+    }
+  }
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
 function nonAscii(name: string): boolean {
   for (const ch of name) if (ch.codePointAt(0)! > 127) return true;
   return false;
@@ -211,7 +234,8 @@ function nonAscii(name: string): boolean {
 // The member list, not the extracted tree. A link, a repeated path, a case-fold collision, a second top directory, a root
 // file, a bundled node_modules member, or a non-ASCII name is a note. A note holds unless the old release had the same
 // one (see the pre-pass); a repeated path, a case-fold collision, an unreadable entry and node_modules always hold.
-function archiveNotes(listing: string[], members: string[]): TarNote[] {
+// `listed`: the member names as bsdtar printed them (escaped), which the -tv lines hold; `members` are unescaped.
+function archiveNotes(listing: string[], members: string[], listed: readonly string[] = members): TarNote[] {
   if (listing.length !== members.length) return [{ note: "unreadable tar entry", key: "unreadable tar entry", kind: "unreadable tar entry" }];
   const notes: TarNote[] = [];
   const at = (kind: string, name: string, raw: string[], extra: Partial<TarNote> = {}) => {
@@ -253,8 +277,8 @@ function archiveNotes(listing: string[], members: string[]): TarNote[] {
       // The target name, read from the listing after the date column: `<member> link to <target>`. A line this cannot
       // read leaves it unread (a hold).
       const cols = /^\S+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+\d+\s+\S+\s/.exec(line);
-      const lead = cols ? `${raw} link to ` : "";
-      const target = cols && line.startsWith(lead, cols[0].length) ? line.slice(cols[0].length + lead.length) : null;
+      const lead = cols ? `${listed[i] ?? raw} link to ` : "";
+      const target = cols && line.startsWith(lead, cols[0].length) ? unescapeMember(line.slice(cols[0].length + lead.length)) : null;
       at("hardlink", name, [raw], { rawTarget: target, target: target === null ? null : diskKey(target) });
     }
   }
@@ -312,7 +336,8 @@ export async function readArtifact(path: string, opts: { passphrase?: string; ma
   }
   if (declared > maxBytes) throw new Error(`artifact declares ${declared} bytes, over the ${maxBytes} cap: ${path}`);
   const names = run(["-tf", path]);
-  const members = names.text.split("\n").filter(Boolean);
+  const listedNames = names.text.split("\n").filter(Boolean);
+  const members = listedNames.map(unescapeMember);
   for (const m of members) {
     if (isUnsafeMember(m)) throw new Error(`unsafe member in ${path}: ${m}`);
   }
@@ -340,13 +365,20 @@ export async function readArtifact(path: string, opts: { passphrase?: string; ma
       }
     };
     walk("");
+    // A file or link member the tree does not hold under its own name (a filesystem stored two names as one file, or
+    // kept another form of the name): it was never read, so each note naming it is collided and holds.
+    // With no UTF-8 locale the names are escapes: every name-based check would read the wrong name, so it holds.
+    const lost: TarNote[] = listed.localeLost || names.localeLost ? [{ note: "unreadable tar entry names (bsdtar has no UTF-8 locale)", key: "unreadable tar entry names", kind: "unreadable tar entry" }] : [];
     if (!isZip(path)) {
-      // A file or link member the tree does not hold under its own name (a filesystem stored two names as one file, or
-      // kept another form of the name): it was never read, so each note naming it is collided and holds.
-      // With no UTF-8 locale the names are escapes: every name-based check would read the wrong name, so it holds.
-      const lost: TarNote[] = listed.localeLost || names.localeLost ? [{ note: "unreadable tar entry names (bsdtar has no UTF-8 locale)", key: "unreadable tar entry names", kind: "unreadable tar entry" }] : [];
-      markTarNotes(out, [...lost, ...markUnstored(archiveNotes(listing, members), unstoredMembers(listing, members, out))]);
+      markTarNotes(out, [...lost, ...markUnstored(archiveNotes(listing, members, listedNames), unstoredMembers(listing, members, out))]);
       NPM_MEMBERS.set(out, members);
+    } else {
+      // A zip (a wheel) gets the name checks only: twins by case or form, a repeated name (bsdtar on macOS lists both
+      // forms of a name in one form), and a member not stored under its own name. Its other shapes (a root module, a
+      // non-ascii name) are what a wheel normally holds.
+      const nameKinds = new Set(["case-fold", "duplicate path", "unreadable tar entry"]);
+      const twins = archiveNotes(listing, members, listedNames).filter((n) => nameKinds.has(n.kind));
+      markTarNotes(out, [...lost, ...markUnstored(twins, unstoredMembers(listing, members, out))]);
     }
     return out;
   } finally {
