@@ -30,21 +30,52 @@ export function isLink(bytes: Uint8Array): boolean {
 
 // Tar member problems read from the archive listing, not the extracted tree.
 // npm skips link entries; bsdtar does not. The note survives path normalization.
-const TAR_NOTES = new WeakMap<FileMap, string[]>();
+// `note` is shown as read (with the archive's top dir). `paths` are the note's members where this map holds them,
+// carried through every step that moves a file (npm strip, normalizePaths, mergeArtifactPair; after a merge they are
+// merged keys, possibly under a `label/` prefix, and `key` keeps the pre-merge paths), and `raw` the member names as listed. `key` compares one release's note with the other's: a JSON array of the kind and the normalized
+// paths (a hardlink adds its target), never the display text, so "top dirs a b c" from {a, "b c"} and {"a b", c}
+// differ. `pair` names the one mergeArtifactPair call (an artifact instance, not its label) the note came from: a note
+// is compared only with that pair's old notes. `collided`: the map does not hold the note's member as listed, so the
+// note always holds. Either a path or target of the note is where two distinct paths of its release landed after
+// normalizing (demo-1.data/x and demo-2.data/x), or the unpacked tree did not hold one of its members under its own
+// name (a filesystem stored two names as one file).
+export type TarNote = {
+  note: string;
+  key: string;
+  kind: string;
+  paths?: string[];
+  raw?: string[];
+  target?: string | null;
+  rawTarget?: string | null;
+  words?: string[];
+  pair?: string;
+  collided?: boolean;
+};
 
-export function markTarNotes(files: FileMap, notes: readonly string[]): void {
+/** The comparison key: a JSON array of the kind and the note's paths in the current map, plus a hardlink's target name. */
+export function noteKey(n: TarNote): string {
+  const kind = n.kind;
+  if (!n.paths && !n.words) return n.key;
+  return JSON.stringify([kind, ...(n.paths ?? n.words ?? []), ...(kind === "hardlink" ? [n.target ?? null] : [])]);
+}
+const TAR_NOTES = new WeakMap<FileMap, TarNote[]>();
+
+export function markTarNotes(files: FileMap, notes: readonly TarNote[]): void {
   if (notes.length === 0) return;
   const prev = TAR_NOTES.get(files) ?? [];
-  const seen = new Set(prev);
+  // One note per pair: the same note text from two artifacts of a release is two notes.
+  const id = (n: TarNote) => `${n.pair ?? ""}\0${n.note}`;
+  const seen = new Set(prev.map(id));
   const next = [...prev];
-  for (const note of notes) if (!seen.has(note)) {
-    seen.add(note);
-    next.push(note);
+  for (const n of notes) {
+    if (seen.has(id(n))) continue;
+    seen.add(id(n));
+    next.push(n);
   }
   TAR_NOTES.set(files, next);
 }
 
-export function tarNotes(files: FileMap): readonly string[] {
+export function tarNoteEntries(files: FileMap): readonly TarNote[] {
   return TAR_NOTES.get(files) ?? [];
 }
 
@@ -98,6 +129,8 @@ export interface Signal {
 export interface PrepassResult {
   hard: Signal[];
   soft: Signal[];
+  /** Tar notes the old release had too (same kind and path, a link's bytes unchanged): shown, never a hold. */
+  carriedTarNotes?: string[];
   added: string[];
   removed: string[];
   changed: string[];
@@ -993,6 +1026,12 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   return out;
 }
 
+// A duplicate path, case-fold collision or unreadable entry: what an installer writes can differ from the file read here.
+// A bundled node_modules member: a dependency's contents, which a carried note would stop reviewing as one.
+// A path collision: two distinct paths of the release landed on one path after the npm strip or normalizePaths, so the
+// map holds one file for both (package/x and other/x, demo-1.data/x and demo-2.data/x), with or without another note.
+const ALWAYS_HOLD_NOTE = new Set(["duplicate path", "case-fold", "unreadable tar entry", "node_modules", "path collision", "unstored member"]);
+
 const BUILD_INCLUDE_RE = /^\s*(data|data-files|data_files|include|force-include|shared-data|package-data|package_data)\s*=/;
 
 export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): PrepassResult {
@@ -1002,8 +1041,39 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
   const removed: string[] = [];
   const changed: string[] = [];
 
-  for (const detail of new Set([...tarNotes(oldFiles), ...tarNotes(newFiles)])) {
-    hard.push({ kind: "tar-entry", path: detail.split(" ").slice(1).join(" ") || "archive", detail: detail.slice(0, 200) });
+  // A tar note holds when the old release did not have it: a new link, homoglyph, root file and the like, or every note
+  // of a first release. One the same pair's old side had too is carried over and shown, each old note used once, with
+  // exceptions that still hold: a symlink whose target bytes changed, a hardlink whose target name is unread, and the
+  // ALWAYS_HOLD_NOTE kinds. A hardlink's target name is in its key, so a retarget to identical bytes is a new note. A
+  // collided note (two paths of a release on one normalized key) holds on either side: the map shows only one of them.
+  const oldPool = new Map<string, TarNote[]>();
+  for (const n of tarNoteEntries(oldFiles)) {
+    const k = `${n.pair ?? ""}\0${n.key}`;
+    const pool = oldPool.get(k);
+    if (pool) pool.push(n);
+    else oldPool.set(k, [n]);
+  }
+  const carriedTarNotes: string[] = [];
+  const linkAt = (n: TarNote) => n.paths?.[0] ?? n.note.slice(n.kind.length + 1);
+  // A merged note names its artifact, so a hold and a carry with one text tell which file each is about.
+  const shown = (n: TarNote) => (n.pair ? `${n.pair.split("\0")[0]}: ${n.note}` : n.note);
+  // The file the note is about, at its key in this map (a merged key), for the reviewer's pointer.
+  const pathOf = (n: TarNote) => (n.paths?.[0] && !n.paths[0].startsWith("\0") ? n.paths[0] : n.note.split(" ").slice(1).join(" ") || "archive");
+  const sameLink = (o: TarNote, n: TarNote) => {
+    const a = oldFiles.get(linkAt(o));
+    const b = newFiles.get(linkAt(n));
+    return !!a && !!b && isLink(a) && isLink(b) && a.length === b.length && Buffer.compare(a, b) === 0;
+  };
+  for (const n of tarNoteEntries(newFiles)) {
+    const kind = n.kind;
+    const pool = oldPool.get(`${n.pair ?? ""}\0${n.key}`) ?? [];
+    const ok = !n.collided && !ALWAYS_HOLD_NOTE.has(kind) && (kind !== "hardlink" || (n.target !== undefined && n.target !== null));
+    // Any old note on the same key may be this one's counterpart; each is used once.
+    const at = ok ? pool.findIndex((o) => !o.collided && (kind !== "symlink" || sameLink(o, n))) : -1;
+    if (at >= 0) {
+      pool.splice(at, 1);
+      carriedTarNotes.push(shown(n));
+    } else hard.push({ kind: "tar-entry", path: pathOf(n), detail: shown(n).slice(0, 200) });
   }
 
   for (const p of oldFiles.keys()) if (!newFiles.has(p)) removed.push(p);
@@ -1073,5 +1143,5 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
   soft.push(...dependencySignals(eco, oldFiles, newFiles));
   soft.push(...ecosystemSignals(oldFiles, newFiles));
 
-  return { hard, soft, added, removed, changed };
+  return { hard, soft, added, removed, changed, ...(carriedTarNotes.length ? { carriedTarNotes } : {}) };
 }

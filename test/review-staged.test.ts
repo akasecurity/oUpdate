@@ -229,7 +229,7 @@ describe("a large release with no cap asked for is read in every part", () => {
 describe("a signal that names no file of the release", () => {
   test("in the reorder, a skipped tar entry takes no room in a part and prints no empty header", async () => {
     const art = release(12);
-    markTarNotes(art.new, ["skipped evil/skipped-entry"]);
+    markTarNotes(art.new, [{ note: "skipped evil/skipped-entry", key: "skipped evil/skipped-entry", kind: "skipped" }]);
     const { prompts } = await run(art, { maxParts: 3, maxStages: 30 });
     expect(prompts.length).toBeGreaterThan(0);
     expect(prompts.join("\n")).not.toContain("=== evil/skipped-entry");
@@ -237,7 +237,7 @@ describe("a signal that names no file of the release", () => {
   });
   test("the ranked tier itself reads no phantom: signal files alone over the limit, a skipped tar entry among the ranked paths", async () => {
     const art = release(12, { "setup.py": "v = 3\n".repeat(120) }); // setup.py alone is several parts, so the narrowing reaches the ranked tier
-    markTarNotes(art.new, ["skipped evil/skipped-entry"]);
+    markTarNotes(art.new, [{ note: "skipped evil/skipped-entry", key: "skipped evil/skipped-entry", kind: "skipped" }]);
     const { prompts, rev } = await run(art, { maxParts: 1, maxStages: 1 });
     expect(rev.detail).toMatch(/too large for model review: \d+ parts > 1 \(signal files alone\)/); // the tier is the ranked one
     expect(prompts).toHaveLength(1);

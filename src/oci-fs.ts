@@ -3,7 +3,7 @@
 // honoring `.wh.<name>` and `.wh..wh..opq`; one file's bytes come out of its layer on demand (`bsdtar -xOf`). Every
 // limit is checked before the work it bounds and throws a LayerError, which the review turns into a hold.
 
-import { isUnsafeMember } from "./artifact.ts";
+import { bsdtarEnv, isUnsafeMember, LOCALE_FAILED } from "./artifact.ts";
 import type { LayerInfo } from "./adapters/oci/registry.ts";
 
 export interface Limits {
@@ -167,7 +167,7 @@ const globSafe = (member: string): string => member.replace(/[\\*?[\]]/g, "\\$&"
  * reading, and bsdtar is stopped the moment either passes, so a hostile layer cannot make the listing grow without limit.
  */
 async function streamListing(digest: string, file: string, maxEntries: number, timeoutMs: number): Promise<string> {
-  const p = Bun.spawn(["bsdtar", "-tv", "--numeric-owner", "-f", file], { stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawn(["bsdtar", "-tv", "--numeric-owner", "-f", file], { stdout: "pipe", stderr: "pipe", env: bsdtarEnv() });
   const timer = deadline(p, timeoutMs);
   const errText = new Response(p.stderr).text();
   const dec = new TextDecoder();
@@ -195,6 +195,8 @@ async function streamListing(digest: string, file: string, maxEntries: number, t
   }
   if (timer.timedOut()) throw new LayerError(digest, `bsdtar did not list the layer within ${timeoutMs} ms`);
   if (rc !== 0) throw new LayerError(digest, `bsdtar could not list the layer: ${(await errText).trim().split("\n")[0]}`);
+  // Under the C locale the listed names are octal escapes, not the member names.
+  if (LOCALE_FAILED.test(await errText)) throw new LayerError(digest, "bsdtar has no UTF-8 locale, so the layer's member names are unreadable");
   return text + dec.decode();
 }
 
@@ -267,7 +269,7 @@ export class LayerStore {
     this.contentRead += want;
     if (this.contentRead > this.limits.maxContent) throw new LayerError(node.layer, `content read passes the ${this.limits.maxContent} byte cap at ${node.path}`);
     // Streamed: the bytes are counted as they arrive, and the pull stops at the size the header declares.
-    const p = Bun.spawn(["bsdtar", "-xOf", listing.file, "--", globSafe(node.member)], { stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn(["bsdtar", "-xOf", listing.file, "--", globSafe(node.member)], { stdout: "pipe", stderr: "pipe", env: bsdtarEnv() });
     const ms = this.limits.timeoutMs ?? LIMITS.timeoutMs!;
     const timer = deadline(p, ms);
     const errText = new Response(p.stderr).text();
@@ -299,6 +301,7 @@ export class LayerStore {
     if (timer.timedOut()) throw new LayerError(node.layer, `bsdtar did not read ${node.path} within ${ms} ms`);
     if (want < node.size && total === want) return concat(chunks, total);
     if (rc !== 0) throw new LayerError(node.layer, `bsdtar could not read ${node.path}: ${(await errText).trim().split("\n")[0]}`);
+    if (LOCALE_FAILED.test(await errText)) throw new LayerError(node.layer, `bsdtar has no UTF-8 locale, so ${node.path} was not matched by its name`);
     if (total !== node.size) throw new LayerError(node.layer, `${node.path} is ${total} bytes, its header declares ${node.size}`);
     return concat(chunks, total);
   }

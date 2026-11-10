@@ -2329,6 +2329,12 @@ export function changedFiles(old: FileMap, now: FileMap): { old: FileMap; new: F
   return { old: o, new: n };
 }
 
+// Tar notes the old release had too: info for the reader, never a hold.
+export function carriedNote(pre: PrepassResult): string {
+  const c = pre.carriedTarNotes ?? [];
+  return c.length ? `; carried over from the old release (no hold): ${c.slice(0, 3).join("; ")}${c.length > 3 ? ` and ${c.length - 3} more` : ""}` : "";
+}
+
 /** Files with a pre-pass or scanner signal, plus manifests and install or startup files: the last tier before a human. */
 export function signalPaths(pre: PrepassResult): Set<string> {
   const out = new Set<string>([...pre.hard, ...pre.soft].filter((s) => !isRegistrySignal(s)).map((s) => s.path));
@@ -2515,8 +2521,8 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
     else
       layers.push(
         pre.hard.length
-          ? { layer: "prepass", verdict: "stop", detail: pre.hard.map((s) => `${s.kind} ${s.path}`).join("; ") }
-          : { layer: "prepass", verdict: "pass", detail: `no hard signals; ${pre.soft.length} soft` },
+          ? { layer: "prepass", verdict: "stop", detail: pre.hard.map((s) => `${s.kind} ${s.path}`).join("; ") + carriedNote(pre) }
+          : { layer: "prepass", verdict: "pass", detail: `no hard signals; ${pre.soft.length} soft` + carriedNote(pre) },
       );
   } else layers.push({ layer: "prepass", verdict: "skipped", detail: "not selected" });
 
