@@ -61,10 +61,46 @@ export function diffSeq(a: string[], b: string[], maxD = 4000, maxWork = 50_000_
 const LONG = 500;
 const CONTEXT = 60;
 
+// A minifier's rename: one short identifier for another. Keywords are left out, so `aF`->`in` stays a shown change.
+const SHORT_ID = /^[A-Za-z_$][\w$]{0,2}$/;
+const KEYWORD = new Set(["do", "if", "in", "of", "for", "let", "new", "try", "var"]);
+const renameable = (s: string) => SHORT_ID.test(s) && !KEYWORD.has(s);
+const RENAMES_SHOWN = 5;
+const renameList = (pairs: string[]) => pairs.slice(0, RENAMES_SHOWN).join(", ") + (pairs.length > RENAMES_SHOWN ? ` and ${pairs.length - RENAMES_SHOWN} more` : "");
+
 function tokenDiff(oldLine: string, newLine: string): string | undefined {
   const tok = (s: string) => s.match(/\w+|\s+|[^\w\s]/g) ?? [];
   const ops = diffSeq(tok(oldLine), tok(newLine), 3000);
   if (!ops) return undefined;
+  // Bundlers rename locals between builds, so a line can differ only by `aF`->`dF`. A short-identifier swap that
+  // maps one to one within the line is written as its new name and listed at the end, so the real changes stand out.
+  const chunks: { del: string; add: string }[] = [];
+  for (let i = 0; i < ops.length; ) {
+    if (ops[i]!.op === "=") { i++; continue; }
+    let del = "";
+    let add = "";
+    while (i < ops.length && ops[i]!.op !== "=") {
+      if (ops[i]!.op === "-") del += ops[i]!.v;
+      else add += ops[i]!.v;
+      i++;
+    }
+    chunks.push({ del, add });
+  }
+  const to = new Map<string, Set<string>>();
+  const from = new Map<string, Set<string>>();
+  for (const { del, add } of chunks) {
+    if (!renameable(del) || !renameable(add)) continue;
+    (to.get(del) ?? to.set(del, new Set()).get(del)!).add(add);
+    (from.get(add) ?? from.set(add, new Set()).get(add)!).add(del);
+  }
+  // A minifier renames every use, so the new name is absent from the old line and the old name from the new one: aF->bQ
+  // beside an unchanged bQ merges two names (a call now goes elsewhere) and is shown as a change.
+  const oldToks = new Set(tok(oldLine));
+  const newToks = new Set(tok(newLine));
+  const isRename = (del: string, add: string) => to.get(del)?.size === 1 && from.get(add)?.size === 1 && !oldToks.has(add) && !newToks.has(del);
+  const pairs: string[] = [];
+  for (const { del, add } of chunks) if (isRename(del, add) && !pairs.includes(`${del}→${add}`)) pairs.push(`${del}→${add}`);
+  if (pairs.length && chunks.every(({ del, add }) => isRename(del, add))) return `[only identifiers renamed: ${renameList(pairs)}]`;
   // Walk the ops, keeping CONTEXT chars of unchanged text around each change.
   let out = "";
   let eq = "";
@@ -78,22 +114,25 @@ function tokenDiff(oldLine: string, newLine: string): string | undefined {
   for (let i = 0; i < ops.length; ) {
     const o = ops[i]!;
     if (o.op === "=") { eq += o.v; i++; continue; }
-    flushEq(false);
-    started = true;
     let del = "";
     let add = "";
+    let rawDel = "";
+    let rawAdd = "";
     while (i < ops.length && ops[i]!.op !== "=") {
       // A whitespace token as JSON, so a space or a tab inside a minified line is visible.
       const bit = /^\s+$/.test(ops[i]!.v) ? JSON.stringify(ops[i]!.v) : ops[i]!.v;
-      if (ops[i]!.op === "-") del += bit;
-      else add += bit;
+      if (ops[i]!.op === "-") { del += bit; rawDel += ops[i]!.v; }
+      else { add += bit; rawAdd += ops[i]!.v; }
       i++;
     }
+    if (isRename(rawDel, rawAdd)) { eq += rawAdd; continue; }
+    flushEq(false);
+    started = true;
     if (del) out += `[-${del}-]`;
     if (add) out += `{+${add}+}`;
   }
   flushEq(true);
-  return out;
+  return pairs.length ? `${out} [renamed: ${renameList(pairs)}]` : out;
 }
 
 // Renders the change between two file texts for the reviewer: hunks in file order with
@@ -104,7 +143,18 @@ function tokenDiff(oldLine: string, newLine: string): string | undefined {
 const QUOTE_NOTE = " [lines below are exact text as JSON strings, to show a CR or trailing whitespace]";
 const needsQuote = (l: string) => l.includes("\r") || /[ \t]$/.test(l);
 
-export function renderLineDiff(before: string | undefined, after: string | undefined): string {
+// Key for the present-before mark: whitespace runs collapsed, so a re-indented moved line still matches.
+export const presentKey = (l: string) => l.trim().replace(/\s+/g, " ");
+// Shorter lines (`}`, `return x;`) recur everywhere, so finding one in the old release says nothing.
+const PRESENT_MIN = 24;
+export function presentLine(l: string): string | undefined {
+  const k = presentKey(l);
+  return k.replace(/ /g, "").length >= PRESENT_MIN ? k : undefined;
+}
+
+// `oldLineSet`, when given, holds presentLine of every line in the old release's text files: an added line in it is
+// shown as `=` (moved or reordered code the old release already had), so the reviewer judges the changes around it.
+export function renderLineDiff(before: string | undefined, after: string | undefined, oldLineSet?: Set<string>): string {
   if (before !== undefined && after !== undefined && before !== after && (after === before.replaceAll("\n", "\r\n") || before === after.replaceAll("\n", "\r\n"))) {
     return "[line endings only: every line converted between CRLF and LF]\n";
   }
@@ -112,12 +162,18 @@ export function renderLineDiff(before: string | undefined, after: string | undef
   const oldLines = split(before);
   const newLines = split(after);
   const ops = diffSeq(oldLines, newLines);
+  // A line starting `==` stays `+`, so a marked line never reads as a `=== path ===` file header.
+  const mark = (l: string) => {
+    if (!oldLineSet || l.startsWith("==")) return "+";
+    const k = presentLine(l);
+    return k !== undefined && oldLineSet.has(k) ? "=" : "+";
+  };
   if (!ops) {
     // Too many edits to order: show the whole new version. Dropping lines both versions hold would hide a
     // reorder (an activation line moved above its payload); the review's size holds bound the length.
     const q = newLines.some(needsQuote);
     const show = (l: string) => (q ? JSON.stringify(l) : l);
-    return [`[too many changes to show in order: the whole new version follows]${q ? QUOTE_NOTE : ""}\n`, ...newLines.map((l) => `+${show(l)}\n`)].join("");
+    return [`[too many changes to show in order: the whole new version follows]${q ? QUOTE_NOTE : ""}\n`, ...newLines.map((l) => `${mark(l)}${show(l)}\n`)].join("");
   }
 
   let out = "";
@@ -143,7 +199,7 @@ export function renderLineDiff(before: string | undefined, after: string | undef
         out += t === undefined ? `-${show(del[j]!)}\n+${show(add[j]!)}\n` : `~${t}\n`;
       }
     } else {
-      out += del.map((l) => `-${show(l)}\n`).join("") + add.map((l) => `+${show(l)}\n`).join("");
+      out += del.map((l) => `-${show(l)}\n`).join("") + add.map((l) => `${mark(l)}${show(l)}\n`).join("");
     }
   }
   return out;
