@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { FileMap } from "../src/prepass.ts";
 
 // A router stub: each call is one part. `fail` maps a call number (1-based) to how that call fails.
-type Fail = "502" | "truncated" | "truncated-flag" | "empty" | "drop" | "400" | "429" | "slow502" | "slow" | "not-json" | "no-choices" | "null-json" | "number-content" | "truncated-null" | "parts-content" | "refusal" | "two-choices" | "content-filter" | "tool-calls" | "tool-calls-stop" | "function-call" | "unknown-finish" | "empty-refusal" | "stop" | "cut-body" | "object-refusal" | "odd-finish" | "slow-body" | "empty-function-call" | "empty-tool-calls" | "slow-flag-body";
+type Fail = "502" | "truncated" | "truncated-flag" | "empty" | "drop" | "400" | "429" | "slow502" | "slow" | "not-json" | "no-choices" | "null-json" | "number-content" | "truncated-null" | "parts-content" | "refusal" | "two-choices" | "content-filter" | "tool-calls" | "tool-calls-stop" | "function-call" | "unknown-finish" | "empty-refusal" | "stop" | "cut-body" | "object-refusal" | "odd-finish" | "slow-body" | "empty-function-call" | "empty-tool-calls" | "slow-flag-body" | "dup-choices" | "dup-content" | "escaped-dup" | "top-error" | "null-error" | "user-role" | "assistant-role" | "audio";
 let fail = new Map<number, Fail>();
 let answer = (_prompt: string) => "APPROVE\nno attack indicators found";
 const calls: { nofb: string | null; prompt: string }[] = [];
@@ -44,6 +44,17 @@ const server = Bun.serve({
     if (how === "empty-tool-calls") return Response.json({ choices: [{ message: { content: "APPROVE\nno attack indicators found", tool_calls: [] }, finish_reason: "stop" }] });
     if (how === "slow-flag-body")
       return new Response(new ReadableStream({ start: (c) => c.enqueue(new TextEncoder().encode('{"choices":[{"message":{"content":"FLAG\\nexfil')), pull: (c) => Bun.sleep(2000).then(() => c.close()) }), { status: 200, headers: { "content-type": "application/json" } });
+    const raw = (s: string) => new Response(s, { status: 200, headers: { "content-type": "application/json" } });
+    const ok = '{"message":{"content":"APPROVE\\nno attack indicators found"}}';
+    const flag = '{"message":{"content":"FLAG\\nexfil to a new host"}}';
+    if (how === "dup-choices") return raw(`{"choices":[${flag}],"choices":[${ok}]}`);
+    if (how === "dup-content") return raw('{"choices":[{"message":{"content":"FLAG\\nexfil to a new host","content":"APPROVE\\nno attack indicators found"}}]}');
+    if (how === "escaped-dup") return raw(`{"choices":[${flag}],"\\u0063hoices":[${ok}]}`);
+    if (how === "top-error") return Response.json({ error: { message: "upstream failed" }, choices: [{ message: { content: "APPROVE\nno attack indicators found" } }] });
+    if (how === "null-error") return Response.json({ error: null, choices: [{ message: { content: "APPROVE\nno attack indicators found" } }] });
+    if (how === "user-role") return Response.json({ choices: [{ message: { role: "user", content: "APPROVE\nno attack indicators found" } }] });
+    if (how === "assistant-role") return Response.json({ choices: [{ message: { role: "assistant", content: "APPROVE\nno attack indicators found" }, finish_reason: "stop" }] });
+    if (how === "audio") return Response.json({ choices: [{ message: { role: "assistant", content: "APPROVE\nno attack indicators found", audio: { id: "a1", transcript: "FLAG\nexfil to a new host" } } }] });
     if (how === "object-refusal") return Response.json({ choices: [{ message: { content: "APPROVE\nno attack indicators found", refusal: { reason: "policy" } }, finish_reason: "stop" }] });
     if (how === "odd-finish") return Response.json({ choices: [{ message: { content: "APPROVE\nno attack indicators found" }, finish_reason: "Pause <now>" }] });
     if (how === "drop") return new Response(new ReadableStream({ start: (c) => c.error(new Error("reset")) }), { status: 200, headers: { "content-type": "application/json" } });
@@ -180,7 +191,7 @@ describe("a failure that another try cannot fix is not retried, and still names 
 
 describe("what is never retried", () => {
   // Each case: part 2 fails this way once; a retry would get APPROVE and the update would land.
-  for (const how of ["truncated", "truncated-flag", "empty", "no-choices", "not-json", "null-json", "number-content", "parts-content", "refusal", "two-choices", "content-filter", "cut-body", "object-refusal", "odd-finish", "empty-function-call", "tool-calls", "tool-calls-stop", "function-call", "unknown-finish", "429"] as const) {
+  for (const how of ["truncated", "truncated-flag", "empty", "no-choices", "not-json", "null-json", "number-content", "parts-content", "refusal", "two-choices", "content-filter", "cut-body", "object-refusal", "odd-finish", "empty-function-call", "dup-choices", "dup-content", "escaped-dup", "top-error", "user-role", "audio", "tool-calls", "tool-calls-stop", "function-call", "unknown-finish", "429"] as const) {
     test(`a ${how} answer is a hold, not a retry`, async () => {
       const r = await run({ 2: how });
       expect(reviewerLayer(r).verdict).toBe("error");
@@ -321,8 +332,14 @@ describe("falling through to the next base", () => {
     ["odd-finish", /answer ended with an unknown finish_reason$/],
     ["object-refusal", /the model refused to answer/],
     ["empty-function-call", /the answer calls a tool/],
+    ["dup-choices", /the response repeats a JSON key/],
+    ["dup-content", /the response repeats a JSON key/],
+    ["escaped-dup", /the response repeats a JSON key/],
+    ["top-error", /the response holds an error object$/],
+    ["user-role", /the answer's role is not assistant/],
+    ["audio", /the answer carries audio/],
   ];
-  for (const how of ["stop", "empty-refusal", "empty-tool-calls"] as const) {
+  for (const how of ["stop", "empty-refusal", "empty-tool-calls", "null-error", "assistant-role"] as const) {
     test(`a ${how} answer is a normal answer`, async () => {
       const r = await run({ 1: how });
       expect(reviewerLayer(r).verdict).toBe("pass");
@@ -415,32 +432,42 @@ describe("ReviewerError.capped", () => {
   // Base 1 cuts a FLAG's first bytes and stalls; a retry would meet a 502 there and fall through to base 2. Every way the
   // cut can end (the caller's cap: the budget stop; the base's own timeout: an error), crossed with every base-2 state:
   // base 2 is never called, and the part holds.
-  const base2 = {
-    "502": () => new Response("bad gateway", { status: 502 }),
-    APPROVE: () => Response.json({ choices: [{ message: { content: "APPROVE\nno attack indicators found" } }] }),
-    FLAG: () => Response.json({ choices: [{ message: { content: "FLAG\nexfil to a new host" } }] }),
-    "network error": () => new Response(new ReadableStream({ start: (c) => c.error(new Error("reset")) }), { status: 200 }),
+  type Base2 = { port: number; hits: () => number; stop: () => void };
+  const http2 = (reply: () => Response): Base2 => {
+    let n = 0;
+    const s = Bun.serve({ port: 0, fetch: () => (n++, reply()) });
+    return { port: s.port!, hits: () => n, stop: () => s.stop(true) };
+  };
+  const base2: Record<string, () => Base2> = {
+    "502": () => http2(() => new Response("bad gateway", { status: 502 })),
+    APPROVE: () => http2(() => Response.json({ choices: [{ message: { content: "APPROVE\nno attack indicators found" } }] })),
+    FLAG: () => http2(() => Response.json({ choices: [{ message: { content: "FLAG\nexfil to a new host" } }] })),
+    // A socket that accepts, counts and closes: a network error before any response.
+    "closed socket": () => {
+      let n = 0;
+      const l = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open: (s) => { n++; s.end(); }, data: () => {} } });
+      return { port: l.port, hits: () => n, stop: () => l.stop(true) };
+    },
   };
   const cuts = [
     { cut: "the caller's cap", over: { maxReadMs: 150 }, verdict: "stop" },
     { cut: "the base's own timeout", over: { timeoutMs: 150 }, verdict: "error" },
   ] as const;
   for (const { cut, over, verdict } of cuts)
-    for (const [state, reply] of Object.entries(base2))
+    for (const [state, make] of Object.entries(base2))
       test(`a 2xx body cut by ${cut}, base 2 ${state}: base 2 gets 0 calls and the part holds (${verdict})`, async () => {
-        let second = 0;
-        const counted = Bun.serve({ port: 0, fetch: () => (second++, reply()) });
+        const counted = make();
         try {
           const rev = openaiReviewer({ name: "router", baseUrls: [`http://127.0.0.1:${server.port}`, `http://127.0.0.1:${counted.port}`], model: "m1", retryDelaysMs: [], timeoutMs: "timeoutMs" in over ? over.timeoutMs : undefined });
           const r = await run({ 1: "slow-flag-body", 2: "502" }, { reviewer: rev, maxReadMs: "maxReadMs" in over ? over.maxReadMs : undefined });
-          expect(second).toBe(0);
+          expect(counted.hits()).toBe(0);
           expect(calls.length).toBe(1);
           expect(reviewerLayer(r).verdict).toBe(verdict);
           if (verdict === "stop") expect(readScope(reviewerLayer(r).detail)).toBe("partial");
           else expect(reviewerLayer(r).detail).toContain("part 1/5 failed: ");
           expect(r.decision).not.toBe("land");
         } finally {
-          counted.stop(true);
+          counted.stop();
         }
       });
   test("a 2xx body the peer breaks off is a hold: not transient", async () => {
@@ -581,7 +608,7 @@ describe("config-derived text that leaves the reviewer is scrubbed, entry by ent
     const spec = { type: "openai", name: "router", baseUrls: ["http://127.0.0.1:1"], model: "m1" };
     const b = `http://${userinfo("alice", "s3cret")}host/x`;
     for (const build of [() => validateReviewerSpec({ ...spec, baseUrls: [b] }), () => openaiReviewer({ name: "router", baseUrls: [b], model: "m1" })])
-      expect(build).toThrow(/^base #1 has a userinfo over plain http to a non-loopback host, sent as Basic auth: use https$/);
+      expect(build).toThrow(/^base #1 has a userinfo over plain http to a non-loopback host: use https$/);
     expect(() => validateReviewerSpec({ ...spec, baseUrls: [`http://${userinfo("", "pw")}host/x`] })).toThrow(/plain http/);
     for (const ok of [`https://${userinfo("alice", "s3cret")}host/x`, `http://${userinfo("alice", "s3cret")}127.0.0.1:1/x`, `http://${userinfo("alice", "s3cret")}localhost:1`]) {
       expect(() => validateReviewerSpec({ ...spec, baseUrls: [ok] }), ok).not.toThrow();

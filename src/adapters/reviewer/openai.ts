@@ -1,6 +1,7 @@
 // Reviewer over any OpenAI-compatible /v1/chat/completions endpoint (a local
 // model server, a proxy, or a hosted API). Base URLs are tried in order.
 
+import { hasDuplicateKey } from "./json-keys.ts";
 import { checkBaseUrl, checkExpectHeaders, checkReviewerName, checkServedByHeader, loopbackHost } from "./config-rules.ts";
 import { parseVerdict, ReviewerError, type Reviewer } from "../../review.ts";
 
@@ -170,10 +171,12 @@ function readServedBy(headers: Headers, name: string | undefined): string | unde
  * A reviewer behind an OpenAI-compatible chat endpoint, tried base by base. A base that gives no answer (a non-2xx or a
  * network failure) falls through to the next, and so does an APPROVE from a base without the expected header; any FLAG
  * from any base stands. A 2xx answer that cannot be read (not JSON, no choice or more than one, a refusal, content that
- * is not text or is empty, a body the peer breaks off, a finish_reason other than "stop", a tool call) ends the call: it
+ * is not text or is empty, a body the peer breaks off, a finish_reason other than "stop", a tool call, a repeated JSON
+ * key, a top-level error object, a role other than assistant, audio) ends the call: it
  * holds. A 2xx body our own deadline cuts ends the call too (it may have begun a FLAG) and is never retried: cut by the
  * caller's cap it is a capped error (the caller's budget stop), cut by the base's own timeout a non-transient one. A failed
- * call throws ReviewerError, transient only when every base tried failed with a 5xx or 408, a network error or a timeout.
+ * call throws ReviewerError, transient only when every base tried failed with a 5xx or 408, a network error or a timeout
+ * before a 2xx answer.
  */
 export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
   checkReviewerName(cfg.name);
@@ -331,6 +334,17 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
           fail(base, why("the response is not JSON"));
           break;
         }
+        // A repeated key reads one way here and maybe another elsewhere: not one answer.
+        if (hasDuplicateKey(raw)) {
+          fail(base, why("the response repeats a JSON key"));
+          break;
+        }
+        // An error object beside the choices: the server says the answer failed. Its text is the server's, never shown.
+        const topError = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+        if (topError !== undefined && topError !== null) {
+          fail(base, why("the response holds an error object"));
+          break;
+        }
         const choices = body && typeof body === "object" ? (body as { choices?: unknown }).choices : undefined;
         if (Array.isArray(choices) && choices.length > 1) {
           fail(base, why(`more than one answer in the response (${choices.length} choices)`));
@@ -351,7 +365,7 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
           fail(base, `${mismatch ? `${mismatch}; ` : ""}${stop}`);
           break;
         }
-        const message = choice?.message && typeof choice.message === "object" ? (choice.message as { content?: unknown; refusal?: unknown; tool_calls?: unknown; function_call?: unknown }) : undefined;
+        const message = choice?.message && typeof choice.message === "object" ? (choice.message as { content?: unknown; refusal?: unknown; tool_calls?: unknown; function_call?: unknown; role?: unknown; audio?: unknown }) : undefined;
         if (!choice || !message) {
           fail(base, why("no answer in the response"));
           break;
@@ -366,6 +380,16 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
         const calls = Array.isArray(tools) ? tools.length > 0 : tools !== undefined && tools !== null;
         if (calls || (message.function_call !== undefined && message.function_call !== null)) {
           fail(base, why("the answer calls a tool"));
+          break;
+        }
+        // Only the assistant's text is the answer; a message from another role, or one that also carries audio (whose
+        // transcript could say something else), is not.
+        if (message.role !== undefined && message.role !== "assistant") {
+          fail(base, why("the answer's role is not assistant"));
+          break;
+        }
+        if (message.audio !== undefined && message.audio !== null) {
+          fail(base, why("the answer carries audio"));
           break;
         }
         if (message.content !== undefined && message.content !== null && typeof message.content !== "string") {

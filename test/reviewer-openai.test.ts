@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { openaiReviewer } from "../src/adapters/reviewer/openai.ts";
 import { validateReviewerSpec } from "../src/adapters/reviewer/spec.ts";
 import { reviewUpdate } from "../src/review.ts";
@@ -237,8 +237,11 @@ describe("openaiReviewer API key transport", () => {
 });
 
 describe("openaiReviewer expectHeaders", () => {
+  // Stopped and awaited after each test, so no test's port or pooled connection outlives it into the next.
   const servers: ReturnType<typeof Bun.serve>[] = [];
-  afterAll(() => servers.forEach((s) => s.stop(true)));
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => s.stop(true)));
+  });
 
   // One 2xx chat answer. `served` is omitted when the response must carry no served-by header.
   function serve(served: string | undefined, body: string) {
