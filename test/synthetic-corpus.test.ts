@@ -26,9 +26,9 @@ describe("the synthetic attack corpus", () => {
     expect(lookalikeOf("npm", "momnet")).toBe("moment");
   });
 
-  test("it has 20 to 30 cases, each listed in cases.json as an extended synthetic case with matching fields", () => {
+  test("it has 20 to 40 cases, each listed in cases.json as an extended synthetic case with matching fields", () => {
     expect(CORPUS.length).toBeGreaterThanOrEqual(20);
-    expect(CORPUS.length).toBeLessThanOrEqual(30);
+    expect(CORPUS.length).toBeLessThanOrEqual(40);
     const listed = cases.filter((c) => c.source?.type === "synthetic" && c.source.generator && isCorpus(c.source.generator));
     expect(listed.map((c) => c.source!.generator).sort()).toEqual([...CORPUS].sort());
     expect(new Set(cases.map((c) => c.id)).size).toBe(cases.length);
