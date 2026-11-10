@@ -341,5 +341,23 @@
     "eco": "pypi", "name": "synthetic-py-lazy", "good": "1.2.0", "bad": "1.2.1",
     "source": { "type": "synthetic", "generator": "pypi-lazy-import-time-bomb" },
     "what": "synthetic: a module-level __getattr__ that downloads and executes a script the first time an unknown attribute is read"
+  },
+  {
+    "id": "synthetic-pypi-rust-build-script-added", "set": "extended",
+    "eco": "pypi", "name": "synthetic-py-rs", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "pypi-rust-build-script-added" },
+    "what": "synthetic: the sdist builds its Rust extension with maturin, and the new release adds a build.rs that runs a downloaded script when pip builds it"
+  },
+  {
+    "id": "synthetic-npm-go-generate-cgo-added", "set": "extended",
+    "eco": "npm", "name": "synthetic-go-bridge", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-go-generate-cgo-added" },
+    "what": "synthetic: the install script builds a bundled Go helper with go generate and go build; the helper gains a go:generate line that runs a downloaded script and a cgo import with linker flags"
+  },
+  {
+    "id": "synthetic-npm-workflow-pull-request-target-write", "set": "extended",
+    "eco": "npm", "name": "synthetic-ci-kit", "good": "1.2.0", "bad": "1.2.1",
+    "source": { "type": "synthetic", "generator": "npm-workflow-pull-request-target-write" },
+    "what": "synthetic: the release ships the publisher repo's CI workflow, now on pull_request_target with write-all permissions and posting the token; it would run on the publisher's CI, never on install"
   }
 ]

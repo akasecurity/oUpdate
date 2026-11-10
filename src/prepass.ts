@@ -3,6 +3,7 @@
 // signals are handed to the reviewer as pointers. It reads bytes only.
 
 import { dependencySignals, isNpmManifest } from "./dependency-signals.ts";
+import { ecosystemSignals } from "./ecosystem-signals.ts";
 import { installView, otherInstallEntry, prepareInert } from "./install-closure.ts";
 
 export type FileMap = Map<string, Uint8Array>;
@@ -145,8 +146,7 @@ function linkEscapes(path: string, target: string): boolean {
 /** Same bytes and same type: a file and a symlink with equal bytes (the link target) are different entries. */
 export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length || isLink(a) !== isLink(b)) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
+  return Buffer.from(a.buffer, a.byteOffset, a.length).equals(Buffer.from(b.buffer, b.byteOffset, b.length));
 }
 
 function addedLines(oldText: string | undefined, newText: string): string[] {
@@ -1071,6 +1071,7 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
   }
 
   soft.push(...dependencySignals(eco, oldFiles, newFiles));
+  soft.push(...ecosystemSignals(oldFiles, newFiles));
 
   return { hard, soft, added, removed, changed };
 }
