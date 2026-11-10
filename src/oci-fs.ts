@@ -299,9 +299,9 @@ export class LayerStore {
       timer.clear();
     }
     if (timer.timedOut()) throw new LayerError(node.layer, `bsdtar did not read ${node.path} within ${ms} ms`);
+    if (LOCALE_FAILED.test(await errText)) throw new LayerError(node.layer, `bsdtar has no UTF-8 locale, so ${node.path} was not matched by its name`);
     if (want < node.size && total === want) return concat(chunks, total);
     if (rc !== 0) throw new LayerError(node.layer, `bsdtar could not read ${node.path}: ${(await errText).trim().split("\n")[0]}`);
-    if (LOCALE_FAILED.test(await errText)) throw new LayerError(node.layer, `bsdtar has no UTF-8 locale, so ${node.path} was not matched by its name`);
     if (total !== node.size) throw new LayerError(node.layer, `${node.path} is ${total} bytes, its header declares ${node.size}`);
     return concat(chunks, total);
   }
