@@ -13,6 +13,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Reviewer } from "../../review.ts";
+import { checkReviewerName } from "./config-rules.ts";
 import { isStopping, realExec } from "../../apply/exec.ts";
 
 export const DEFAULT_TIMEOUT_MS = 600_000;
@@ -48,6 +49,7 @@ function empty(dir: string): void {
 let turn: Promise<unknown> = Promise.resolve();
 
 export function commandReviewer(cfg: CommandReviewerConfig): Reviewer {
+  checkReviewerName(cfg.name);
   return {
     name: cfg.name,
     review(prompt) {

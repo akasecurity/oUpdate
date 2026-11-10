@@ -66,7 +66,8 @@ export function cachedReviewer(inner: Reviewer, dir: string, host: string, finge
     storeHits: 0,
     ...(inner.ready ? { ready: () => inner.ready!() } : {}),
     ...(inner.lastServedBy ? { lastServedBy: () => (fromStore ? undefined : inner.lastServedBy!()) } : {}),
-    async review(prompt) {
+    ...(inner.lastUnverified ? { lastUnverified: () => !fromStore && inner.lastUnverified!() } : {}),
+    async review(prompt, opts) {
       fromStore = false;
       const file = join(dir, `${verdictKey(inner.name, prompt, fingerprint)}.json`);
       try {
@@ -77,8 +78,9 @@ export function cachedReviewer(inner: Reviewer, dir: string, host: string, finge
           return hit.text;
         }
       } catch {} // absent or damaged: a miss
-      const text = await inner.review(prompt);
-      if (isFlag(text)) {
+      const text = await inner.review(prompt, opts);
+      // A FLAG from a base without the expected header holds this review only: stored, a misrouted proxy could plant a lasting hold.
+      if (isFlag(text) && !inner.lastUnverified?.()) {
         try {
           const meta = release ? { eco: release.eco, name: release.name, from: release.from, to: release.to } : {};
           writeAtomic(file, JSON.stringify({ reviewer: inner.name, host, ...meta, at: new Date().toISOString(), text }));

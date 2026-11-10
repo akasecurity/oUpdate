@@ -274,14 +274,14 @@ describe("openaiReviewer expectHeaders", () => {
   test("a wrong header with no further base errors and does not return that verdict", async () => {
     const { hits, base } = serve("cloud", "APPROVE\nfrom cloud");
     const r = openaiReviewer({ name: "local", baseUrls: [base], model: "m", retryDelaysMs: [1, 1], expectHeaders: { "x-served-by": "local" } });
-    await expect(r.review("x")).rejects.toThrow(/http:\/\/127\.0\.0\.1:\d+: answer x-served-by cloud, expected local/);
+    await expect(r.review("x")).rejects.toThrow(/http:\/\/127\.0\.0\.1:\d+: answer header x-served-by did not match the expected value/);
     expect(hits.n).toBe(1);
   });
 
   test("a missing response header is an error", async () => {
     const { hits, base } = serve(undefined, "APPROVE\nno header");
     const r = openaiReviewer({ name: "local", baseUrls: [base], model: "m", retryDelaysMs: [], expectHeaders: { "x-served-by": "local" } });
-    await expect(r.review("x")).rejects.toThrow(/answer x-served-by missing, expected local/);
+    await expect(r.review("x")).rejects.toThrow(/answer header x-served-by missing/);
     expect(hits.n).toBe(1);
   });
 

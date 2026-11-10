@@ -24,13 +24,32 @@ export interface LayerVerdict {
   detail: string;
 }
 
+/** What a review call may be told: `timeoutMs` caps how long this call may take, all its tries included. */
+export interface ReviewCallOptions {
+  timeoutMs?: number;
+}
+
+/**
+ * A failed review call. `transient`: another try of the same call can get past it. The openai reviewer sets it only when
+ * every base it tried failed with a 5xx or 408, or a network error or timeout; never for a cut-off, empty or malformed
+ * answer, a 429, another 4xx, a redirect, a header mismatch, a bad or skipped base.
+ */
+export class ReviewerError extends Error {
+  /** `capped`: the call ran out of the time the caller gave it (ReviewCallOptions.timeoutMs); always transient. */
+  constructor(message: string, readonly transient = false, readonly capped = false) {
+    super(message);
+  }
+}
+
 export interface Reviewer {
   name: string;
-  review(prompt: string): Promise<string>;
+  review(prompt: string, opts?: ReviewCallOptions): Promise<string>;
   /** A cheap check before a run: undefined when the reviewer can answer now, else why not. Absent: assumed ready. */
   ready?(): Promise<string | undefined>;
   /** Who served the latest answer, when the reviewer's endpoint says (the router's served-by header); undefined when it did not say or the call failed. One value per reviewer instance: calls running at the same time on one instance overwrite it, so a parallel caller must capture it per call. */
   lastServedBy?(): string | undefined;
+  /** True when the latest answer came from a base that failed the expected-header check (only a FLAG is ever taken from one): it holds, but is no verdict to keep. Same one-value-per-instance caveat as lastServedBy. */
+  lastUnverified?(): boolean;
 }
 
 /** A static rule scanner (e.g. GuardDog in a sandbox) run on each release; only findings new in the new release count. */
@@ -152,6 +171,9 @@ const TERMINAL_DROP = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}
 export function stripTerminal(s: string): string {
   return s.replace(TERMINAL_DROP, "");
 }
+
+/** Said on a FLAG taken from a base that failed the expected-header check: it holds, and the detail says where it came from (after the model's reason). */
+const unverifiedNote = (parts: Set<number>, at: number) => (parts.has(at) ? "; answer from a base without the expected header" : "");
 
 /** The model's first reasoning line after its FLAG, one line and cut, so a hold says why (empty for a bare FLAG).
  *  Model output can echo package bytes and the line reaches the terminal raw: controls, bidi and zero-width characters are dropped. */
@@ -2367,6 +2389,42 @@ export function prepareChangedInert(oldFiles: FileMap, newFiles: FileMap, pre?: 
   return prepareInert(a.scripts, otherInstallEntry(oldFiles, a.manifest)) && prepareInert(b.scripts, otherInstallEntry(newFiles, b.manifest));
 }
 
+/**
+ * One part's review call, retried once when its failure is a ReviewerError marked transient (see ReviewerError for
+ * exactly what is) and the read time budget is not spent. A long diff is many calls and one such failure in any of them
+ * leaves the whole update without a verdict. An answer is never retried, and neither is a cut-off one: a truncated FLAG
+ * must stay a hold. The retry goes through the same reviewer, so it sends the same headers. Each try gets only what is
+ * left of the budget. A failure that is not retried, or a second one, names the part. `spent`: a transient failure (a
+ * timeout at the budget's cap among them) once the budget is spent, which the caller holds as the budget stop; it carries
+ * the failure's message.
+ */
+async function reviewPart(reviewer: Reviewer, prompt: string, i: number, n: number, budgetLeftMs: () => number | undefined): Promise<string | { spent: string }> {
+  const msg = (x: unknown) => (x instanceof Error ? x.message : String(x));
+  let first: unknown;
+  const cap = () => {
+    const left = budgetLeftMs();
+    return left === undefined ? undefined : { timeoutMs: Math.max(left, 0) };
+  };
+  const spent = () => {
+    const left = budgetLeftMs();
+    return left !== undefined && left <= 0;
+  };
+  const transient = (e: unknown) => e instanceof ReviewerError && e.transient;
+  try {
+    return await reviewer.review(prompt, cap());
+  } catch (e) {
+    if (!transient(e)) throw new Error(`part ${i + 1}/${n} failed: ${msg(e)}`);
+    if (spent() || (e as ReviewerError).capped) return { spent: `part ${i + 1}/${n}: ${msg(e)}` };
+    first = e;
+  }
+  try {
+    return await reviewer.review(prompt, cap());
+  } catch (e) {
+    if (transient(e) && (spent() || (e as ReviewerError).capped)) return { spent: `part ${i + 1}/${n}: ${msg(e)}` };
+    throw new Error(`part ${i + 1}/${n} failed twice: ${msg(e)}${msg(first) === msg(e) ? "" : ` (first try: ${msg(first)})`}`);
+  }
+}
+
 function reviewPrompt(input: ReviewInput, pre: PrepassResult, chunk: string, i: number, n: number, scope: Scope, prepareNote = ""): string {
   const signals = [...pre.hard.map((s) => `HARD ${s.kind} ${s.path}: ${s.detail}`), ...pre.soft.map((s) => `soft ${s.kind} ${s.path}: ${s.detail}`)];
   return `You are reviewing a dependency update for supply-chain attacks before it is installed.
@@ -2562,9 +2620,18 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         const budget = input.maxReadMs !== undefined && Number.isFinite(input.maxReadMs) && input.maxReadMs > 0 ? input.maxReadMs : undefined;
         const started = performance.now();
         let outOfTime = false;
+        let lastTry = "";
+        // Parts whose answer (a FLAG: nothing else is taken) came from a base without the expected header.
+        const unverified = new Set<number>();
         for (let i = 0; i < chunks.length; i++) {
           if (budget !== undefined && i > 0 && performance.now() - started >= budget) { outOfTime = true; break; }
-          texts.push(await input.reviewer.review(reviewPrompt(input, pre, chunks[i]!, i, chunks.length, scope, prepareChangedInert(artifacts.old, artifacts.new, pre) ? PREPARE_NOTE : "")));
+          const prompt = reviewPrompt(input, pre, chunks[i]!, i, chunks.length, scope, prepareChangedInert(artifacts.old, artifacts.new, pre) ? PREPARE_NOTE : "");
+          const text = await reviewPart(input.reviewer, prompt, i, chunks.length, () => (budget === undefined ? undefined : budget - (performance.now() - started)));
+          if (typeof text !== "string") { outOfTime = true; lastTry = text.spent; break; }
+          if (input.reviewer.lastUnverified?.()) unverified.add(texts.length);
+          texts.push(text);
+          // An APPROVE that came in after the budget ran out is read but cannot land: the budget holds the update (a late FLAG stops it anyway).
+          if (budget !== undefined && performance.now() - started > budget && parseVerdict(text) !== "FLAG") { outOfTime = true; break; }
           // The first FLAG ends the review: the stop is certain and only the first FLAG gives the reason, so the later parts are not paid for.
           if (parseVerdict(texts[i]!) === "FLAG") break;
         }
@@ -2588,23 +2655,25 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           const seen = filesRead(chunks, texts.length);
           const budgetParts = [
             `${texts.length} of ${chunks.length} part(s) read, the read time budget of ${budget} ms ran out`,
-            `${leftOut(seen)} file(s) not reviewed`,
+            ...(leftOut(seen) ? [`${leftOut(seen)} file(s) not reviewed`] : []),
             ...[overFull, overPriority].filter(Boolean),
-            ...(scope === "ranked" ? [`${rankedTotal - texts.length} ranked parts not reviewed`] : []),
+            ...(scope === "ranked" && rankedTotal > texts.length ? [`${rankedTotal - texts.length} ranked parts not reviewed`] : []),
             "needs a human",
+            // What failed when the budget ran out (an outage that ate it), at the end: readers match the start of the detail.
+            ...(lastTry ? [`last try: ${stripTerminal(lastTry.replace(/\s+/g, " ")).slice(0, 200)}`] : []),
           ];
           layers.push({ layer: "reviewer", verdict: "stop", detail: budgetParts.join("; ") });
         } else if (scope === "ranked")
           layers.push(
             flagged.length
-              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on ranked part(s) ${parts} of ${texts.length} reviewed; ${note}` }
+              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on ranked part(s) ${parts} of ${texts.length} reviewed; ${note}${unverifiedNote(unverified, flagAt)}` }
               : { layer: "reviewer", verdict: "stop", detail: `${overPriority}; ${input.reviewer.name} APPROVE on the top ${chunks.length} ranked part(s); ${note}; needs a human` },
           );
         else if (scope === "signal")
           // A narrowed review never lands an update: an APPROVE leaves the unread files for a human.
           layers.push(
             flagged.length
-              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on signal part(s) ${parts} of ${chunks.length}${readNote}; ${note}` }
+              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on signal part(s) ${parts} of ${chunks.length}${readNote}; ${note}${unverifiedNote(unverified, flagAt)}` }
               : { layer: "reviewer", verdict: "stop", detail: `${overPriority}; ${input.reviewer.name} APPROVE on the signal files (${chunks.length} part(s)), ${note}; needs a human` },
           );
         else if (scope === "priority" && overFull && !flagged.length)
@@ -2623,7 +2692,7 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
         else
           layers.push(
             flagged.length
-              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on part(s) ${parts} of ${chunks.length}${readNote}${note}${flagReason(texts[flagAt]!)}` }
+              ? { layer: "reviewer", verdict: "stop", detail: `${input.reviewer.name} FLAG on part(s) ${parts} of ${chunks.length}${readNote}${note}${flagReason(texts[flagAt]!)}${unverifiedNote(unverified, flagAt)}` }
               : { layer: "reviewer", verdict: "pass", detail: `${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}` },
           );
       } catch (e) {
