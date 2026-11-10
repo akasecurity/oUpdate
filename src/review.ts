@@ -31,8 +31,10 @@ export interface ReviewCallOptions {
 
 /**
  * A failed review call. `transient`: another try of the same call can get past it. The openai reviewer sets it only when
- * every base it tried failed with a 5xx or 408, or a network error or timeout; never for a cut-off, empty or malformed
- * answer, a 429, another 4xx, a redirect, a header mismatch, a bad or skipped base.
+ * every base it tried failed with a 5xx or 408, or a network error or timeout before a 2xx answer; never for a cut-off,
+ * empty or malformed answer, a 2xx body cut short (by the peer, or by the base's own timeout), a 429, another 4xx, a
+ * redirect, a header mismatch, a bad or skipped base. A 2xx body cut by the caller's cap is capped, the caller's budget
+ * stop.
  */
 export class ReviewerError extends Error {
   /** `capped`: the call ran out of the time the caller gave it (ReviewCallOptions.timeoutMs); always transient. */

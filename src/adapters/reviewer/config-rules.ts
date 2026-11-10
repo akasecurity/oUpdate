@@ -55,5 +55,5 @@ export function checkBaseUrl(base: string, i: number): void {
   if (rawTail || [u.pathname, u.search, u.hash].some((part) => part.includes("@")))
     throw new Error(`base #${i + 1} is ambiguous: percent-encode @ ? # in credentials, and @ in a path as %40`);
   if (u.protocol === "http:" && (u.username || u.password) && !loopbackHost(u.hostname))
-    throw new Error(`base #${i + 1} has a userinfo over plain http to a non-loopback host, sent as Basic auth: use https`);
+    throw new Error(`base #${i + 1} has a userinfo over plain http to a non-loopback host: use https`);
 }

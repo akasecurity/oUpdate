@@ -454,6 +454,8 @@ Limits evaluation runs (`bun eval/limits/run.ts --reviewer <spec.json>`) write c
 
 A server that turns thinking on another way takes its own switch in `extraBody`. A reviewer that thinks needs the larger `maxTokens`: a short limit cuts the answer off and the review fails closed.
 
+A reviewer base URL is checked when the config is read. A user name or password in a base over plain `http://` to a host other than this machine is refused (use https), and so is a raw `@` anywhere after the host, a path's included (write it `%40`), since a URL parser could read part of a password as the host.
+
 ### Score your own model
 
 `acceptance/run.ts` runs the attack and clean-release cases through any reviewer you give it. `acceptance-results/summary.txt` ends with a scorecard per reviewer: attacks stopped, attacks stopped by the model reviewer alone, model FLAGs on attacks, controls landed, and the cases the model did not judge. Each line sits beside the bar (every attack stopped, every core control landed: 9 of 9 and 10 of 10) and the [26 Oct result](eval/2026-10-26-attack-and-clean-release-evaluation/) (9 of 9 stopped, 8 of 8 landed, model FLAG on 7 of 9). `run.ts` runs the 8 dataset attacks; litellm 1.107.0 is a separate replay, so a run scores attacks out of 8. The run also builds 4 synthetic evasion cases in memory (`acceptance/synthetic/generate.ts`: a comment telling the reviewer to approve, a loader hidden among 300 changed files, a loader inside a minified bundle, a refactor that posts the environment to a URL). They are inert, with payload URLs on `.invalid` hosts only, and the scorecard counts them on their own line, outside the published set.
