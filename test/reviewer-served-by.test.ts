@@ -49,10 +49,8 @@ describe("openaiReviewer served-by", () => {
     expect(other.lastServedBy?.()).toBeUndefined();
   });
 
-  test("a name that is no legal header name leaves served unknown and still returns the answer", async () => {
-    const r = make("m1", "x served by");
-    expect(await r.review("x")).toContain("APPROVE");
-    expect(r.lastServedBy?.()).toBeUndefined();
+  test("a name that is no legal header name is refused when the reviewer is built", () => {
+    expect(() => make("m1", "x served by")).toThrow(/servedByHeader must be a legal HTTP header name/);
   });
 
   test("a failed call clears the value", async () => {
