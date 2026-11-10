@@ -259,6 +259,22 @@ describe("review fixes, round 4", () => {
     expect(ecosystemSignals(go(""), go('import ( "fmt"; "Cx" )'))).toEqual([]);
   });
 
+  test("an identifier ending in import, Unicode letters included, is not the import keyword", () => {
+    const go = (body: string) => files({ "main.go": `package main\n${body}\nfunc main() {}\n` });
+    for (const body of ['type T struct {\n\tαimport "C"\n}', 'type T struct {\n\tέimport "C"\n}', 'type T struct {\n\t٣import "C"\n}', 'var _ = x.import\n"C"', 'type T struct {\n\tαimport ( "C" )\n}'])
+      expect(ecosystemSignals(go(""), go(body)), body).toEqual([]);
+    // A Unicode name before the path is still a named import of C.
+    for (const body of ['import α "C"', 'import ( α"C" )', 'import (\n\tβ "C"\n)']) expect(kinds(ecosystemSignals(go(""), go(body))), body).toEqual(["go-cgo-added"]);
+  });
+
+  test("an import path written as one escape for C is cgo; other escapes are not", () => {
+    const go = (body: string) => files({ "main.go": `package main\n${body}\nfunc main() {}\n` });
+    for (const body of ['import "\\x43"', 'import "\\103"', 'import "\\u0043"', 'import "\\U00000043"', 'import ( "fmt"; "\\x43" )'])
+      expect(kinds(ecosystemSignals(go(""), go(body))), body).toEqual(["go-cgo-added"]);
+    for (const body of ['import "\\x44"', 'import "\\x43x"', 'import "\\\\x43"', "import '\\x43'", 'var s = "\\x43"'])
+      expect(ecosystemSignals(go(""), go(body)), body).toEqual([]);
+  });
+
   test("a Cargo.toml build path is normalized and followed only when the release ships that file", () => {
     const toml = (b: string) => `[package]\nname = "x"\nversion = "1.0.0"\nbuild = "${b}"\n`;
     expect(ecosystemSignals(files({ "c/Cargo.toml": toml("../shared/gen.rs") }), files({ "c/Cargo.toml": toml("../shared/gen.rs").replace("1.0.0", "1.0.1") }))).toEqual([]);
@@ -455,6 +471,53 @@ describe("prepass carries the build and CI signals as soft, never hard", () => {
   });
 });
 
+describe("review follow-ups: build key removed, one signal per script, new-job wording", () => {
+  const toml = (build?: string) => `[package]\nname = "x"\nversion = "1.0.0"\n${build === undefined ? "" : `build = ${build}\n`}`;
+  const rs = "fn main() {}\n";
+  test("a root build.rs that the manifest stops turning off, or stops passing over, starts running: it is raised", () => {
+    for (const [from, to] of [["false", undefined], ['"tools/gen.rs"', undefined], ["false", '"build.rs"'], ["false", '"./build.rs"']] as const) {
+      for (const dir of ["", "c/"]) {
+        const o = files({ [`${dir}Cargo.toml`]: toml(from), [`${dir}build.rs`]: rs, [`${dir}tools/gen.rs`]: rs });
+        const n = files({ [`${dir}Cargo.toml`]: toml(to), [`${dir}build.rs`]: rs, [`${dir}tools/gen.rs`]: rs });
+        expect(ecosystemSignals(o, n).map((x) => [x.kind, x.path]), `${dir} ${from} -> ${to}`).toEqual([["rust-build-script-added", `${dir}build.rs`]]);
+      }
+    }
+    const s = ecosystemSignals(files({ "Cargo.toml": toml("false"), "build.rs": rs }), files({ "Cargo.toml": toml(), "build.rs": rs }));
+    expect(s[0]!.detail).toBe("build.rs now runs: Cargo.toml no longer turns the build script off");
+  });
+  test("no new signal when the root build.rs ran before too, is still off, or is not shipped", () => {
+    const same = (from: string | undefined, to: string | undefined, extra: Record<string, string> = { "build.rs": rs }) =>
+      ecosystemSignals(files({ "Cargo.toml": toml(from), ...extra }), files({ "Cargo.toml": toml(to), ...extra }));
+    expect(same('"build.rs"', undefined)).toEqual([]);
+    expect(same(undefined, '"build.rs"')).toEqual([]);
+    expect(same("true", undefined)).toEqual([]);
+    expect(same("false", "false")).toEqual([]);
+    expect(same("false", undefined, { "src/lib.rs": rs })).toEqual([]);
+    // A brand-new Cargo.toml has no old key to compare: as before, nothing for an unchanged build.rs.
+    expect(ecosystemSignals(files({ "build.rs": rs }), files({ "Cargo.toml": toml(), "build.rs": rs }))).toEqual([]);
+    // The line reader (a manifest the TOML parser refuses) reads build = false too.
+    expect(ecosystemSignals(files({ "Cargo.toml": "[package]\nbuild = false\nx = [\n", "build.rs": rs }), files({ "Cargo.toml": "[package]\nx = [\n", "build.rs": rs })).map((x) => x.path)).toEqual(["build.rs"]);
+  });
+  test("one signal per script path, however many manifests newly name it", () => {
+    for (const script of ["shared/gen.rs", "shared/t/build.rs"]) {
+      const o: Record<string, string> = { [script]: rs };
+      const n: Record<string, string> = { [script]: rs };
+      for (const c of ["a", "b", "c"]) {
+        o[`${c}/Cargo.toml`] = toml();
+        n[`${c}/Cargo.toml`] = toml(`"../${script}"`);
+      }
+      expect(ecosystemSignals(files(o), files(n)).map((x) => [x.kind, x.path]), script).toEqual([["rust-build-script-added", script]]);
+    }
+  });
+  test("a removed block and a new job with no block are worded apart", () => {
+    const wf = (src: string) => files({ [WF]: src });
+    const old = "on: push\njobs:\n  a:\n    runs-on: x\n    permissions:\n      contents: read\n";
+    const nu = "on: push\njobs:\n  a:\n    runs-on: x\n  b:\n    runs-on: x\n";
+    expect(ecosystemSignals(wf(old), wf(nu))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "permissions removed, the repository default applies: job a; no permissions block, the repository default applies: job b" }]);
+    expect(permissionsRemoved(old, nu)).toEqual(["job a", "job b"]);
+  });
+});
+
 describe("soft-signal misses: Go import forms, new jobs without a block, more triggers, a named build.rs, lone CR", () => {
   const go = (body: string) => files({ "main.go": `package main\n${body}\nfunc main() {}\n` });
   const cgo = (body: string) => kinds(ecosystemSignals(go(""), go(body)));
@@ -492,7 +555,7 @@ describe("soft-signal misses: Go import forms, new jobs without a block, more tr
   const wf = (src: string) => files({ [WF]: src });
   test("a new or renamed job with no permissions block, where every old job had one, falls back to the default", () => {
     const old = "on: push\njobs:\n  a:\n    runs-on: x\n    permissions:\n      contents: read\n";
-    expect(ecosystemSignals(wf(old), wf(old + "  b:\n    runs-on: x\n"))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "permissions removed, the repository default applies: job b" }]);
+    expect(ecosystemSignals(wf(old), wf(old + "  b:\n    runs-on: x\n"))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "no permissions block, the repository default applies: job b" }]);
     expect(permissionsRemoved(old, "on: push\njobs:\n  c:\n    runs-on: x\n")).toEqual(["job c"]);
     // Not when an old job already ran on the default, or a workflow block covers the new job.
     const mixed = old + "  d:\n    runs-on: x\n";
