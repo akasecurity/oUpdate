@@ -26,13 +26,16 @@ const GO_GENERATE = /^\s*\/\/go:generate\b/;
 // Read on goCode's output, where every string is "" except the path "C". A one-path import: `import`, an optional name
 // (`.`, which needs no space, or `_` or an identifier after one), then "C". An import group: its contents to the closing
 // paren, split into tokens; a path with its name may be one token (`_"C"`). Both start only at the keyword, and the group
-// stops at any paren, so a scan costs linear time.
-const GO_IMPORT_C = /(?<![\w.])import(?:\s*\.|\s+(?:_|[A-Za-z_]\w*))?\s*"C"/;
-const GO_IMPORT_GROUP = /(?<![\w.])import\s*\(([^()]*)\)/g;
-const GO_C_TOKEN = /^(?:[_.]|[A-Za-z_]\w*)?"C"$/;
+// stops at any paren, so a scan costs linear time. A Go identifier is Unicode letters, digits and _, so the keyword's
+// boundary and a name are read with Unicode classes (a field named αimport is no import).
+const GO_IMPORT_C = /(?<![\p{L}\p{Nd}_.])import(?:\s*\.|\s+[\p{L}_][\p{L}\p{Nd}_]*)?\s*"C"/u;
+const GO_IMPORT_GROUP = /(?<![\p{L}\p{Nd}_.])import\s*\(([^()]*)\)/gu;
+const GO_C_TOKEN = /^(?:\.|[\p{L}_][\p{L}\p{Nd}_]*)?"C"$/u;
+// An interpreted string that is one escape for C (\x43, \103, \u0043, \U00000043) unquotes to the same import path.
+const GO_ESCAPED_C = /^\\(?:x43|103|u0043|U00000043)$/;
 /**
  * Go source with its comments taken out (a block comment's newlines kept) and every string and rune turned into "" or ''
- * ("C" for a string that is exactly C, raw or not: the same import path), read in one pass the way the Go scanner reads
+ * ("C" for a string that is exactly C, raw or not, or one escape for it: the same import path), read in one pass the way the Go scanner reads
  * it: a backquote or a quote inside a comment or another string opens nothing. A carriage return is no line end in Go, so
  * it reads as a space.
  */
@@ -64,7 +67,8 @@ function goCode(src: string): string {
       out += src.slice(from, i);
       let j = i + 1;
       while (j < n && src[j] !== c && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
-      out += c === '"' && src.slice(i + 1, j) === "C" ? '"C"' : c + c;
+      const body = src.slice(i + 1, j);
+      out += c === '"' && (body === "C" || GO_ESCAPED_C.test(body)) ? '"C"' : c + c;
       i = from = Math.min(j + 1, n);
     } else i++;
   }
@@ -94,48 +98,77 @@ function rustSignals(oldFiles: FileMap, newFiles: FileMap, p: string): Signal[] 
 
 /** The custom build script a Cargo.toml names under [package] (`build = "<path>"`), relative to the crate; undefined for none or the default. */
 export function cargoBuildScript(toml: string | undefined): string | undefined {
+  const key = cargoBuildKey(toml);
+  return typeof key === "string" ? key : undefined;
+}
+
+/** The [package] build key: the script path it names, false when it turns the build script off, undefined when absent (or true: the crate root's build.rs). */
+function cargoBuildKey(toml: string | undefined): string | false | undefined {
   if (toml === undefined) return undefined;
   try {
     const build = (Bun.TOML.parse(toml) as { package?: { build?: unknown } }).package?.build;
-    return typeof build === "string" ? build.replace(/^\.\//, "") : undefined;
+    return typeof build === "string" ? build.replace(/^\.\//, "") : build === false ? false : undefined;
   } catch {
-    return cargoBuildScriptLines(toml);
+    return cargoBuildKeyLines(toml);
   }
 }
 
-/** The line reader behind cargoBuildScript, for a Cargo.toml the TOML parser refuses. */
-function cargoBuildScriptLines(toml: string): string | undefined {
+/** The line reader behind cargoBuildKey, for a Cargo.toml the TOML parser refuses. */
+function cargoBuildKeyLines(toml: string): string | false | undefined {
   let inPackage = false;
   for (const raw of lines(toml)) {
     const l = raw.replace(/\s#[\s\S]*$/, "").trim();
     const sec = /^\[([^\]]+)\]$/.exec(l);
     if (sec) { inPackage = sec[1]!.trim() === "package"; continue; }
     if (!inPackage) continue;
+    if (/^build\s*=\s*false$/.test(l)) return false;
     const m = /^build\s*=\s*(?:"([^"]+)"|'([^']+)')$/.exec(l);
     if (m) return (m[1] ?? m[2])!.replace(/^\.\//, "");
   }
   return undefined;
 }
 
-/** `seen`: the script paths already looked at in this release, so a script many manifests share is compared, and reported, once. */
-function cargoSignals(oldFiles: FileMap, newFiles: FileMap, p: string, seen: Set<string>): Signal[] {
-  const script = cargoBuildScript(text(newFiles, p));
-  if (!script) return [];
+/** Per release: `seen`, the script paths already reported (one signal per script path, however many manifests name it);
+ * `same`, each path's old-versus-new byte comparison, made once however many manifests share the script. */
+type CargoState = { seen: Set<string>; same: Map<string, boolean> };
+function cargoSignals(oldFiles: FileMap, newFiles: FileMap, p: string, st: CargoState): Signal[] {
+  const unchanged = (path: string) => {
+    let v = st.same.get(path);
+    if (v === undefined) st.same.set(path, (v = sameBytes(oldFiles.get(path), newFiles.get(path))));
+    return v;
+  };
+  const sig = cargoSignal(oldFiles, newFiles, p, unchanged);
+  if (!sig || st.seen.has(sig.path)) return [];
+  st.seen.add(sig.path);
+  return [sig];
+}
+function cargoSignal(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged: (path: string) => boolean): Signal | undefined {
+  const key = cargoBuildKey(text(newFiles, p));
+  if (key === false) return undefined;
+  const oldToml = text(oldFiles, p);
+  const oldKey = cargoBuildKey(oldToml);
   const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
+  const root = posix.normalize(dir + "build.rs");
+  const runsRoot = (k: string | false | undefined) => k === undefined || (typeof k === "string" && posix.normalize(dir + k) === root);
+  if (runsRoot(key)) {
+    // The crate root's build.rs runs. A new or changed one is raised on its own path; an unchanged one the old manifest
+    // turned off, or passed over for another script, starts running now.
+    if (oldToml === undefined || runsRoot(oldKey) || !newFiles.has(root) || !unchanged(root)) return undefined;
+    const why = oldKey === false ? "no longer turns the build script off" : "no longer names another build script";
+    return { kind: "rust-build-script-added", path: root, detail: `build.rs now runs: ${p} ${why}`.slice(0, 160) };
+  }
+  const script = key!;
   const sp = posix.normalize(dir + script);
-  if (!newFiles.has(sp)) return [];
-  const named = cargoBuildScript(text(oldFiles, p)) === script;
+  if (!newFiles.has(sp)) return undefined;
+  const named = cargoBuildScript(oldToml) === script;
   const prev = oldFiles.get(sp);
-  // A build.rs is read on its own path (a new or changed one is raised there), and the crate root's build.rs runs with or
-  // without the key. Followed from here: a script under another name, and a build.rs elsewhere that the manifest newly
-  // names while it was already shipped (it did not run before, and its own path raises nothing when it is unchanged).
-  if (isRustBuildScript(sp) && (sp === posix.normalize(dir + "build.rs") || named || !prev || !sameBytes(prev, newFiles.get(sp)))) return [];
-  // A manifest that newly names the script is still reported; otherwise the script's bytes are compared once per path.
-  if ((named || isRustBuildScript(sp)) && seen.has(sp)) return [];
-  seen.add(sp);
-  if (named && sameBytes(prev, newFiles.get(sp))) return [];
+  // A build.rs is read on its own path (a new or changed one is raised there). Followed from here: a script under another
+  // name, and a build.rs elsewhere that the manifest newly names while it was already shipped (it did not run before, and
+  // its own path raises nothing when it is unchanged).
+  if (isRustBuildScript(sp) && (named || !prev || !unchanged(sp))) return undefined;
+  if (named && unchanged(sp)) return undefined;
   const added = !named || !prev;
-  return [{ kind: added ? "rust-build-script-added" : "rust-build-script-changed", path: sp, detail: `${added ? "new" : "changed"} custom build script named in ${p}; it runs at build time` }];
+  return { kind: added ? "rust-build-script-added" : "rust-build-script-changed", path: sp, detail: `${added ? "new" : "changed"} custom build script named in ${p}; it runs at build time` };
 }
 
 function goSignals(oldFiles: FileMap, newFiles: FileMap, p: string): Signal[] {
@@ -344,23 +377,25 @@ function widenedGrants(o: Permissions, n: Permissions): string[] {
 }
 
 /**
- * Where the new file drops a permissions block the old one had, so the repository or organization default (which can
- * be read-write) applies: the workflow level when a job is left with no block of its own (unless the old workflow
- * block was write-all, which no default exceeds), a job still present when the workflow level has none, and a new or
- * renamed job with no block when every old job had one.
+ * Where the repository or organization default (which can be read-write) now applies and did not before: a permissions
+ * block the old file had and the new one drops (the workflow level when a job is left with no block of its own, unless
+ * the old workflow block was write-all, which no default exceeds; a job still present when the workflow level has none),
+ * then a new or renamed job with no block of its own when every old job had one (nothing was removed there).
  */
 export function permissionsRemoved(oldSrc: string, newSrc: string): string[] {
-  return removedBlocks(readWorkflow(oldSrc).perms, readWorkflow(newSrc).perms);
+  const { removed, unset } = defaultApplies(readWorkflow(oldSrc).perms, readWorkflow(newSrc).perms);
+  return [...removed, ...unset];
 }
-function removedBlocks(o: Permissions, n: Permissions): string[] {
-  if (n.workflow) return [];
-  const out: string[] = [];
-  if (o.workflow && !o.workflow.has("write-all") && [...n.jobs.values()].some((s) => !s)) out.push("workflow");
-  for (const [j, s] of o.jobs) if (s && n.jobs.has(j) && !n.jobs.get(j)) out.push(`job ${j}`);
+function defaultApplies(o: Permissions, n: Permissions): { removed: string[]; unset: string[] } {
+  const removed: string[] = [];
+  const unset: string[] = [];
+  if (n.workflow) return { removed, unset };
+  if (o.workflow && !o.workflow.has("write-all") && [...n.jobs.values()].some((s) => !s)) removed.push("workflow");
+  for (const [j, s] of o.jobs) if (s && n.jobs.has(j) && !n.jobs.get(j)) removed.push(`job ${j}`);
   // A new or renamed job with no block of its own, where every old job had one (and no workflow block): the default
   // applies to a job where none did before.
-  if (!o.workflow && o.jobs.size && [...o.jobs.values()].every((s) => s)) for (const [j, s] of n.jobs) if (!s && !o.jobs.has(j)) out.push(`job ${j}`);
-  return out;
+  if (!o.workflow && o.jobs.size && [...o.jobs.values()].every((s) => s)) for (const [j, s] of n.jobs) if (!s && !o.jobs.has(j)) unset.push(`job ${j}`);
+  return { removed, unset };
 }
 
 /** The risky triggers (pull_request_target, workflow_run, issue_comment, pull_request_review_comment, issues, discussion, discussion_comment) the file names under its top-level `on:` key. */
@@ -414,10 +449,11 @@ function workflowSignals(oldFiles: FileMap, newFiles: FileMap, p: string): Signa
   const o = readWorkflow(prev ?? "");
   const out: Signal[] = [];
   const widened = widenedGrants(o.perms, n.perms);
-  const dropped = prev === undefined ? [] : removedBlocks(o.perms, n.perms);
+  const { removed, unset } = prev === undefined ? { removed: [], unset: [] } : defaultApplies(o.perms, n.perms);
   const parts = [
     ...(widened.length ? [`write access added: ${widened.slice(0, 6).join("; ")}`] : []),
-    ...(dropped.length ? [`permissions removed, the repository default applies: ${dropped.slice(0, 6).join(", ")}`] : []),
+    ...(removed.length ? [`permissions removed, the repository default applies: ${removed.slice(0, 6).join(", ")}`] : []),
+    ...(unset.length ? [`no permissions block, the repository default applies: ${unset.slice(0, 6).join(", ")}`] : []),
   ];
   if (parts.length) out.push({ kind: "workflow-permissions-widened", path: p, detail: parts.join("; ").slice(0, 160) });
   const added = [...n.triggers].filter((t) => !o.triggers.has(t));
@@ -428,10 +464,10 @@ function workflowSignals(oldFiles: FileMap, newFiles: FileMap, p: string): Signa
 /** Soft signals for a new or changed build.rs (or Cargo.toml custom build script), Go generate / cgo, and workflow permission or trigger changes. Never hard. */
 export function ecosystemSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   const out: Signal[] = [];
-  const cargoSeen = new Set<string>();
+  const cargoState: CargoState = { seen: new Set(), same: new Map() };
   for (const p of newFiles.keys()) {
     if (isRustBuildScript(p)) out.push(...rustSignals(oldFiles, newFiles, p));
-    else if (base(p) === "Cargo.toml") out.push(...cargoSignals(oldFiles, newFiles, p, cargoSeen));
+    else if (base(p) === "Cargo.toml") out.push(...cargoSignals(oldFiles, newFiles, p, cargoState));
     else if (isGoSource(p)) out.push(...goSignals(oldFiles, newFiles, p));
     else if (isWorkflowFile(p)) out.push(...workflowSignals(oldFiles, newFiles, p));
   }
