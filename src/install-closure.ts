@@ -78,6 +78,8 @@ interface Ctx {
   depth: number;
   // Directories a cd or a directory flag moved a run into: their files are not inert whatever the folder name.
   movedDirs: Set<string>;
+  // True while a `node` command's operands are read: only a program that runs a directory as a module reads a root `main`.
+  rootRuns?: boolean;
   // The directory the last `cd` of the hook moved to, relative to the package root.
   cwd: string;
   // The shell scan was not sure what a body does: the widen reads every file, inert paths included.
@@ -500,8 +502,21 @@ function findKey(ctx: Ctx, logical: string): string | undefined {
     const pj = parseJson(ctx.bytes.get(manifest));
     if (pj && pj.main !== undefined && typeof pj.main !== "string") return undefined;
     const main = pj && typeof pj.main === "string" ? pj.main : "index.js";
-    const rel = normalize(main);
-    if (!rel || badPath(rel) || /[*?[]/.test(rel)) return undefined;
+    let rel = normalize(main);
+    if (!rel || /[*?[]/.test(rel)) return undefined;
+    if (badPath(rel)) {
+      // A main with a `.` or `..` segment or a trailing slash resolves inside its directory; one that leaves it reads every file.
+      const inside = rel.startsWith("/") || /^[A-Za-z]:/.test(rel) || /[\u0005$~]/.test(rel) ? undefined : joinDir("", rel);
+      if (inside === undefined) {
+        if (/(^|\/)\.\.(\/|$)/.test(rel)) {
+          ctx.widenInert = true;
+          widenAll(ctx);
+        }
+        return undefined;
+      }
+      rel = inside;
+      if (!rel) return findFile(ctx, `${logical}/index`);
+    }
     const next = joinLogical(`${logical}/package.json`, rel);
     if (!next) return undefined;
     return findFile(ctx, next);
@@ -4502,20 +4517,32 @@ function noteHookArgCwd(ctx: Ctx, token: string): void {
   }
 }
 
-// `node .` and `node lib/..` run the package root as a directory: its manifest `main`, or index.js. A root with neither
-// runs nothing (and `tsc -p .` names the root without running it), so it is not a hold.
+// `node .` and `node lib/..` run the package root as a directory, as Node does: the manifest `main` as a file (with its added
+// extensions), then as a directory's index, and index.js of the root when main names nothing. Only node reads a root this
+// way: `tsc -p .` names the root without running it. A root with nothing to run is not a hold.
+function nodeFile(ctx: Ctx, base: string): string | undefined {
+  for (const ext of ["", ".js", ".json", ".node"]) if (ctx.logical.has(base + ext)) return base + ext;
+  return undefined;
+}
+
 function noteRootMain(ctx: Ctx): void {
-  if (ctx.hold) return;
+  if (ctx.hold || !ctx.rootRuns) return;
   const manifest = ctx.logical.get("package.json");
   const pj = manifest ? parseJson(ctx.bytes.get(manifest)) : undefined;
-  const rel = normalize(pj && typeof pj.main === "string" ? pj.main : "index.js");
-  if (!rel || badPath(rel) || /[*?[]/.test(rel)) {
-    fail(ctx, "unresolved: path");
-    return;
+  let rel = "";
+  if (pj && typeof pj.main === "string") {
+    const m = normalize(pj.main);
+    const j = /[*?[\u0005$~]/.test(m) || m.startsWith("/") || /^[A-Za-z]:/.test(m) ? undefined : joinDir("", m);
+    if (j === undefined) {
+      fail(ctx, "unresolved: path");
+      return;
+    }
+    rel = j;
   }
-  if (!findKey(ctx, rel)) return;
-  markHookFile(ctx, rel);
-  addRef(ctx, rel);
+  const name = (rel ? nodeFile(ctx, rel) ?? nodeFile(ctx, `${rel}/index`) : undefined) ?? nodeFile(ctx, "index");
+  if (!name) return;
+  markHookFile(ctx, name);
+  addLogical(ctx, name);
 }
 
 function noteHookArg(ctx: Ctx, token: string, afterCd = false): void {
@@ -6616,7 +6643,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
       const raw = normalize(d);
       if (raw) ctx.movedDirs.add(raw);
       if (n) ctx.movedDirs.add(n);
-      if (CD_WORD.test(runnerName(argv.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{|command|builtin)$/.test(t))?.replace(/^\\+/, "") ?? "")) && n) ctx.cwd = n;
+      if (CD_WORD.test(runnerName(argv.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{|command|builtin)$/.test(t))?.replace(/^\\+/, "") ?? ""))) ctx.cwd = n;
     }
     widenAll(ctx);
   }
@@ -6664,7 +6691,13 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (WORKSPACE_TOOLS.has(bin) || ((bin === "npx" || bin === "bunx" || bin === "corepack") && WORKSPACE_TOOLS.has(runnerName(argv[i] ?? "")))) widenAll(ctx);
   if (bin === "echo" || bin === "true" || bin === ":") return;
   if (bin === "node" || bin === "nodejs") {
-    dispatchNode(ctx, argv, i);
+    const before = ctx.rootRuns;
+    ctx.rootRuns = true;
+    try {
+      dispatchNode(ctx, argv, i);
+    } finally {
+      ctx.rootRuns = before;
+    }
     return;
   }
   if (bin === "node-gyp") {

@@ -88,3 +88,43 @@ test("node . with an unchanged main stays quiet when another file changes", () =
   expect(rootHeld("node .", "lib/ok.js", { "docs/evil.js": "console.log('evil V')\n" })).toBe(false));
 test("node lib/../lib with a manifest main in lib holds when that main changes", () =>
   expect(rootHeld("node lib/../lib", undefined, { "lib/package.json": '{"main":"m.js"}', "lib/m.js": "console.log('evil V')\n" })).toBe(true));
+
+// Returning to the root after a cd leaves no stale directory.
+test("cd lib && cd .. && node ./docs/./evil.js: a changed docs/evil.js holds", () =>
+  expect(held("cd lib && cd .. && node ./docs/./evil.js", "docs/evil.js")).toBe(true));
+test("cd lib && cd .. && node . : the main docs/evil.js changed holds", () =>
+  expect(rootHeld("cd lib && cd .. && node .", "docs/evil.js", { "docs/evil.js": "console.log('evil V')\n" })).toBe(true));
+
+// Only a program that runs the directory as a module reads the root main.
+test("tsc -p . does not run the manifest main", () =>
+  expect(rootHeld("tsc -p .", "docs/runtime.js", { "docs/runtime.js": "console.log('r V')\n" })).toBe(false));
+test("node-gyp rebuild stays quiet when main changes", () =>
+  expect(rootHeld("node-gyp rebuild", "docs/runtime.js", { "docs/runtime.js": "console.log('r V')\n" })).toBe(false));
+test("node scripts/build.js stays quiet when main changes", () =>
+  expect(rootHeld("node scripts/build.js", "docs/runtime.js", { "scripts/build.js": "1\n", "docs/runtime.js": "console.log('r V')\n" })).toBe(false));
+
+// A main that is a directory is run through its index, not a nested manifest; an operand directory honors its manifest.
+test("a main that is a directory ignores that directory's manifest", () =>
+  expect(
+    rootHeld("node .", "docs", { "docs/package.json": '{"main":"evil.js"}', "docs/index.js": "1\n", "docs/evil.js": "console.log('evil V')\n" }),
+  ).toBe(false));
+test("a main that is a directory runs its index.js", () =>
+  expect(rootHeld("node .", "docs", { "docs/index.js": "console.log('evil V')\n" })).toBe(true));
+test("node lib honors lib/package.json main", () =>
+  expect(rootHeld("node lib", undefined, { "lib/package.json": '{"main":"m.js"}', "lib/m.js": "console.log('evil V')\n" })).toBe(true));
+test("node lib with a manifest main that leaves lib holds", () =>
+  expect(rootHeld("node lib", undefined, { "lib/package.json": '{"main":"../docs/evil.js"}', "docs/evil.js": "console.log('evil V')\n" })).toBe(true));
+
+// Valid main spellings resolve before they are validated.
+test("a main with a .. segment stays quiet when an unrelated file changes", () =>
+  expect(rootHeld("node .", "lib/../lib/ok.js", { "docs/other.md": "doc V\n" })).toBe(false));
+test("a main with a .. segment holds when the file it names changes", () =>
+  expect(rootHeld("node .", "lib/../lib/ok.js", { "lib/ok.js": "console.log('evil V')\n" })).toBe(true));
+test("a main with a trailing slash stays quiet when an unrelated file changes", () =>
+  expect(rootHeld("node .", "lib/", { "lib/index.js": "1\n", "docs/other.md": "doc V\n" })).toBe(false));
+test("a main with a trailing slash holds when its index.js changes", () =>
+  expect(rootHeld("node .", "lib/", { "lib/index.js": "console.log('evil V')\n" })).toBe(true));
+
+// A main that names a missing file falls back to the root index.js.
+test("a main naming a missing file falls back to index.js: a changed index.js holds", () =>
+  expect(rootHeld("node .", "missing.js", { "index.js": "console.log('evil V')\n" })).toBe(true));
