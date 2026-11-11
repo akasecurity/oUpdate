@@ -297,6 +297,16 @@ describe("carried tar notes after review (each lets a new or changed note pass i
     expect(holds(r)).toEqual(["sdist: symlink x-1.0.1/docs/link"]);
   });
 
+  test("a link spelled x/./docs/link is the same note as x/docs/link: unchanged across versions it is carried over", async () => {
+    const dotted = (extra: E[]) => extra.map((e) => (e.name === "docs/link" ? { ...e, name: "./docs/link" } : e));
+    const r = prepass("pypi", await read(rel("1.0.0", dotted(link("../a.txt")))), await read(rel("1.0.1", link("../a.txt"))));
+    expect(holds(r)).toEqual([]);
+    expect(r.carriedTarNotes?.length).toBe(1);
+    const s = prepass("pypi", await read(rel("1.0.0", link("../a.txt"))), await read(rel("1.0.1", dotted(link("../a.txt")))));
+    expect(holds(s)).toEqual([]);
+    expect(s.carriedTarNotes?.length).toBe(1);
+  });
+
   // Codex round 3: a path collision with no note on it (a top dir pair, or two versioned .data dirs) read one file for two.
   test("a path collision is a hold of its own, with no other note: two top dirs, and demo-1.data/x beside demo-2.data/x", async () => {
     const tops = (payload: string) => tarBytes([{ name: "package/install.js", type: "file", data: payload }, { name: "other/install.js", type: "file", data: "// benign\n" }]);
@@ -1218,15 +1228,15 @@ describe("pypi files pair with their own old file", () => {
     { name: `x-${v}/a.txt`, type: "file", data: "a" },
     ...(withLink ? [{ name: `x-${v}/docs/link`, type: "sym" as const, data: "../a.txt" } as E] : []),
   ]);
-  const load = async (before: [string, Uint8Array][], now: [string, Uint8Array][], name = "x") => {
+  const load = async (before: [string, Uint8Array][], now: [string, Uint8Array][], name = "x", from = "1", to = "2") => {
     const sha = (b: Uint8Array) => new Bun.CryptoHasher("sha256").update(b).digest("hex");
     const bytes = new Map<string, Uint8Array>([...before, ...now].map(([n, b]) => [`https://files.example/${n}`, b]));
     const listing = (files: [string, Uint8Array][]) => files.map(([n, b]) => ({ url: `https://files.example/${n}`, filename: n, packagetype: n.endsWith(".whl") ? ("bdist_wheel" as const) : ("sdist" as const), sha256: sha(b) }));
-    const registry = { latest: async () => undefined, publishedAt: async () => undefined, artifactUrls: async () => [], artifactFiles: async (_n: string, v: string) => listing(v === "1" ? before : now) };
+    const registry = { latest: async () => undefined, publishedAt: async () => undefined, artifactUrls: async () => [], artifactFiles: async (_n: string, v: string) => listing(v === from ? before : now) };
     const fetcher = (async (u: string | URL) => new Response(bytes.get(String(u))! as unknown as BodyInit)) as unknown as typeof fetch;
     const work = join(dir, `pypi-${n++}`);
     mkdirSync(work);
-    const art = await loadArtifacts({ eco: "pypi", name, from: "1", to: "2" } as ReviewArgs, registry as never, work, fetcher);
+    const art = await loadArtifacts({ eco: "pypi", name, from, to } as ReviewArgs, registry as never, work, fetcher);
     return prepass("pypi", art.old, art.new);
   };
   const tarHolds = (r: ReturnType<typeof prepass>) => r.hard.filter((s) => s.kind === "tar-entry").map((s) => s.detail);
@@ -1235,13 +1245,13 @@ describe("pypi files pair with their own old file", () => {
     test(`a new .tar.bz2 with a link does not take the old .tar.gz as its counterpart (${order})`, async () => {
       const now: [string, Uint8Array][] = [["x-2.tar.bz2", sdist("2", true)], ["x-2.tar.gz", sdist("2", false)]];
       const r = await load([["x-1.tar.gz", sdist("1", true)]], order === "bz2 first" ? now : now.reverse());
-      expect(tarHolds(r)).toContain("sdist: symlink x-2/docs/link");
+      expect(tarHolds(r)).toContain("x-2.tar.bz2: symlink x-2/docs/link");
     });
 
   test("a new file with the same bytes as a paired one still has no old side: its link holds", async () => {
     const r = await load([["x-1.tar.gz", sdist("1", true)]], [["x-2.tar.gz", sdist("2", true)], ["x-2.tar.bz2", sdist("2", true)]]);
-    expect(tarHolds(r)).toEqual(["sdist: symlink x-2/docs/link"]);
-    expect(r.carriedTarNotes).toEqual(["sdist: symlink x-2/docs/link"]);
+    expect(tarHolds(r)).toEqual(["x-2.tar.bz2: symlink x-2/docs/link"]);
+    expect(r.carriedTarNotes).toEqual(["x-2.tar.gz: symlink x-2/docs/link"]);
   });
 
   // Each pairs, so its unchanged link carries; a file that did not pair would hold it.
@@ -1259,7 +1269,60 @@ describe("pypi files pair with their own old file", () => {
 
   test("a version needs a boundary: x-10.tar.gz does not pair with x-20.tar.gz for 1 -> 2", async () => {
     const r = await load([["x-10.tar.gz", sdist("1", true)]], [["x-20.tar.gz", sdist("2", true)]]);
-    expect(tarHolds(r)).toEqual(["sdist: symlink x-2/docs/link"]);
+    expect(tarHolds(r)).toEqual(["x-20.tar.gz: symlink x-2/docs/link"]);
+  });
+
+  test("a changed sdist format pairs when each release has exactly one sdist: x-1.zip with x-2.tar.gz", async () => {
+    const r = await load([["x-1.zip", sdist("1", true, "zip")]], [["x-2.tar.gz", sdist("2", true)]]);
+    expect(tarHolds(r)).toEqual([]);
+    expect(r.carriedTarNotes).toEqual(["x-2.tar.gz: symlink x-2/docs/link"]);
+  });
+
+  test("a changed sdist format does not pair when a release has two sdists", async () => {
+    const r = await load([["x-1.zip", sdist("1", true, "zip")], ["x-1.tar.xz", sdist("1", true, "xz")]], [["x-2.tar.gz", sdist("2", true)]]);
+    expect(tarHolds(r)).toEqual(["x-2.tar.gz: symlink x-2/docs/link"]);
+  });
+
+  // A version is compared as PEP 440 spells it, so the file name and the release need not use one spelling.
+  const spellings: [string, string, string, string, string][] = [
+    ["1.0 is 1.0.0", "x-1.0.tar.gz", "x-2.0.tar.gz", "1.0.0", "2.0.0"],
+    ["1 is 1.0", "x-1.tar.gz", "x-2.tar.gz", "1.0", "2.0"],
+    ["1.0-1 is 1.0.post1", "x-1.0-1.tar.gz", "x-2.0-1.tar.gz", "1.0.post1", "2.0.post1"],
+    ["1.0RC1 is 1.0rc1 (wheel)", "x-1.0RC1-py3-none-any.whl", "x-2.0RC1-py3-none-any.whl", "1.0rc1", "2.0rc1"],
+    ["1.0alpha1 is 1.0a1", "x-1.0alpha1.tar.gz", "x-2.0alpha1.tar.gz", "1.0a1", "2.0a1"],
+    ["1.0.0.post0 is 1.post0", "x-1.0.0.post0.tar.gz", "x-2.0.0.post0.tar.gz", "1.post0", "2.post0"],
+  ];
+  for (const [label, before, after, from, to] of spellings)
+    test(`version spellings pair: ${label}`, async () => {
+      const r = await load([[before, sdist("1", true)]], [[after, sdist("2", true)]], "x", from, to);
+      expect(tarHolds(r)).toEqual([]);
+      expect(r.carriedTarNotes?.length).toBe(1);
+    });
+
+  test("a dot after the version does not end it: x-1.post1 and x-2.post1 are not releases 1 and 2", async () => {
+    const r = await load([["x-1.post1.tar.gz", sdist("1", true)]], [["x-2.post1.tar.gz", sdist("2", true)]]);
+    expect(tarHolds(r)).toEqual(["x-2.post1.tar.gz: symlink x-2/docs/link"]);
+  });
+
+  test("an unrecognized sdist extension or a release that is no version pairs with nothing", async () => {
+    const odd = await load([["x-1.tar.gz.sig", sdist("1", true)]], [["x-2.tar.gz.sig", sdist("2", true)]]);
+    expect(tarHolds(odd)).toEqual(["x-2.tar.gz.sig: symlink x-2/docs/link"]);
+    const junk = await load([["x-one.tar.gz", sdist("1", true)]], [["x-two.tar.gz", sdist("2", true)]], "x", "one", "two");
+    expect(tarHolds(junk)).toEqual(["x-two.tar.gz: symlink x-2/docs/link"]);
+  });
+
+  test("a note shows its own file's name: two sdists name the one whose link changed", async () => {
+    const changed = tarBytes([{ name: "x-2/setup.py", type: "file", data: 'setup(fmt="zip")\n' }, { name: "x-2/a.txt", type: "file", data: "a" }, { name: "x-2/b.txt", type: "file", data: "b" }, { name: "x-2/docs/link", type: "sym", data: "../b.txt" }]);
+    const r = await load([["x-1.tar.gz", sdist("1", true)], ["x-1.zip", sdist("1", true, "zip")]], [["x-2.tar.gz", sdist("2", true)], ["x-2.zip", changed]]);
+    expect(tarHolds(r)).toEqual(["x-2.zip: symlink x-2/docs/link"]);
+    expect(r.carriedTarNotes).toEqual(["x-2.tar.gz: symlink x-2/docs/link"]);
+  });
+
+  test("a note of an artifact read through a copy points at the file that copy was placed at", async () => {
+    const zip = sdist("2", true, "zip");
+    const r = await load([["x-1.tar.gz", sdist("1", true)]], [["x-2.tar.gz", sdist("2", true)], ["x-2.zip", zip], ["x-2.tar.bz2", zip]]);
+    const paths = r.hard.filter((s) => s.kind === "tar-entry").map((s) => [s.detail, s.path]);
+    expect(paths).toEqual(expect.arrayContaining([["x-2.zip: symlink x-2/docs/link", "x-2.zip/docs/link"], ["x-2.tar.bz2: symlink x-2/docs/link", "x-2.zip/docs/link"]]));
   });
 
   test("two distinct sdists each pair with their own old file: an unchanged link carries, unchanged files are not added", async () => {

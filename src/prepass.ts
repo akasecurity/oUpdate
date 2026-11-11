@@ -32,13 +32,14 @@ export function isLink(bytes: Uint8Array): boolean {
 // npm skips link entries; bsdtar does not. The note survives path normalization.
 // `note` is shown as read (with the archive's top dir). `paths` are the note's members where this map holds them,
 // carried through every step that moves a file (npm strip, normalizePaths, mergeArtifactPair; after a merge they are
-// merged keys, possibly under a `label/` prefix, and `key` keeps the pre-merge paths), and `raw` the member names as listed. `key` compares one release's note with the other's: a JSON array of the kind and the normalized
-// paths (a hardlink adds its target), never the display text, so "top dirs a b c" from {a, "b c"} and {"a b", c}
-// differ. `pair` names the one mergeArtifactPair call (an artifact instance, not its label) the note came from: a note
-// is compared only with that pair's old notes. `collided`: the map does not hold the note's member as listed, so the
-// note always holds. Either a path or target of the note is where two distinct paths of its release landed after
-// normalizing (demo-1.data/x and demo-2.data/x), or the unpacked tree did not hold one of its members under its own
-// name (a filesystem stored two names as one file).
+// merged keys, possibly under a `label/` prefix, and `key` keeps the pre-merge paths), and `raw` the member names as
+// listed. `key` compares one release's note with the other's: a JSON array of the kind and the normalized paths (a
+// hardlink adds its target), never the display text, so "top dirs a b c" from {a, "b c"} and {"a b", c} differ. `pair`
+// names the one mergeArtifactPair call (an artifact instance, not its label) the note came from: a note is compared
+// only with that pair's old notes. `collided`: the map does not hold the note's member as listed, so the note always
+// holds. Either a path or target of the note is where two distinct paths of its release landed after normalizing
+// (demo-1.data/x and demo-2.data/x), or the unpacked tree did not hold one of its members under its own name (a
+// filesystem stored two names as one file).
 export type TarNote = {
   note: string;
   key: string;
