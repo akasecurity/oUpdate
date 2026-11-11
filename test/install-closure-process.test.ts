@@ -869,3 +869,82 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} stays static (round 27)`, () => expect(held(pre)).toBe(false));
 }
+
+// Round 28: writes through a pattern, a loop head, ++, -- and delete follow the target rule; a join with a computed suffix.
+for (const [label, pre] of [
+  ["an array pattern target", 'exports.main = () => { [process.env.NODE_OPTIONS] = ["--require ./docs/payload.txt"] }\n'],
+  ["an object pattern target", 'exports.main = () => { ({ x: process.env.NODE_OPTIONS } = { x: "--require ./docs/payload.txt" }) }\n'],
+  ["a nested pattern target", 'exports.main = () => { [{ a: process.env.PATH }] = [{ a: "./docs" }] }\n'],
+  ["a for-of head target", 'exports.main = (xs) => { for (process.env.NODE_OPTIONS of xs) { } }\n'],
+  ["a for-in head target", 'exports.main = (o) => { for (process.env.NODE_PATH in o) { } }\n'],
+  ["an increment of a steering variable", 'exports.main = () => { process.env.NODE_OPTIONS++ }\n'],
+  ["a delete of a steering variable", 'exports.main = () => { delete process.env.PATH }\n'],
+  ["Object.assign on process.env", 'exports.main = (o) => { Object.assign(process.env, o) }\n'],
+  ["Object.defineProperty on process.env", 'exports.main = () => { Object.defineProperty(process.env, "NODE_OPTIONS", { value: "--require ./docs/payload.txt" }) }\n'],
+  ["Reflect.set on process.env", 'exports.main = () => { Reflect.set(process.env, "NODE_OPTIONS", "--require ./docs/payload.txt") }\n'],
+  ["a whole env replacement", 'exports.main = (o) => { process.env = o }\n'],
+  ["a computed env key write", 'exports.main = (k, v) => { process.env[k] = v }\n'],
+  ["a join with a spread suffix", 'const path = require("path");\nexports.main = (x) => require(path.join(process.cwd(), "hooks", ...x))\n'],
+  ["a join with a name as the second segment", 'const path = require("path");\nexports.main = (x) => require(path.join(process.cwd(), x))\n'],
+  ["a join with a call as a later segment", 'const path = require("path");\nexports.main = (x) => require(path.join(process.cwd(), "a", f(x)))\n'],
+] as const) {
+  test(`${label} widens the closure (round 28)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["an array pattern target", 'exports.main = () => { [process.env.NODE_OPTIONS] = ["--require ./docs/payload.txt"] }\n'],
+  ["an object pattern target", 'exports.main = () => { ({ x: process.env.NODE_OPTIONS } = { x: "--require ./docs/payload.txt" }) }\n'],
+  ["a join with a spread suffix", 'const path = require("path");\nexports.main = (x) => require(path.join(process.cwd(), "hooks", ...x))\n'],
+] as const) {
+  test(`${label} holds a changed payload outside the hook directory (round 28)`, () => expect(widensDocs(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["an array pattern into exitCode", 'exports.main = (c) => { [process.exitCode] = [c] }\n'],
+  ["an increment of exitCode", 'exports.main = () => { process.exitCode++ }\n'],
+  ["a delete of a plain env key", 'exports.main = () => { delete process.env.FOO }\n'],
+  ["a computed index that reads an env value", 'exports.main = (a) => { a[process.env.NODE_OPTIONS] = 1 }\n'],
+  ["a spread of process.env", 'exports.main = () => ({ ...process.env, X: "1" })\n'],
+  ["a join with literal segments only", 'const path = require("path");\nexports.main = () => require(path.join(process.cwd(), "hooks", "x.js"))\n'],
+] as const) {
+  test(`${label} does not widen the closure (round 28)`, () => expect(widensAll(pre)).toBe(false));
+}
+
+// Round 28b: keys of a destructuring pattern, a ternary far from its key, a keyword before a line break, steering names as keys
+// or through an alias, comments and ternaries around .constructor, the join callee.
+const pad = " ".repeat(60);
+for (const [label, pre] of [
+  ["a quoted pattern key chain", 'exports.main = () => { const { "constructor": { "constructor": F } } = []; return F(process.env.X)() }\n'],
+  ["a bare pattern key chain", 'exports.main = () => { const { constructor: { constructor: F } } = []; return F(process.env.X)() }\n'],
+  ["a parameter pattern key chain", 'exports.main = ({ "constructor": { "constructor": F } }) => F(process.env.X)()\n'],
+  ["a bare parameter pattern key chain", 'exports.main = ({ constructor: { constructor: F } }) => F(process.env.X)()\n'],
+  ["an assignment pattern key chain", 'let F; exports.main = () => { ({ "constructor": { "constructor": F } } = []); return F(process.env.X)() }\n'],
+  ["a ternary consequent far from its key", `exports.main = (c) => [][c ?${pad}"constructor" : ""][c ?${pad}"constructor" : ""](process.env.X)()\n`],
+  ["an await before process.on on the next line", 'const p = await\nprocess.on("exit", () => 1)\nexports.main = () => p["x"]\n'],
+  ["export default before process.on on the next line", 'export default\nprocess.on("exit", () => 1)\n'],
+  ["a spawn env object with NODE_OPTIONS", 'exports.main = () => run("node", { env: { ...process.env, NODE_OPTIONS: "--require ./docs/payload.txt" } })\n'],
+  ["a spawn env object with a quoted LD_PRELOAD key", 'exports.main = () => run("node", { env: { ...process.env, "LD_PRELOAD": "./docs/payload.txt" } })\n'],
+  ["an alias of process.env written through", 'exports.main = () => { const e = process.env; e.NODE_OPTIONS = "--require ./docs/payload.txt" }\n'],
+  ["process.env passed to a call", 'exports.main = () => run(process.env)\n'],
+  ["a join named by something other than path", 'const path = require("path");\nfunction join(a, b) { return b }\nexports.main = (x) => require(path.join(process.cwd(), x))\n'],
+] as const) {
+  test(`${label} widens the closure (round 28b)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a quoted pattern key chain", 'exports.main = () => { const { "constructor": { "constructor": F } } = []; return F(process.env.X)() }\n'],
+  ["a bare pattern key chain", 'exports.main = () => { const { constructor: { constructor: F } } = []; return F(process.env.X)() }\n'],
+  ["a spawn env object with NODE_OPTIONS", 'exports.main = () => run("node", { env: { ...process.env, NODE_OPTIONS: "--require ./docs/payload.txt" } })\n'],
+] as const) {
+  test(`${label} holds a changed payload outside the hook directory (round 28b)`, () => expect(widensDocs(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["an object literal with a constructor key", 'function Foo() {}\nFoo.prototype = { constructor: Foo };\nexports.main = () => new Foo()\n'],
+  ["an object literal with a quoted constructor key", 'function Foo() {}\nFoo.prototype = { "constructor": Foo };\nexports.main = () => new Foo()\n'],
+  ["a comment that names .constructor(x)", '// obj.constructor(x)\nexports.main = () => 1\n'],
+  ["a message that names .constructor(x)", 'exports.main = () => console.log("obj.constructor(x)")\n'],
+  ["a ternary after .constructor", 'exports.main = (x) => x.constructor ? [1] : [2]\n'],
+  ["a spread of process.env", 'exports.main = () => ({ ...process.env, X: "1" })\n'],
+  ["process.on after a statement on the previous line", 'const a = 1\nprocess.on("exit", () => 1)\nexports.main = () => a\n'],
+  ["an env object with an ordinary key", 'exports.main = () => run("node", { env: { ...process.env, FOO: "1" } })\n'],
+  ["path.join of cwd() with literal segments", 'const path = require("path");\nexports.main = () => require(path.join(process.cwd(), "a", "b.js"))\n'],
+] as const) {
+  test(`${label} does not widen the closure (round 28b)`, () => expect(widensAll(pre)).toBe(false));
+}

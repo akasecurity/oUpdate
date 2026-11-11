@@ -703,19 +703,82 @@ function pureLiteralKey(key: string): string | undefined {
 // True when the file holds a string whose value is a property name reaching Function or a loader, in any position a value can
 // take (a computed key, a binding, an array element, an argument, a returned or conditional value). Escapes are decoded.
 // A comparison (key === "constructor"), a case label, the left side of in and an object key are guards or names, not uses.
+const STEERING_NAME_RE = /^(?:NODE_OPTIONS|NODE_PATH|PATH|LD_PRELOAD|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|BASH_ENV|ENV|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|NODE_EXTRA_CA_CERTS)$/;
+const STEERING_NAME = { test: (v: string) => STEERING_NAME_RE.test(v) || /^npm_config_/i.test(v) };
+const STATEMENT_KEYWORDS = new Set(["await", "yield", "return", "export", "default", "case", "throw", "typeof", "void", "new", "delete", "in", "of", "else", "do", "instanceof", "extends"]);
+
+// The kept text with strings, regular expressions and template text blanked, so brackets can be matched.
+function maskSpans(out: string, spans: SpanNote[]): string {
+  const parts: string[] = [];
+  let at = 0;
+  for (const s of [...spans].sort((x, y) => x.at - y.at)) {
+    parts.push(out.slice(at, s.at), " ".repeat(s.len));
+    at = s.at + s.len;
+  }
+  parts.push(out.slice(at));
+  return parts.join("");
+}
+
+// True when the brace or bracket that holds "at" is a destructuring pattern, not an object or array literal: it follows const,
+// let or var, it is closed by = or of or in, or it is a parameter or a catch binding. Unmatched brackets count as a pattern.
+function inPattern(code: string, at: number): boolean {
+  const chain = enclosingBrackets(code, [at]).get(at) ?? [];
+  if (chain.length === 0 || code[chain[0]![0]] === "(") return false;
+  let top = chain[0]!;
+  let next = 1;
+  // Climb while the bracket is the value or element of the one around it ({ k: { ... } }, [{ ... }]).
+  const prevChar = (o: number) => {
+    let p = o;
+    while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+    return p > 0 ? code[p - 1]! : "";
+  };
+  for (; next < chain.length; next++) {
+    const e = chain[next]!;
+    if (code[e[0]] === "(" || !/[:,\[{]/.test(prevChar(top[0]))) break;
+    top = e;
+  }
+  if (top[1] >= code.length) return true;
+  let p = top[0];
+  while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+  if (/(?<![\w$.])(?:const|let|var)$/.test(code.slice(Math.max(0, p - 6), p))) return true;
+  if (/^\s*(?:=(?![=>])|of(?![\w$])|in(?![\w$]))/.test(code.slice(top[1] + 1, top[1] + 8))) return true;
+  const paren = chain[next];
+  if (paren && code[paren[0]] === "(") {
+    const closer = code.slice(paren[1] + 1, paren[1] + 6);
+    if (/^\s*(?:=>|\{)/.test(closer)) return true;
+  }
+  return false;
+}
+
+// True when the file holds a string whose value is a property name reaching Function or a loader, in any position a value can
+// take (a computed key, a binding, an array element, an argument, a returned or conditional value). Escapes are decoded.
+// A comparison (key === "constructor"), a case label, the left side of in and a key of an object literal are guards or names,
+// not uses; the key of a destructuring pattern binds the property and is one. A string that names a variable that steers the
+// next process (NODE_OPTIONS, PATH, ...) as a key of an object is a use too.
 function dangerousStringUse(source: string): boolean {
-  const strings: { raw: string; at: number; len: number }[] = [];
-  const out = codeOnly(source, [], true, strings);
+  const spans: SpanNote[] = [];
+  const out = codeOnly(source, [], true, spans);
   if (out === undefined) return false;
-  for (const s of strings) {
-    if (!s.raw.includes("\\") && !DANGEROUS_KEY.test(s.raw)) continue;
+  const masked = maskSpans(out, spans);
+  for (const s of spans) {
+    if (s.mask) continue;
     const v = s.raw.includes("\\") ? decodeJsString(s.raw) : s.raw;
-    if (v === undefined || !DANGEROUS_KEY.test(v)) continue;
-    const before = out.slice(Math.max(0, s.at - 40), s.at).trimEnd();
-    const after = out.slice(s.at + s.len, s.at + s.len + 40).trimStart();
+    if (v === undefined) continue;
+    const danger = DANGEROUS_KEY.test(v);
+    const steering = STEERING_NAME.test(v);
+    if (!danger && !steering) continue;
+    let q = s.at;
+    while (q > 0 && /\s/.test(masked[q - 1]!)) q--;
+    const before = masked.slice(Math.max(0, q - 12), q);
+    const after = masked.slice(s.at + s.len, s.at + s.len + 40).trimStart();
+    const key = (q === 0 || /[{,]$/.test(before)) && after.startsWith(":");
+    if (steering && !danger) {
+      if (key && /[{,]$/.test(before)) return true;
+      continue;
+    }
     if (/[!=]==?$/.test(before) || /^[!=]==?/.test(after)) continue;
     if (/(?:^|[^\w$.])case$/.test(before) || /^in(?![\w$])/.test(after)) continue;
-    if ((before === "" || before.endsWith("{") || before.endsWith(",")) && after.startsWith(":")) continue;
+    if (key && !inPattern(masked, s.at)) continue;
     return true;
   }
   return false;
@@ -831,7 +894,9 @@ const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "
  */
 const TEMPLATE_LITERAL = /(?:[^`\\$\n]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*`/y;
 
-function codeOnly(text: string, watch: string[] = [], keep = false, strings?: { raw: string; at: number; len: number }[]): string | undefined {
+// A span of the kept text: a string (raw is its text) or text to blank when brackets are matched (a regular expression, template text).
+type SpanNote = { raw: string; at: number; len: number; mask?: boolean };
+function codeOnly(text: string, watch: string[] = [], keep = false, strings?: SpanNote[]): string | undefined {
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
   let t1: Tok | undefined;
@@ -859,11 +924,13 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: { 
       else if (c === "`") {
         i++;
         // A closing backtick leaves "" so the tokens on either side of a template never join in the output.
+        strings?.push({ raw: "", at: out.length, len: i - st, mask: true });
         out += keep ? text.slice(st, i) : '""';
         return true;
       } else if (c === "$" && text[i + 1] === "{") {
         i += 2;
         braces.push(true);
+        strings?.push({ raw: "", at: out.length, len: i - st - 2, mask: true });
         out += keep ? text.slice(st, i) : " `${";
         opened = true;
         return true;
@@ -976,7 +1043,10 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: { 
         if (danger.test(span) || !endsInOperand(span) || !closesCleanly(end + 1)) return undefined;
       }
       if (end >= 0) {
-        if (keep) out += text.slice(i, end + 1);
+        if (keep) {
+          strings?.push({ raw: "", at: out.length, len: end + 1 - i, mask: true });
+          out += text.slice(i, end + 1);
+        }
         i = end + 1;
         if (!keep) out += "/r/";
         push("regex", "");
@@ -1071,12 +1141,20 @@ const DESTRUCTURE_OK = "(?:env|platform|arch|versions?|argv|cwd|exit|exitCode)(?
 // True when the expression that starts at "i" (right after an allowlisted read) ends there: the next token is not a member,
 // a call, a template or an optional chain. A few string and array methods and a numeric index are read through.
 // A write through a read is harmless only for exitCode, title and an environment variable that does not steer the next run.
-const STEERING_ENV = /^(?:NODE_OPTIONS|NODE_PATH|PATH|npm_config_.*)$/i;
+const STEERING_ENV = { test: (v: string) => STEERING_NAME.test(v) || /^path$/i.test(v) };
 function harmlessTarget(target: string | undefined): boolean {
   if (target === undefined) return false;
   if (/^\s*(?:\?\.|\.)\s*(?:exitCode|title)$/.test(target)) return true;
   const env = /^\s*(?:\?\.|\.)\s*env\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)$/.exec(target);
   return env !== null && !STEERING_ENV.test(env[1]!);
+}
+// True when the expression at "at" starts a statement: after ; { } or the start, or after a line break that ends the previous one
+// (an identifier, a literal or a closing bracket, never a keyword such as await, return, export default or else).
+function stmtStartAt(code: string, j: number, at: number, prev: string): boolean {
+  if (prev === "" || prev === ";" || prev === "{" || prev === "}") return true;
+  if (!/[\n\r]/.test(code.slice(j, at)) || !/[\w$)\]"']/.test(prev)) return false;
+  const word = /[A-Za-z_$][\w$]*$/.exec(code.slice(Math.max(0, j - 20), j));
+  return !(word && STATEMENT_KEYWORDS.has(word[0]));
 }
 // True when the next token of a dropped statement (an event-handler call that ends a line) cannot continue the expression.
 function statementEnds(code: string, at: number): boolean {
@@ -1086,6 +1164,53 @@ function statementEnds(code: string, at: number): boolean {
   if (!nl) return false;
   const next = rest[nl[0].length];
   return next === undefined || /[A-Za-z_$}{;"'\d]/.test(next);
+}
+
+// The brackets that enclose each position in "at", innermost first, as [opener, closer] index pairs.
+function enclosingBrackets(code: string, at: number[]): Map<number, Array<[number, number]>> {
+  const out = new Map<number, Array<[number, number]>>();
+  const closers = new Map<number, number>();
+  const stack: number[] = [];
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i]!;
+    if (c === "(" || c === "[" || c === "{") stack.push(i);
+    else if (c === ")" || c === "]" || c === "}") {
+      const o = stack.pop();
+      if (o !== undefined) closers.set(o, i);
+    }
+  }
+  const open: number[] = [];
+  const want = [...at].sort((a, b) => a - b);
+  let w = 0;
+  for (let i = 0; i < code.length && w < want.length; i++) {
+    while (w < want.length && want[w]! === i) {
+      out.set(i, open.map((o) => [o, closers.get(o) ?? code.length] as [number, number]).reverse());
+      w++;
+    }
+    const c = code[i]!;
+    if (c === "(" || c === "[" || c === "{") open.push(i);
+    else if (c === ")" || c === "]" || c === "}") open.pop();
+  }
+  return out;
+}
+
+// True when a member of process at "at" (its chain ends at "end") is written other than by a plain assignment: a destructuring
+// target, a for-in or for-of head, an operand of ++, -- or delete. The target rule then applies to the write.
+function writtenOddly(code: string, at: number, end: number, around: Array<[number, number]>): { chain: string } | undefined {
+  const chain = /^(?:\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*)*/.exec(code.slice(end))![0];
+  const tail = code.slice(end + chain.length, end + chain.length + 12);
+  const head = code.slice(Math.max(0, at - 24), at);
+  if (/^\s*(?:\+\+|--)/.test(tail) || /(?:\+\+|--)\s*$/.test(head) || /(?<![\w$.])delete\s*$/.test(head)) return { chain };
+  if (/^\s*(?:of|in)(?![\w$])/.test(tail) && /(?<![\w$.])for\s*(?:await\s*)?\(\s*$/.test(head)) return { chain };
+  for (const [o, c] of around) {
+    if (code[o] === "(") continue;
+    let p = o;
+    while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+    const prev = p > 0 ? code[p - 1]! : "";
+    if (code[o] === "[" ? /[\w$)\]]/.test(prev) : prev === "$") continue;
+    if (/^\s*=(?![=>])/.test(code.slice(c + 1, c + 6))) return { chain };
+  }
+  return undefined;
 }
 
 function readEnds(code: string, start: number, lenient = false, target?: string): boolean {
@@ -1187,9 +1312,20 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
     " ",
   );
   const re = new RegExp(`${L}(?:${alt})${R}`, "g");
+  // Object.assign(process.env, ...) and its relatives write through a bare argument.
+  if (new RegExp(`(?<![\\w$.])(?:Object|Reflect)\\s*\\.\\s*(?:assign|defineProperty|defineProperties|set|deleteProperty|setPrototypeOf)\\s*\\(\\s*(?:${alt})${R}`).test(rest)) return true;
+  const around = enclosingBrackets(rest, [...rest.matchAll(re)].map((x) => x.index ?? 0));
   for (const m of rest.matchAll(re)) {
     const at = m.index ?? 0;
     const end = at + m[0].length;
+    {
+      let q = at;
+      while (q > 0 && /\s/.test(rest[q - 1]!)) q--;
+      if (rest[q - 1] !== "." || rest.slice(0, q).endsWith("...")) {
+        const w = writtenOddly(rest, at, end, around.get(at) ?? []);
+        if (w && !harmlessTarget(w.chain)) return true;
+      }
+    }
     let j = at;
     while (j > 0 && /\s/.test(rest[j - 1]!)) j--;
     const prev = j > 0 ? rest[j - 1]! : "";
@@ -1211,7 +1347,7 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
     {
       MEMBER_AFTER.lastIndex = end;
       const ev = MEMBER_AFTER.exec(rest);
-      if (ev && /^\s*\.\s*(?:on|once|off|addListener|removeListener)$/.test(ev[0]) && (prev === "" || prev === ";" || prev === "{" || prev === "}" || (/[\n\r]/.test(rest.slice(j, at)) && /[\w$)\]"']/.test(prev)))) {
+      if (ev && /^\s*\.\s*(?:on|once|off|addListener|removeListener)$/.test(ev[0]) && stmtStartAt(rest, j, at, prev)) {
         let p2 = end + ev[0].length;
         while (p2 < rest.length && /\s/.test(rest[p2]!)) p2++;
         const args = rest[p2] === "(" ? argsOf(rest, p2) : undefined;
@@ -1239,6 +1375,14 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
             if (e2 < rest.length) after = e2 + 1;
           }
         }
+        // A bare process.env that is passed, aliased or returned can be written later (const e = process.env; e.PATH = x): only a
+        // spread of it into a new object is a copy.
+        if (/^\s*\.\s*env$/.test(mem[0]) && after === end + mem[0].length) {
+          let k = after;
+          while (k < rest.length && /\s/.test(rest[k]!)) k++;
+          const spread = rest.slice(Math.max(0, j - 3), j) === "...";
+          if (!spread && rest[k] !== "." && !(rest[k] === "?" && rest[k + 1] === ".") && !/(?:^|[^\w$.])(?:typeof|in)$/.test(rest.slice(Math.max(0, j - 7), j))) return true;
+        }
         let j2 = after;
         while (j2 < rest.length && /\s/.test(rest[j2]!)) j2++;
         if (rest[j2] === "(") {
@@ -1248,7 +1392,7 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
         }
         // on, once, off, addListener and removeListener return the object: only as a statement whose value is dropped (emit returns a boolean).
         if (/^\s*\.\s*(?:on|once|off|addListener|removeListener)\b/.test(mem[0])) {
-          const stmtStart = prev === "" || prev === ";" || prev === "{" || prev === "}" || (/[\n\r]/.test(rest.slice(j, at)) && /[\w$)\]"']/.test(prev));
+          const stmtStart = stmtStartAt(rest, j, at, prev);
           if (!stmtStart || !statementEnds(rest, after)) return true;
         }
         // process.env[k] = v writes a key the file does not show.
@@ -1331,7 +1475,7 @@ function provablyStatic(source: string): boolean {
   const code = codeOnly(rest, aliases);
   if (code === undefined) return false;
   // Strings are gone from this text: a loader word or the word process inside a message is not a use.
-  if (PROCESS_LOADER_WORDS.test(code) || UNSAFE_JS.test(code) || timerGetsCode(code)) return false;
+  if (PROCESS_LOADER_WORDS.test(code) || UNSAFE_JS.test(code) || timerGetsCode(code) || steeringKey(code)) return false;
   return !processValueUse(code, aliases);
 }
 
@@ -1723,6 +1867,7 @@ type JsTier = { all: boolean; pkg: boolean; tests: boolean; flows: boolean; same
 
 // eval/Function/vm of a value we cannot see can load any file, docs included.
 // A string literal or a read of a literal path is not that shape.
+const PATH_MODULE = /(?:\brequire\s*\(|\bfrom|\bimport)\s*['"](?:node:)?path(?:\/posix)?['"]/;
 function processHazard(source: string): boolean {
   // Comments out first (strings kept) so the alias statements can be read, then strings out so no word inside a message counts.
   const names = ["process"];
@@ -1732,7 +1877,7 @@ function processHazard(source: string): boolean {
   if (keep === undefined) return unreadable();
   const code = codeOnly(stripProcessAliases(keep, names), names);
   if (code === undefined) return unreadable();
-  if (PROCESS_LOADER_WORDS.test(code)) return true;
+  if (PROCESS_LOADER_WORDS.test(code) || steeringKey(code)) return true;
   // A computed member of the global object can be the process object.
   if (/(?<![\w$.])(?:globalThis|global)\s*(?:\?\.)?\s*\[/.test(code)) return true;
   // An escape in code can spell process or a loader word.
@@ -1758,7 +1903,7 @@ function processHazard(source: string): boolean {
       // platform and arch name one of a few fixed values: a file-name selector, not a path.
       const selector = /^\s*\.\s*(?:platform|arch)$/.test(read[0]);
       // path.join(process.cwd(), "x.js") and path.resolve(process.cwd(), ...): the root, then literal segments.
-      const joined = (/^\s*\.\s*cwd\s*\(\s*\)$/.test(read[0]) || /^\s*\.\s*env\s*\.\s*INIT_CWD$/.test(read[0])) && /(?:join|resolve)\s*\(\s*$/.test(args.slice(0, at)) && /^\s*,\s*""/.test(after);
+      const joined = (/^\s*\.\s*cwd\s*\(\s*\)$/.test(read[0]) || /^\s*\.\s*env\s*\.\s*INIT_CWD$/.test(read[0])) && /(?<![\w$.])(?:(?:path|posix)\s*\.\s*)?(?:join|resolve)\s*\(\s*$/.test(args.slice(0, at)) && PATH_MODULE.test(keep) && /^(?:\s*,\s*"")+\s*\)/.test(after);
       if (!prefixed && !manifest && !selector && !joined) return true;
     }
   }
@@ -1778,6 +1923,18 @@ function timerGetsCode(code: string): boolean {
   return false;
 }
 
+// An identifier key that names a variable steering the next process, as the key of an object literal ({ NODE_OPTIONS: x }).
+function steeringKey(code: string): boolean {
+  for (const m of code.matchAll(/(?<![\w$.?])([A-Za-z_$][\w$]*)\s*:(?!:)/g)) {
+    if (!STEERING_NAME.test(m[1]!)) continue;
+    let q = m.index ?? 0;
+    while (q > 0 && /\s/.test(code[q - 1]!)) q--;
+    if (q === 0 || /[{,]/.test(code[q - 1]!)) return true;
+  }
+  return false;
+}
+
+const CALL_OK = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
 function hasUnbounded(text: string): boolean {
   if (processHazard(text)) return true;
   // Indirect and optional eval, new Function, the global object's eval, a computed member of a global, and a timer given code.
@@ -1786,9 +1943,21 @@ function hasUnbounded(text: string): boolean {
   if (/(?<![\w$.])(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*(?:eval|Function)\b|(?<![\w$.])window\s*(?:\?\.)?\s*\[/.test(plain)) return true;
   if (timerGetsCode(plain)) return true;
   // .constructor.constructor and .constructor[ reach Function; .constructor( is read like Function( below.
-  if (/(?:\?\.|\.)\s*constructor\s*(?:\?\.|\.)\s*constructor\b|(?:\?\.|\.)\s*constructor\s*\??\.?\s*\[/.test(plain)) return true;
-  const re = /(?:\?\.|\.)\s*constructor\s*\(|\b(?:eval|Function)\s*\(|\bvm\s*\.\s*(?:runInThisContext|runInNewContext|runInContext|compileFunction)\s*\(/g;
-  const ok = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
+  if (/(?:\?\.|\.)\s*constructor\s*(?:\?\.|\.)\s*constructor\b|(?:\?\.|\.)\s*constructor\s*(?:\?\.\s*)?\[/.test(plain)) return true;
+  // A pattern that binds a constructor key ({ constructor: { constructor: F } }) reaches Function without a dot.
+  for (const m of plain.matchAll(/(?<![\w$.])constructor(?![\w$])\s*:/g)) if (inPattern(plain, m.index ?? 0)) return true;
+  // .constructor( is read like Function(: the comment-free text, so a comment or a message does not count.
+  for (const m of plain.matchAll(/(?:\?\.|\.)\s*constructor\s*\(/g)) {
+    const args = argsOf(plain, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined) return true;
+    const arg = firstArg(args).trim();
+    if (/^(['"`])[^'"`\\]*\1$/.test(arg)) continue;
+    const bare = arg.replace(/['"][^'"]*['"]/g, " ").replace(/`[^`$]*`/g, " ");
+    if (bare.includes("${")) return true;
+    if (!(bare.match(/[A-Za-z_$][\w$]*/g) ?? []).every((id) => CALL_OK.has(id))) return true;
+  }
+  const re = /\b(?:eval|Function)\s*\(|\bvm\s*\.\s*(?:runInThisContext|runInNewContext|runInContext|compileFunction)\s*\(/g;
+  const ok = CALL_OK;
   for (const m of text.matchAll(re)) {
     const paren = (m.index ?? 0) + m[0].lastIndexOf("(");
     const args = argsOf(text, paren);
