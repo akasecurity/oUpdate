@@ -53,7 +53,6 @@ describe("install closure", () => {
 
   test("an unresolved command does not hold when the closed bytes match", () => {
     const quiet: object[] = [
-      { postinstall: "(npm run setup)", setup: "node assets/x.bmp" },
       { postinstall: "run-s 'setup --x'", setup: "node assets/x.bmp" },
       { postinstall: "yarn run-s setup", setup: "node assets/x.bmp" },
     ];
@@ -64,6 +63,8 @@ describe("install closure", () => {
     // No file argument: the runner's surface is every non-doc file, so x.bmp holds.
     // The same bytes do not.
     const widened: object[] = [
+      // A subshell still runs the script, so the file the script names holds when it changes.
+      { postinstall: "(npm run setup)", setup: "node assets/x.bmp" },
       { postinstall: "cross-env A=1 npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "env npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "npx run-s setup", setup: "node assets/x.bmp" },

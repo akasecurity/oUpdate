@@ -4749,10 +4749,60 @@ function logicalLines(text: string, heredocs?: string[]): string[] {
   return out;
 }
 
+// The runners of a script of this package. A stage that starts with one runs that script wherever the line sits.
+const SCRIPT_RUNNERS = new Set(["npm", "yarn", "pnpm", "bun", "run-s", "run-p", "npm-run-all"]);
+const STAGE_KEYWORDS = new Set(["then", "do", "else", "elif", "if", "while", "until", "time", "!", "exec"]);
+
+// A line that is not split into commands (a pipe, a redirect, a subshell, a function definition) still runs the commands in
+// it. The stages are cut apart at every separator, and a stage that starts with a script runner and holds no expansion the
+// scan could not resolve is dispatched on its own: `npm run evil | cat`, `(npm run evil)`, `f() { npm run evil; }; f`.
+function dispatchScriptStages(ctx: Ctx, text: string): void {
+  if (ctx.hold || ctx.depth >= DEPTH) return;
+  const stages: string[] = [];
+  let quote: string | undefined;
+  let cur = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (quote) {
+      cur += c;
+      if (c === "\\" && quote === '"' && i + 1 < text.length) cur += text[++i]!;
+      else if (c === quote) quote = undefined;
+      continue;
+    }
+    if (c === "\\" && i + 1 < text.length) {
+      cur += c + text[++i]!;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      cur += c;
+      continue;
+    }
+    if (/[|&;()<>\n`{}]/.test(c)) {
+      stages.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += c;
+  }
+  stages.push(cur);
+  for (const stage of stages) {
+    if (ctx.hold) return;
+    if (stage.includes(UNRESOLVED)) continue;
+    const ws = stage.trim().split(/\s+/).filter(Boolean);
+    while (ws.length && STAGE_KEYWORDS.has(ws[0]!)) ws.shift();
+    if (!ws.length || !SCRIPT_RUNNERS.has(binName(ws[0]!))) continue;
+    ctx.depth++;
+    dispatch(ctx, ws.join(" "));
+    ctx.depth--;
+  }
+}
+
 // A body that does not read whole is read one logical line at a time, as the shell runs it: the commands of a line
 // that reads are scanned; a line that does not read is noted like an unreadable body, and the commands of it that
 // hold no expansion the scan cannot resolve are still scanned (`make -C sub && echo $(date)`).
 function noteUnreadable(ctx: Ctx, text: string): void {
+  dispatchScriptStages(ctx, text);
   // The text was not split, so a `cd` or a workspace flag inside a redirect, pipe or subshell may be moving a
   // run to another package. A body that stays in place (`node safe.js > out`) is not widened.
   if (noteBody(ctx, text)) widenAll(ctx);
