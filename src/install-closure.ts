@@ -2478,16 +2478,35 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
   const text = codeOnly(source, [], true) ?? source;
   if (hasUnbounded(text, source)) tier.all = true;
+  cls = { text, ...pathNames(text), bind: new Map(), memo: new Map(), visiting: new Set(), steps: 0 };
+  try {
+    classifyLoads(tier, fromKey, text);
+  } finally {
+    cls = undefined;
+  }
+  // A hit we do not classify can name any non-doc file, including tests and workflows.
+  if (!tier.all && unclassifiedUnsafe(text)) {
+    tier.pkg = true;
+    tier.tests = true;
+    tier.flows = true;
+  }
+  return tier;
+}
+function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
   const callers = loaderNames(text);
   const re = new RegExp(`(?:^|[^\\w$])(?:require(?:\\s*\\.\\s*resolve)?|import|fork|execFile|execFileSync${callers.map((n) => `|${n.replace(/\$/g, "\\$")}`).join("")})\\s*\\(`, "g");
   for (const m of text.matchAll(re)) {
     const paren = (m.index ?? 0) + m[0].lastIndexOf("(");
     const args = argsOf(text, paren);
     if (args === undefined) continue;
-    loadEffect(tier, fromKey, firstArg(args), text);
+    // An alias, require.resolve and a name held string leave the hook's own folder in the set: only a direct literal-headed
+    // argument restricts to a directory.
+    const callee = m[0].replace(/^[^\w$]/, "").replace(/\s*\($/, "").replace(/\s+/g, "");
+    const direct = /^(?:require|import|fork|execFile|execFileSync)$/.test(callee);
+    loadEffect(tier, fromKey, firstArg(args), text, !direct || /^[A-Za-z_$][\w$]*$/.test(firstArg(args).trim()));
   }
   // createRequire(...)(x) loads x like require does.
-  for (const m of text.matchAll(/\bcreateRequire\s*\(/g)) {
+  for (const m of text.matchAll(new RegExp(`\\b(?:${createRequireNames(text).join("|")})\\s*\\(`, "g"))) {
     const open = (m.index ?? 0) + m[0].length - 1;
     const inner = argsOf(text, open);
     if (inner === undefined) continue;
@@ -2495,7 +2514,13 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
     const call = /^\s*\(/.exec(text.slice(after));
     if (!call) continue;
     const args = argsOf(text, after + call[0].length - 1);
-    if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text);
+    if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text, true);
+  }
+  // A code-running builtin that loads a file by name (cluster.setupPrimary({ exec }), module.register(...), Module._load(...)).
+  if (/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["'](?:node:)?(?:cluster|module)["']/.test(text) && /\b(?:setupPrimary|setupMaster)\s*\(|\bregister\s*\(|\b_load\s*\(/.test(text)) {
+    tier.pkg = true;
+    tier.tests = true;
+    tier.flows = true;
   }
   // require or import handed on as a value (`list.map(require)`, `[require]`) loads whatever it is called with later.
   if (/(?:[(,[:?]|\breturn|=>)\s*(?:require|import)(?![\w$])(?!\s*[(.])/.test(text)) {
@@ -2512,17 +2537,10 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
       if (!t.startsWith("[") || !t.endsWith("]")) continue;
       for (const el of splitTop(t.slice(1, -1), ",")) {
         const e = el.trim();
-        if (e && strLit(e) === undefined && !/^-/.test(e)) loadEffect(tier, fromKey, e, text);
+        if (e && strLit(e) === undefined && !/^-/.test(e)) loadEffect(tier, "package.json", e, text, true); // an argument vector names files from the package root
       }
     }
   }
-  // A hit we do not classify can name any non-doc file, including tests and workflows.
-  if (!tier.all && unclassifiedUnsafe(text)) {
-    tier.pkg = true;
-    tier.tests = true;
-    tier.flows = true;
-  }
-  return tier;
 }
 
 // npm sets npm_package_json to this package's manifest. dirname of it is the package root.
@@ -4070,10 +4088,12 @@ function applyNonJs(ctx: Ctx, text: string, lang: NonJsLang): boolean {
 
 // The effect of one load argument. An argument that names nothing (a parameter, an unresolved name) can still be any file of
 // this directory or above, so it keeps that fallback even when another call restricts to a directory.
-function loadEffect(tier: JsTier, fromKey: string, arg: string, text: string): void {
+function loadEffect(tier: JsTier, fromKey: string, arg: string, text: string, floor = false): void {
   const eff = effectOf(fromKey, arg, text);
   mergeEffect(tier, eff);
   if (eff.t === "none" && strLit(arg.trim()) === undefined) tier.same = true;
+  // A shape main did not classify at all kept the hook's own folder: a restriction to one directory keeps it too.
+  if (floor && (eff.t === "prefix" || eff.t === "lit")) tier.same = true;
 }
 function mergeEffect(tier: JsTier, eff: JsEffect): void {
   if (eff.t === "none") return;
@@ -4101,67 +4121,194 @@ function mergeEffect(tier: JsTier, eff: JsEffect): void {
 
 // A plain identifier is a package name (require(name)), not a file path.
 // The names a file binds to require, or to the result of createRequire(...): a call through one loads like require.
+// An assignment anywhere counts (`let r; r = require`), so do aliases of aliases (up to three deep) and require.bind(...).
 function loaderNames(text: string): string[] {
+  const id = "[A-Za-z_$][\\w$]*";
   const names = new Set<string>();
-  for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:require\b(?!\s*[(.])|(?:[A-Za-z_$][\w$]*\s*\.\s*)?createRequire\s*\()/g)) names.add(m[1]!);
+  const add = (re: RegExp) => { for (const m of text.matchAll(re)) names.add(m[1]!); };
+  add(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*(?:(?:module\\s*\\.\\s*)?require\\b(?!\\s*\\()(?!\\s*\\.\\s*(?!bind\\b))|[^;\\n]*\\bcreateRequire\\s*\\()`, "g"));
+  for (const alias of createRequireNames(text)) add(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*[^;\\n]*\\b${alias.replace(/\$/g, "\\$")}\\s*\\(`, "g"));
+  for (let round = 0; round < 3; round++) {
+    for (const n of [...names]) add(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*${n.replace(/\$/g, "\\$")}(?![\\w$])(?!\\s*[(.])`, "g"));
+  }
   return [...names];
 }
 
-// What a name is bound to: its initializers and later assignments, up to the end of the statement.
-function bindingsOf(text: string, name: string): string[] {
+// createRequire and its renamed destructured binding (const { createRequire: cr } = require("module")).
+function createRequireNames(text: string): string[] {
+  const out = new Set<string>(["createRequire"]);
+  for (const m of text.matchAll(/\bcreateRequire\s*:\s*([A-Za-z_$][\w$]*)/g)) out.add(m[1]!);
+  return [...out];
+}
+
+// What a name is bound to: its initializers and later assignments, up to the end of the statement. A line that continues the
+// expression (a leading + . ? : & |, or a trailing operator) belongs to it; `+=` also reads the unknown left side.
+function bindingsOf(name: string): string[] {
+  const c = cls;
+  if (!c) return [];
+  const hit = c.bind.get(name);
+  if (hit) return hit;
+  const text = c.text;
   const out: string[] = [];
-  const re = new RegExp(`(?:\\b(?:const|let|var)\\s+|(?<![\\w$.]))${name.replace(/\$/g, "\\$")}\\s*(?:\\+|\\|\\||\\?\\?)?=(?![=>])`, "g");
+  const re = new RegExp(`(?:\\b(?:const|let|var)\\s+|(?<![\\w$.]))${name.replace(/\$/g, "\\$")}\\s*(\\+|\\|\\||\\?\\?|&&)?=(?![=>])`, "g");
   for (const m of text.matchAll(re)) {
-    const start = (m.index ?? 0) + m[0].length;
+    let start = (m.index ?? 0) + m[0].length;
+    while (start < text.length && /\s/.test(text[start]!)) start++;
     let depth = 0;
     let quote: string | null = null;
     let i = start;
     for (; i < text.length; i++) {
-      const c = text[i]!;
+      const ch = text[i]!;
       if (quote) {
-        if (c === "\\") i++;
-        else if (c === quote) quote = null;
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = null;
         continue;
       }
-      if (c === "'" || c === '"' || c === "`") quote = c;
-      else if (c === "(" || c === "[" || c === "{") depth++;
-      else if (c === ")" || c === "]" || c === "}") {
+      if (ch === "'" || ch === '"' || ch === "`") quote = ch;
+      else if (ch === "(" || ch === "[" || ch === "{") depth++;
+      else if (ch === ")" || ch === "]" || ch === "}") {
         if (depth === 0) break;
         depth--;
-      } else if (depth === 0 && (c === ";" || c === "\n" || c === ",")) break;
+      } else if (depth === 0 && (ch === ";" || ch === ",")) break;
+      else if (depth === 0 && ch === "\n") {
+        const before = /[+\-*/?:&|.,=(]\s*$/.test(text.slice(start, i));
+        const after = /^\s*[+.?:&|]/.test(text.slice(i + 1, i + 40));
+        if (!before && !after) break;
+      }
     }
     const init = text.slice(start, i).trim();
-    if (init) out.push(init);
+    if (init) out.push(m[1] === "+" ? `__prev + ${init}` : init);
   }
+  c.bind.set(name, out);
   return out;
 }
 
-function effectOf(fromKey: string, expr: string, text = "", depth = 0): JsEffect {
-  const t = expr.trim();
-  if (/^[A-Za-z_$][\w$]*$/.test(t)) {
-    // A name held string: read what it was built from. A parameter or an import has no binding here and names nothing.
-    if (depth >= 3 || !text) return { t: "none" };
-    const effects = bindingsOf(text, t).map((init) => effectOf(fromKey, init, text, depth + 1));
-    if (effects.every((e) => e.t === "none")) return { t: "none" };
-    if (effects.some((e) => e.t === "all")) return { t: "all" };
-    const wide = effects.filter((e): e is Extract<JsEffect, { t: "pkg" }> => e.t === "pkg");
-    if (wide.length) return { t: "pkg", tests: wide.some((e) => e.tests), flows: wide.some((e) => e.flows) };
-    // A restriction to a directory stands only when every binding restricts the same way; a binding that names nothing
-    // (a parameter, a literal read elsewhere) or a different directory leaves the whole package possible.
-    const first = JSON.stringify(effects[0]);
-    if (effects.every((e) => JSON.stringify(e) === first)) return effects[0]!;
-    return { t: "pkg", tests: true, flows: true };
+// One classify call's view of the file: the path-module names, and the bindings it has already read. A name is read once,
+// a name met again while it is being read counts for nothing more, and past this many names the answer is the package.
+type ClsCtx = { text: string; mods: Set<string>; fns: Set<string>; bind: Map<string, string[]>; memo: Map<string, JsEffect>; visiting: Set<string>; steps: number };
+let cls: ClsCtx | undefined;
+const BIND_STEPS = 200;
+const WIDE: JsEffect = { t: "pkg", tests: true, flows: true };
+
+function combineEffects(effects: JsEffect[]): JsEffect {
+  if (effects.length === 0 || effects.every((e) => e.t === "none")) return { t: "none" };
+  if (effects.some((e) => e.t === "all")) return { t: "all" };
+  const wide = effects.filter((e): e is Extract<JsEffect, { t: "pkg" }> => e.t === "pkg");
+  if (wide.length) return { t: "pkg", tests: wide.some((e) => e.tests), flows: wide.some((e) => e.flows) };
+  // A restriction to a directory stands only when every one restricts the same way; one that names nothing or a different
+  // directory leaves the whole package possible.
+  const first = JSON.stringify(effects[0]);
+  if (effects.every((e) => JSON.stringify(e) === first)) return effects[0]!;
+  return WIDE;
+}
+
+function nameEffect(fromKey: string, name: string, depth: number): JsEffect {
+  const c = cls;
+  if (!c) return { t: "none" };
+  const hit = c.memo.get(name);
+  if (hit) return hit;
+  if (c.visiting.has(name)) return { t: "none" };
+  if (++c.steps > BIND_STEPS || depth >= 8) return WIDE;
+  c.visiting.add(name);
+  let eff: JsEffect;
+  try {
+    eff = nameEffectScan(fromKey, name, depth);
+  } finally {
+    c.visiting.delete(name);
   }
+  c.memo.set(name, eff);
+  return eff;
+}
+
+function nameEffectScan(fromKey: string, name: string, depth: number): JsEffect {
+  const c = cls!;
+  const n = name.replace(/\$/g, "\\$");
+  // A name taken out of a structure or a loop (`const { p } = o`, `for (const p of list)`, `catch (p)`) is data the scan cannot follow.
+  if (new RegExp(`\\b(?:const|let|var)\\s*[{\\[][^;=]*?(?<![\\w$.])${n}(?![\\w$])[^;=]*?[}\\]]\\s*=|\\bfor\\s*\\(\\s*(?:const|let|var)\\s+${n}\\s+(?:of|in)\\b|\\bcatch\\s*\\(\\s*${n}\\s*\\)`).test(c.text)) return WIDE;
+  const inits = bindingsOf(name);
+  if (inits.length) return combineEffects(inits.map((init) => effectOf(fromKey, init, "", depth + 1)));
+  return paramEffect(fromKey, name, depth);
+}
+
+// A function parameter names nothing until the function is called: the arguments at its call sites in this file are what it loads.
+// A function that is never called here (an export) names nothing.
+function paramEffect(fromKey: string, name: string, depth: number): JsEffect {
+  const text = cls!.text;
+  const effects: JsEffect[] = [];
+  const params = (list: string) => splitTop(list, ",").map((x) => x.trim().replace(/\s*=.*$/s, "").replace(/^\.\.\./, ""));
+  const sites = (fname: string, at: number) => {
+    const re = new RegExp(`(?<![\\w$.])${fname.replace(/\$/g, "\\$")}\\s*\\(`, "g");
+    for (const m of text.matchAll(re)) {
+      if (/\bfunction\s*$/.test(text.slice(Math.max(0, (m.index ?? 0) - 12), m.index ?? 0))) continue;
+      const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
+      if (args === undefined) continue;
+      const arg = splitTop(args, ",")[at];
+      if (arg !== undefined && arg.trim()) effects.push(effectOf(fromKey, arg, "", depth + 1));
+    }
+  };
+  for (const m of text.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(([^()]*)\)/g)) {
+    const at = params(m[2]!).indexOf(name);
+    if (at >= 0) sites(m[1]!, at);
+  }
+  for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\s*\(([^()]*)\)|\(([^()]*)\)\s*=>|([A-Za-z_$][\w$]*)\s*=>)/g)) {
+    const list = m[2] ?? m[3] ?? m[4] ?? "";
+    const at = params(list).indexOf(name);
+    if (at >= 0) sites(m[1]!, at);
+  }
+  return combineEffects(effects);
+}
+
+function effectOf(fromKey: string, expr: string, _text = "", depth = 0): JsEffect {
+  const t = expr.trim();
+  if (/^[A-Za-z_$][\w$]*$/.test(t)) return nameEffect(fromKey, t, depth);
   if (!t || strLit(t) !== undefined) return { t: "none" };
   if (/Buffer\.from\s*\(|\bbase64\b|\batob\s*\(/.test(t)) return { t: "pkg", tests: true, flows: true };
   const call = matchCall(t);
-  // A join or resolve is a path call when its receiver is a name; an array literal or a call result is a string built by
-  // joining pieces, which can name any file.
-  if (call && isJoinCallee(call.callee) && /^(?:(?:[A-Za-z_$][\w$]*|require\((['"])(?:node:)?path(?:\/posix)?\1\))\.)*(?:join|resolve)$/.test(call.callee.replace(/\s+/g, ""))) return effectOfJoin(fromKey, call.args, isResolveCallee(call.callee));
-  if (call && isJoinCallee(call.callee)) return { t: "pkg", tests: true, flows: true };
+  // A join or resolve is a path call when its receiver is the path module (`path`, `path?.join`, `(path).join`,
+  // require("path/win32").join, a destructured join). Any other join is a string built by joining pieces: when every piece is a
+  // literal it is that string, otherwise it can name any file, docs included.
+  if (call && isJoinCallee(call.callee)) {
+    const callee = call.callee.replace(/\s+/g, "").replace(/\?\./g, ".").replace(/\(([A-Za-z_$][\w$]*)\)/g, "$1");
+    if (isPathCallee(callee)) return effectOfJoin(fromKey, call.args, isResolveCallee(callee));
+    const exact = literalJoin(callee, call.args);
+    if (exact !== undefined) {
+      const walked = applySegs(parentParts(fromKey), exact);
+      const path = walked.escape ? "" : walked.parts.join("/");
+      return path ? { t: "lit", path } : { t: "none" };
+    }
+    return { t: "all" };
+  }
   if (t.includes("+") || t.startsWith("`")) return effectOfPlus(fromKey, t);
   if (/[([`]/.test(t)) return { t: "pkg", tests: true, flows: true };
   return { t: "none" };
+}
+
+// The callee of a join or resolve call is the path module: a name bound to it, a destructured join or resolve, or a require of it.
+function isPathCallee(callee: string): boolean {
+  const c = cls;
+  const rm = /^require\((["'`])(?:node:)?path(?:\/(?:posix|win32))?\1\)\.(?:(?:posix|win32)\.)?(?:join|resolve)$/.test(callee);
+  if (rm) return true;
+  if (!c) return false;
+  const bare = /^([A-Za-z_$][\w$]*)$/.exec(callee);
+  if (bare) return c.fns.has(bare[1]!);
+  const member = /^([A-Za-z_$][\w$]*)\.(?:(?:posix|win32)\.)?(?:join|resolve)$/.exec(callee);
+  return !!member && (c.mods.has(member[1]!) || c.fns.has(member[1]!));
+}
+
+// `["./do", "cs/x.js"].join("")`: the string a join of literals makes, when every piece is a literal.
+function literalJoin(callee: string, argsSrc: string): string | undefined {
+  if (!callee.endsWith(".join")) return undefined;
+  const recv = callee.slice(0, -5);
+  if (!recv.startsWith("[") || !recv.endsWith("]")) return undefined;
+  const parts: string[] = [];
+  for (const el of splitTop(recv.slice(1, -1), ",")) {
+    if (!el.trim()) continue;
+    const lit = strLit(el.trim());
+    if (lit === undefined) return undefined;
+    parts.push(lit);
+  }
+  const sep = argsSrc.trim() ? strLit(firstArg(argsSrc).trim()) : ",";
+  return sep === undefined ? undefined : parts.join(sep);
 }
 
 function isJoinCallee(callee: string): boolean {
