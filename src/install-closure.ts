@@ -4782,13 +4782,6 @@ function isRemoteSpec(o: string, files: Set<string>): boolean {
   for (const f of files) if (f === dir || f.startsWith(dir + "/")) return false;
   return true;
 }
-// A bump word or anything that reads as a loose semver (npm accepts =v1.2.3 and trailing text): npm rejects any other plain word
-// (`PATCH`, `1`, `1.2`) before it runs a hook. A word with an expansion or a glob
-// may become one at run time, so it counts as an operand that runs.
-function versionOperandRuns(o: string): boolean {
-  if (!/^[A-Za-z0-9._+=-]+$/.test(o)) return true;
-  return /^(?:major|minor|patch|premajor|preminor|prepatch|prerelease|from-git)$/.test(o) || /^[=v]*[0-9]+\.[0-9]+\.[0-9]+/.test(o);
-}
 // A tarball path with a literal name: it is a file, so no hook of this package runs for it.
 function isTarballPath(o: string): boolean {
   return /^(?:file:)?[A-Za-z0-9._/@+-]+\.(?:tgz|tar\.gz|tar)$/.test(o);
@@ -4815,7 +4808,7 @@ function npmLifecycleApplies(sub: string, rest: string[], files: Set<string>): b
     ops.push(w);
   }
   if (sub === "pack") return unsure || ops.length === 0 || !ops.every((o) => isRegistrySpec(o) || isTarballPath(o) || isRemoteSpec(o, files));
-  return unsure ? ops.length > 0 : ops.some(versionOperandRuns);
+  return ops.length > 0; // npm reads any operand as a version (any run of v and = is stripped), so every operand counts
 }
 // `env -i`, `env -` and `env -u npm_config_ignore_scripts` clear the variable.
 function envClears(words: string[]): boolean {
