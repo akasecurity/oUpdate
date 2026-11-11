@@ -153,7 +153,7 @@ describe("review fixes, round 2", () => {
   test("removing a permissions block falls back to the repository default and is widened", () => {
     const top = "on: push\npermissions:\n  contents: read\njobs:\n  a:\n    runs-on: x\n";
     const none = "on: push\njobs:\n  a:\n    runs-on: x\n";
-    expect(ecosystemSignals(wf(top), wf(none))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "permissions removed, the repository default applies: workflow" }]);
+    expect(ecosystemSignals(wf(top), wf(none))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "permissions removed, default applies: workflow" }]);
     const job = "on: push\njobs:\n  a:\n    runs-on: x\n    permissions: {}\n";
     expect(permissionsRemoved(job, none)).toEqual(["job a"]);
     // Moved from the workflow level into every job, or a workflow block kept: no fallback. A renamed job that lost its block falls back.
@@ -513,7 +513,7 @@ describe("review follow-ups: build key removed, one signal per script, new-job w
     const wf = (src: string) => files({ [WF]: src });
     const old = "on: push\njobs:\n  a:\n    runs-on: x\n    permissions:\n      contents: read\n";
     const nu = "on: push\njobs:\n  a:\n    runs-on: x\n  b:\n    runs-on: x\n";
-    expect(ecosystemSignals(wf(old), wf(nu))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "permissions removed, the repository default applies: job a; no permissions block, the repository default applies: job b" }]);
+    expect(ecosystemSignals(wf(old), wf(nu))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "permissions removed, default applies: job a; no permissions block, default applies: job b" }]);
     expect(permissionsRemoved(old, nu)).toEqual(["job a", "job b"]);
   });
 });
@@ -555,7 +555,7 @@ describe("soft-signal misses: Go import forms, new jobs without a block, more tr
   const wf = (src: string) => files({ [WF]: src });
   test("a new or renamed job with no permissions block, where every old job had one, falls back to the default", () => {
     const old = "on: push\njobs:\n  a:\n    runs-on: x\n    permissions:\n      contents: read\n";
-    expect(ecosystemSignals(wf(old), wf(old + "  b:\n    runs-on: x\n"))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "no permissions block, the repository default applies: job b" }]);
+    expect(ecosystemSignals(wf(old), wf(old + "  b:\n    runs-on: x\n"))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail: "no permissions block, default applies: job b" }]);
     expect(permissionsRemoved(old, "on: push\njobs:\n  c:\n    runs-on: x\n")).toEqual(["job c"]);
     // Not when an old job already ran on the default, or a workflow block covers the new job.
     const mixed = old + "  d:\n    runs-on: x\n";
@@ -586,5 +586,45 @@ describe("soft-signal misses: Go import forms, new jobs without a block, more tr
     const src = "on: push\rpermissions: write-all\rjobs:\r  a:\r    runs-on: x\rbroken: [\n";
     expect([...workflowWriteGrants(src)]).toEqual(["write-all"]);
     expect([...workflowTriggers("on:\r  - issues\r  - pull_request_target\rbroken: [\n")].sort()).toEqual(["issues", "pull_request_target"]);
+  });
+});
+
+describe("soft follow-ups: a script added and changed, normalized paths, a build.rs back on and changed, short labels", () => {
+  const toml = (build?: string) => `[package]\nname = "x"\nversion = "1.0.0"\n${build === undefined ? "" : `build = ${build}\n`}`;
+  test("a shared script new to one manifest and changed under another is one signal, added, in either order", () => {
+    for (const order of [["a", "b"], ["b", "a"]]) {
+      const old: Record<string, string> = { "a/Cargo.toml": toml('"../shared/gen.rs"'), "b/Cargo.toml": toml(), "shared/gen.rs": "a" };
+      const nu: Record<string, string> = {};
+      for (const c of order) nu[`${c}/Cargo.toml`] = toml('"../shared/gen.rs"');
+      nu["shared/gen.rs"] = "b";
+      expect(ecosystemSignals(files(old), files(nu)), order.join()).toEqual([
+        { kind: "rust-build-script-added", path: "shared/gen.rs", detail: "new custom build script named in b/Cargo.toml; it runs at build time" },
+      ]);
+    }
+  });
+  test("a build path is compared normalized: the same script written two ways is not new", () => {
+    for (const dir of ["", "c/"])
+      for (const from of ['"././gen/make.rs"', '"tools/../gen/make.rs"']) {
+        const o = { [`${dir}Cargo.toml`]: toml(from), [`${dir}gen/make.rs`]: "a" };
+        expect(ecosystemSignals(files(o), files({ ...o, [`${dir}Cargo.toml`]: toml('"gen/make.rs"') })), `${dir} ${from}`).toEqual([]);
+        const s = ecosystemSignals(files(o), files({ [`${dir}Cargo.toml`]: toml('"gen/make.rs"'), [`${dir}gen/make.rs`]: "b" }));
+        expect(s.map((x) => [x.kind, x.path]), `${dir} ${from}`).toEqual([["rust-build-script-changed", `${dir}gen/make.rs`]]);
+      }
+  });
+  test("a build.rs that was turned off comes back changed: one added signal that says both, in either order", () => {
+    for (const [from, why] of [["false", "no longer turns the build script off"], ['"tools/gen.rs"', "no longer names another build script"]] as const) {
+      const o = files({ "Cargo.toml": toml(from), "build.rs": "a", "tools/gen.rs": "g" });
+      for (const n of [files({ "Cargo.toml": toml(), "build.rs": "b", "tools/gen.rs": "g" }), files({ "build.rs": "b", "Cargo.toml": toml(), "tools/gen.rs": "g" })])
+        expect(ecosystemSignals(o, n), from).toEqual([{ kind: "rust-build-script-added", path: "build.rs", detail: `build.rs now runs, changed: Cargo.toml ${why}` }]);
+    }
+    // A new build.rs is raised on its own path once, as before.
+    expect(ecosystemSignals(files({ "Cargo.toml": toml("false") }), files({ "Cargo.toml": toml(), "build.rs": "b" }))).toEqual([{ kind: "rust-build-script-added", path: "build.rs", detail: "new build.rs; it runs at build time" }]);
+  });
+  test("added grants, a removed block and a new job with no block fit under the 160-character cut together", () => {
+    const old = "on: push\njobs:\n  build:\n    runs-on: x\n    permissions:\n      contents: read\n";
+    const nu = "on: push\njobs:\n  build:\n    runs-on: x\n  publish:\n    runs-on: x\n  release:\n    runs-on: x\n    permissions:\n      contents: write\n      packages: write\n";
+    const detail = "write access added: contents write; packages write; permissions removed, default applies: job build; no permissions block, default applies: job publish";
+    expect(detail.length).toBeLessThanOrEqual(160);
+    expect(ecosystemSignals(files({ [WF]: old }), files({ [WF]: nu }))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail }]);
   });
 });

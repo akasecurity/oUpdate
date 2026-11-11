@@ -35,9 +35,9 @@ const GO_C_TOKEN = /^(?:\.|[\p{L}_][\p{L}\p{Nd}_]*)?"C"$/u;
 const GO_ESCAPED_C = /^\\(?:x43|103|u0043|U00000043)$/;
 /**
  * Go source with its comments taken out (a block comment's newlines kept) and every string and rune turned into "" or ''
- * ("C" for a string that is exactly C, raw or not, or one escape for it: the same import path), read in one pass the way the Go scanner reads
- * it: a backquote or a quote inside a comment or another string opens nothing. A carriage return is no line end in Go, so
- * it reads as a space.
+ * ("C" for a string that is exactly C, raw or not, or one escape for it: the same import path), read in one pass the way
+ * the Go scanner reads it: a backquote or a quote inside a comment or another string opens nothing. A carriage return is
+ * no line end in Go, so it reads as a space.
  */
 function goCode(src: string): string {
   let out = "";
@@ -102,7 +102,12 @@ export function cargoBuildScript(toml: string | undefined): string | undefined {
   return typeof key === "string" ? key : undefined;
 }
 
-/** The [package] build key: the script path it names, false when it turns the build script off, undefined when absent (or true: the crate root's build.rs). */
+/**
+ * The [package] build key: the script path it names, false when it turns the build script off, undefined when absent
+ * (or true: the crate root's build.rs).
+ * Known limit: a list of scripts (build = ["a.rs", "b.rs"], an unstable Cargo form) reads as undefined, so only the crate
+ * root's build.rs is followed and the listed scripts raise nothing here unless one is a build.rs on its own path.
+ */
 function cargoBuildKey(toml: string | undefined): string | false | undefined {
   if (toml === undefined) return undefined;
   try {
@@ -128,19 +133,29 @@ function cargoBuildKeyLines(toml: string): string | false | undefined {
   return undefined;
 }
 
-/** Per release: `seen`, the script paths already reported (one signal per script path, however many manifests name it);
- * `same`, each path's old-versus-new byte comparison, made once however many manifests share the script. */
-type CargoState = { seen: Set<string>; same: Map<string, boolean> };
+/** Per release: `seen`, the signal already reported for each build script path (one per path, however many manifests
+ * name it, and a build.rs read on its own path counts); `same`, each path's old-versus-new byte comparison, made once
+ * however many manifests share the script. */
+type CargoState = { seen: Map<string, Signal>; same: Map<string, boolean> };
+/** One signal per script path. A script that is new to one manifest and changed under another is reported as added
+ * (it now runs where it did not): the added signal takes the place of the changed one, where that was reported. */
+function oncePerPath(st: CargoState, sig: Signal | undefined): Signal[] {
+  if (!sig) return [];
+  const prev = st.seen.get(sig.path);
+  if (!prev) {
+    st.seen.set(sig.path, sig);
+    return [sig];
+  }
+  if (prev.kind === "rust-build-script-changed" && sig.kind === "rust-build-script-added") Object.assign(prev, sig);
+  return [];
+}
 function cargoSignals(oldFiles: FileMap, newFiles: FileMap, p: string, st: CargoState): Signal[] {
   const unchanged = (path: string) => {
     let v = st.same.get(path);
     if (v === undefined) st.same.set(path, (v = sameBytes(oldFiles.get(path), newFiles.get(path))));
     return v;
   };
-  const sig = cargoSignal(oldFiles, newFiles, p, unchanged);
-  if (!sig || st.seen.has(sig.path)) return [];
-  st.seen.add(sig.path);
-  return [sig];
+  return oncePerPath(st, cargoSignal(oldFiles, newFiles, p, unchanged));
 }
 function cargoSignal(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged: (path: string) => boolean): Signal | undefined {
   const key = cargoBuildKey(text(newFiles, p));
@@ -151,16 +166,20 @@ function cargoSignal(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged:
   const root = posix.normalize(dir + "build.rs");
   const runsRoot = (k: string | false | undefined) => k === undefined || (typeof k === "string" && posix.normalize(dir + k) === root);
   if (runsRoot(key)) {
-    // The crate root's build.rs runs. A new or changed one is raised on its own path; an unchanged one the old manifest
-    // turned off, or passed over for another script, starts running now.
-    if (oldToml === undefined || runsRoot(oldKey) || !newFiles.has(root) || !unchanged(root)) return undefined;
+    // The crate root's build.rs runs. A new one is raised on its own path; one the old manifest turned off, or passed over
+    // for another script, starts running now: added, and said to be changed too when it is (in place of the changed signal
+    // its own path raises).
+    if (oldToml === undefined || runsRoot(oldKey) || !newFiles.has(root)) return undefined;
+    const changed = !unchanged(root);
+    if (changed && !oldFiles.has(root)) return undefined;
     const why = oldKey === false ? "no longer turns the build script off" : "no longer names another build script";
-    return { kind: "rust-build-script-added", path: root, detail: `build.rs now runs: ${p} ${why}`.slice(0, 160) };
+    return { kind: "rust-build-script-added", path: root, detail: `build.rs now runs${changed ? ", changed" : ""}: ${p} ${why}`.slice(0, 160) };
   }
-  const script = key!;
-  const sp = posix.normalize(dir + script);
+  const sp = posix.normalize(dir + key!);
   if (!newFiles.has(sp)) return undefined;
-  const named = cargoBuildScript(oldToml) === script;
+  // Compared as normalized paths: "./gen.rs" and "gen.rs" are the same script.
+  const oldScript = cargoBuildScript(oldToml);
+  const named = oldScript !== undefined && posix.normalize(dir + oldScript) === sp;
   const prev = oldFiles.get(sp);
   // A build.rs is read on its own path (a new or changed one is raised there). Followed from here: a script under another
   // name, and a build.rs elsewhere that the manifest newly names while it was already shipped (it did not run before, and
@@ -452,8 +471,9 @@ function workflowSignals(oldFiles: FileMap, newFiles: FileMap, p: string): Signa
   const { removed, unset } = prev === undefined ? { removed: [], unset: [] } : defaultApplies(o.perms, n.perms);
   const parts = [
     ...(widened.length ? [`write access added: ${widened.slice(0, 6).join("; ")}`] : []),
-    ...(removed.length ? [`permissions removed, the repository default applies: ${removed.slice(0, 6).join(", ")}`] : []),
-    ...(unset.length ? [`no permissions block, the repository default applies: ${unset.slice(0, 6).join(", ")}`] : []),
+    // Short labels, so all three parts and their names fit under the 160-character cut.
+    ...(removed.length ? [`permissions removed, default applies: ${removed.slice(0, 6).join(", ")}`] : []),
+    ...(unset.length ? [`no permissions block, default applies: ${unset.slice(0, 6).join(", ")}`] : []),
   ];
   if (parts.length) out.push({ kind: "workflow-permissions-widened", path: p, detail: parts.join("; ").slice(0, 160) });
   const added = [...n.triggers].filter((t) => !o.triggers.has(t));
@@ -464,9 +484,9 @@ function workflowSignals(oldFiles: FileMap, newFiles: FileMap, p: string): Signa
 /** Soft signals for a new or changed build.rs (or Cargo.toml custom build script), Go generate / cgo, and workflow permission or trigger changes. Never hard. */
 export function ecosystemSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   const out: Signal[] = [];
-  const cargoState: CargoState = { seen: new Set(), same: new Map() };
+  const cargoState: CargoState = { seen: new Map(), same: new Map() };
   for (const p of newFiles.keys()) {
-    if (isRustBuildScript(p)) out.push(...rustSignals(oldFiles, newFiles, p));
+    if (isRustBuildScript(p)) out.push(...rustSignals(oldFiles, newFiles, p).flatMap((s) => oncePerPath(cargoState, s)));
     else if (base(p) === "Cargo.toml") out.push(...cargoSignals(oldFiles, newFiles, p, cargoState));
     else if (isGoSource(p)) out.push(...goSignals(oldFiles, newFiles, p));
     else if (isWorkflowFile(p)) out.push(...workflowSignals(oldFiles, newFiles, p));
