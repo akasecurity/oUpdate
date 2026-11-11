@@ -603,6 +603,14 @@ function decodeJsString(raw: string): string | undefined {
 }
 
 function followLoads(ctx: Ctx, key: string, text: string): void {
+  try {
+    followLoadsScan(ctx, key, text);
+  } catch {
+    scannerFaults++;
+    fail(ctx, "scanner fault");
+  }
+}
+function followLoadsScan(ctx: Ctx, key: string, text: string): void {
   for (const m of (codeOnly(text, [], true) ?? text).matchAll(new RegExp(LITERAL_LOAD.source, "g"))) {
     if (ctx.hold) return;
     let spec = m[2] || m[4] || m[6] || "";
@@ -678,10 +686,185 @@ const LITERAL_LOAD = new RegExp(
   "g",
 );
 // Anything still able to name a file. module.exports is removed first; it is the static CJS assignment.
-const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bchild_process\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
-// The plain reads of the process object a name for the process module may make. Any other use of such a name (a computed
-// member, binding, getBuiltinModule, an argument to a call) can reach a loader or a native module, so it is not static.
-const PROCESS_READ = "(?:env\\s*\\.\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|versions?\\b(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)?|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
+const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global|window)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
+// child_process only counts as the name of a module being loaded; the word inside a message does not.
+// A load of the process module by name, in any shape.
+const LOADS_PROCESS = /(?:\brequire\s*\(|\brequire\s*\.\s*resolve\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*(['"`])(?:node:)?process\1/;
+const DANGEROUS_KEY = /^(?:constructor|getBuiltinModule|mainModule|_?linkedBinding|createRequire|prepareStackTrace|getThis|getFunction)$/;
+// The value of a key made only of string literals, template literals of literals, + and parentheses; undefined for anything else.
+function pureLiteralKey(key: string): string | undefined {
+  let i = 0;
+  let out = "";
+  const ws = () => { while (i < key.length && /[\s()]/.test(key[i]!)) i++; };
+  for (;;) {
+    ws();
+    const m = /^(?:"([^"\\\n]*)"|'([^'\\\n]*)'|`((?:[^`\\$]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*)`)/.exec(key.slice(i));
+    if (!m) return undefined;
+    out += (m[1] ?? m[2] ?? m[3] ?? "").replace(/\$\{\s*(?:"([^"]*)"|'([^']*)')\s*\}/g, (_x, a: string | undefined, b: string | undefined) => a ?? b ?? "");
+    i += m[0].length;
+    ws();
+    if (i >= key.length) return out;
+    if (key[i] !== "+") return undefined;
+    i++;
+  }
+}
+// True when the file holds a string whose value is a property name reaching Function or a loader, in any position a value can
+// take (a computed key, a binding, an array element, an argument, a returned or conditional value). Escapes are decoded.
+// A comparison (key === "constructor"), a case label, the left side of in and an object key are guards or names, not uses.
+// Names of variables that steer the next process. The strong ones are refused as keys and entries anywhere; PATH and ENV only
+// as members of process.env (an object key named ENV or PATH is an ordinary option). Case does not matter (Windows).
+const STEERING_STRONG_RE = /^(?:NODE_OPTIONS|NODE_PATH|LD_PRELOAD|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|BASH_ENV|PYTHONPATH|PYTHONSTARTUP|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|NODE_EXTRA_CA_CERTS|npm_config_.*)$/i;
+const STEERING_NAME = { test: (v: string) => STEERING_STRONG_RE.test(v) };
+// True when the object literal that holds position "at" spreads process.env or is the value of an env key: PATH and ENV
+// steer the next process there.
+function envObjectLiteral(code: string, at: number, raw?: string): boolean {
+  const chain = bracketChain(code, at);
+  const top = chain[0];
+  if (top && top[0] < 0) return true;
+  if (!top || code[top[0]] !== "{") return false;
+  const memo = bracketIndex(code).memo;
+  const spreadKey = "s" + top[0];
+  let spreads = memo.get(spreadKey);
+  if (spreads === undefined) {
+    spreads = /\.\.\.\s*process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(code.slice(top[0], top[1] + 1));
+    memo.set(spreadKey, spreads);
+  }
+  if (spreads) return true;
+  const [t1, t1At] = prevTok(code, top[0]);
+  if (t1 === ":") {
+    const k = prevTok(code, t1At)[0];
+    // A quoted key is blanked in the scan: the raw text tells whether it is "env".
+    return k === "env" || (raw !== undefined && /(['"])env\1\s*$/.test(raw.slice(0, t1At))) || (raw === undefined && /^["']$/.test(k));
+  }
+  // opts.env = { ... } and Object.assign({}, process.env, { ... }).
+  // opts.env = { ... } and the compound forms (||=, ??=, &&=).
+  if (t1 === "=") {
+    let [k, kAt] = prevTok(code, t1At);
+    while (k === "|" || k === "?" || k === "&") [k, kAt] = prevTok(code, kAt);
+    if (k === "env") return true;
+  }
+  const outer = chain[1];
+  if (outer === undefined || outer[0] < 0 || code[outer[0]] !== "(") return false;
+  const callKey = "c" + outer[0];
+  let handles = memo.get(callKey);
+  if (handles === undefined) {
+    handles = /(?:^|[^\w$.]|\.\.\.)process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(code.slice(outer[0], outer[1] + 1));
+    memo.set(callKey, handles);
+  }
+  return handles;
+}
+const STATEMENT_KEYWORDS = new Set(["await", "yield", "return", "export", "default", "case", "throw", "typeof", "void", "new", "delete", "in", "of", "else", "do", "instanceof", "extends"]);
+
+// The kept text with strings, regular expressions and template text blanked, so brackets can be matched.
+function maskSpans(out: string, spans: SpanNote[]): string {
+  const parts: string[] = [];
+  let at = 0;
+  for (const s of [...spans].sort((x, y) => x.at - y.at)) {
+    parts.push(out.slice(at, s.at), " ".repeat(s.len));
+    at = s.at + s.len;
+  }
+  parts.push(out.slice(at));
+  return parts.join("");
+}
+
+// True when the brace or bracket that holds "at" is a destructuring pattern, not an object or array literal: it follows const,
+// let or var, it is closed by = or of or in, or it is a parameter or a catch binding. Unmatched brackets count as a pattern.
+function inPattern(code: string, at: number): boolean {
+  const chain = bracketChain(code, at);
+  if (chain.length === 0 || code[chain[0]![0]] === "(") return false;
+  if (chain.some((e) => e[0] === -1)) return true;
+  let top = chain[0]!;
+  let next = 1;
+  // Climb while the bracket is the value or element of the one around it ({ k: { ... } }, [{ ... }]).
+  const prevChar = (o: number) => {
+    let p = o;
+    while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+    return p > 0 ? code[p - 1]! : "";
+  };
+  for (; next < chain.length; next++) {
+    const e = chain[next]!;
+    if (code[e[0]] === "(" || !/[:,\[{]/.test(prevChar(top[0]))) break;
+    top = e;
+  }
+  if (top[1] >= code.length) return true;
+  let p = top[0];
+  while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+  if (/(?<![\w$.])(?:const|let|var)$/.test(code.slice(Math.max(0, p - 6), p))) return true;
+  if (/^(?:=(?![=>])|of(?![\w$])|in(?![\w$]))/.test(codeAfter(code, top[1] + 1, 8))) return true;
+  const paren = chain[next];
+  if (paren && code[paren[0]] === "(") {
+    const closer = codeAfter(code, paren[1] + 1, 5);
+    if (/^=>/.test(closer)) return true;
+    // A brace after the parenthesis is a function body (a parameter list) unless the keyword makes it a condition.
+    if (/^\{/.test(closer)) {
+      let p = paren[0];
+      while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+      if (!/(?<![\w$.])(?:if|while|for|switch|with)$/.test(code.slice(Math.max(0, p - 8), p))) return true;
+    }
+  }
+  return false;
+}
+
+// True when the file holds a string whose value is a property name reaching Function or a loader, in any position a value can
+// take (a computed key, a binding, an array element, an argument, a returned or conditional value). Escapes are decoded.
+// A comparison (key === "constructor"), a case label, the left side of in and a key of an object literal are guards or names,
+// not uses; the key of a destructuring pattern binds the property and is one. A string that names a variable that steers the
+// next process (NODE_OPTIONS, PATH, ...) as a key of an object is a use too.
+function dangerousStringUse(source: string): boolean {
+  const spans: SpanNote[] = [];
+  const out = codeOnly(source, [], true, spans);
+  if (out === undefined) return false;
+  const masked = maskSpans(out, spans);
+  for (const s of spans) {
+    if (s.mask) continue;
+    const v = s.raw.includes("\\") ? decodeJsString(s.raw) : s.raw;
+    if (v === undefined) continue;
+    const danger = DANGEROUS_KEY.test(v);
+    const steering = STEERING_NAME.test(v);
+    if (!danger && !steering && !/^(?:PATH|Path|ENV)$/.test(v)) continue;
+    let q = s.at;
+    while (q > 0 && /\s/.test(masked[q - 1]!)) q--;
+    const before = masked.slice(Math.max(0, q - 12), q);
+    const after = codeAfter(masked, s.at + s.len, 40);
+    const key = (q === 0 || /[{,]$/.test(before)) && after.startsWith(":");
+    if (!steering && !danger) {
+      if (key && /[{,]$/.test(before) && envObjectLiteral(masked, s.at, out)) return true;
+      // An entries pair ["PATH", dir] in a file that handles the environment.
+      if (/\[$/.test(before) && after.startsWith(",") && !/[\w$)\]]/.test(prevTok(masked, q - 1)[0]) && /(?:^|[^\w$.]|\.\.\.)process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(masked)) return true;
+      continue;
+    }
+    if (steering && !danger) {
+      if (key && /[{,]$/.test(before)) return true;
+      // The first element of an array literal ([["NODE_OPTIONS", v]] for Object.fromEntries) names an entry the same way.
+      if (/\[$/.test(before) && after.startsWith(",") && !/[\w$)\]]/.test(masked.slice(Math.max(0, q - 14), q - 1).trimEnd().slice(-1))) return true;
+      // A computed key ({ ["NODE_OPTIONS"]: x }) and an index that is written (env["NODE_OPTIONS"] = x).
+      if (/\[$/.test(before) && after.startsWith("]")) {
+        const next = codeAfter(masked, s.at + s.len + masked.slice(s.at + s.len).indexOf("]") + 1, 3);
+        if (/^:/.test(next) || /^(?:\|\||&&|\?\?|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?![=>])/.test(next)) return true;
+      }
+      continue;
+    }
+    if (/[!=]==?$/.test(before) || /^[!=]==?/.test(after)) continue;
+    if (/(?:^|[^\w$.])case$/.test(before) || /^in(?![\w$])/.test(after)) continue;
+    if (key && !inPattern(masked, s.at)) continue;
+    return true;
+  }
+  return false;
+}
+// True when a bracket expression is only literals and spells a dangerous property name.
+function dangerousLiteralKey(keep: string): boolean {
+  for (const m of keep.matchAll(/\[((?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`|[^\]\["'`])*)\]/g)) {
+    const v = pureLiteralKey(m[1]!);
+    if (v !== undefined && DANGEROUS_KEY.test(v)) return true;
+  }
+  return false;
+}
+const LOADS_CHILD_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*['"](?:node:)?(?:child_process|vm|module|worker_threads)\b/;
+// The plain reads of the process object, or of a name for the process module, a static file may make. Any other use (an
+// alias, a computed member, binding, getBuiltinModule, mainModule, an argument to a call) can reach a loader or a native
+// module, so it is not static; the loader words and a bare or computed use also widen the closure to the whole package.
+const PROCESS_LOADER_WORDS = /\b(?:getBuiltinModule|mainModule|_?linkedBinding)\b|\.\s*binding\b/;
+const PROCESS_READ = "(?:env\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|(?:version\\b|versions\\b(?:\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*)?)|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
 // `const p = require("process")` or `import p from "node:process"`: the only loads of the process module that stay static.
 const PROCESS_ALIAS = new RegExp(
   String.raw`\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(?:node:)?process\2\s*\)|import(?:${GAP}+|(?=\*))(?:\*${GAP}*as${GAP}+)?([A-Za-z_$][\w$]*)${GAP}+from${GAP}*(['"])(?:node:)?process\4)\s*;?`,
@@ -777,7 +960,11 @@ const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "
  * regular expression is decided from the previous token this scan emitted, never from the source text before it: text
  * inside a string, template or regular expression is not a token.
  */
-function codeOnly(text: string, watch: string[] = [], keep = false): string | undefined {
+const TEMPLATE_LITERAL = /(?:[^`\\$\n]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*`/y;
+
+// A span of the kept text: a string (raw is its text) or text to blank when brackets are matched (a regular expression, template text).
+type SpanNote = { raw: string; at: number; len: number; mask?: boolean };
+function codeOnly(text: string, watch: string[] = [], keep = false, strings?: SpanNote[]): string | undefined {
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
   let t1: Tok | undefined;
@@ -805,11 +992,13 @@ function codeOnly(text: string, watch: string[] = [], keep = false): string | un
       else if (c === "`") {
         i++;
         // A closing backtick leaves "" so the tokens on either side of a template never join in the output.
+        strings?.push({ raw: "", at: out.length, len: i - st, mask: true });
         out += keep ? text.slice(st, i) : '""';
         return true;
       } else if (c === "$" && text[i + 1] === "{") {
         i += 2;
         braces.push(true);
+        strings?.push({ raw: "", at: out.length, len: i - st - 2, mask: true });
         out += keep ? text.slice(st, i) : " `${";
         opened = true;
         return true;
@@ -877,11 +1066,25 @@ function codeOnly(text: string, watch: string[] = [], keep = false): string | un
       for (; i < n && text[i] !== c && !eol(text[i]); i++) if (text[i] === "\\") i++;
       if (text[i] !== c) return undefined;
       i++;
+      strings?.push({ raw: text.slice(st + 1, i - 1), at: out.length, len: i - st });
       out += keep ? text.slice(st, i) : '""';
       push("str", "");
     } else if (c === "`") {
       const st = i;
       i++;
+      // A template made only of text and ${"literal"} is a plain string (require(`process`)). A tagged one is a call: not changed.
+      TEMPLATE_LITERAL.lastIndex = i;
+      const lit = TEMPLATE_LITERAL.exec(text);
+      if (lit && !/[\w$)\]]\s*$/.test(out)) {
+        const value = lit[0].slice(0, -1).replace(/\$\{\s*(?:"([^"]*)"|'([^']*)')\s*\}/g, (_m, a: string | undefined, b: string | undefined) => a ?? b ?? "");
+        if (!/["\\\n\r\u2028\u2029]/.test(value)) {
+          i += lit[0].length;
+          strings?.push({ raw: value, at: out.length, len: value.length + 2 });
+          out += keep ? `"${value}"` : '""';
+          push("str", "");
+          continue;
+        }
+      }
       if (!afterTemplate(st)) return undefined;
     } else if (c === "/" && text[i + 1] === "/") {
       while (i < n && !eol(text[i])) i++;
@@ -908,7 +1111,10 @@ function codeOnly(text: string, watch: string[] = [], keep = false): string | un
         if (danger.test(span) || !endsInOperand(span) || !closesCleanly(end + 1)) return undefined;
       }
       if (end >= 0) {
-        if (keep) out += text.slice(i, end + 1);
+        if (keep) {
+          strings?.push({ raw: "", at: out.length, len: end + 1 - i, mask: true });
+          out += text.slice(i, end + 1);
+        }
         i = end + 1;
         if (!keep) out += "/r/";
         push("regex", "");
@@ -991,12 +1197,463 @@ function dotBefore(text: string, at: number): boolean {
   return j > 0 && text[j - 1] === ".";
 }
 
-function provablyStatic(source: string): boolean {
+const READ_AFTER = new RegExp(`\\s*(?:\\?\\.|\\.)\\s*${PROCESS_READ}`, "y");
+// Reads of the global object that cannot reach process or a loader.
+const HARMLESS_GLOBAL = /^\s*(?:\?\.|\.)\s*(?:crypto|document|window|location|localStorage|sessionStorage|atob|btoa|isNaN|parseInt|parseFloat|encodeURIComponent|decodeURIComponent|addEventListener|setTimeout|setInterval|setImmediate|clearTimeout|clearInterval|clearImmediate|queueMicrotask|console|URL|URLSearchParams|TextEncoder|TextDecoder|performance|navigator|fetch|structuredClone|Promise|Symbol|JSON|Math|Date|Array|Object|AbortController|AbortSignal|Intl|Event|EventTarget|Blob|File|FormData|Headers|Request|Response|ReadableStream|WritableStream|TransformStream|Map|Set|WeakMap|WeakSet|WeakRef|FinalizationRegistry|BigInt|Number|String|Boolean|RegExp|Buffer|Uint8Array|Int32Array|Float64Array|ArrayBuffer|DataView)\b/;
+// Members of process that run no code the file does not show and hand out no loader.
+const HARMLESS_MEMBER = /^\s*\.\s*(?:env|report|features|version|versions|argv|exitCode|cwd|nextTick|hrtime|memoryUsage|cpuUsage|uptime|umask|emitWarning|on|once|off|emit|addListener|removeListener|stdout|stderr|stdin|title|pid|ppid|execPath|execArgv|argv0|release|getuid|getgid|geteuid|getegid|getgroups|platform|arch)\b/;
+const MEMBER_AFTER = /\s*\.\s*[A-Za-z_$][\w$]*/y;
+const SAFE_SUFFIX = /\.\s*(?:length\b|(?:slice|split|includes|startsWith|endsWith|indexOf|toString|toLowerCase|toUpperCase|trim|join|forEach|map|filter|some|every|find|replace)\s*\()/y;
+// env is not here: it binds the live environment object to a name the scan does not follow.
+const DESTRUCTURE_OK = "(?:platform|arch|versions?|argv|cwd|exit|exitCode)(?![\\w$])";
+
+// True when the expression that starts at "i" (right after an allowlisted read) ends there: the next token is not a member,
+// a call, a template or an optional chain. A few string and array methods and a numeric index are read through.
+// A write through a read is harmless only for exitCode, title and an environment variable that does not steer the next run.
+const STEERING_ENV = { test: (v: string) => STEERING_NAME.test(v) || /^(?:path|env)$/i.test(v) };
+function harmlessTarget(target: string | undefined): boolean {
+  if (target === undefined) return false;
+  if (/^\s*(?:\?\.|\.)\s*(?:exitCode|title)$/.test(target)) return true;
+  const env = /^\s*(?:\?\.|\.)\s*env\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)$/.exec(target);
+  return env !== null && !STEERING_ENV.test(env[1]!);
+}
+// True when the expression at "at" starts a statement: after ; { } or the start, or after a line break that ends the previous one
+// (an identifier, a literal or a closing bracket, never a keyword such as await, return, export default or else).
+function stmtStartAt(code: string, j: number, at: number, prev: string): boolean {
+  if (prev === "" || prev === ";" || prev === "{" || prev === "}") return true;
+  if (!/[\n\r]/.test(code.slice(j, at)) || !/[\w$)\]"']/.test(prev)) return false;
+  const word = /[A-Za-z_$][\w$]*$/.exec(code.slice(Math.max(0, j - 20), j));
+  return !(word && STATEMENT_KEYWORDS.has(word[0]));
+}
+// True when the next token of a dropped statement (an event-handler call that ends a line) cannot continue the expression.
+function statementEnds(code: string, at: number): boolean {
+  const rest = code.slice(at);
+  if (/^[ \t]*(?:;|\}|$)/.test(rest)) return true;
+  const nl = /^[ \t]*\r?\n\s*/.exec(rest);
+  if (!nl) return false;
+  const next = rest[nl[0].length];
+  return next === undefined || /[A-Za-z_$}{;"'\d]/.test(next);
+}
+
+// The "len" characters that follow position "at" after the white space, and the ones that precede "at" before the white space.
+function codeAfter(code: string, at: number, len: number): string {
+  let i = at;
+  while (i < code.length && /\s/.test(code[i]!)) i++;
+  return code.slice(i, i + len);
+}
+function codeBefore(code: string, at: number, len: number): string {
+  let i = at;
+  while (i > 0 && /\s/.test(code[i - 1]!)) i--;
+  return code.slice(Math.max(0, i - len), i);
+}
+// The last token before position "at", skipping white space without limit: [token, index where it starts].
+function prevTok(code: string, at: number): [string, number] {
+  let q = at;
+  while (q > 0 && /\s/.test(code[q - 1]!)) q--;
+  if (q === 0) return ["", 0];
+  const word = /[A-Za-z_$][\w$]*$|\d[\w.]*$/.exec(code.slice(Math.max(0, q - 64), q));
+  if (word) return [word[0], q - word[0].length];
+  const op = /(?:\.\.\.|\+\+|--|=>|\?\.)$/.exec(code.slice(Math.max(0, q - 3), q));
+  if (op) return [op[0], q - op[0].length];
+  return [code[q - 1]!, q - 1];
+}
+// One pass over a text gives, for every position, the innermost bracket around it, and each bracket's partner. Kept for the last few
+// texts scanned, so the many lookups of one scan never walk the file again.
+type BracketIndex = { inner: Int32Array; closer: Int32Array; opener: Int32Array; memo: Map<string, boolean>; mismatch: boolean };
+const bracketCache: Array<{ code: string; idx: BracketIndex }> = [];
+function bracketIndex(code: string): BracketIndex {
+  for (const e of bracketCache) if (e.code === code) return e.idx;
+  const inner = new Int32Array(code.length);
+  const closer = new Int32Array(code.length).fill(-1);
+  const opener = new Int32Array(code.length).fill(-1);
+  const stack: number[] = [];
+  let mismatch = false;
+  for (let i = 0; i < code.length; i++) {
+    inner[i] = stack.length > 0 ? stack[stack.length - 1]! : -1;
+    const c = code[i]!;
+    if (c === "(" || c === "[" || c === "{") stack.push(i);
+    else if (c === ")" || c === "]" || c === "}") {
+      const o = stack.pop();
+      if (o === undefined || code[o] !== (c === ")" ? "(" : c === "]" ? "[" : "{")) mismatch = true;
+      if (o !== undefined) {
+        closer[o] = i;
+        opener[i] = o;
+      }
+    }
+  }
+  if (stack.length > 0) mismatch = true;
+  const idx: BracketIndex = { inner, closer, opener, memo: new Map(), mismatch };
+  bracketCache.push({ code, idx });
+  if (bracketCache.length > 4) bracketCache.shift();
+  return idx;
+}
+const CHAIN_CAP = 64;
+// The brackets that enclose a position, innermost first, as [opener, closer] pairs. A chain deeper than the cap ends in the
+// pair [-1, length]: callers read it as "unknown" and take the cautious answer.
+function bracketChain(code: string, at: number): Array<[number, number]> {
+  const idx = bracketIndex(code);
+  if (idx.mismatch) return [[-1, code.length]];
+  const chain: Array<[number, number]> = [];
+  let o = at >= 0 && at < code.length ? idx.inner[at]! : -1;
+  while (o >= 0) {
+    if (chain.length >= CHAIN_CAP) {
+      chain.push([-1, code.length]);
+      break;
+    }
+    chain.push([o, idx.closer[o]! >= 0 ? idx.closer[o]! : code.length]);
+    o = idx.inner[o]!;
+  }
+  return chain;
+}
+function enclosingBrackets(code: string, at: number[]): Map<number, Array<[number, number]>> {
+  const out = new Map<number, Array<[number, number]>>();
+  for (const a of at) out.set(a, bracketChain(code, a));
+  return out;
+}
+
+// True when a member of process at "at" (its chain ends at "end") is written other than by a plain assignment: a destructuring
+// target, a for-in or for-of head, an operand of ++, -- or delete. The target rule then applies to the write.
+function writtenOddly(code: string, at: number, end: number, around: Array<[number, number]>): { chain: string } | undefined {
+  let chain = /^(?:\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*)*/.exec(code.slice(end))![0];
+  let after = end + chain.length;
+  // An index after the chain (process.env[k]) names a key the file does not show.
+  for (let guard = 0; guard < 4; guard++) {
+    let k = after;
+    while (k < code.length && /\s/.test(code[k]!)) k++;
+    if (code[k] !== "[") break;
+    const e = bracketIndex(code).closer[k]! >= 0 ? bracketIndex(code).closer[k]! : code.length;
+    if (e >= code.length) return { chain: chain + "[]" };
+    chain += "[]";
+    after = e + 1;
+  }
+  // Parentheses around the target ([(process.env.X)] = v, delete (process.env.X)) are transparent.
+  let a = at;
+  let e = after;
+  let arr = around;
+  while (arr.length > 0 && code[arr[0]![0]] === "(" && prevTok(code, a)[1] === arr[0]![0] && codeAfter(code, e, 1) === ")" && code.indexOf(")", e) === arr[0]![1]) {
+    a = arr[0]![0];
+    e = arr[0]![1] + 1;
+    arr = arr.slice(1);
+  }
+  const tail = codeAfter(code, e, 12);
+  // ++ and -- before the member are prefix operators unless they end an expression on the same line (i++ then a line break).
+  const [t1, t1At] = prevTok(code, a);
+  let prefix = false;
+  if (t1 === "++" || t1 === "--") {
+    const [t0, t0At] = prevTok(code, t1At);
+    prefix = !(/^[\w$]+$|^["'\]]$/.test(t0) && !STATEMENT_KEYWORDS.has(t0) && !/[\n\r]/.test(code.slice(t0At + t0.length, t1At)));
+  }
+  let d = t1;
+  let dAt = t1At;
+  while (d === "(") [d, dAt] = prevTok(code, dAt);
+  if (/^(?:\+\+|--)/.test(tail) || prefix || d === "delete") return { chain };
+  if (/^(?:of|in)(?![\w$])/.test(tail) && t1 === "(") {
+    const [f1, f1At] = prevTok(code, t1At);
+    if (f1 === "for" || (f1 === "await" && prevTok(code, f1At)[0] === "for")) return { chain };
+  }
+  // The member must be the target itself: an element of the pattern, not an index into another value (a[process.env.X]), a
+  // computed key ([process.platform]: x) or a default initializer (x = process.cwd()) of another target.
+  const inner = arr[0];
+  if (!inner || code[inner[0]] === "(") return undefined;
+  const sig = (from: number) => {
+    let p = from;
+    while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+    if (code.slice(0, p).endsWith("...")) {
+      p -= 3;
+      while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+    }
+    return p > 0 ? code[p - 1]! : "";
+  };
+  const wordBefore = (o: number) => {
+    let p = o;
+    while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+    const w = /[A-Za-z_$][\w$]*$/.exec(code.slice(Math.max(0, p - 20), p));
+    return w ? w[0] : "";
+  };
+  // An index follows an expression; a keyword (else, return, ...) before the bracket starts an array instead.
+  const afterHeader = (o: number) => {
+    let p = o;
+    while (p > 0 && /\s/.test(code[p - 1]!)) p--;
+    if (code[p - 1] !== ")") return false;
+    const open = bracketIndex(code).opener[p - 1]!;
+    return open >= 0 && /^(?:if|while|for|switch|with)$/.test(prevTok(code, open)[0]);
+  };
+  const indexes = (o: number) => /[\w$)\]]/.test(sig(o)) && !STATEMENT_KEYWORDS.has(wordBefore(o)) && !afterHeader(o);
+  if (code[inner[0]] === "[" && indexes(inner[0])) return undefined;
+  if (code[inner[0]] === "[" && /^:/.test(codeAfter(code, inner[1] + 1, 1))) return undefined;
+  if (!/[\[,:{]/.test(sig(a))) return undefined;
+  const nextSig = /^\s*(.)(.?)/.exec(code.slice(e));
+  if (!nextSig || !(/[,\]}]/.test(nextSig[1]!) || (nextSig[1] === "=" && nextSig[2] !== "=" && nextSig[2] !== ">"))) return undefined;
+  for (const [o, c] of arr) {
+    if (o < 0) return { chain };
+    if (code[o] === "(") continue;
+    if (code[o] === "[" ? indexes(o) : sig(o) === "$") continue;
+    if (/^(?:=(?![=>])|of(?![\w$])|in(?![\w$]))/.test(codeAfter(code, c + 1, 8))) return { chain };
+  }
+  return undefined;
+}
+
+// A bare process.env (the live object) is harmless only as a read that cannot keep it: a spread into a new object, an operand
+// of typeof or in, or a destructuring that takes strings out of it. Bound, returned, passed on (to a spawn, to Object.keys,
+// to any function) or held in an object, the live object can be written later through an alias the scan does not follow.
+function bareEnvOk(code: string, at: number): boolean {
+  let q = at;
+  while (q > 0 && /\s/.test(code[q - 1]!)) q--;
+  if (code.slice(0, q).endsWith("...")) return true;
+  if (/(?:^|[^\w$.])(?:typeof|in)$/.test(code.slice(Math.max(0, q - 7), q))) return true;
+  // const { PATH: p } = process.env copies strings out of it.
+  return /(?<![\w$.])(?:const|let|var)\s*\{[^{}]*\}\s*=$/.test(code.slice(Math.max(0, q - 300), q));
+}
+
+function readEnds(code: string, start: number, lenient = false, target?: string): boolean {
+  let i = start;
+  let indexed = false;
+  for (let guard = 0; guard < 64; guard++) {
+    while (i < code.length && /\s/.test(code[i]!)) i++;
+    const c = code[i];
+    if (c === undefined) return true;
+    if (c === "." && lenient) {
+      // Widening only: a plain member or call chain is fine unless it reaches a constructor.
+      const m = /^\.\s*([A-Za-z_$][\w$]*)/.exec(code.slice(i, i + 80));
+      if (!m || m[1] === "constructor" || m[1] === "__proto__") return false;
+      i += m[0].length;
+      while (i < code.length && /\s/.test(code[i]!)) i++;
+      if (code[i] === "(") {
+        const args = argsOf(code, i);
+        if (args === undefined) return false;
+        i += args.length + 2;
+      }
+      continue;
+    }
+    if (c === "?" && code[i + 1] === "." && lenient && code[i + 2] === "(") {
+      const args = argsOf(code, i + 2);
+      if (args === undefined) return false;
+      i += args.length + 4;
+      continue;
+    }
+    if (c === "?" && code[i + 1] === "." && lenient && /[A-Za-z_$]/.test(code[i + 2] ?? "")) {
+      i += 2;
+      const m = /^[A-Za-z_$][\w$]*/.exec(code.slice(i, i + 80));
+      if (!m || m[0] === "constructor" || m[0] === "__proto__") return false;
+      i += m[0].length;
+      continue;
+    }
+    if (c === ".") {
+      // Pure string and array methods with no arguments or literal arguments only: a callback or any other argument can
+      // hand the value to code that is not read here.
+      const m = /^\.\s*(?:length\b|(?:toString|toLowerCase|toUpperCase|trim|split|slice|indexOf|startsWith|endsWith|includes|join)\s*\()/.exec(code.slice(i, i + 40));
+      if (!m) return false;
+      i += m[0].length;
+      if (m[0].endsWith("(")) {
+        const args = argsOf(code, i - 1);
+        if (args === undefined || !/^\s*(?:(?:""|-?\d+)\s*(?:,\s*(?:""|-?\d+)\s*)*)?$/.test(args)) return false;
+        i += args.length + 1;
+      }
+      continue;
+    }
+    if (c === "[") {
+      // One index by a number or a plain name (process.argv[i]); a second index or a key built from strings is not read through.
+      const m = /^\[\s*[\w$\s+\-*]+\]/.exec(code.slice(i, i + 40));
+      if (!m || indexed) return false;
+      indexed = true;
+      i += m[0].length;
+      continue;
+    }
+    // An assignment through a read, plain or compound (process.env.X = ..., process.env.X += ...): the target decides, not the right side.
+    if (/^(?:\|\||&&|\?\?|\*\*|>>>|<<|>>|[-+*\/%&|^])=(?!=)/.test(code.slice(i, i + 4)) || (c === "=" && code[i + 1] !== "=" && code[i + 1] !== ">")) {
+      return !indexed && harmlessTarget(target);
+    }
+    if (c === "(" || c === "`") return false;
+    if (c === "?" && code[i + 1] === "." && !/[0-9]/.test(code[i + 2] ?? "")) return false;
+    return true;
+  }
+  return false;
+}
+
+// Decides on the identifier, never on text near it. "code" has no strings or comments. True when any name in "names" (the
+// process object, or a name for the process module) is used as anything but a complete allowlisted read: an alias, a
+// computed member, a spread, a template or call argument, a returned or assigned value, a read followed by a chained
+// call, or the bare global object. A property named like the name (x.process()), an object key (process: 1) and a method
+// definition are not the object. A parameter or variable of that name is not told apart from the global: it counts.
+function processValueUse(code: string, names: string[], lenient = false): boolean {
+  const alt = names.map((n) => n.replace(/\$/g, "\\$")).join("|");
+  const L = "(?<![\\w$])(?<![^\\x00-\\x7f\\s])";
+  const R = "(?![\\w$])(?![^\\x00-\\x7f\\s])";
+  // The scan writes a template as a lone backtick and ${; argsOf would read the backtick as an open quote.
+  let rest = code.replace(/`/g, " ");
+  // A parameter list that only declares plain names binds them: the declaration is not a use (a use of it in the body still is).
+  const id = "[A-Za-z_$][\\w$]*";
+  const params = `\\(\\s*${id}(?:\\s*,\\s*${id})*\\s*\\)`;
+  const declared = (list: string) => list.replace(new RegExp(`${L}(?:${alt})${R}`, "g"), "_");
+  rest = rest.replace(new RegExp(`(?<![\\w$])(?<![^\\x00-\\x7f\\s])function(?![\\w$])\\s*\\*?\\s*(?:[A-Za-z_$][\\w$]*)?\\s*(${params})`, "g"), (m, p: string, at: number, whole: string) => {
+    // A property (api. function(...)), an object key or a class field named function is not a declaration.
+    let j = at;
+    while (j > 0 && /\s/.test(whole[j - 1]!)) j--;
+    if (whole[j - 1] === ".") return m;
+    if (/^function\s*[:=,}]/.test(m)) return m;
+    return m.slice(0, m.length - p.length) + declared(p);
+  });
+  rest = rest.replace(new RegExp(`(${params})(?=\\s*=>)`, "g"), (p: string) => declared(p));
+  rest = rest.replace(/(?<![\w$.])(?<![^\x00-\x7f\s])(?:globalThis|global)\s*(?:\?\.|\.)\s*process(?![\w$])(?![^\x00-\x7f\s])/g, "process");
+  // process taken out of the global object by a pattern or a spread.
+  if (/\{[^{}]*(?<![\w$.])process(?![\w$])[^{}]*\}\s*=\s*(?:globalThis|global)(?![\w$])/.test(rest)) return true;
+  // Destructuring of allowlisted members only.
+  const member = DESTRUCTURE_OK;
+  rest = rest.replace(
+    new RegExp(`\\b(?:const|let|var)\\s*\\{\\s*${member}(?:\\s*,\\s*${member})*\\s*,?\\s*\\}\\s*=\\s*(?:${alt})${R}(?!\\s*[.\\[(?\`])`, "g"),
+    " ",
+  );
+  const re = new RegExp(`${L}(?:${alt})${R}`, "g");
+  // Object.assign(process.env, ...) and its relatives write through a bare argument.
+  if (new RegExp(`(?<![\\w$.])(?:Object|Reflect)\\s*\\.\\s*(?:assign|defineProperty|defineProperties|set|deleteProperty|setPrototypeOf)\\s*\\(\\s*(?:${alt})${R}`).test(rest)) return true;
+  const around = enclosingBrackets(rest, [...rest.matchAll(re)].map((x) => x.index ?? 0));
+  for (const m of rest.matchAll(re)) {
+    const at = m.index ?? 0;
+    const end = at + m[0].length;
+    {
+      let q = at;
+      while (q > 0 && /\s/.test(rest[q - 1]!)) q--;
+      if (rest[q - 1] !== "." || rest.slice(0, q).endsWith("...")) {
+        const w = writtenOddly(rest, at, end, around.get(at) ?? []);
+        if (w && !harmlessTarget(w.chain)) return true;
+      }
+    }
+    let j = at;
+    while (j > 0 && /\s/.test(rest[j - 1]!)) j--;
+    const prev = j > 0 ? rest[j - 1]! : "";
+    if (prev === "." && !rest.slice(0, j).endsWith("...")) continue;
+    READ_AFTER.lastIndex = end;
+    const read = READ_AFTER.exec(rest);
+    if (read) {
+      let after = end + read[0].length;
+      if (read[0].endsWith("(") && !/\(\s*\)$/.test(read[0])) {
+        const args = argsOf(rest, after - 1);
+        if (args === undefined) return true;
+        after += args.length + 1;
+      }
+      if (readEnds(rest, after, false, read[0])) continue;
+      return true;
+    }
+    if (/(?:^|[^\w$.])(?:typeof|in)$/.test(rest.slice(Math.max(0, j - 7), j)) && readEnds(rest, end)) continue;
+    // process.on("exit", cb) as a statement with a literal event name: the value is dropped and the callback is code of this file.
+    {
+      MEMBER_AFTER.lastIndex = end;
+      const ev = MEMBER_AFTER.exec(rest);
+      if (ev && /^\s*\.\s*(?:on|once|off|addListener|removeListener)$/.test(ev[0]) && stmtStartAt(rest, j, at, prev)) {
+        let p2 = end + ev[0].length;
+        while (p2 < rest.length && /\s/.test(rest[p2]!)) p2++;
+        const args = rest[p2] === "(" ? argsOf(rest, p2) : undefined;
+        if (args !== undefined && args.trimStart().startsWith('""') && statementEnds(rest, p2 + args.length + 2)) continue;
+      }
+    }
+    if (lenient) {
+      // Any other plain member (nextTick, on, hrtime) is not static, but it does not reach a loader unless a chain follows it.
+      MEMBER_AFTER.lastIndex = end;
+      const mem = MEMBER_AFTER.exec(rest);
+      if (mem) {
+        if (!HARMLESS_MEMBER.test(mem[0])) return true;
+        let after = end + mem[0].length;
+        // process.env[name] reads one value from the environment.
+        if (/^\s*\.\s*env$/.test(mem[0])) {
+          let k = after;
+          while (k < rest.length && /\s/.test(rest[k]!)) k++;
+          if (rest[k] === "[") {
+            let depth = 0;
+            let e2 = k;
+            for (; e2 < rest.length; e2++) {
+              if (rest[e2] === "[") depth++;
+              else if (rest[e2] === "]" && --depth === 0) break;
+            }
+            if (e2 < rest.length) after = e2 + 1;
+          }
+        }
+        // A bare process.env that is bound, returned or passed on can be written later (const e = process.env; e.PATH = x).
+        if (/^\s*\.\s*env$/.test(mem[0]) && after === end + mem[0].length) {
+          let k = after;
+          while (k < rest.length && /\s/.test(rest[k]!)) k++;
+          if (rest[k] !== "." && !(rest[k] === "?" && rest[k + 1] === ".") && !bareEnvOk(rest, at)) return true;
+        }
+        let j2 = after;
+        while (j2 < rest.length && /\s/.test(rest[j2]!)) j2++;
+        if (rest[j2] === "(") {
+          const args = argsOf(rest, j2);
+          if (args === undefined) return true;
+          after = j2 + args.length + 2;
+        }
+        // on, once, off, addListener and removeListener return the object: only as a statement whose value is dropped (emit returns a boolean).
+        if (/^\s*\.\s*(?:on|once|off|addListener|removeListener)\b/.test(mem[0])) {
+          const stmtStart = stmtStartAt(rest, j, at, prev);
+          if (!stmtStart || !statementEnds(rest, after)) return true;
+        }
+        // process.env[k] = v writes a key the file does not show.
+        const computedEnv = /^\s*\.\s*env$/.test(mem[0]) && after > end + mem[0].length;
+        if (readEnds(rest, after, true, computedEnv ? undefined : mem[0])) continue;
+        return true;
+      }
+    }
+    const tail = rest.slice(end, end + 200);
+    if ((prev === "{" || prev === ",") && /^\s*:/.test(tail)) continue;
+    // A label (process: for (...)), break/continue process, a class field (process = 1;) and an assignment to the name do not read it.
+    if ((prev === "{" || prev === "}" || prev === ";" || prev === "") && /^\s*(?::|=(?!=))/.test(tail)) continue;
+    if (/(?:^|[^\w$.])(?:break|continue)$/.test(rest.slice(Math.max(0, j - 9), j))) continue;
+    if ((prev === "{" || prev === "}" || prev === "," || prev === ";" || prev === "") && /^\s*\([^()]*\)\s*\{/.test(tail)) continue;
+    return true;
+  }
+  // The global object handed on (bound, passed, returned, put in an array, a default value, new f(globalThis)) can be read for
+  // process later. Only a member read of it (globalThis.name) and typeof / in are not a hand-over. At the top level of a
+  // CommonJS file this is the exports object, so a bare top-level this counts the same.
+  let depth = 0;
+  for (const m of rest.matchAll(/(?<![\w$])(?<![^\x00-\x7f\s])(?:globalThis|global|this)(?![\w$])(?![^\x00-\x7f\s])|[{}]/g)) {
+    const at = m.index ?? 0;
+    if (m[0] === "{") { depth++; continue; }
+    if (m[0] === "}") { depth = Math.max(0, depth - 1); continue; }
+    if (m[0] === "this" && depth > 0) continue;
+    // An object key (global: true) is a name, not the global object.
+    const nextText = rest.slice(at + m[0].length, at + m[0].length + 8);
+    let pj = at;
+    while (pj > 0 && /\s/.test(rest[pj - 1]!)) pj--;
+    const before = pj === 0 ? "" : rest[pj - 1]!;
+    if (m[0] !== "this" && /^\s*:/.test(nextText) && (before === "" || /[{,;}]/.test(before))) continue;
+    if (m[0] !== "this" && /(?:^|[^\w$.])(?:break|continue)\s*$/.test(rest.slice(Math.max(0, at - 12), at))) continue;
+    // A class field (global = 1) is a name too.
+    if (m[0] !== "this" && /^\s*=(?!=)/.test(nextText) && (before === "" || /[{;}]/.test(before))) continue;
+    // (this && this.__x) is a test: its value is the right side. A comparison does not hand it on either.
+    if (m[0] === "this" && /^\s*(?:&&|[!=]==?)/.test(rest.slice(at + 4, at + 20))) continue;
+    let j = at;
+    while (j > 0 && /\s/.test(rest[j - 1]!)) j--;
+    if (rest[j - 1] === "." && !rest.slice(0, j).endsWith("...")) continue;
+    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(rest.slice(Math.max(0, j - 11), j))) {
+      if (readEnds(rest, at + m[0].length)) continue;
+      // typeof globalThis.name is one property read whose value is a string: no hand-over, whatever the name.
+      const prop = /^\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*/.exec(rest.slice(at + m[0].length, at + m[0].length + 80));
+      if (m[0] !== "this" && /(?:^|[^\w$.])typeof$/.test(rest.slice(Math.max(0, j - 11), j)) && prop && readEnds(rest, at + m[0].length + prop[0].length)) continue;
+    }
+    if (m[0] !== "this" && HARMLESS_GLOBAL.test(rest.slice(at + m[0].length, at + m[0].length + 40))) continue;
+    if (m[0] === "this" && /^\s*(?:\?\.|\.)\s*[A-Za-z_$]/.test(rest.slice(at + 4, at + 44))) continue;
+    return true;
+  }
+  return false;
+}
+
+// A scanner that throws must not make a file look safe: a fault reads as "not static" and "widen everything".
+let scannerFaults = 0;
+export function scannerFaultCount(): number {
+  return scannerFaults;
+}
+export function provablyStatic(source: string): boolean {
+  try {
+    return provablyStaticScan(source);
+  } catch {
+    scannerFaults++;
+    return false;
+  }
+}
+function provablyStaticScan(source: string): boolean {
   if (source.includes(REMOVED)) return false;
   // Comments out first, strings kept: the patterns below read code, and a comment can neither hide nor fake a load.
   const text = codeOnly(source, [], true);
   if (text === undefined) return false;
-  const aliases: string[] = [];
+  const aliases: string[] = ["process"];
   let viaOther = false;
   let rest = stripProcessAliases(text, aliases);
   if (hidesNames(codeOnly(text, aliases))) return false;
@@ -1016,18 +1673,15 @@ function provablyStatic(source: string): boolean {
   // No space after this one on purpose: a property access can follow it (module.exports.in is a property).
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
-  if (/(?:\brequire\s*\(|\bfrom|\bimport)\s*['"](?:node:)?process\b/.test(rest)) return false;
-  if (UNSAFE_JS.test(rest)) return false;
-  if (aliases.length === 0) return true;
+  if (/(?:\brequire\s*\(|\bfrom|\bimport)\s*(['"])(?:node:)?process\1/.test(rest)) return false;
+  if (LOADS_CHILD_PROCESS.test(rest) || dangerousStringUse(source) || dangerousLiteralKey(rest)) return false;
   const code = codeOnly(rest, aliases);
   if (code === undefined) return false;
-  rest = code;
-  // Identifier edges: $, _, digits and non-ASCII characters continue a name, so \b is not an edge.
-  const names = aliases.map((n) => n.replace(/\$/g, "\\$"));
-  const L = "(?<![\\w$\\u0080-\\uffff])";
-  const R = "(?![\\w$\\u0080-\\uffff])";
-  for (const n of names) rest = rest.replace(new RegExp(`${L}${n}\\s*\\.\\s*${PROCESS_READ}`, "g"), "");
-  return !new RegExp(`${L}(?:${names.join("|")})${R}`).test(rest);
+  // Strings are gone from this text: a loader word or the word process inside a message is not a use.
+  if (PROCESS_LOADER_WORDS.test(code) || UNSAFE_JS.test(code) || timerGetsCode(code) || steeringKey(code)) return false;
+  // Brackets that do not pair up (a file Bun rejects) are read by nothing below: not static.
+  if (bracketIndex(code).mismatch) return false;
+  return !processValueUse(code, aliases);
 }
 
 // exec/eval/compile, a dynamic import, or a loader that runs another file.
@@ -1393,6 +2047,14 @@ function narrowWiden(ctx: Ctx, fromKey: string): void {
 }
 
 function widenJs(ctx: Ctx, key: string, text: string): void {
+  try {
+    widenJsScan(ctx, key, text);
+  } catch {
+    scannerFaults++;
+    widenEvery(ctx);
+  }
+}
+function widenJsScan(ctx: Ctx, key: string, text: string): void {
   // Comment-free text, so a comment inside an eval argument cannot end its argument list early. Unreadable text stays raw.
   const tier = classifyJs(key, codeOnly(text, [], true) ?? text);
   if (tier.all) widenEvery(ctx);
@@ -1418,9 +2080,163 @@ type JsTier = { all: boolean; pkg: boolean; tests: boolean; flows: boolean; same
 
 // eval/Function/vm of a value we cannot see can load any file, docs included.
 // A string literal or a read of a literal path is not that shape.
-function hasUnbounded(text: string): boolean {
+// The local names bound to the path module and to its join and resolve: const path = require("path"), import path from "node:path",
+// const { join } = require("path"), import { resolve as r } from "path", const { join } = path.
+function pathNames(keep: string): { mods: Set<string>; fns: Set<string> } {
+  const mods = new Set<string>();
+  const fns = new Set<string>();
+  const SPEC = String.raw`['"](?:node:)?path(?:\/(?:posix|win32))?['"]`;
+  const id = String.raw`[A-Za-z_$][\w$]*`;
+  for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*require\(\s*${SPEC}\s*\)`, "g"))) mods.add(m[1]!);
+  for (const m of keep.matchAll(new RegExp(String.raw`\bimport\s+(?:\*\s*as\s+)?(${id})\s+from\s*${SPEC}`, "g"))) mods.add(m[1]!);
+  for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*require\(\s*${SPEC}\s*\)\s*\.\s*(?:(?:posix|win32)\s*\.\s*)?(?:join|resolve)(?=[ \t]*(?:;|,|\r?\n|$|\}))`, "g"))) fns.add(m[1]!);
+  const members = (list: string) => {
+    for (const part of list.split(",")) {
+      const mm = /^\s*(join|resolve)\s*(?:(?::|\bas\b)\s*([A-Za-z_$][\w$]*))?\s*$/.exec(part);
+      if (mm) fns.add(mm[2] ?? mm[1]!);
+    }
+  };
+  for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\(\s*${SPEC}\s*\)`, "g"))) members(m[1]!);
+  for (const m of keep.matchAll(new RegExp(String.raw`\bimport\s*\{([^{}]*)\}\s*from\s*${SPEC}`, "g"))) members(m[1]!);
+  for (const name of mods) {
+    for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*${name.replace(/\$/g, "\\$")}(?![\w$])`, "g"))) members(m[1]!);
+  }
+  for (const name of mods) {
+    for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*${name.replace(/\$/g, "\\$")}\s*\.\s*(?:(?:posix|win32)\s*\.\s*)?(?:join|resolve)(?=[ \t]*(?:;|,|\r?\n|$|\}))`, "g"))) fns.add(m[1]!);
+  }
+  return { mods, fns };
+}
+// True when text ends in a call of path.join or path.resolve through a name bound to the path module.
+function endsInPathCall(before: string, names: { mods: Set<string>; fns: Set<string> }): boolean {
+  const m = /(?<![\w$.])([A-Za-z_$][\w$]*)(?:\s*\.\s*(?:posix|win32))?(?:\s*\.\s*(join|resolve))?\s*\(\s*$/.exec(before);
+  if (!m) return false;
+  return m[2] !== undefined ? names.mods.has(m[1]!) : names.fns.has(m[1]!);
+}
+export function processHazard(source: string): boolean {
+  try {
+    return processHazardScan(source);
+  } catch {
+    scannerFaults++;
+    return true;
+  }
+}
+function processHazardScan(source: string): boolean {
+  // Comments out first (strings kept) so the alias statements can be read, then strings out so no word inside a message counts.
+  const names = ["process"];
+  const keep = codeOnly(source, [], true);
+  // A file the scan cannot read is a hazard only when it can name the process object or spell a name with an escape.
+  const unreadable = () => /process|global|\\/.test(source);
+  if (keep === undefined) return unreadable();
+  const code = codeOnly(stripProcessAliases(keep, names), names);
+  if (code === undefined) return unreadable();
+  if (PROCESS_LOADER_WORDS.test(code) || steeringKey(code)) return true;
+  if (bracketIndex(code).mismatch) return unreadable();
+  // A computed member of the global object can be the process object.
+  if (/(?<![\w$.])(?:globalThis|global)\s*(?:\?\.)?\s*\[/.test(code)) return true;
+  // An escape in code can spell process or a loader word.
+  if (code.includes("\\")) return true;
+  // Any load of the process module other than the plain alias statement (require("process")[..], import("process"),
+  // import { default as p } from "process") is a name for it that is not tracked.
+  if (LOADS_PROCESS.test(stripProcessAliases(keep, [])) || dangerousStringUse(source) || dangerousLiteralKey(keep)) return true;
+  // A require, import() or require.resolve whose argument reads process cannot be classified, unless every read is a complete
+  // read put in front of a string (process.cwd() + "/tools/") or the manifest path (dirname(process.env.npm_package_json)).
+  const flat = code.replace(/`/g, " ");
+  const pathBindings = pathNames(keep);
+  const word = new RegExp(`(?<![\\w$])(?<![^\\x00-\\x7f\\s])(?:${names.join("|").replace(/\$/g, "\\$")})(?![\\w$])(?![^\\x00-\\x7f\\s])`, "g");
+  for (const m of flat.matchAll(/(?:\brequire(?:\s*\.\s*resolve)?|\bimport)\s*\(/g)) {
+    const args = argsOf(flat, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined) return true;
+    for (const w of args.matchAll(word)) {
+      const at = w.index ?? 0;
+      READ_AFTER.lastIndex = at + w[0].length;
+      const read = READ_AFTER.exec(args);
+      if (!read) return true;
+      const after = args.slice(at + w[0].length + read[0].length);
+      const prefixed = /^\s*\+\s*""/.test(after) && (/^\s*\.\s*cwd\s*\(\s*\)$/.test(read[0]) || /^\s*\.\s*env\s*\.\s*INIT_CWD$/.test(read[0]));
+      const manifest = /\.\s*npm_package_json$/.test(read[0]) && /dirname\s*\(\s*$/.test(args.slice(0, at));
+      // platform and arch name one of a few fixed values: a file-name selector, not a path.
+      const selector = /^\s*\.\s*(?:platform|arch)$/.test(read[0]);
+      // path.join(process.cwd(), "x.js") and path.resolve(process.cwd(), ...): the root, then literal segments.
+      const joined = (/^\s*\.\s*cwd\s*\(\s*\)$/.test(read[0]) || /^\s*\.\s*env\s*\.\s*INIT_CWD$/.test(read[0])) && endsInPathCall(args.slice(0, at), pathBindings) && /^(?:\s*,\s*"")+\s*\)/.test(after);
+      if (!prefixed && !manifest && !selector && !joined) return true;
+    }
+  }
+  return processValueUse(code, names, true);
+}
+
+// setTimeout or setInterval whose first argument is a string or built from one: that string is run as code.
+function timerGetsCode(code: string): boolean {
+  // The scan writes a template as a lone backtick, which argsOf would read as an open quote.
+  const plain = code.replace(/`/g, "§");
+  for (const m of plain.matchAll(/(?<![\w$.])(?:(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*)?(?:setTimeout|setInterval)\s*\(/g)) {
+    const args = argsOf(plain, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined) return true;
+    const first = firstArg(args).trim();
+    if (first.startsWith('""') || first.startsWith("§") || (/\+/.test(first) && !/=>|function/.test(first))) return true;
+  }
+  return false;
+}
+
+// An identifier key that names a variable steering the next process, as the key of an object literal ({ NODE_OPTIONS: x }).
+function steeringKey(code: string): boolean {
+  for (const m of code.matchAll(/(?<![\w$.?])([A-Za-z_$][\w$]*)\s*:(?!:)/g)) {
+    const strong = STEERING_NAME.test(m[1]!);
+    if (!strong && !/^(?:PATH|Path|ENV)$/.test(m[1]!)) continue;
+    let q = m.index ?? 0;
+    while (q > 0 && /\s/.test(code[q - 1]!)) q--;
+    if ((q === 0 || /[{,]/.test(code[q - 1]!)) && (strong || envObjectLiteral(code, m.index ?? 0))) return true;
+  }
+  // A computed key in an object literal that spreads process.env or sits under env: the name is not shown.
+  for (const m of code.matchAll(/[{,]\s*\[/g)) {
+    const open = (m.index ?? 0) + m[0].length - 1;
+    const close = bracketIndex(code).closer[open]! >= 0 ? bracketIndex(code).closer[open]! : code.length;
+    if (close < code.length && codeAfter(code, close + 1, 1) === ":" && envObjectLiteral(code, open)) return true;
+  }
+  const mentionsEnv = /(?:^|[^\w$.]|\.\.\.)process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(code);
+  // Any assignment to a member with such a name (env.NODE_OPTIONS = x on a copied environment); PATH and ENV where the file
+  // handles the environment at all.
+  for (const m of code.matchAll(/(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)\s*(?:\|\||&&|\?\?|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?![=>])/g)) {
+    if (STEERING_NAME.test(m[1]!) || (mentionsEnv && /^(?:PATH|Path|ENV)$/.test(m[1]!))) return true;
+  }
+  // A shorthand key ({ ...process.env, PATH }).
+  for (const m of code.matchAll(/[{,]\s*(PATH|Path|ENV)\s*(?=[,}])/g)) {
+    if (envObjectLiteral(code, (m.index ?? 0) + m[0].indexOf(m[1]!))) return true;
+  }
+  return false;
+}
+
+const CALL_OK = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
+export function hasUnbounded(text: string): boolean {
+  try {
+    return hasUnboundedScan(text);
+  } catch {
+    scannerFaults++;
+    return true;
+  }
+}
+function hasUnboundedScan(text: string): boolean {
+  if (processHazard(text)) return true;
+  // Indirect and optional eval, new Function, the global object's eval, a computed member of a global, and a timer given code.
+  const plain = codeOnly(text) ?? text;
+  if (/(?<![\w$.])(?<!instanceof\s+)(?:eval|Function)\b(?!\s*\()/.test(plain)) return true;
+  if (/(?<![\w$.])(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*(?:eval|Function)\b|(?<![\w$.])window\s*(?:\?\.)?\s*\[/.test(plain)) return true;
+  if (timerGetsCode(plain)) return true;
+  // .constructor.constructor and .constructor[ reach Function; .constructor( is read like Function( below.
+  if (/(?:\?\.|\.)\s*constructor\s*(?:\?\.|\.)\s*constructor\b|(?:\?\.|\.)\s*constructor\s*(?:\?\.\s*)?\[/.test(plain)) return true;
+  // A pattern that binds a constructor key ({ constructor: { constructor: F } }) reaches Function without a dot.
+  for (const m of plain.matchAll(/(?<![\w$.])constructor(?![\w$])\s*:/g)) if (inPattern(plain, m.index ?? 0)) return true;
+  // .constructor( is read like Function(: the comment-free text, so a comment or a message does not count.
+  for (const m of plain.matchAll(/(?:\?\.|\.)\s*constructor\s*\(/g)) {
+    const args = argsOf(plain, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined) return true;
+    const arg = firstArg(args).trim();
+    if (/^(['"`])[^'"`\\]*\1$/.test(arg)) continue;
+    const bare = arg.replace(/['"][^'"]*['"]/g, " ").replace(/`[^`$]*`/g, " ");
+    if (bare.includes("${")) return true;
+    if (!(bare.match(/[A-Za-z_$][\w$]*/g) ?? []).every((id) => CALL_OK.has(id))) return true;
+  }
   const re = /\b(?:eval|Function)\s*\(|\bvm\s*\.\s*(?:runInThisContext|runInNewContext|runInContext|compileFunction)\s*\(/g;
-  const ok = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
+  const ok = CALL_OK;
   for (const m of text.matchAll(re)) {
     const paren = (m.index ?? 0) + m[0].lastIndexOf("(");
     const args = argsOf(text, paren);
@@ -1436,6 +2252,14 @@ function hasUnbounded(text: string): boolean {
 }
 
 function classifyJs(fromKey: string, text: string): JsTier {
+  try {
+    return classifyJsScan(fromKey, text);
+  } catch {
+    scannerFaults++;
+    return { all: true, pkg: true, tests: true, flows: true, same: false, dirs: [], lits: [] };
+  }
+}
+function classifyJsScan(fromKey: string, text: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
   if (hasUnbounded(text)) tier.all = true;
   const re = /(?:^|[^\w$])(?:require|import|fork|execFile|execFileSync)\s*\(/g;
