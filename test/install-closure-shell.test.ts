@@ -344,3 +344,74 @@ for (const [label, hook] of plainQuiet) {
     expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
   });
 }
+
+// Ordinary hooks: a substitution in a flag value or a later argument of a literal script or a build tool is not the program.
+const ordinaryQuiet: [string, string][] = [
+  ["a case on a substitution, redirected", "case $(uname) in Darwin) node lib/ok.js ;; *) node lib/ok.js ;; esac > log"],
+  ["a flag before a literal script with a substituted argument", 'node --no-warnings lib/ok.js "$(pwd)" > log'],
+  ["a numeric flag value on node", "node --max-old-space-size=$(nproc) lib/ok.js | cat"],
+  ["make with a substituted job count", "make -j$(nproc) | tee log"],
+  ["node-gyp with a substituted target", "node-gyp rebuild --target=$(node -v) > log"],
+];
+
+for (const [label, hook] of ordinaryQuiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
+  });
+}
+
+// Strings a shell or eval runs, arithmetic on a substituted value, and a heredoc body that expands: each reads every file, with a
+// pipe or a redirect so that the line is read by the stage reader.
+const evalLines: [string, string][] = [
+  ["a string given to sh -c", `sh -c 'node ${U}' "$0" | cat`],
+  ["a string given to bash -c with a flag", `bash -e -c 'node ${U}' _ > log`],
+  ["eval of a word that holds a dot", `eval x.y\\; node ${U} | cat`],
+  ["eval of a substituted word", `eval ${U} | cat`],
+  ["a numeric test on a substituted value", `[[ ${U} -eq 0 ]] 2>/dev/null`],
+  ["declare -i with a substituted value", `declare -i x=${U} | cat`],
+  ["local -i with a substituted value", `f() { local -i x=${U}; }; f | cat`],
+  ["read of a substituted name", `read "${U}" | cat`],
+  ["printf -v into a substituted name", `printf -v "${U}" x | cat`],
+  ["unset of a substituted name", `unset "${U}" | cat`],
+  ["test -v of a substituted name", `[ -v "${U}" ] | cat`],
+  ["arithmetic on a substituted value", `echo $(( ${U} )) | cat`],
+  ["arithmetic on a variable set from a substitution", `F=${U}; echo $((F)) | cat`],
+  ["an arithmetic command on a substituted value", `(( x = ${U} )) | cat`],
+  ["an unquoted heredoc whose body runs a substitution", `cat > out <<EOF\n$(node ${U})\nEOF`],
+  ["an unquoted heredoc whose body runs a substitution, piped", `cat <<EOF | cat\n$(node ${U})\nEOF`],
+];
+
+for (const [label, hook] of evalLines) {
+  for (const changed of ["lib/evil.js", "docs/evil.js"] as const) {
+    test(`${label} reads every file: a changed ${changed} holds`, () => {
+      expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, changed)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const evalQuiet: [string, string][] = [
+  ["a quoted heredoc body", `cat > out <<'EOF'\n$(node ${U})\nEOF`],
+  ["an unquoted heredoc body with a plain variable", "cat > out <<EOF\nhome $HOME\nEOF"],
+  ["a string given to sh -c with a literal script", "sh -c 'node lib/ok.js' | cat"],
+  ["arithmetic on plain names", "echo $(( N + 1 )) | cat"],
+  ["a numeric test on a plain name", "[[ $N -eq 0 ]] 2>/dev/null"],
+];
+
+for (const [label, hook] of evalQuiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
+  });
+}
+
+// The runner, executor and parse forms again with a pipe or a redirect, which sends them through the stage reader, and with the
+// target in docs/.
+const pipedForms: [string, string][] = [
+  ...runnerLines.map(([l, h]) => [l, h.includes("|") || h.includes(">") ? h : `${h} | cat`] as [string, string]),
+  ...parseLines.map(([l, h]) => [l, h.includes("|") || h.includes(">") ? h : `${h} | cat`] as [string, string]),
+];
+
+for (const [label, hook] of pipedForms) {
+  test(`${label}, piped, reads every file: a changed docs/evil.js holds`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js")).length).toBeGreaterThan(0);
+  });
+}

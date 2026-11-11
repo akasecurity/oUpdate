@@ -4650,7 +4650,7 @@ function noteUnparsedMake(ctx: Ctx, text: string): void {
 // The logical lines of a body: what the shell reads as one command line. A newline inside quotes, a substitution or
 // after a backslash does not end one; a comment is dropped; the text of a heredoc is skipped up to its terminator.
 // An unclosed quote, substitution or heredoc takes the rest of the body.
-function logicalLines(text: string): string[] {
+function logicalLines(text: string, heredocs?: string[]): string[] {
   const out: string[] = [];
   // The line so far, as parts and its last 12 characters: indexing into a long string being appended to is quadratic.
   const parts: string[] = [];
@@ -4658,7 +4658,7 @@ function logicalLines(text: string): string[] {
   let blank = true;
   let i = 0;
   let esc = false;
-  const pend: { delim: string; strip: boolean }[] = [];
+  const pend: { delim: string; strip: boolean; quoted: boolean }[] = [];
   const put = (x: string): void => {
     if (!x) return;
     parts.push(x);
@@ -4738,7 +4738,7 @@ function logicalLines(text: string): string[] {
     }
     if (c === "\n") {
       flush();
-      i = skipHeredocs(text, i + 1, pend);
+      i = skipHeredocs(text, i + 1, pend, heredocs ? (t) => heredocs.push(t) : undefined);
       pend.length = 0;
       continue;
     }
@@ -4787,6 +4787,7 @@ function plainStage(name: string): boolean {
 }
 // Commands that run a script, a program or the text on their standard input.
 const STAGE_RUNNER = /^(?:sh|bash|dash|zsh|ksh|source|\.|eval|node|nodejs|bun|deno|python[0-9.]*|py|perl|ruby|php)$/;
+const SHELL_RUNNER = /^(?:sh|bash|dash|zsh|ksh|ash|mksh|yash)$/;
 const STAGE_PM = /^(?:npm|npx|yarn|pnpm)$/;
 // Package manager words that only look things up.
 const PM_LOOKUP = new Set(["ls", "list", "view", "info", "config", "outdated", "audit", "help", "prefix", "root", "bin", "whoami", "version", "show", "search"]);
@@ -4803,7 +4804,7 @@ const PREFIX_VALUE_FLAG: Record<string, RegExp> = {
 };
 const STAGE_KEYWORD = /^(?:\{|\}|!|if|then|elif|else|do|done|fi|while|until)$/;
 
-type StageWord = { t: string; sub: boolean; v: boolean; n: string[] }; // sub: a command substitution; v: a variable or arithmetic expansion; n: the plain variable names in the word
+type StageWord = { t: string; sub: boolean; v: boolean; n: string[]; ar: boolean; an: string[] }; // sub: a command substitution; v: a variable or arithmetic expansion; n: the plain variable names in the word
 
 // `text` with each command substitution replaced by a number, so what is left reads as arithmetic or not.
 function blankSubs(text: string): string {
@@ -4888,6 +4889,9 @@ function shellStages(line: string): StageFeed {
   let nowFedUnres = false;
   let nowFed = false;
   let names: string[] = [];
+  let arithBudget = 16; // scans for the end of a `((` are bounded: a long run of them is not read one by one
+  let arSub = false; // the word holds arithmetic with a substitution in it: the substituted value is evaluated
+  let arNames: string[] = []; // and the names the arithmetic reads
   const bodies: string[] = [];
   let words: StageWord[] = [];
   let cur = "";
@@ -4903,12 +4907,14 @@ function shellStages(line: string): StageFeed {
       skip = false;
       if (hereStr && (sub || v)) nowFedUnres = true;
       hereStr = false;
-    } else words.push({ t: cur, sub, v, n: names });
+    } else words.push({ t: cur, sub, v, n: names, ar: arSub, an: arNames });
     cur = "";
     inWord = false;
     sub = false;
     v = false;
     names = [];
+    arSub = false;
+    arNames = [];
   };
   const endStage = (): void => {
     endWord();
@@ -4947,7 +4953,10 @@ function shellStages(line: string): StageFeed {
         unsure = true;
         return line.length;
       }
-      if (!nestedBodies(line.slice(i + 3, e - 2), bodies, 0, dq)) unsure = true;
+      const arith = line.slice(i + 3, e - 2);
+      if (!nestedBodies(arith, bodies, 0, dq)) unsure = true;
+      if (/\$\(|`/.test(arith)) arSub = true;
+      arNames.push(...(arith.match(/[A-Za-z_]\w*/g) ?? []));
       return e;
     }
     if (line[i + 1] === "{") {
@@ -5078,6 +5087,24 @@ function shellStages(line: string): StageFeed {
       i += line[i + 1] === "&" ? 2 : 1;
       continue;
     }
+    if (c === "(" && line[i + 1] === "(" && !inWord && arithBudget-- <= 0) unsure = true; // a very long run of ((: read every file
+    if (c === "(" && line[i + 1] === "(" && !inWord && arithBudget >= 0) {
+      // `(( ... ))` as a command evaluates its text as arithmetic: a substituted value in it runs as code
+      const e = endParen(line, i + 1);
+      const inner0 = e > 0 ? line.slice(i + 2, e - 2) : "";
+      if (e > 0 && line[e - 2] === ")" && !/[;|&]/.test(blankSubs(inner0)) && !/[\w$)\]}]\s+[\w$({]/.test(blankSubs(inner0))) {
+        endStage();
+        const inner = inner0;
+        if (!nestedBodies(inner, bodies, 0, false)) unsure = true;
+        stages.push([{ t: "((", sub: false, v: false, n: [], ar: /\$\(|`/.test(inner), an: inner.match(/[A-Za-z_]\w*/g) ?? [] }]);
+        feed.push(null);
+        fed.push(false);
+        fedUnres.push(false);
+        lastRange = [stages.length - 1, stages.length];
+        i = e;
+        continue;
+      }
+    }
     if (c === "(") {
       endStage();
       groups.push({ start: stages.length, feed: nextFeed ?? (groups.length ? groups[groups.length - 1]!.feed : null) });
@@ -5115,6 +5142,24 @@ function shellStages(line: string): StageFeed {
   return { stages, feed, fed, fedUnres, bodies, unsure };
 }
 
+// The flags of an interpreter that carry its program text (`-e`) or take a separate value, and the ones of a shell.
+function runnerFlags(name: string): { code: RegExp; value: RegExp } {
+  if (SHELL_RUNNER.test(name)) return { code: /^-[A-Za-z]*c[A-Za-z]*$/, value: /^(?:-o|-O|--rcfile|--init-file)$/ };
+  const key = /^(?:node|nodejs)$/.test(name) ? "node" : /^(?:python[0-9.]*|py)$/.test(name) ? "python" : name;
+  const spec = STDIN_INTERPS[key];
+  if (!spec) return { code: /^$/, value: /^$/ };
+  return { code: spec.code, value: key === "node" ? new RegExp(spec.value.source.replace(/\)\$$/, "|--title)$")) : spec.value };
+}
+// Flags whose substituted value is a number or a target, not a program.
+const SAFE_FLAG_SUB: Record<string, RegExp> = {
+  make: /^-j/,
+  gmake: /^-j/,
+  ninja: /^-j/,
+  cmake: /^-D/,
+  "node-gyp": /^--(?:target|arch|jobs|devdir|nodedir|dist-url|runtime|python)(?:=|$)/,
+  "prebuild-install": /^--(?:target|arch|runtime|platform)(?:=|$)/,
+};
+
 // True when a stage of the line (or of a substitution in it) may run a file of the package that the text does not name.
 // Only plain commands (SHELL_PLAIN, PLAIN_CMDS) are quiet with a substitution in an argument: any other command may run what
 // the substitution names. An interpreter given a literal script (`node lib/ok.js "$(date)"`) runs that script, whose arguments
@@ -5151,6 +5196,8 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
       } else break;
     }
     const head = words[h];
+    // Arithmetic evaluates a substituted value, and a value like a[$(cmd)] runs the command.
+    if (words.some((w) => w.ar || w.an.some((x) => tainted.has(x)))) widen(true);
     if (!head) return; // only assignments: what their substitutions hold is read as bodies
     if (head.sub || head.v) {
       // An unresolved command word may be any runner; a path word keeps the directory-scoped read.
@@ -5163,6 +5210,8 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
       if (rest.slice(2).some(taints)) tainted.add(rest[0]!.t);
       return;
     }
+    // The word a `case` or `select` looks at is data: what a substitution in it prints only picks a branch.
+    if (/^(?:case|esac|select)$/.test(head.t)) return;
     const name = binName(head.t);
     const path = head.t.includes("/");
     if (!path && plainStage(name)) {
@@ -5170,6 +5219,12 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
       if (/^(?:export|local|declare|typeset|readonly)$/.test(name)) {
         for (const w of rest) if (ASSIGN.test(w.t) && taints(w)) tainted.add(w.t.slice(0, w.t.indexOf("=")).replace(/\+$/, ""));
       }
+      // A substituted name or number is evaluated as arithmetic by these: a[$(cmd)] runs cmd.
+      const named = rest.some((w) => !ASSIGN.test(w.t) && !w.t.startsWith("-") && taints(w));
+      if (/^(?:read|unset|declare|typeset|local|readonly|export)$/.test(name) && named) widen(true);
+      if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && rest.some(taints)) widen(true);
+      if (name === "printf" && rest.some((w) => w.t === "-v") && rest.some(taints)) widen(true);
+      if (/^(?:\[|\[\[|test)$/.test(name) && rest.some(taints) && rest.some((w) => w.t === "-v" || /^-(?:eq|ne|lt|le|gt|ge)$/.test(w.t))) widen(true);
       return;
     }
     if (path) {
@@ -5178,16 +5233,56 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
       return;
     }
     if (STAGE_RUNNER.test(name)) {
-      const k = rest.findIndex((w) => !w.t.startsWith("-"));
-      const first = k >= 0 ? rest[k] : undefined;
-      if (!first) {
+      const spec = runnerFlags(name);
+      let q = 0;
+      let codeFlag = false;
+      let codeWord: StageWord | undefined;
+      let sub = false; // deno and bun take a subcommand (`deno run -A file`) before the script
+      while (q < rest.length) {
+        const w = rest[q]!;
+        if (!w.t.startsWith("-")) {
+          if (!sub && /^(?:deno|bun)$/.test(name) && /^[a-z]+$/.test(w.t) && !w.sub && !w.v) {
+            sub = true;
+            q++;
+            continue;
+          }
+          break;
+        }
+        const joined = w.t.includes("=");
+        const flag = joined ? w.t.slice(0, w.t.indexOf("=")) : w.t;
+        if (!joined && spec.code.test(w.t)) {
+          // The word after a code flag is the program text, which may read its arguments.
+          codeFlag = true;
+          codeWord = rest[q + 1];
+          q += 2;
+        } else if (spec.value.test(flag)) {
+          // A preload or loader names a file the runner loads.
+          if (joined ? taints(w) : rest[q + 1] !== undefined && taints(rest[q + 1]!)) widen(true);
+          q += joined ? 1 : 2;
+        } else q++;
+      }
+      const first = rest[q];
+      if (name === "eval" && rest.length > 0) {
+        // The words are joined and run as a line.
+        if (rest.some(taints)) widen(true);
+        else if (depth < 6) {
+          const r = stageHazard(rest.map((w) => w.t).join(" "), depth + 1, tainted);
+          if (r.hit) widen(r.inert);
+        }
+        return;
+      }
+      if (codeWord && !codeWord.sub && SHELL_RUNNER.test(name) && depth < 6) {
+        const r = stageHazard(codeWord.t, depth + 1, tainted);
+        if (r.hit) widen(r.inert);
+      }
+      if (codeFlag && rest.some(taints)) widen(true);
+      else if (!first) {
         // no script: it reads its standard input, which a pipe or a here-string feeds
         const f = feed[at];
         const piped = f ? stages.slice(f[0], f[1]).some(holdsUnresolved) : false;
         if (piped || (fed[at] && fedUnres[at])) widen(true);
         else if (rest.some(taints)) widen(true);
-      } else if (first.sub || first.v) widen(true);
-      else if (!(k === 0 && /[./]/.test(first.t)) && rest.some(taints)) widen(true);
+      } else if (!codeFlag && (first.sub || first.v)) widen(true);
       return;
     }
     if (STAGE_PM.test(name)) {
@@ -5196,7 +5291,10 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
       if (ops.slice(0, 2).some((w) => w.sub || w.v) || rest.some(taints)) widen(true);
       return;
     }
-    if (rest.some(taints)) widen(true);
+    // Any other command may run what a substitution in its arguments names; a flag value of a build tool that only sets a
+    // number or a target (`make -j$(nproc)`, `node-gyp rebuild --target=$(node -v)`) does not.
+    const safe = SAFE_FLAG_SUB[name];
+    if (rest.some((w) => taints(w) && !(safe && w.t.startsWith("-") && safe.test(w.t)))) widen(true);
   });
   if (depth < 6) {
     for (const body of bodies) {
@@ -5237,6 +5335,23 @@ function substBodiesHazard(ctx: Ctx, orig: string): void {
   widenAll(ctx);
 }
 
+function heredocHazard(ctx: Ctx, text: string): void {
+  if (!/[$`]/.test(text)) return;
+  const bs: string[] = [];
+  let hit = !nestedBodies(text, bs, 0, true);
+  let inert = hit;
+  for (const b of bs) {
+    const r = stageHazard(b, 1);
+    if (r.hit) {
+      hit = true;
+      inert ||= r.inert;
+    }
+  }
+  if (!hit) return;
+  if (inert) ctx.widenInert = true;
+  widenAll(ctx);
+}
+
 function readParts(ctx: Ctx, body: string): void {
   if (body.includes(UNRESOLVED)) {
     // The placeholder is a character the body itself holds: a command could not be told from an unresolved one. Read every file.
@@ -5244,7 +5359,10 @@ function readParts(ctx: Ctx, body: string): void {
     widenAll(ctx);
     return;
   }
-  const lines = logicalLines(body);
+  const hds: string[] = [];
+  const lines = logicalLines(body, hds);
+  // An unquoted heredoc expands its text: a substitution in it runs.
+  for (const text of hds) heredocHazard(ctx, text);
   for (const line of lines) {
     if (ctx.hold) return;
     const whole = subst(ctx, line);
