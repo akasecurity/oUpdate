@@ -539,8 +539,6 @@ for (const [label, hook] of [
   ["Object.assign of an object with a module key", `Object.assign({}, { module: 1 });`],
   ["Reflect.get of a data object by the key module", `Reflect.get({ a: 1 }, "module");`],
   ["Object.entries of an object with a require key and a module string", `Object.entries({ require: "module" });`],
-  ["Object.entries of a parameter named module", `function f(module) { Object.entries(module); }\nf({ a: 1 });`],
-  ["Object.assign of a parameter named module in an arrow", `const f = (module) => Object.assign({}, module);\nf({ a: 1 });`],
 ] as [string, string][]) {
   test(`${label} does not hold an unrelated changed x/evil.js`, () => {
     expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
@@ -549,6 +547,21 @@ for (const [label, hook] of [
 for (const [label, hook] of [
   ["a Reflect.get of module after a function with a module parameter", `function f(module) { return module; }\nconst k = "require";\nReflect.get(module, k).call(module, ${BX});`],
   ["an Object.entries of module with a data key beside it", `const d = Object.entries({ module: 1 });\nconst e = Object.entries(Object.getPrototypeOf(module));\ne.find(([n]) => n === "req" + "uire")[1].call(module, ${BX});`],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
+}
+
+// Fourteenth review batch: a parameter named module proves nothing about what is passed; it may hold the real module.
+for (const [label, hook] of [
+  ["a function parameter named module holding the real module (documented hold)", `function f(module) { Object.entries(module); }\nf({ a: 1 });`],
+  ["an arrow parameter named module (documented hold)", `const f = (module) => Object.assign({}, module);\nf({ a: 1 });`],
+  ["a function expression called with the real module", `const k = "require";\n(function (module) { Reflect.get(module, k).call(module, ${BX}); })(module);`],
+  ["an arrow called with the real module", `const k = "require";\n((module) => Reflect.get(module, k).call(module, ${BX}))(module);`],
+  ["an arrow parameter defaulting to require.main", `const k = "require";\n((module = require.main) => Reflect.get(module, k).call(module, ${BX}))();`],
+  ["a function called with a name bound to module", `const k = "require";\nconst M = module;\n(function (module) { Reflect.get(module, k).call(module, ${BX}); })(M);`],
+  ["a closure over a parameter named module passed the real module", `const k = "require";\nfunction outer(module) { return () => Reflect.get(module, k).call(module, ${BX}); }\nouter(module)();`],
+  ["a regex with a brace in a function with a module parameter", `const k = "require";\n(function (module) { /{/; })(0);\nReflect.get(module, k).call(module, ${BX});`],
+  ["a template with a brace in a function with a module parameter", "const k = \"require\";\n(function (module) { `{`; })(0);\nReflect.get(module, k).call(module, " + BX + ");"],
 ] as [string, string][]) {
   test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
 }

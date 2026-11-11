@@ -2528,7 +2528,7 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
     const list = splitTop(args, ",");
     if (list.slice(1).some((a) => /^\s*(["'`])require\1\s*$/.test(a))) return true;
     // A read by a key the file builds (a name, an expression) from module, require.main, module.parent or a name bound to one.
-    if (/^(?:get|getOwnPropertyDescriptors?|entries|values|assign|fromEntries|getOwnPropertyNames|ownKeys)$/.test(/\.\s*(\w+)\s*\($/.exec(m[0])?.[1] ?? "") && list.some((a) => mentionsModule(a, keptKeys, m.index ?? 0))) return true;
+    if (/^(?:get|getOwnPropertyDescriptors?|entries|values|assign|fromEntries|getOwnPropertyNames|ownKeys)$/.test(/\.\s*(\w+)\s*\($/.exec(m[0])?.[1] ?? "") && list.some((a) => mentionsModule(a, keptKeys))) return true;
   }
   // module.require handed on (a bare mention, .bind(...)).
   for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
@@ -2580,7 +2580,7 @@ function keyInPattern(text: string, end: number): boolean {
 }
 // The expression names module, require, require.main, module.parent or a name assigned from one of them (module.exports, require.cache and
 // the like are not the loader).
-function mentionsModule(expr: string, text: string, at: number): boolean {
+function mentionsModule(expr: string, text: string): boolean {
   const names = new Set(["module", "require"]);
   for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:module|require)(?![\w$])(?!\s*\()(?!\s*\.\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\b)/g)) names.add(m[1]!);
   // Strings are text and a key before a colon is a name of data, not a reference: only code mentions count.
@@ -2590,43 +2590,8 @@ function mentionsModule(expr: string, text: string, at: number): boolean {
     for (const m of code.matchAll(new RegExp(`(?<![\\w$.])${n}(?![\\w$])(?!\\s*\\()(?!\\s*\\.\\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\\b)`, "g"))) {
       const k = m.index ?? 0;
       if (/^\s*:/.test(code.slice(k + name.length, k + name.length + 12)) && /[{,]\s*$/.test(code.slice(Math.max(0, k - 12), k))) continue; // { module: 1 }
-      if (!shadowed(text, name, at)) return true;
+      return true; // a parameter of the same name proves nothing about what the call passes: it may hold the real module
     }
-  }
-  return false;
-}
-// A parameter named like the loader, of a function that holds position `at`: the name there is the parameter, not the loader.
-function shadowed(text: string, name: string, at: number): boolean {
-  const n = name.replace(/\$/g, "\\$");
-  for (const m of text.matchAll(new RegExp(`(?<![\\w$.])${n}(?![\\w$])`, "g"))) {
-    const p = m.index ?? 0;
-    if (p > at || !inParamList(text, p, name.length)) continue;
-    let d = 0;
-    let j = p + name.length;
-    for (; j < text.length; j++) {
-      if (text[j] === "(") d++;
-      else if (text[j] === ")") {
-        if (d === 0) break;
-        d--;
-      }
-    }
-    let b = nextNonSpace(text, j + 1);
-    if (text.startsWith("=>", b)) b = nextNonSpace(text, b + 2);
-    let end = text.length;
-    if (text[b] === "{") {
-      let e = 0;
-      for (let q = b; q < text.length; q++) {
-        if (text[q] === "{") e++;
-        else if (text[q] === "}" && --e === 0) {
-          end = q;
-          break;
-        }
-      }
-    } else {
-      const stop = text.slice(b).search(/[;\n]/);
-      end = stop < 0 ? text.length : b + stop;
-    }
-    if (at <= end) return true;
   }
   return false;
 }
