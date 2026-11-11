@@ -1709,6 +1709,9 @@ function isFunctionHead(code: string, k: number): boolean {
   return kw.word === "function" && notProperty(code, kw.start);
 }
 
+// How far back from the ] of a computed method name its [ is looked for.
+const METHOD_KEY_REACH = 256;
+
 // A method or accessor at member position of an object literal or class body: name(...) {, get name(...) {, async *name(...) {,
 // [key](...) {. A call statement (f(1)) inside a block is not a member.
 function isMethodHead(code: string, k: number, outer: BraceKind | undefined): boolean {
@@ -1718,11 +1721,13 @@ function isMethodHead(code: string, k: number, outer: BraceKind | undefined): bo
   if (code[p - 1] === "]") {
     let depth = 0;
     let i = p - 1;
-    for (; i >= 0; i--) {
+    // A bounded walk back to the opening [: a longer key is not read as a method head (a hold, never a miss), so nested keys
+    // never rescan one another.
+    for (; i >= 0 && p - i <= METHOD_KEY_REACH; i--) {
       if (code[i] === "]") depth++;
       else if (code[i] === "[" && --depth === 0) break;
     }
-    if (i < 0) return false;
+    if (i < 0 || p - i > METHOD_KEY_REACH) return false;
     p = skipSpaceBack(code, i);
   } else if (/["'`]/.test(code[p - 1] ?? "")) {
     // A quoted name ("m"(a) {): the text has its strings blanked, so the literal is its two quotes.

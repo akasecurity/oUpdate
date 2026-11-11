@@ -1566,6 +1566,31 @@ for (const [label, make] of [
     expect(performance.now() - t0).toBeLessThan(4000);
   }, 60000);
 }
+// The walk back over a computed method name is bounded, so nested names never rescan one another (this took seconds at a depth of
+// 16,000 and grew by four per doubling).
+for (const [label, n, limit, make] of [
+  ["nested computed method names", 16000, 1000, (d: number) => "const o = " + "{[".repeat(d) + "0" + "]()\n{}}".repeat(d) + ";"],
+  ["nested computed method names, 64,000 deep", 64000, 2000, (d: number) => "const o = " + "{[".repeat(d) + "0" + "]()\n{}}".repeat(d) + ";"],
+  ["nested accessor computed names", 16000, 1000, (d: number) => "const o = " + "{get [".repeat(d) + "0" + "]()\n{}}".repeat(d) + ";"],
+  ["nested mixed brackets and parens", 16000, 1000, (d: number) => "const o = " + "{[(".repeat(d) + "0" + ")]()\n{}}".repeat(d) + ";"],
+] as const) {
+  test(`${label} are scanned in linear time`, () => {
+    const text = make(n);
+    const t0 = performance.now();
+    provablyStatic(text);
+    expect(performance.now() - t0).toBeLessThan(limit);
+  }, 120000);
+}
+// A computed method name longer than the walk is not read as a method head: its body is a block (a hold, never a miss).
+test("a computed method name longer than the scan reach holds as a block (a documented false hold)", () => {
+  const key = "k" + "+k".repeat(150);
+  const pre = `const k = "m";\nconst o = {\n [${key}](a)\n { return arguments[0] }\n};\nexports.main = () => 1\n`;
+  expect(held(pre)).toBe(true);
+});
+test("a computed method name inside the scan reach stays a method head", () => {
+  const pre = `const k = "m";\nconst o = {\n [k + "x"](a)\n { return arguments[0] }\n};\nexports.main = () => 1\n`;
+  expect(held(pre)).toBe(false);
+});
 for (const [label, pre] of [
   ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
   ["arguments bound to a name", 'const a = arguments; exports.main = () => a[1]("child_"+"pro"+"cess")\n'],
