@@ -78,6 +78,8 @@ interface Ctx {
   depth: number;
   // Directories a cd or a directory flag moved a run into: their files are not inert whatever the folder name.
   movedDirs: Set<string>;
+  // True while a `node` command's operands are read: only a program that runs a directory as a module reads a root `main`.
+  rootRuns?: boolean;
   // The directory the last `cd` of the hook moved to, relative to the package root.
   cwd: string;
   // The shell scan was not sure what a body does: the widen reads every file, inert paths included.
@@ -501,7 +503,20 @@ function findKey(ctx: Ctx, logical: string): string | undefined {
     if (pj && pj.main !== undefined && typeof pj.main !== "string") return undefined;
     const main = pj && typeof pj.main === "string" ? pj.main : "index.js";
     const rel = normalize(main);
-    if (!rel || badPath(rel) || /[*?[]/.test(rel)) return undefined;
+    if (!rel || /[*?[]/.test(rel)) return undefined;
+    if (badPath(rel)) {
+      // A main with a `.` or `..` segment or a trailing slash resolves from the manifest's directory; one that leaves the
+      // package reads every file.
+      const inside = rel.startsWith("/") || /^[A-Za-z]:/.test(rel) || /[\u0005$~]/.test(rel) ? undefined : joinDir(logical, rel);
+      if (inside === undefined) {
+        if (/(^|\/)\.\.(\/|$)/.test(rel)) {
+          ctx.widenInert = true;
+          widenAll(ctx);
+        }
+        return undefined;
+      }
+      return findFile(ctx, inside || "index");
+    }
     const next = joinLogical(`${logical}/package.json`, rel);
     if (!next) return undefined;
     return findFile(ctx, next);
@@ -5166,22 +5181,70 @@ function noteHookArgCwd(ctx: Ctx, token: string): void {
     else addUnder(ctx, dir);
     widenAll(ctx);
   }
-  noteHookArg(ctx, token);
+  // After a `cd` a dotted path is resolved from that directory below, not from the package root.
+  noteHookArg(ctx, token, Boolean(ctx.cwd));
   if (ctx.cwd && token && !token.startsWith("-") && !token.startsWith("/")) {
     const j = joinDir(ctx.cwd, token);
     if (j === undefined) {
       // A path that leaves the package: every file is read, and later checks are not switched off first.
       ctx.widenInert = true;
       widenAll(ctx);
-    } else noteHookArg(ctx, j);
+    } else if (j === "") noteRootMain(ctx);
+    else noteHookArg(ctx, j);
   }
 }
 
-function noteHookArg(ctx: Ctx, token: string): void {
+// `node .` and `node lib/..` run the package root as a directory, as Node does: the manifest `main` as a file (with its added
+// extensions), then as a directory's index, and index.js of the root when main names nothing. Only node reads a root this
+// way: `tsc -p .` names the root without running it. A root with nothing to run is not a hold.
+function nodeFile(ctx: Ctx, base: string): string | undefined {
+  for (const ext of ["", ".js", ".json", ".node"]) if (ctx.logical.has(base + ext)) return base + ext;
+  return undefined;
+}
+
+function noteRootMain(ctx: Ctx): void {
+  if (ctx.hold || !ctx.rootRuns) return;
+  const manifest = ctx.logical.get("package.json");
+  const pj = manifest ? parseJson(ctx.bytes.get(manifest)) : undefined;
+  let rel = "";
+  if (pj && typeof pj.main === "string") {
+    const m = normalize(pj.main);
+    const j = /[*?[\u0005$~]/.test(m) || m.startsWith("/") || /^[A-Za-z]:/.test(m) ? undefined : joinDir("", m);
+    if (j === undefined) {
+      fail(ctx, "unresolved: path");
+      return;
+    }
+    rel = j;
+  }
+  const name = (rel ? nodeFile(ctx, rel) ?? nodeFile(ctx, `${rel}/index`) : undefined) ?? nodeFile(ctx, "index");
+  if (!name) return;
+  markHookFile(ctx, name);
+  addLogical(ctx, name);
+}
+
+function noteHookArg(ctx: Ctx, token: string, afterCd = false): void {
   // `.` is not a named file. Recording it would be an unresolved-path hold.
   // A glob still reaches addRef, so the glob and pattern-length caps stay holds.
   if (!token || token.startsWith("-")) return;
   const logical = normalize(token);
+  if (!afterCd && /^(?:\.\/*)+$/.test(token)) {
+    noteRootMain(ctx);
+    return;
+  }
+  if (!afterCd && logical && /(^|\/)\.{1,2}(\/|$)/.test(logical) && !logical.startsWith("/") && !/^[A-Za-z]:/.test(logical) && !/[\u0005$~*?[]/.test(logical)) {
+    // A path with a `.` or `..` segment names the file it resolves to (`lib/../x/evil.js` is x/evil.js). One that leaves the
+    // package reads every file, as a path joined to an earlier `cd` does.
+    const j = joinDir("", logical);
+    if (j === undefined) {
+      ctx.widenInert = true;
+      widenAll(ctx);
+    } else if (j === "") noteRootMain(ctx);
+    else if (!badPath(j)) {
+      markHookFile(ctx, j);
+      addRef(ctx, j);
+    }
+    return;
+  }
   if (!logical || badPath(logical)) return;
   markHookFile(ctx, token);
   addRef(ctx, token);
@@ -5601,16 +5664,64 @@ function restart(ctx: Ctx): void {
   if (start) runScript(ctx, "start", false);
 }
 
+// The program a package runner runs: the first word that is not one of the runner's own options. Options that take the next word
+// as a value (`--registry URL`, `--cache DIR`, `--cwd .`, `-p pkg`) are skipped with it. A package manager that runs another
+// program (`corepack npm exec -- node`, `corepack npx node`) is followed to that program.
+const RUNNER_VALUE_FLAGS = /^--(?:registry|cache|userconfig|globalconfig|loglevel|cwd|prefix|workspace|shell|node-arg|node-options|config|tag|scope)$/;
+function runnerExecutable(argv: string[], i: number, depth = 0): string {
+  for (let j = i; j < argv.length; j++) {
+    const a = argv[j]!;
+    let exe: string | undefined;
+    if (a === "--") exe = runnerName(argv[j + 1] ?? "");
+    else if (!a.startsWith("-")) exe = runnerName(a);
+    if (exe !== undefined) {
+      const at = a === "--" ? j + 1 : j;
+      // Past the depth limit the program is not known: it may be node.
+      if (/^(?:npx|bunx|pnpx)$/.test(exe)) return depth < 4 ? runnerExecutable(argv, at + 1, depth + 1) : "node";
+      if (/^(?:npm|pnpm|yarn|bun)$/.test(exe)) {
+        const sub = argv.findIndex((w, q) => q > at && /^(?:exec|x|dlx)$/.test(w));
+        if (sub > 0) return depth < 4 ? runnerExecutable(argv, sub + 1, depth + 1) : "node";
+      }
+      return exe;
+    }
+    const ef = execFlag(a);
+    if (ef?.kind === "call") return "";
+    if (ef?.kind === "package" && ef.value === undefined) j++;
+    else if (RUNNER_VALUE_FLAGS.test(a)) j++;
+  }
+  return "";
+}
+
+// Node's own options that never take a value (from `node --help`), and the V8 flags that are plain switches. Any other option may
+// take the next word (`--title t`, `--localstorage-file f`, `-C dev`), so that word is not counted as the script: a `.` after it
+// still names the package root. The options node documents as taking a value are listed too: their value is never the root.
+const NODE_BOOL_NAMES = new Set(["--abort-on-uncaught-exception", "--allow-addons", "--allow-child-process", "--allow-ffi", "--allow-fs-vfs", "--allow-inspector", "--allow-net", "--allow-openssl-store", "--allow-wasi", "--allow-worker", "--bench", "--build-snapshot", "--check", "--completion-bash", "--cpu-prof", "--deprecation", "--disable-sigusr1", "--disable-wasm-trap-handler", "--disallow-code-generation-from-strings", "--enable-etw-stack-walking", "--enable-fips", "--enable-fips-indicator-events", "--enable-network-family-autoselection", "--enable-source-maps", "--entry-url", "--experimental-addon-modules", "--experimental-async-context-frame", "--experimental-bench", "--experimental-detect-module", "--experimental-eventsource", "--experimental-fetch", "--experimental-global-customevent", "--experimental-global-navigator", "--experimental-global-webcrypto", "--experimental-import-meta-resolve", "--experimental-import-text", "--experimental-inspector-network-resource", "--experimental-json-modules", "--experimental-network-inspection", "--experimental-permission", "--experimental-print-required-tla", "--experimental-repl-await", "--experimental-require-module", "--experimental-shadow-realm", "--experimental-sqlite", "--experimental-storage-inspection", "--experimental-stream-iter", "--experimental-strip-types", "--experimental-test-coverage", "--experimental-test-module-mocks", "--experimental-transform-types", "--experimental-vfs", "--experimental-vm-modules", "--experimental-wasm-modules", "--experimental-web-worker", "--experimental-websocket", "--experimental-webstorage", "--experimental-worker", "--experimental-worker-inspection", "--expose-gc", "--force-context-aware", "--force-fips", "--force-node-api-uncaught-exceptions-policy", "--frozen-intrinsics", "--heap-prof", "--help", "--insecure-http-parser", "--inspect", "--inspect-brk", "--inspect-wait", "--interactive", "--interpreted-frames-native-stack", "--jitless", "--no-addons", "--no-async-context-frame", "--no-deprecation", "--no-experimental-detect-module", "--no-experimental-ffi", "--no-experimental-global-navigator", "--no-experimental-repl-await", "--no-experimental-require-module", "--no-experimental-sqlite", "--no-experimental-websocket", "--no-experimental-webstorage", "--no-extra-info-on-fatal-exception", "--no-force-async-hooks-checks", "--no-global-search-paths", "--no-network-family-autoselection", "--no-require-module", "--no-strip-types", "--no-warnings", "--no-worker-snapshot", "--node-memory-debug", "--openssl-legacy-provider", "--openssl-shared-config", "--pending-deprecation", "--permission", "--permission-audit", "--preserve-symlinks", "--preserve-symlinks-main", "--prof", "--prof-process", "--report-compact", "--report-exclude-env", "--report-exclude-network", "--report-on-fatalerror", "--report-on-process-timeout", "--report-on-signal", "--report-uncaught-exception", "--test", "--test-coverage-include-all", "--test-force-exit", "--test-only", "--test-randomize", "--test-update-snapshots", "--throw-deprecation", "--tls-max-v1.2", "--tls-max-v1.3", "--tls-min-v1.0", "--tls-min-v1.1", "--tls-min-v1.2", "--tls-min-v1.3", "--trace-deprecation", "--trace-env", "--trace-env-js-stack", "--trace-env-native-stack", "--trace-exit", "--trace-promises", "--trace-sigint", "--trace-sync-io", "--trace-tls", "--trace-uncaught", "--trace-warnings", "--track-heap-objects", "--use-bundled-ca", "--use-env-proxy", "--use-openssl-ca", "--use-system-ca", "--v8-options", "--version", "--warnings", "--watch", "--watch-preserve-output", "--webstorage", "--zero-fill-buffers", "-c", "-h", "-i", "-v"]);
+const NODE_VALUE_NAMES = new Set(["--allow-fs-read", "--allow-fs-write", "--bench-isolation", "--bench-name-pattern", "--bench-reporter", "--bench-reporter-destination", "--bench-samples", "--bench-warmup", "--build-sea", "--build-snapshot-config", "--conditions", "--config-file", "--cpu-prof-dir", "--cpu-prof-interval", "--cpu-prof-name", "--debug-port", "--diagnostic-dir", "--disable-proto", "--disable-warning", "--dns-result-order", "--env-file", "--env-file-if-exists", "--eval", "--experimental-config-file", "--experimental-default-config-file", "--experimental-loader", "--experimental-package-map", "--experimental-sea-config", "--experimental-test-isolation", "--experimental-test-tag-filter", "--heap-prof-dir", "--heap-prof-interval", "--heap-prof-name", "--heapsnapshot-near-heap-limit", "--heapsnapshot-signal", "--icu-data-dir", "--import", "--input-type", "--inspect-port", "--inspect-publish-uid", "--loader", "--localstorage-file", "--max-http-header-size", "--max-old-space-size-percentage", "--network-family-autoselection-attempt-timeout", "--openssl-config", "--process-timeout", "--redirect-warnings", "--report-dir", "--report-directory", "--report-filename", "--report-signal", "--require", "--run", "--secure-heap", "--secure-heap-min", "--snapshot-blob", "--test-concurrency", "--test-coverage-branches", "--test-coverage-exclude", "--test-coverage-functions", "--test-coverage-include", "--test-coverage-lines", "--test-global-setup", "--test-isolation", "--test-name-pattern", "--test-random-seed", "--test-reporter", "--test-reporter-destination", "--test-rerun-failures", "--test-shard", "--test-skip-pattern", "--test-timeout", "--title", "--tls-cipher-list", "--tls-keylog", "--trace-event-categories", "--trace-event-file-pattern", "--trace-require-module", "--unhandled-rejections", "--use-largepages", "--v8-pool-size", "--vfs-load", "--watch-kill-signal", "--watch-path", "-C", "-e", "-r"]);
+const NODE_BOOL_RE =
+  /^--(?:no-[a-z0-9-]+|harmony[a-z-]*|expose-[a-z-]+|abort-on-[a-z-]+|disable-(?!warning|proto)[a-z-]+|trace-(?!event-|require-module)[a-z-]+|allow-natives-syntax|use-strict|max-lazy|veri[f]y-base-objects|track-heap-objects|zero-fill-buffers|perf-[a-z-]+)$/;
+
 function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
+  // The first operand that names a file of the package is the script, and the words after it are its own arguments: a `.`
+  // before that (after an option and its value, `--title t .`) is the directory node runs.
+  const allow = ctx.rootRuns;
+  let scriptSeen = false;
+  let optValue = false; // the next word is possibly an option's value: not the script
+  let knownValue = false; // ... and a documented value: not the root either
   while (i < argv.length) {
+    ctx.rootRuns = false;
     if (ctx.hold) return;
     const a = argv[i]!;
     if (a === "--") {
       // What follows is the script and its arguments.
-      for (let q = i + 1; q < argv.length; q++) noteHookArgCwd(ctx, argv[q]!);
+      for (let q = i + 1; q < argv.length; q++) {
+        ctx.rootRuns = allow && !scriptSeen && q === i + 1;
+        noteHookArgCwd(ctx, argv[q]!);
+      }
       return;
     }
     if (a.startsWith("-")) {
+      optValue = false;
+      knownValue = false;
       const eq = a.indexOf("=");
       const name = eq > 0 ? a.slice(0, eq) : a;
       const inline = eq > 0 ? a.slice(eq + 1) : undefined;
@@ -5642,12 +5753,14 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
         const code = take();
         if (code === undefined) return;
         evalCode(ctx, code);
+        scriptSeen = true; // the words after the code are its arguments
         i++;
         continue;
       }
       if (name === "-r" || name === "--require" || name === "--import") {
         const spec = take();
         if (!spec) return;
+        ctx.rootRuns = allow; // a preload names a module, so a directory runs its main
         noteHookArgCwd(ctx, spec);
         i++;
         continue;
@@ -5656,6 +5769,10 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       // the next word as its value or load a file: widen, and keep reading the words that follow as files.
       widenAll(ctx);
       if (inline) noteHookArgCwd(ctx, inline);
+      else if (!NODE_BOOL_NAMES.has(name) && !NODE_BOOL_RE.test(name)) {
+        optValue = true;
+        knownValue = NODE_VALUE_NAMES.has(name);
+      }
       i++;
       continue;
     }
@@ -5665,7 +5782,17 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       ctx.widenInert = true;
       widenAll(ctx);
     }
+    ctx.rootRuns = allow && !scriptSeen && !knownValue;
     noteHookArgCwd(ctx, a);
+    // The value of a value-taking option (`--title lib/ok.js`, `--env-file .env`) is not the script. A file, a dotfile or a
+    // directory with an index or manifest that is not the root is the script; `.`, `./` and `lib/..` name the root.
+    if (!scriptSeen && !optValue) {
+      const n = normalize(a).replace(/\/+$/, "");
+      scriptSeen =
+        Boolean(n) && !badPath(n) && (nodeFile(ctx, n) !== undefined || nodeFile(ctx, `${n}/index`) !== undefined || ctx.logical.has(`${n}/package.json`));
+    }
+    optValue = false;
+    knownValue = false;
     i++;
   }
 }
@@ -7257,7 +7384,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
       const raw = normalize(d);
       if (raw) ctx.movedDirs.add(raw);
       if (n) ctx.movedDirs.add(n);
-      if (CD_WORD.test(runnerName(argv.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{|command|builtin)$/.test(t))?.replace(/^\\+/, "") ?? "")) && n) ctx.cwd = n;
+      if (CD_WORD.test(runnerName(argv.find((t) => !/^(?:!|then|do|else|elif|if|while|until|\{|command|builtin)$/.test(t))?.replace(/^\\+/, "") ?? ""))) ctx.cwd = n;
     }
     widenAll(ctx);
   }
@@ -7305,7 +7432,13 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (WORKSPACE_TOOLS.has(bin) || ((bin === "npx" || bin === "bunx" || bin === "corepack") && WORKSPACE_TOOLS.has(runnerName(argv[i] ?? "")))) widenAll(ctx);
   if (bin === "echo" || bin === "true" || bin === ":") return;
   if (bin === "node" || bin === "nodejs") {
-    dispatchNode(ctx, argv, i);
+    const before = ctx.rootRuns;
+    ctx.rootRuns = true;
+    try {
+      dispatchNode(ctx, argv, i);
+    } finally {
+      ctx.rootRuns = before;
+    }
     return;
   }
   if (bin === "node-gyp") {
@@ -7546,7 +7679,14 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if ((bin === "." || bin === "source") && argv[i]) readFed(ctx, argv[i] === "--" && argv[i + 1] ? argv[i + 1]! : argv[i]!, true);
   // A script run by its path is read as a body (what its first line names runs it).
   if (/^(?:\.\.?\/|[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)/.test(argv[i - 1] ?? "") && bin !== "npx" && bin !== "bunx") readFed(ctx, argv[i - 1]!, true);
-  closeUnknownRunner(ctx, argv, i);
+  // `npx node .` runs the root as a module through the runner, as `node .` does.
+  const rootBefore = ctx.rootRuns;
+  if ((bin === "npx" || bin === "bunx" || bin === "corepack") && /^(?:node|nodejs)$/.test(runnerExecutable(argv, i))) ctx.rootRuns = true;
+  try {
+    closeUnknownRunner(ctx, argv, i);
+  } finally {
+    ctx.rootRuns = rootBefore;
+  }
   // A package runner fetches or resolves a package, so a local file named among its
   // arguments does not make the run resolved, as with dlx.
   // `-p`/`--package` fetches a package onto PATH for the named file, so it always widens.
