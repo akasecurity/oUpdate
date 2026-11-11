@@ -1543,6 +1543,29 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} stays static (class keyword)`, () => expect(held(pre)).toBe(false));
 }
+// The brace scans look a bounded way back from each brace: a large file of many braces is read in linear time (a search that ran to
+// the end of the text for every brace took many seconds per MB). 2 MB reads in about a second where it should; the quadratic
+// forms took over thirty seconds.
+// The scan back from a : looks 256 characters for its ?: an alternate object farther away is read as a block (a hold, never a miss).
+test("an object in a ternary alternate beyond the scan reach is a block (a documented false hold)", () => {
+  const pre = `const o = false ?${" ".repeat(300)}null : {\n m(a)\n { return arguments[0] }\n};\nexports.main = () => 1\n`;
+  expect(held(pre)).toBe(true);
+});
+const bigOf = (unit: string) => unit.repeat(Math.ceil((2048 * 1024) / unit.length)) + "exports.main = () => 1;";
+for (const [label, make] of [
+  ["empty blocks", () => bigOf("{}\n")],
+  ["nested blocks", () => "{".repeat(1024 * 1024) + "}".repeat(1024 * 1024) + "\nexports.main = () => 1;"],
+  ["a call statement and an empty block", () => bigOf("f(1)\n{}\n")],
+  ["conditional expressions with an empty object", () => bigOf("c ? 1 : {}\n")],
+  ["empty object methods", () => bigOf("o = { m(a)\n{} }\n")],
+] as const) {
+  test(`2 MB of ${label} is scanned in linear time`, () => {
+    const text = make();
+    const t0 = performance.now();
+    provablyStatic(text);
+    expect(performance.now() - t0).toBeLessThan(4000);
+  }, 60000);
+}
 for (const [label, pre] of [
   ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
   ["arguments bound to a name", 'const a = arguments; exports.main = () => a[1]("child_"+"pro"+"cess")\n'],

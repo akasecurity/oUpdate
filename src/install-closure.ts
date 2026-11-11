@@ -1757,7 +1757,10 @@ function opensClassBody(code: string, j: number): boolean {
   let lo = j - 1;
   while (lo >= 0 && j - lo <= 200 && code[lo] !== "{" && code[lo] !== "}" && code[lo] !== ";") lo--;
   const from = Math.max(0, lo + 1);
-  for (let i = code.indexOf("class", from); i >= 0 && i < j; i = code.indexOf("class", i + 1)) {
+  // Search the stretch only (never the rest of the file: that makes every brace scan the whole text).
+  const stretch = code.slice(from, j);
+  for (let at = stretch.indexOf("class"); at >= 0; at = stretch.indexOf("class", at + 1)) {
+    const i = from + at;
     if ((i > 0 && identChar(code[i - 1]!)) || identChar(code[i + 5] ?? " ")) continue;
     const r = skipSpaceBack(code, i);
     if (code[r - 1] === "#" || (code[r - 1] === "." && code.slice(r - 3, r) !== "...")) continue;
@@ -1803,11 +1806,17 @@ function braceKind(code: string, at: number, outer?: BraceKind): BraceKind {
   return "block";
 }
 
+// How far back from a : the scan looks for its ? (an alternate object farther than this holds as a block: a hold, never a miss).
+const TERNARY_REACH = 256;
+
 // The : at index c closes a ? of a conditional expression in the same statement (scanned back a bounded way; no answer is false).
 function closesTernary(code: string, c: number): boolean {
+  // A bounded stretch, and no ? in it ends the scan at native speed: the cost per : never depends on the size of the file.
+  const from = Math.max(0, c - TERNARY_REACH);
+  if (!code.slice(from, c).includes("?")) return false;
   let pending = 0;
   let depth = 0;
-  for (let i = c - 1; i >= 0 && c - i < 2000; i--) {
+  for (let i = c - 1; i >= from; i--) {
     const ch = code[i]!;
     if (ch === ")" || ch === "]" || ch === "}") depth++;
     else if (ch === "(" || ch === "[" || ch === "{") {
