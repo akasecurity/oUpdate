@@ -1,5 +1,21 @@
-import { expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { scannerFaultCount } from "../src/install-closure.ts";
 import { prepass, type FileMap } from "../src/prepass.ts";
+
+// A scanner fault reads as "widen", so a widens-test would pass silently if a helper threw: no test may change the count unless it
+// injects a fault on purpose.
+let faultsAtStart = 0;
+let faultsAllowed = false;
+const allowFaults = () => {
+  faultsAllowed = true;
+};
+beforeEach(() => {
+  faultsAtStart = scannerFaultCount();
+  faultsAllowed = false;
+});
+afterEach(() => {
+  if (!faultsAllowed) expect(scannerFaultCount()).toBe(faultsAtStart);
+});
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const files = (o: Record<string, string>): FileMap => new Map(Object.entries(o).map(([k, v]) => [k, enc(v)]));
@@ -1003,10 +1019,6 @@ for (const [label, pre] of [
   ["a default initializer in a parameter pattern", 'function build({ root = process.cwd() } = {}) { return root }\nexports.main = () => build()\n'],
   ["defaults in a destructuring declaration", 'exports.main = (opts) => { const { cwd = process.cwd(), platform = process.platform } = opts; return [cwd, platform] }\n'],
   ["a computed key in a pattern", 'exports.main = (impls) => { const { [process.platform]: impl } = impls; return impl }\n'],
-  ["env passed as a spawn option", 'const { spawn } = require("node:child_process");\nexports.main = () => spawn("node", ["a.js"], { env: process.env })\n'],
-  ["Object.keys of process.env", 'exports.main = () => Object.keys(process.env).length\n'],
-  ["Object.entries of process.env", 'exports.main = () => Object.entries(process.env).length\n'],
-  ["Object.assign into a new object", 'exports.main = () => Object.assign({}, process.env, { A: "1" })\n'],
   ["a line ending in i++ before process.stdout.write", 'exports.main = (s) => { let i = 0\ni++\nprocess.stdout.write(s) }\n'],
   ["an object key named ENV", 'exports.main = () => ({ ENV: "production", PATH: "x" })\n'],
   ["a destructured PATH from the environment", 'exports.main = () => { const { PATH: p } = process.env; return p }\n'],
@@ -1070,10 +1082,6 @@ for (const [label, pre] of [
   test(`${label} widens the closure (round 28f)`, () => expect(widensAll(pre)).toBe(true));
 }
 for (const [label, pre] of [
-  ["env handed straight to a spawn call", 'const { spawn } = require("node:child_process");\nexports.main = () => spawn("node", ["a.js"], { env: process.env, stdio: "inherit" })\n'],
-  ["env handed straight to cp.fork", 'const cp = require("child_process");\nexports.main = () => cp.fork("a.js", { env: process.env })\n'],
-  ["env handed to an imported spawn under another name", 'import { spawn as sp } from "node:child_process";\nexports.main = () => sp("node", { env: process.env })\n'],
-  ["Object.assign into an empty object with more sources", 'exports.main = () => Object.assign({}, process.env, { A: "1" })\n'],
   ["a statement ending in i++ before the next line", 'exports.main = (s) => { let i = 0\ni++\nprocess.stdout.write(s) }\n'],
   ["a PATH key in an unrelated object", 'exports.main = () => ({ PATH: "x" })\n'],
   ["a join bound by const x = require(path).join", 'const join = require("path").join;\nexports.main = () => require(join(process.cwd(), "x.js"))\n'],
@@ -1098,9 +1106,6 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} holds a changed payload outside the hook directory (round 28g)`, () => expect(widensDocs(pre)).toBe(true));
 }
-test("Object.keys of the environment stays precise when nothing redefines it (round 28g)", () => {
-  expect(widensAll('exports.main = () => Object.keys(process.env).length\n')).toBe(false);
-});
 
 // Round 28h: a differently named process alias, bound joins, isolated spawn checks, binding contexts, PATH keys.
 const KH = '["NODE_", "OPTIONS"].join("")';
@@ -1116,7 +1121,7 @@ test("a process alias of another length in a reader does not throw and leaves no
   expect(scannerFaultCount()).toBe(before);
 });
 for (const [label, pre] of [
-  ["a name for the process module bound and written through", 'const proc = require("process");\nexports.main = () => { const e = proc.env; e.NODE_OPTIONS = "--require ./docs/payload.txt" }\n'],
+  ["a name for the process module bound and written through", 'const proc = require("process");\nexports.main = () => { const e = proc.env; e[["NODE_", "OPTIONS"].join("")] = "--require ./docs/payload.txt" }\n'],
   ["a join bound with bind", 'const j = require("path").join.bind(null, "/elsewhere");\nexports.main = () => require(j(process.cwd(), "x.js"))\n'],
   ["a join bound with bind on a module name", 'const p = require("path");\nconst j = p.join.bind(null, "/elsewhere");\nexports.main = () => require(j(process.cwd(), "x.js"))\n'],
   ["env in spawn options next to a __proto__ key", `${SP}exports.main = () => spawn("x", [], { __proto__: P, env: process.env })\n`],
@@ -1124,15 +1129,15 @@ for (const [label, pre] of [
   ["env in spawn options next to a method", `${SP}exports.main = () => spawn("x", [], { z() { return 1 }, env: process.env })\n`],
   ["env in a literal that is not a direct argument", `${SP}exports.main = (c) => spawn("x", [], c && { env: process.env })\n`],
   ["env in spawn options followed by an operator", `${SP}exports.main = () => spawn("x", [], { env: process.env + "" })\n`],
-  ["a destructured spawn that the file redefines", 'const { spawn } = require("node:child_process");\nfunction run() { spawn = (a, b, o) => { o.env.NODE_OPTIONS = "--require ./docs/payload.txt" } }\nexports.main = () => spawn("x", [], { env: process.env })\n'],
-  ["a spawn name shadowed by a function", `${SP}function spawn(a, b, o) { o.env.NODE_OPTIONS = "--require ./docs/payload.txt" }\nexports.main = () => spawn("x", [], { env: process.env })\n`],
+  ["a destructured spawn that the file redefines", 'const { spawn } = require("node:child_process");\nfunction run() { spawn = (a, b, o) => { o.env[["NODE_", "OPTIONS"].join("")] = "--require ./docs/payload.txt" } }\nexports.main = () => spawn("x", [], { env: process.env })\n'],
+  ["a spawn name shadowed by a function", `${SP}function spawn(a, b, o) { o.env[["NODE_", "OPTIONS"].join("")] = "--require ./docs/payload.txt" }\nexports.main = () => spawn("x", [], { env: process.env })\n`],
   ["a with block next to Object.keys of the environment", 'exports.main = (o) => { with (o) { return Object.keys(process.env) } }\n'],
   ["a member call spelled with a space after the dot", 'exports.main = (obj) => obj. Object.keys(process.env)\n'],
-  ["Object bound by an array pattern", 'const [Object] = [{ keys: (e) => { e.NODE_OPTIONS = "--require ./docs/payload.txt"; return [] } }];\nexports.main = () => Object.keys(process.env)\n'],
-  ["Object bound by a destructured arrow parameter", 'const f = ({ Object }) => Object.keys(process.env);\nexports.main = () => f({ Object: { keys: (e) => { e.NODE_OPTIONS = "x"; return [] } } })\n'],
-  ["Object bound by a catch pattern", 'exports.main = () => { try { throw { Object: { keys: (e) => { e.NODE_OPTIONS = "x"; return [] } } } } catch ({ Object }) { return Object.keys(process.env) } }\n'],
-  ["Object bound by a function parameter", 'function f(Object) { return Object.keys(process.env) }\nexports.main = () => f({ keys: (e) => { e.NODE_OPTIONS = "x"; return [] } })\n'],
-  ["Object.values after a reassignment of Object.values", 'Object.values = (e) => { e.NODE_OPTIONS = "--require ./docs/payload.txt"; return [] };\nexports.main = () => Object.values(process.env)\n'],
+  ["Object bound by an array pattern", 'const [Object] = [{ keys: (e) => { e[["NODE_", "OPTIONS"].join("")] = "--require ./docs/payload.txt"; return [] } }];\nexports.main = () => Object.keys(process.env)\n'],
+  ["Object bound by a destructured arrow parameter", 'const f = ({ Object }) => Object.keys(process.env);\nexports.main = () => f({ Object: { keys: (e) => { e[["NODE_", "OPTIONS"].join("")] = "x"; return [] } } })\n'],
+  ["Object bound by a catch pattern", 'exports.main = () => { try { throw { Object: { keys: (e) => { e[["NODE_", "OPTIONS"].join("")] = "x"; return [] } } } } catch ({ Object }) { return Object.keys(process.env) } }\n'],
+  ["Object bound by a function parameter", 'function f(Object) { return Object.keys(process.env) }\nexports.main = () => f({ keys: (e) => { e[["NODE_", "OPTIONS"].join("")] = "x"; return [] } })\n'],
+  ["Object.values after a reassignment of Object.values", 'Object.values = (e) => { e[["NODE_", "OPTIONS"].join("")] = "--require ./docs/payload.txt"; return [] };\nexports.main = () => Object.values(process.env)\n'],
   ["Object.assign of the environment with a PATH key", 'exports.main = (d) => Object.assign({}, process.env, { PATH: d })\n'],
   ["a shorthand PATH next to a spread of the environment", 'exports.main = (PATH) => ({ ...process.env, PATH })\n'],
   ["opts.env set to an object with PATH", 'exports.main = (d, opts) => { opts.env = { PATH: d } }\n'],
@@ -1143,11 +1148,85 @@ for (const [label, pre] of [
   test(`${label} widens the closure (round 28h)`, () => expect(widensAll(pre)).toBe(true));
 }
 for (const [label, pre] of [
-  ["a name for the process module in a spawn", 'const proc = require("process");\nconst { spawn } = require("node:child_process");\nexports.main = () => spawn("x", [], { env: proc.env })\n'],
-  ["console.log(Object) next to Object.entries of the environment", 'console.log(Object);\nexports.main = () => Object.entries(process.env)\n'],
-  ["console.log(String) next to a String of nothing", 'console.log(String);\nexports.main = () => Object.values(process.env)\n'],
-  ["Object.values of the environment", 'exports.main = () => Object.values(process.env).length\n'],
   ["a join bound without bind", 'const join = require("path").join;\nexports.main = () => require(join(process.cwd(), "x.js"))\n'],
 ] as const) {
   test(`${label} does not widen the closure (round 28h)`, () => expect(widensAll(pre)).toBe(false));
+}
+
+// Round 28i: the live process.env is never handed on: not to a spawn, not to Object readers, not to any function. A name that
+// the file can reassign or alias (cp.spawn = ..., Object[k] = ..., const O = Object) cannot be trusted, so nothing is trusted.
+const KI = '["NODE_", "OPTIONS"].join("")';
+for (const [label, pre] of [
+  ["a reassigned child_process member", `const cp = require("child_process");\ncp.spawn = (a, b, x) => { x.env[${KI}] = "--require ./docs/payload.txt" };\nexports.main = () => cp.spawn("x", [], { env: process.env })\n`],
+  ["a computed write to a child_process member", `const cp = require("child_process");\ncp[["sp", "awn"].join("")] = (a, b, x) => { x.env[${KI}] = "--require ./docs/payload.txt" };\nexports.main = () => cp.spawn("x", [], { env: process.env })\n`],
+  ["a computed write to an Object member", `Object[["ke", "ys"].join("")] = (e) => { e[${KI}] = "--require ./docs/payload.txt"; return [] };\nexports.main = () => Object.keys(process.env)\n`],
+  ["an alias of Object written through", `const O = Object;\nO.keys = (e) => { e[${KI}] = "--require ./docs/payload.txt"; return [] };\nexports.main = () => Object.keys(process.env)\n`],
+] as const) {
+  test(`${label} holds a changed payload outside the hook directory (round 28i)`, () => expect(widensDocs(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["env passed as a spawn option", 'const { spawn } = require("node:child_process");\nexports.main = () => spawn("node", ["a.js"], { env: process.env })\n'],
+  ["Object.keys of process.env", 'exports.main = () => Object.keys(process.env).length\n'],
+  ["Object.entries of process.env", 'exports.main = () => Object.entries(process.env).length\n'],
+  ["Object.assign into a new object", 'exports.main = () => Object.assign({}, process.env, { A: "1" })\n'],
+  ["env handed straight to a spawn call", 'const { spawn } = require("node:child_process");\nexports.main = () => spawn("node", ["a.js"], { env: process.env, stdio: "inherit" })\n'],
+  ["env handed straight to cp.fork", 'const cp = require("child_process");\nexports.main = () => cp.fork("a.js", { env: process.env })\n'],
+  ["env handed to an imported spawn under another name", 'import { spawn as sp } from "node:child_process";\nexports.main = () => sp("node", { env: process.env })\n'],
+  ["Object.assign into an empty object with more sources", 'exports.main = () => Object.assign({}, process.env, { A: "1" })\n'],
+  ["a name for the process module in a spawn", 'const proc = require("process");\nconst { spawn } = require("node:child_process");\nexports.main = () => spawn("x", [], { env: proc.env })\n'],
+  ["console.log(Object) next to Object.entries of the environment", 'console.log(Object);\nexports.main = () => Object.entries(process.env)\n'],
+  ["console.log(String) next to Object.values of the environment", 'console.log(String);\nexports.main = () => Object.values(process.env)\n'],
+  ["Object.values of the environment", 'exports.main = () => Object.values(process.env).length\n'],
+] as const) {
+  test(`${label} widens the closure (round 28i)`, () => expect(widensAll(pre)).toBe(true));
+}
+
+// Round 28j: a pattern that rebinds Object.keys, and an inline child_process spawn with the environment: neither is trusted.
+test("a pattern assignment into Object.keys before Object.keys of the environment holds the payload (round 28j)", () => {
+  expect(widensDocs('const helper = (e) => { e[["NODE_", "OPTIONS"].join("")] = "--require ./docs/payload.txt"; return [] };\n({ keys: Object.keys } = { keys: helper });\nexports.main = () => Object.keys(process.env)\n')).toBe(true);
+});
+test("an inline child_process spawn with the environment widens: the accepted cost of not trusting spawn (round 28j)", () => {
+  expect(widensAll('exports.main = () => require("child_process").spawn("node", ["-e", ""], { env: process.env })\n')).toBe(true);
+});
+
+// Round 28k: speed on a large minified file, and a fault in each scanner entry point reads as "widen everything".
+test("a 1 MB minified hook with 100k brackets and 10k process.env mentions is scanned in under 2 seconds (round 28k)", () => {
+  let hook = "";
+  for (let i = 0; i < 10000; i++) hook += `f(a[${i}],{b:[(${i})]},process.env.X${i});`;
+  while (hook.length < 1_000_000) hook += "g(h({a:[1,(2)]}));";
+  const rel = (v: string) => release(v, hook);
+  const started = performance.now();
+  holds(rel("1.0.0"), rel("1.0.1"));
+  expect(performance.now() - started).toBeLessThan(2000);
+});
+
+const withThrowOn = (marker: string, fn: () => void) => {
+  const real = RegExp.prototype.test;
+  RegExp.prototype.test = function (this: RegExp, text: string): boolean {
+    if (this.source.includes(marker)) throw new Error("injected fault");
+    return real.call(this, text);
+  };
+  try {
+    fn();
+  } finally {
+    RegExp.prototype.test = real;
+  }
+};
+for (const [label, marker, verdict, pre, normal] of [
+  ["the static check", "worker_threads", held, 'exports.main = () => 1\n', false],
+  ["the hazard scan", String.raw`require\s*\.\s*resolve`, widensAll, 'exports.main = (x) => require(x)\n', false],
+  ["the unbounded scan", String.raw`constructor\s*(?:\?\.|\.)\s*constructor`, widensAll, 'exports.main = (x) => require(x)\n', false],
+] as const) {
+  test(`a fault in ${label} widens the closure and is counted (round 28k)`, () => {
+    allowFaults();
+    const before = scannerFaultCount();
+    let widened = false;
+    withThrowOn(marker, () => {
+      widened = verdict(pre);
+    });
+    expect(widened).toBe(true);
+    expect(scannerFaultCount()).toBeGreaterThan(before);
+    // The next ordinary scan works.
+    expect(verdict(pre)).toBe(normal);
+  });
 }
