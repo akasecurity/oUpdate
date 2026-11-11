@@ -128,3 +128,22 @@ test("a main with a trailing slash holds when its index.js changes", () =>
 // A main that names a missing file falls back to the root index.js.
 test("a main naming a missing file falls back to index.js: a changed index.js holds", () =>
   expect(rootHeld("node .", "missing.js", { "index.js": "console.log('evil V')\n" })).toBe(true));
+
+// A runner that wraps node runs the root as a module too.
+for (const hook of ["npx node .", "npx --yes node .", "npx nodejs .", "bunx node .", "env node .", "nice node .", "sudo node .", "exec node .", "command node ."]) {
+  test(`${hook}: the package main changed holds`, () =>
+    expect(rootHeld(hook, "docs/evil.js", { "docs/evil.js": "console.log('evil V')\n" })).toBe(true));
+}
+test("npx tsc -p . does not run the manifest main", () =>
+  expect(rootHeld("npx tsc -p .", "docs/runtime.js", { "docs/runtime.js": "console.log('r V')\n" })).toBe(false));
+
+// A dependency main that leaves its directory but stays in the package resolves to the file it names.
+const build = { "scripts/build.js": 'require("../lib");\n', "lib/package.json": '{"main":"../safe.js"}' };
+test("a dependency main one level up stays quiet when an unrelated file changes", () =>
+  expect(rootHeld("node scripts/build.js", undefined, { ...build, "safe.js": "1\n", "docs/unrelated.md": "d V\n" })).toBe(false));
+test("a dependency main one level up holds when the file it names changes", () =>
+  expect(rootHeld("node scripts/build.js", undefined, { ...build, "safe.js": "console.log('evil V')\n" })).toBe(true));
+test("a dependency main that leaves the package holds", () =>
+  expect(
+    rootHeld("node scripts/build.js", undefined, { ...build, "lib/package.json": '{"main":"../../x.js"}', "safe.js": "1\n", "docs/unrelated.md": "d V\n" }),
+  ).toBe(true));

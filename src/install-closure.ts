@@ -502,11 +502,12 @@ function findKey(ctx: Ctx, logical: string): string | undefined {
     const pj = parseJson(ctx.bytes.get(manifest));
     if (pj && pj.main !== undefined && typeof pj.main !== "string") return undefined;
     const main = pj && typeof pj.main === "string" ? pj.main : "index.js";
-    let rel = normalize(main);
+    const rel = normalize(main);
     if (!rel || /[*?[]/.test(rel)) return undefined;
     if (badPath(rel)) {
-      // A main with a `.` or `..` segment or a trailing slash resolves inside its directory; one that leaves it reads every file.
-      const inside = rel.startsWith("/") || /^[A-Za-z]:/.test(rel) || /[\u0005$~]/.test(rel) ? undefined : joinDir("", rel);
+      // A main with a `.` or `..` segment or a trailing slash resolves from the manifest's directory; one that leaves the
+      // package reads every file.
+      const inside = rel.startsWith("/") || /^[A-Za-z]:/.test(rel) || /[\u0005$~]/.test(rel) ? undefined : joinDir(logical, rel);
       if (inside === undefined) {
         if (/(^|\/)\.\.(\/|$)/.test(rel)) {
           ctx.widenInert = true;
@@ -514,8 +515,7 @@ function findKey(ctx: Ctx, logical: string): string | undefined {
         }
         return undefined;
       }
-      rel = inside;
-      if (!rel) return findFile(ctx, `${logical}/index`);
+      return findFile(ctx, inside || "index");
     }
     const next = joinLogical(`${logical}/package.json`, rel);
     if (!next) return undefined;
@@ -6938,7 +6938,14 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if ((bin === "." || bin === "source") && argv[i]) readFed(ctx, argv[i] === "--" && argv[i + 1] ? argv[i + 1]! : argv[i]!, true);
   // A script run by its path is read as a body (what its first line names runs it).
   if (/^(?:\.\.?\/|[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)/.test(argv[i - 1] ?? "") && bin !== "npx" && bin !== "bunx") readFed(ctx, argv[i - 1]!, true);
-  closeUnknownRunner(ctx, argv, i);
+  // `npx node .` runs the root as a module through the runner, as `node .` does.
+  const rootBefore = ctx.rootRuns;
+  if ((bin === "npx" || bin === "bunx" || bin === "corepack") && argv.slice(i).some((a) => a === "node" || a === "nodejs")) ctx.rootRuns = true;
+  try {
+    closeUnknownRunner(ctx, argv, i);
+  } finally {
+    ctx.rootRuns = rootBefore;
+  }
   // A package runner fetches or resolves a package, so a local file named among its
   // arguments does not make the run resolved, as with dlx.
   // `-p`/`--package` fetches a package onto PATH for the named file, so it always widens.
