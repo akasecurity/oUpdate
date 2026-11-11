@@ -2499,40 +2499,65 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
 // require without a call: not `require(`, `require.resolve(`, `typeof require`, `require.main/cache/extensions`, not a member name, not a parameter of the
 // module wrapper. module.require and createRequire(...) results count when they are not called on the spot.
 function handedOn(text: string, aliases: string[]): boolean {
-  for (const m of text.matchAll(/(?<![\w$.])require(?![\w$])/g)) {
+  const names = new Set(["require", ...aliases]);
+  for (const m of text.matchAll(/(?<![\w$.])[A-Za-z_$][\w$]*(?![\w$])/g)) {
+    const name = m[0];
+    if (!names.has(name)) continue;
     const at = m.index ?? 0;
-    const after = text.slice(at + 7, at + 40);
-    if (/^\s*\(/.test(after)) continue;
+    const after = text.slice(at + name.length, at + name.length + 60);
+    const before = text.slice(Math.max(0, at - 40), at);
+    if (/^\s*\(/.test(after)) continue; // a direct call
     if (/^\s*\.\s*(?:resolve\s*\(|main\b|cache\b|extensions\b|paths\b)/.test(after)) continue;
-    if (/\btypeof\s+$/.test(text.slice(Math.max(0, at - 10), at))) continue;
-    if (/\b(?:const|let|var|function)\s+$/.test(text.slice(Math.max(0, at - 12), at))) continue;
-    if (/[(,]\s*$/.test(text.slice(Math.max(0, at - 3), at)) && /^\s*[,)]/.test(after) && /function\s*[\w$]*\s*\([^)]*$/.test(text.slice(Math.max(0, at - 80), at))) continue; // a wrapper parameter
+    if (/\btypeof\s+$/.test(before)) continue;
+    if (/\b(?:const|let|var|function)\s+$/.test(before)) continue;
+    if (/^\s*=(?!=)/.test(after)) continue; // its own binding
+    if (/[{,]\s*$/.test(before) && /^\s*:/.test(after)) continue; // a property name ({ require: true })
+    if (inParamList(text, at, name.length)) continue; // a parameter named like the loader
+    if (name === "require" && /(?:^|[;\n}])\s*module\s*\.\s*exports\s*=\s*$/.test(before) && /^[ \t]*(?:;|\r?\n|$)/.test(after)) continue; // module.exports = require;
     return true;
   }
-  // module.require handed on (a bare mention, .bind(...)), and an alias of a loader used any way but a call or its own binding.
+  // module.require handed on (a bare mention, .bind(...)).
   for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
-  for (const name of aliases) {
-    const n = name.replace(/\$/g, "\\$");
-    for (const m of text.matchAll(new RegExp(`(?<![\\w$.])${n}(?![\\w$])`, "g"))) {
-      const at = m.index ?? 0;
-      if (/^\s*\(/.test(text.slice(at + name.length, at + name.length + 6))) continue; // a direct call
-      if (/^\s*=(?!=)/.test(text.slice(at + name.length, at + name.length + 6))) continue; // its own binding
-      if (/\b(?:const|let|var)\s+$/.test(text.slice(Math.max(0, at - 12), at))) continue;
-      return true;
-    }
-  }
   // A createRequire(...) result that is neither called on the spot nor bound to a plain name (a member, an argument, a ternary).
   for (const m of text.matchAll(/(?<![\w$])createRequire\s*\(/g)) {
     const inner = argsOf(text, (m.index ?? 0) + m[0].length - 1);
     if (inner === undefined) return true;
     const end = (m.index ?? 0) + m[0].length + inner.length + 1;
     if (/^\s*\(/.test(text.slice(end, end + 6))) continue;
-    const stmt = text.slice(Math.max(0, (m.index ?? 0) - 200), m.index ?? 0).split(/[;\n]/).pop() ?? "";
-    if (/(?:\b(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=\s*(?:[\w$]+\s*\.\s*)*$/.test(stmt) && !/\.\s*[\w$]+\s*=\s*[^=]*$/.test(stmt)) continue;
+    const { from } = statementStart(text, m.index ?? 0);
+    const stmt = text.slice(from, m.index ?? 0);
+    if (/^(?:\s*(?:\b(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=)\s*(?:[\w$]+\s*\.\s*)*$/.test(stmt)) continue;
     if (/\bconst\s*\{[^}]*\}\s*=\s*require\s*\(\s*["']module["']\s*\)\s*$/.test(stmt)) continue;
     return true;
   }
   return false;
+}
+
+// The name at `at` sits in a parameter list: (require, exports, module) before a body or an arrow.
+function inParamList(text: string, at: number, len: number): boolean {
+  let depth = 0;
+  let k = at - 1;
+  for (; k >= 0 && at - k < 300; k--) {
+    const c = text[k];
+    if (c === ")") depth++;
+    else if (c === "(") {
+      if (depth === 0) break;
+      depth--;
+    } else if (c === "{" || c === ";") return false;
+  }
+  if (k < 0 || text[k] !== "(") return false;
+  let d = 0;
+  let j = at + len;
+  for (; j < text.length && j - at < 300; j++) {
+    const c = text[j];
+    if (c === "(") d++;
+    else if (c === ")") {
+      if (d === 0) break;
+      d--;
+    }
+  }
+  if (text[j] !== ")") return false;
+  return /function\s*\*?\s*[\w$]*\s*$/.test(text.slice(Math.max(0, k - 40), k)) || /^\s*=>/.test(text.slice(j + 1, j + 12));
 }
 const FUNCTION_START = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/;
 function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
@@ -2587,16 +2612,19 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     tier.flows = true;
   }
   // Any other mention of require, module.require or a createRequire result that is not itself an immediate call is a loader handed on as a value.
-  if (handedOn(text, [...callers].filter((n) => !/^(?:require|import|fork|execFile|execFileSync)$/.test(n)))) {
+  const blank = codeOnly(text, [], false) ?? text;
+  if (handedOn(blank, [...callers].filter((n) => !/^(?:require|import|fork|execFile|execFileSync)$/.test(n)))) {
     tier.pkg = true;
     tier.tests = true;
     tier.flows = true;
   }
   // require or import handed on as a value (`list.map(require)`, `[require]`) loads whatever it is called with later.
-  for (const m of text.matchAll(/(?:[(,[:?]|\breturn|=>)\s*(?:require|import)(?![\w$])(?!\s*[(.])/g)) {
-    // A parameter named require (function (require, exports, module)) is a name, not the loader.
-    const head = text.slice(Math.max(0, (m.index ?? 0) - 80), (m.index ?? 0) + 1);
-    if (/function\s*[\w$]*\s*\([^)]*$/.test(head) && /^\s*[,)]/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 4))) continue;
+  for (const m of blank.matchAll(/(?:[(,[:?]|\breturn|=>)\s*(?:require|import)(?![\w$])(?!\s*[(.])/g)) {
+    const at = (m.index ?? 0) + m[0].search(/(?:require|import)$/);
+    const name = m[0].endsWith("require") ? "require" : "import";
+    // A parameter or a property name is a name, not the loader: function (require, exports, module), { a: 1, require: x }.
+    if (inParamList(blank, at, name.length)) continue;
+    if (m[0].startsWith(",") && /^\s*:/.test(blank.slice(at + name.length, at + name.length + 6))) continue;
     tier.pkg = true;
     tier.tests = true;
     tier.flows = true;
@@ -4220,6 +4248,22 @@ function mergeEffect(tier: JsTier, eff: JsEffect): void {
 // A plain identifier is a package name (require(name)), not a file path.
 // The names a file binds to require, or to the result of createRequire(...): a call through one loads like require.
 // An assignment anywhere counts (`let r; r = require`), so do aliases of aliases (up to three deep) and require.bind(...).
+// Back from a call to the start of its statement: a ; ends it, a newline does too unless the line before ends with an operator or the
+// line after starts with one (the usual wrap of a long statement). Past this many characters the statement is unreadable.
+function statementStart(text: string, at: number): { from: number; overflow: boolean } {
+  let from = at;
+  const floor = Math.max(0, at - 3000);
+  while (from > floor && text[from - 1] !== ";") {
+    if (text[from - 1] === "\n") {
+      const prev = text.slice(Math.max(0, from - 200), from - 1).trimEnd();
+      const next = text.slice(from, from + 40).trimStart()[0] ?? "";
+      if (!/[=(,+\-*/?:&|{[]$/.test(prev) && !/[.?:&|+]/.test(next)) break;
+    }
+    from--;
+  }
+  return { from, overflow: from === floor && floor > 0 };
+}
+
 function loaderNames(text: string): string[] {
   const id = "[A-Za-z_$][\\w$]*";
   const names = new Set<string>();
@@ -4227,23 +4271,11 @@ function loaderNames(text: string): string[] {
   // name = ...createRequire(...): walk back from each call to the start of its statement, whatever the length of what lies between.
   for (const maker of createRequireNames(text)) {
     for (const m of text.matchAll(new RegExp(`(?<![\\w$])${maker.replace(/\$/g, "\\$")}\\s*\\(`, "g"))) {
-      let from = m.index ?? 0;
-      const floor = Math.max(0, from - 3000);
-      // Back to the start of the statement: a ; ends it, a newline does too unless the line before ends with an operator or the
-      // line after starts with one (the usual wrap of a long statement).
-      while (from > floor && text[from - 1] !== ";") {
-        if (text[from - 1] === "\n") {
-          const prev = text.slice(Math.max(0, from - 200), from - 1).trimEnd();
-          const next = text.slice(from, from + 40).trimStart()[0] ?? "";
-          if (!/[=(,+\-*/?:&|{[]$/.test(prev) && !/[.?:&|+]/.test(next)) break;
-        }
-        from--;
-      }
+      const { from, overflow } = statementStart(text, m.index ?? 0);
       const stmt = text.slice(from, m.index ?? 0);
-      let bound: RegExpExecArray | null = null;
-      for (const b of stmt.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=(?!=)`, "g"))) bound = b;
-      if (bound) names.add(bound[1]!);
-      else if (from === floor && floor > 0) loaderOverflow = true; // a statement too long to read: the file widens
+      // Every identifier assigned in the statement may be the loader (`const r = (other = 1, make(f))`).
+      for (const b of stmt.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=(?!=)`, "g"))) names.add(b[1]!);
+      if (overflow) loaderOverflow = true; // a statement too long to read: the file widens, whatever was found in it
     }
   }
   // name = other: one scan builds the edges, then three rounds walk them, so a thousand aliases cost one pass.

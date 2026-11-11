@@ -315,3 +315,47 @@ for (const [label, hook] of [
     expect(holds(nested("1.0.0", hook, "x/evil.js"), nested("1.0.1", hook, "x/evil.js"))).toEqual([]);
   });
 }
+
+// Sixth review batch.
+const MAKE = `const { createRequire: make } = require("module"); `;
+for (const [label, hook] of [
+  ["an assignment before the loader in the same statement", MAKE + `let other; const r = (other = 1, make(__filename)); r("../x/" + process.argv[2]);`],
+  ["a statement too long to read, with an assignment found in it", MAKE + `let other; const r =${" ".repeat(3100)}(other = 1, make(__filename)); r(${BX});`],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(hook, "x/evil.js")).toBe(true));
+}
+
+// Isolating: nothing here is read as a loader handed on, so only the fix under test can see the load.
+test("a member import( call on an ordinary object is read as a load", () => {
+  expect(nestHolds(`const L = require("./lib/a"); L.import("../x/" + process.argv[2]);`, "x/evil.js")).toBe(true);
+});
+
+const quiet: [string, string][] = [
+  ["require as an object key", `const opts = { require: true }; require("./lib/a");`],
+  ["require as a destructured key", `const opts = { require: 1 }; const { require: flag } = opts; require("./lib/a");`],
+  ["require as a word in a list of strings", `const words = ["node", "require"]; require("./lib/a");`],
+  ["require in a flag string", `const flag = "--require"; require("./lib/a");`],
+  ["require in an AMD define list", `define(["require", "exports"], function (require, exports) { return require("./lib/a"); });`],
+  ["require in an error message", `const msg = "Dynamic requires are not supported: use commonjsRequire or require"; require("./lib/a");`],
+  ["a createRequire alias that resolves and reads its cache", CR + `const req = createRequire(__filename); req.resolve("./lib/a"); void req.cache; req("./lib/a");`],
+  ["a one-letter alias next to a mode string", CR + `const r = createRequire(__filename); r("./lib/a"); const mode = "r"; const eol = "\\r\\n";`],
+  ["module.exports = require", `module.exports = require;\nrequire("./lib/a");`],
+  ["an arrow whose parameters include require", `const f = (require, exports, module) => require("./lib/a");`],
+  ["a wrapped createRequire assignment called with a literal", CR + `const r =\n  createRequire(__filename);\nr("./lib/a");`],
+];
+for (const [label, hook] of quiet) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", hook, "x/evil.js"), nested("1.0.1", hook, "x/evil.js"))).toEqual([]);
+  });
+}
+
+test("a wrapped createRequire assignment is a loader: its call with a built path holds", () => {
+  expect(nestHolds(CR + `const r =\n  createRequire(__filename);\nr(${BX});`, "x/evil.js")).toBe(true);
+});
+
+test("40000 createRequire aliases in a file of about 1 MB are read in bounded time", () => {
+  const code = CR + Array.from({ length: 40000 }, (_, i) => `const a${i} = createRequire(f);\n`).join("") + `a7(${BX});\n`;
+  const t0 = performance.now();
+  holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"));
+  expect(performance.now() - t0).toBeLessThan(5000);
+});
