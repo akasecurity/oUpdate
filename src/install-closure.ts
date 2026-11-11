@@ -1662,10 +1662,94 @@ function processValueUse(code: string, names: string[], lenient = false, strict 
   return thisOrArgumentsLeaks(rest, strict);
 }
 
-// Where a { opens: a function body ("fn"), an arrow body, a class body or a plain block.
-function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block" {
-  let j = at;
-  while (j > 0 && /\s/.test(code[j - 1]!)) j--;
+type BraceKind = "fn" | "arrow" | "class" | "object" | "block";
+
+// The index just after the last non-space character before `end`.
+function skipSpaceBack(code: string, end: number): number {
+  let i = end;
+  while (i > 0 && /\s/.test(code[i - 1]!)) i--;
+  return i;
+}
+
+const UNICODE_ESCAPE_END = /\\u(?:[0-9a-fA-F]{4}|\{[0-9a-fA-F]+\})$/;
+
+// The identifier that ends at `end` (no window: the whole identifier, with non-ASCII letters and \u escapes as part of it).
+function identBack(code: string, end: number): { word: string; start: number } {
+  let i = end;
+  for (;;) {
+    if (i > 0 && /[\w$\u0080-\uffff]/.test(code[i - 1]!)) {
+      i--;
+      continue;
+    }
+    const esc = UNICODE_ESCAPE_END.exec(code.slice(Math.max(0, i - 12), i));
+    if (!esc) break;
+    i -= esc[0].length;
+  }
+  return { word: code.slice(i, end), start: i };
+}
+
+// The word function at `start` is the keyword and not a property name (o.function, o. function, o?.function).
+function notProperty(code: string, start: number): boolean {
+  return code[skipSpaceBack(code, start) - 1] !== ".";
+}
+
+// A ( at index k opens the parameter list of a function head: function (a), function f(a), function* f(a), async function f(a).
+// The scan runs over the whole text: a long name or long gaps never cut the keyword off.
+function isFunctionHead(code: string, k: number): boolean {
+  let p = skipSpaceBack(code, k);
+  let id = identBack(code, p);
+  if (id.word === "") {
+    if (code[p - 1] !== "*") return false;
+    p = skipSpaceBack(code, p - 1);
+    id = identBack(code, p);
+    return id.word === "function" && notProperty(code, id.start);
+  }
+  if (id.word === "function") return notProperty(code, id.start);
+  let q = skipSpaceBack(code, id.start);
+  if (code[q - 1] === "*") q = skipSpaceBack(code, q - 1);
+  const kw = identBack(code, q);
+  return kw.word === "function" && notProperty(code, kw.start);
+}
+
+// A method or accessor at member position of an object literal or class body: name(...) {, get name(...) {, async *name(...) {,
+// [key](...) {. A call statement (f(1)) inside a block is not a member.
+function isMethodHead(code: string, k: number, outer: BraceKind | undefined): boolean {
+  if (outer === "class") return true;
+  if (outer !== "object") return false;
+  let p = skipSpaceBack(code, k);
+  if (code[p - 1] === "]") {
+    let depth = 0;
+    let i = p - 1;
+    for (; i >= 0; i--) {
+      if (code[i] === "]") depth++;
+      else if (code[i] === "[" && --depth === 0) break;
+    }
+    if (i < 0) return false;
+    p = skipSpaceBack(code, i);
+  } else {
+    const id = identBack(code, p);
+    if (id.word === "") return false;
+    p = skipSpaceBack(code, id.start);
+  }
+  for (;;) {
+    if (code[p - 1] === "*") {
+      p = skipSpaceBack(code, p - 1);
+      continue;
+    }
+    const m = identBack(code, p);
+    if (/^(?:get|set|async|static)$/.test(m.word)) {
+      p = skipSpaceBack(code, m.start);
+      continue;
+    }
+    break;
+  }
+  return code[p - 1] === "{" || code[p - 1] === ",";
+}
+
+// Where a { opens: a function body ("fn"), an arrow body, a class body, an object literal or a plain block. `outer` is the kind
+// of the brace around it.
+function braceKind(code: string, at: number, outer?: BraceKind): BraceKind {
+  const j = skipSpaceBack(code, at);
   if (code.slice(Math.max(0, j - 2), j) === "=>") return "arrow";
   // The word class opens a class body, not an object key (class: function () {}) or a member (x.class).
   if (/(?<![\w$.])class(?![\w$])(?!\s*:)[^{};]*$/.test(code.slice(Math.max(0, j - 200), j))) return "class";
@@ -1676,15 +1760,16 @@ function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block"
       if (code[k] === ")") depth++;
       else if (code[k] === "(" && --depth === 0) break;
     }
-    const word = /([A-Za-z_$][\w$]*)\s*$/.exec(code.slice(Math.max(0, k - 40), Math.max(0, k)))?.[1] ?? "";
+    const word = identBack(code, skipSpaceBack(code, Math.max(0, k))).word;
     if (/^(?:if|for|while|switch|catch|with)$/.test(word)) return "block";
-    // A { on the next line after a ) that is not a function's parameter list is a block after a finished statement, by
-    // automatic semicolon insertion: (1)\n{ ... }, void (0)\n{ ... }, f(1)\n{ ... }. Only a function head (function f(a),
-    // function* (a), async function) keeps its body on the next line; a method written that way counts as a block (a hold at
-    // most, never a miss).
-    if (/[\r\n\u2028\u2029]/.test(code.slice(j, at)) && !/(?:^|[^\w$.])function\s*\*?\s*(?:[A-Za-z_$][\w$]*)?\s*$/.test(code.slice(Math.max(0, k - 80), k))) return "block";
+    // A { on the next line after a ) that is not a function head or a member of an object or class is a block after a finished
+    // statement, by automatic semicolon insertion: (1)\n{ ... }, void (0)\n{ ... }, f(1)\n{ ... }.
+    if (/[\r\n\u2028\u2029]/.test(code.slice(j, at)) && !isFunctionHead(code, k) && !isMethodHead(code, k, outer)) return "block";
     return "fn";
   }
+  // An object literal follows an operator, an opening bracket, a comma or a keyword that takes a value.
+  const w = identBack(code, j).word;
+  if (/[=,(\[?|&!]/.test(code[j - 1] ?? "") || /^(?:return|yield|await|throw|typeof|void|new|in|of|delete|instanceof|default)$/.test(w)) return "object";
   return "block";
 }
 
@@ -1693,11 +1778,11 @@ function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block"
 // computed or process-like member, and arguments outside a function of its own, are not provably harmless. this.name and
 // this.method() stay. Strict code (a class body, "use strict", import/export) has no global this.
 function thisOrArgumentsLeaks(code: string, strictFile: boolean): boolean {
-  const stack: ("fn" | "arrow" | "class" | "block")[] = [];
+  const stack: BraceKind[] = [];
   for (const m of code.matchAll(/[{}]|(?<![\w$])(?:this|arguments)(?![\w$])/g)) {
     const at = m.index ?? 0;
     if (m[0] === "{") {
-      stack.push(braceKind(code, at));
+      stack.push(braceKind(code, at, stack[stack.length - 1]));
       continue;
     }
     if (m[0] === "}") {

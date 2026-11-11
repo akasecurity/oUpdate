@@ -1419,6 +1419,40 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} stays static (asi blocks)`, () => expect(held(pre)).toBe(false));
 }
+// The function head is found by scanning the whole text, not a window, and a property or a longer identifier named function
+// is not the keyword.
+const PAD = " ".repeat(72);
+for (const [label, pre] of [
+  ["a property named function padded past a scan window", `const a = { function() { return 0 } };\na.function${PAD}(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["an identifier ending in function padded past a scan window", `const xfunction = () => 0;\nxfunction${PAD}(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["a property named function with a space after the dot", `const o = { function() { return 0 } };\no. function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["an optional-chain call named function with a space", `const o = { function() { return 0 } };\no?. function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["a property named function on the next line", `const o = { function() { return 0 } };\no\n.function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["an identifier with a non-ASCII letter before function", `const ñfunction = () => 0;\nñfunction(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["an identifier that spells function with a unicode escape", `const \\u0066unction = () => 0;\n\\u0066unction(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["new on a property named function", `const o = { function: class {} };\nnew o. function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["a call statement and a block inside a plain block", `if (x) { f(1)\n{ ${ASI_BODY} } }\nexports.main = () => 1\n`],
+  ["a call statement and a block inside a bare block", `{ f(1)\n{ ${ASI_BODY} } }\nexports.main = () => 1\n`],
+  ["a call statement and a block inside a case block", `switch (1) { case 1: { f(1)\n{ ${ASI_BODY} } } }\nexports.main = () => 1\n`],
+] as const) {
+  test(`${label} is not static (asi head)`, () => expect(held(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a declaration with a 72-character name", `function ${"f".repeat(72)}(a)\n{ return arguments[0] }\nexports.main = () => 1\n`],
+  ["a declaration with 80 spaces before the name", `function${" ".repeat(80)}f(a)\n{ return arguments[0] }\nexports.main = () => f(1)\n`],
+  ["a generator declaration with a long gap", `function${" ".repeat(80)}*${" ".repeat(80)}g(a)\n{ yield arguments[0] }\nexports.main = () => g(1)\n`],
+  ["an anonymous function expression with a long gap", `const f = function${" ".repeat(80)}(a)\n{ return arguments[0] }\nexports.main = () => f(1)\n`],
+  ["a strict object method with its body on the next line", '"use strict";\nconst o = { m()\n{ return this } };\nexports.main = () => o.m()\n'],
+  ["a strict object getter with its body on the next line", '"use strict";\nconst o = { get g()\n{ return this } };\nexports.main = () => o.g\n'],
+  ["a strict object async generator method on the next line", '"use strict";\nconst o = { async *gen(a)\n{ return this } };\nexports.main = () => o.gen(1)\n'],
+  ["a second strict object method with its body on the next line", '"use strict";\nconst o = { a: 1, m(b)\n{ return this } };\nexports.main = () => o.m(1)\n'],
+  ["a computed strict object method with its body on the next line", '"use strict";\nconst k = "m";\nconst o = { [k](a)\n{ return this } };\nexports.main = () => o.m(1)\n'],
+  ["a class method with arguments and its body on the next line", "class A { m(a)\n{ return arguments[0] } }\nexports.main = () => new A()\n"],
+  ["a static class method with its body on the next line", '"use strict";\nclass A { static m(a)\n{ return this } }\nexports.main = () => A.m(1)\n'],
+  ["an object method with arguments and its body on the next line", "const o = { m(a)\n{ return arguments[0] } };\nexports.main = () => o.m(1)\n"],
+] as const) {
+  test(`${label} stays static (asi head)`, () => expect(held(pre)).toBe(false));
+}
 for (const [label, pre] of [
   ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
   ["arguments bound to a name", 'const a = arguments; exports.main = () => a[1]("child_"+"pro"+"cess")\n'],
