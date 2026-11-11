@@ -700,7 +700,18 @@ function builtinRoot(spec: string): string | undefined {
 
 // Relative loads and package names are followed elsewhere. An allowlisted builtin is data.
 // Any other node builtin can run code, so that require is left for UNSAFE_JS.
-function stripLiteralLoad(spec: string): boolean {
+/** The module a literal load names once its escapes are read, or undefined when they cannot be. */
+function loadedSpec(raw: string): string | undefined {
+  return raw.includes("\\") ? decodeJsString(raw) : raw;
+}
+
+function stripLiteralLoad(raw: string): boolean {
+  let spec = raw;
+  if (spec.includes("\\")) {
+    const decoded = decodeJsString(spec);
+    if (decoded === undefined) return false;
+    spec = decoded;
+  }
   if (spec.startsWith(".") || spec.startsWith("/")) return true;
   const root = builtinRoot(spec);
   if (!root) return true;
@@ -711,6 +722,7 @@ function stripLiteralLoad(spec: string): boolean {
 // One predicate for JS. A file that fails it widens by the shape of its computed loads.
 function provablyStatic(text: string): boolean {
   const aliases: string[] = [];
+  let viaOther = false;
   let rest = text.replace(PROCESS_ALIAS, (_m, a1, _q, a2) => {
     aliases.push(String(a1 || a2));
     return "";
@@ -718,16 +730,21 @@ function provablyStatic(text: string): boolean {
   rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "");
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3) => {
     const spec = String(spec1 || spec2 || spec3 || "");
+    if (builtinRoot(loadedSpec(spec) ?? "") === "process") viaOther = true;
     return stripLiteralLoad(spec) ? "" : full;
   });
+  if (viaOther) return false;
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, "");
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
   if (/(?:\brequire\s*\(|\bfrom\s+|\bimport\s+)\s*['"](?:node:)?process\b/.test(rest)) return false;
   if (UNSAFE_JS.test(rest)) return false;
   if (aliases.length === 0) return true;
+  // Identifier edges: $, _, digits and non-ASCII characters continue a name, so \b is not an edge.
   const names = aliases.map((n) => n.replace(/\$/g, "\\$"));
-  for (const n of names) rest = rest.replace(new RegExp(`\\b${n}\\s*\\.\\s*${PROCESS_READ}`, "g"), "");
-  return !new RegExp(`\\b(?:${names.join("|")})\\b`).test(rest);
+  const L = "(?<![\\w$\\u0080-\\uffff])";
+  const R = "(?![\\w$\\u0080-\\uffff])";
+  for (const n of names) rest = rest.replace(new RegExp(`${L}${n}\\s*\\.\\s*${PROCESS_READ}`, "g"), "");
+  return !new RegExp(`${L}(?:${names.join("|")})${R}`).test(rest);
 }
 
 // exec/eval/compile, a dynamic import, or a loader that runs another file.

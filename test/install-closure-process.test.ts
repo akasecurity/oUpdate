@@ -65,3 +65,29 @@ test("a require with an escaped path is followed to the file it names", () => {
   const rel = (v: string, evil: string) => release(v, pre).set("preinstall/evil.js", enc(evil));
   expect(holds(rel("1.0.0", "module.exports = 1\n"), rel("1.0.1", "module.exports = 2\n"))).toContain("file preinstall/evil.js");
 });
+
+// A name that starts with $ or holds an escape or non-ASCII character is still a name for the process module.
+const via = (decl: string, use: string) => `${decl}\nexports.main = () => ${use}\n`;
+const run = "('../build/evil.js')";
+for (const [label, pre] of [
+  ["a $ name for the process module used to reach the loader", via("const $p = require('process');", `$p['getBuiltinModule']('mo'+'dule')['createRequire'](__filename)${run}`)],
+  ["a name after a $ prefix inside another word", via("const a$p = require('process');", `a$p['getBuiltinModule']('mo'+'dule')['createRequire'](__filename)${run}`)],
+  ["a let name with $ used as a value", via("let $ = require('node:process');", "run($)")],
+  ["a var name with an underscore and $ passed on", via("var _$ = require('process');", "run(_$)")],
+  ["a non-ASCII name used as a value", via("const é = require('process');", "run(é)")],
+  ["a unicode escape in the name", via("const \\u0070 = require('process');", `p['getBuiltinModule']('mo'+'dule')['createRequire'](__filename)${run}`)],
+  ["a destructured getBuiltinModule", via("const { getBuiltinModule: g } = require('process');", `g('module').createRequire(__filename)${run}`)],
+  ["an escaped process specifier", via("const p = require('node:\\x70rocess');", `p.getBuiltinModule('mo'+'dule').createRequire(__filename)${run}`)],
+  ["an escaped process specifier with a unicode escape", via("const p = require('\\u0070rocess');", `p.getBuiltinModule('mo'+'dule').createRequire(__filename)${run}`)],
+  ["an escaped process specifier with a code point escape", via("const p = require('node:\\u{70}rocess');", `p.getBuiltinModule('mo'+'dule').createRequire(__filename)${run}`)],
+  ["an escaped process specifier in an import", "import p from 'node:\\x70rocess';\nexport const main = () => p.getBuiltinModule('mo'+'dule').createRequire(import.meta.url)('../build/evil.js')\n"],
+  ["a template-literal process specifier", via("const p = require(`process`);", `p.getBuiltinModule('mo'+'dule').createRequire(__filename)${run}`)],
+] as const) {
+  test(`${label} is not static`, () => expect(held(pre)).toBe(true));
+}
+test("a $ name for the process module used for plain reads stays static", () => {
+  expect(held(via("const $p = require('process');", "$p.env.HOME")  )).toBe(false);
+});
+test("an escaped specifier for a builtin that is static stays static", () => {
+  expect(held(via("const fs = require('\\x66s');", "fs.existsSync('x')"))).toBe(false);
+});
