@@ -5001,9 +5001,10 @@ function runnerExecutable(argv: string[], i: number): string {
 }
 
 function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
-  // Only the first operand is the script (a `.` there is the directory it runs); later words are its own arguments.
+  // The first operand that names a file of the package is the script, and the words after it are its own arguments: a `.`
+  // before that (after an option and its value, `--title t .`) is the directory node runs.
   const allow = ctx.rootRuns;
-  let operands = 0;
+  let scriptSeen = false;
   while (i < argv.length) {
     ctx.rootRuns = false;
     if (ctx.hold) return;
@@ -5072,8 +5073,13 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       ctx.widenInert = true;
       widenAll(ctx);
     }
-    ctx.rootRuns = allow && operands++ === 0;
+    ctx.rootRuns = allow && !scriptSeen;
     noteHookArgCwd(ctx, a);
+    if (!scriptSeen) {
+      const n = normalize(a);
+      // A dotfile (`.env` after `--env-file`) is an option's value, not a script.
+      scriptSeen = Boolean(n) && !badPath(n) && !n.slice(n.lastIndexOf("/") + 1).startsWith(".") && nodeFile(ctx, n) !== undefined;
+    }
     i++;
   }
 }

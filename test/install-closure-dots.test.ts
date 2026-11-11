@@ -165,3 +165,10 @@ test("node -r . lib/ok.js : a preloaded directory runs the root main", () =>
   expect(rootHeld("node -r . lib/ok.js", "docs/runtime.js", rtMain)).toBe(true));
 test("node --import . lib/ok.js : an imported directory runs the root main", () =>
   expect(rootHeld("node --import . lib/ok.js", "docs/runtime.js", rtMain)).toBe(true));
+
+// A value-taking option before the directory does not make the value the script.
+for (const hook of ["node --title t .", "node -C dev .", "node --conditions dev .", "node --env-file .env .", "node --inspect-port 0 .", "node --no-warnings --title t lib/..", "node -r ./lib/ok.js ."]) {
+  test(`${hook}: the root main changed holds`, () => expect(rootHeld(hook, "docs/runtime.js", { ...rtMain, ".env": "A=1\n" })).toBe(true));
+}
+test("node scripts/build.js . stays quiet with an option before the script", () =>
+  expect(rootHeld("node --title t scripts/build.js .", "docs/runtime.js", { ...rtMain, "scripts/build.js": 'console.log("ok")\n' })).toBe(false));
