@@ -261,7 +261,7 @@ function endBraceCore(t: string, i: number, dq: boolean): number {
       const e = endTick(t, j);
       if (e < 0) return -1;
       j = e - 1;
-    } else if (c === '"' && !dq) j = endDq(t, j);
+    } else if (c === '"') j = endDq(t, j); // a nested double quote opens a quoted string, even inside double quotes
     else if (c === "{") d++;
     else if (c === "}" && --d === 0) return j + 1;
   }
