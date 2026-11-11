@@ -4476,7 +4476,11 @@ function markHookFile(ctx: Ctx, token: string): void {
 // A file named by a command, resolved from the directory an earlier cd moved to as well as from the package root.
 function noteHookArgCwd(ctx: Ctx, token: string): void {
   // A file named by an expansion the scan could not resolve (`sh tools/$N.sh`) may be any file of the package.
-  if (token.includes(UNRESOLVED)) widenAll(ctx);
+  if (token.includes(UNRESOLVED)) {
+    // A bare word (`node -r $(cat n)`) may name a file anywhere, docs and tests included; a path word keeps its directory.
+    if (!token.includes("/")) ctx.widenInert = true;
+    widenAll(ctx);
+  }
   noteHookArg(ctx, token);
   if (ctx.cwd && token && !token.startsWith("-") && !token.startsWith("/")) {
     const j = joinDir(ctx.cwd, token);
@@ -4558,7 +4562,8 @@ function evalCode(ctx: Ctx, code: string): void {
   });
   for (const spec of specs) addRef(ctx, spec);
   for (const dir of dynamicRequireDirs(code)) addUnder(ctx, dir);
-  if (/[+`$]/.test(code) || code.includes("process.env") || !specs.length || !/^[\s;]*$/.test(rest)) {
+  // A spec that holds an unresolved expansion (`require('./lib/$(cat n)')`) is matched above as a plain path: it names nothing.
+  if (code.includes(UNRESOLVED) || /[+`$]/.test(code) || code.includes("process.env") || !specs.length || !/^[\s;]*$/.test(rest)) {
     fail(ctx, "unresolved: eval");
     // The inline code runs like a file named "-e" in the package root: the same JS hardening applies to it.
     if (code.includes(UNRESOLVED)) {
@@ -6573,6 +6578,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
   }
   if (argv.some((a) => RUNNERS.has(runnerName(a)))) ctx.sawRunner = true;
   const bin = binName(argv[i]!);
+  // An unresolved command word may be any runner: every file is read, docs and tests included.
+  if (bin.includes(UNRESOLVED) && !argv[i]!.includes("/")) {
+    ctx.widenInert = true;
+    widenAll(ctx);
+  }
   i++;
   // A wrapper (env, nohup, time, sudo, nice, timeout, ...) runs the command after its own options: that command is
   // dispatched too (`env bash -c 'node test/x.js'`, `/usr/bin/env sh -c ...`), and the wrapper's own reading goes on.
@@ -6716,6 +6726,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
       restart(ctx);
       return;
     }
+    if (sub.word.includes(UNRESOLVED)) ctx.widenInert = true;
     widenAll(ctx);
     fail(ctx, "unresolved: runner");
     return;
@@ -6770,6 +6781,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
       return;
     }
     if (!name.word) {
+      if (argv.slice(sub.i + 1).some((a) => a.includes(UNRESOLVED))) ctx.widenInert = true;
       widenAll(ctx);
       if (!ctx.hold) fail(ctx, "unresolved: script");
       return;
