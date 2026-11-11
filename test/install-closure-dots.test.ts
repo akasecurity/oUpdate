@@ -147,3 +147,21 @@ test("a dependency main that leaves the package holds", () =>
   expect(
     rootHeld("node scripts/build.js", undefined, { ...build, "lib/package.json": '{"main":"../../x.js"}', "safe.js": "1\n", "docs/unrelated.md": "d V\n" }),
   ).toBe(true));
+
+// Only the program a runner runs, and the first operand after node's own flags, name the root directory.
+const rtMain = { "docs/runtime.js": "console.log('r V')\n" };
+for (const hook of ["npx tsc --types node -p .", "bunx tsc --types node -p .", "npx --yes tsc --types node -p .", "npx -p typescript tsc --types node -p ."]) {
+  test(`${hook}: the manifest main is not run`, () => expect(rootHeld(hook, "docs/runtime.js", rtMain)).toBe(false));
+}
+test("node scripts/build.js . : the dot is the script's argument, not the directory it runs", () =>
+  expect(rootHeld("node scripts/build.js .", "docs/runtime.js", { ...rtMain, "scripts/build.js": 'console.log("ok")\n' })).toBe(false));
+test("node --no-warnings . : a flag before the directory operand still runs the root main", () =>
+  expect(rootHeld("node --no-warnings .", "docs/runtime.js", rtMain)).toBe(true));
+test("npx -y node . : a runner flag before node still runs the root main", () =>
+  expect(rootHeld("npx -y node .", "docs/runtime.js", rtMain)).toBe(true));
+test("npx -p typescript node . : a package flag with a value before node still runs the root main", () =>
+  expect(rootHeld("npx -p typescript node .", "docs/runtime.js", rtMain)).toBe(true));
+test("node -r . lib/ok.js : a preloaded directory runs the root main", () =>
+  expect(rootHeld("node -r . lib/ok.js", "docs/runtime.js", rtMain)).toBe(true));
+test("node --import . lib/ok.js : an imported directory runs the root main", () =>
+  expect(rootHeld("node --import . lib/ok.js", "docs/runtime.js", rtMain)).toBe(true));

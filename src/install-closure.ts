@@ -4987,13 +4987,33 @@ function restart(ctx: Ctx): void {
   if (start) runScript(ctx, "start", false);
 }
 
+// The program a package runner runs: the first word that is not one of the runner's own options (`-p pkg` takes a value).
+function runnerExecutable(argv: string[], i: number): string {
+  for (let j = i; j < argv.length; j++) {
+    const a = argv[j]!;
+    if (a === "--") return runnerName(argv[j + 1] ?? "");
+    if (!a.startsWith("-")) return runnerName(a);
+    const ef = execFlag(a);
+    if (ef?.kind === "call") return "";
+    if (ef?.kind === "package" && ef.value === undefined) j++;
+  }
+  return "";
+}
+
 function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
+  // Only the first operand is the script (a `.` there is the directory it runs); later words are its own arguments.
+  const allow = ctx.rootRuns;
+  let operands = 0;
   while (i < argv.length) {
+    ctx.rootRuns = false;
     if (ctx.hold) return;
     const a = argv[i]!;
     if (a === "--") {
       // What follows is the script and its arguments.
-      for (let q = i + 1; q < argv.length; q++) noteHookArgCwd(ctx, argv[q]!);
+      for (let q = i + 1; q < argv.length; q++) {
+        ctx.rootRuns = allow && q === i + 1;
+        noteHookArgCwd(ctx, argv[q]!);
+      }
       return;
     }
     if (a.startsWith("-")) {
@@ -5034,6 +5054,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       if (name === "-r" || name === "--require" || name === "--import") {
         const spec = take();
         if (!spec) return;
+        ctx.rootRuns = allow; // a preload names a module, so a directory runs its main
         noteHookArgCwd(ctx, spec);
         i++;
         continue;
@@ -5051,6 +5072,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       ctx.widenInert = true;
       widenAll(ctx);
     }
+    ctx.rootRuns = allow && operands++ === 0;
     noteHookArgCwd(ctx, a);
     i++;
   }
@@ -6940,7 +6962,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
   if (/^(?:\.\.?\/|[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)/.test(argv[i - 1] ?? "") && bin !== "npx" && bin !== "bunx") readFed(ctx, argv[i - 1]!, true);
   // `npx node .` runs the root as a module through the runner, as `node .` does.
   const rootBefore = ctx.rootRuns;
-  if ((bin === "npx" || bin === "bunx" || bin === "corepack") && argv.slice(i).some((a) => a === "node" || a === "nodejs")) ctx.rootRuns = true;
+  if ((bin === "npx" || bin === "bunx" || bin === "corepack") && /^(?:node|nodejs)$/.test(runnerExecutable(argv, i))) ctx.rootRuns = true;
   try {
     closeUnknownRunner(ctx, argv, i);
   } finally {
