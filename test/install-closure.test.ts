@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { prepass, STAR_KEY_MAX, type FileMap } from "../src/prepass.ts";
 import { entryPaths } from "../src/review.ts";
+import { runsOtherFile } from "../src/install-closure.ts";
 
 const enc = new TextEncoder();
 const bmp = (js: string) => enc.encode("BM=0;" + js + "/*\0*/");
@@ -330,5 +331,38 @@ describe("install closure", () => {
     held(overOld, overNew, /key count/);
     const q = JSON.stringify({ name: "x", version: "1", scripts: { postinstall: "node assets/*.bmp" } });
     held({ "package.json": q, ...fill, [A]: oldB }, { "package.json": q, ...fill, [A]: newB }, /key count/);
+  });
+});
+
+// A comment-looking // or /* in a shell, Python or Ruby file is not a comment: a dynamic import after it is still seen.
+describe("runsOtherFile reads raw text for non-JS hooks", () => {
+  const sib = (v: string) => `module.exports = "${v}"\n`;
+  const widens = (hook: string, name: string, cmd: string) => {
+    const p = pj({ postinstall: cmd });
+    const f = (v: string) => ({ "package.json": p, [`hooks/${name}`]: hook, "hooks/other.js": sib(v) });
+    return hard(f("1"), f("2")).length > 0;
+  };
+  test("a shell URL does not hide an import( on the same line", () => {
+    expect(widens('echo http://x/y; import(a)\n', "h.sh", "sh hooks/h.sh")).toBe(true);
+  });
+  test("a shell glob up to a later */ does not hide an import(", () => {
+    expect(widens('ls /tmp/*; import(a); echo "a */ b"\n', "h.sh", "sh hooks/h.sh")).toBe(true);
+  });
+  test("a Python floor division does not hide an import(", () => {
+    expect(widens("x = a // 2; y = import (z)\n", "h.py", "python hooks/h.py")).toBe(true);
+  });
+  test("a shell hook with no dynamic import stays narrow", () => {
+    expect(widens("echo http://x/y\n", "h.sh", "sh hooks/h.sh")).toBe(false);
+  });
+});
+
+describe("runsOtherFile on its own (shell, Python and Ruby text)", () => {
+  test("// and /* are not comments there", () => {
+    expect(runsOtherFile("echo http://x/y; import(a)\n")).toBe(true);
+    expect(runsOtherFile("x = a // 2; y = import (z)\n")).toBe(true);
+    expect(runsOtherFile("ls /tmp/*; import(a); echo '*/'\n")).toBe(true);
+  });
+  test("no dynamic import is false", () => {
+    expect(runsOtherFile("echo http://x/y\n")).toBe(false);
   });
 });

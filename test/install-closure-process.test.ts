@@ -488,3 +488,26 @@ for (const [label, call] of [
     expect(holds(rel("1.0.0", "module.exports = 1\n"), rel("1.0.1", "module.exports = 2\n"))).toContain("file preinstall/evil.js");
   });
 }
+
+// Followed, not widened: the target is outside the hook's directory, so only following the load reaches it.
+for (const [label, pre] of [
+  ["a minified static import", 'import{x}from"../lib/helper.js";import v from"node:process";export const main=()=>v.exit(x)\n'],
+  ["a dynamic import with a comment", 'var v = require("node:process"); import /*c*/ ("../lib/helper.js"); exports.main = () => v.exit(0)\n'],
+  ["a require with a comment inside", 'var v = require("node:process"); require(/*c*/"../lib/helper.js"); exports.main = () => v.exit(0)\n'],
+] as const) {
+  test(`${label} is followed to a file outside the hook directory (round 18)`, () => {
+    const rel = (ver: string, h: string) => release(ver, pre).set("lib/helper.js", enc(h));
+    expect(holds(rel("1.0.0", "exports.x = 1\n"), rel("1.0.1", "exports.x = 2\n"))).toContain("file lib/helper.js");
+  });
+}
+
+// The dot before from/import is found through any amount of whitespace.
+test("a dot before from is seen however far back it lies (round 18)", () => {
+  const pre = `${A}var o = {};\nvar y = o.${" ".repeat(200)}from "./a"\n/ ${Y} / 1;\n`;
+  expect(held(pre)).toBe(true);
+});
+
+// A comment in an eval argument cannot end the argument list early.
+test("an eval whose argument hides a closing paren in a comment still widens (round 18)", () => {
+  expect(held(`${A}var s = require("fs"); eval(s.readFileSync /* ) */ + x);\nexports.main = () => 1\n`)).toBe(true);
+});

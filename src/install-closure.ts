@@ -982,6 +982,13 @@ function removedText(statement: boolean, spaceAfter = ""): string {
   return `${REMOVED}${statement ? ";" : ""}${spaceAfter || " "}`;
 }
 
+// True when the previous non-whitespace character is a dot, however much whitespace lies between.
+function dotBefore(text: string, at: number): boolean {
+  let j = at;
+  while (j > 0 && /\s/.test(text[j - 1])) j--;
+  return j > 0 && text[j - 1] === ".";
+}
+
 function provablyStatic(source: string): boolean {
   if (source.includes(REMOVED)) return false;
   // Comments out first, strings kept: the patterns below read code, and a comment can neither hide nor fake a load.
@@ -999,7 +1006,7 @@ function provablyStatic(source: string): boolean {
     // from "x" and import "x" end an import declaration only when the string is on the keyword's line and no . comes before
     // it (a variable named from, a property named import, are not declarations). Anything else is read as an expression, and
     // a / right after it could be a regular expression or a division: not static.
-    const declaration = spec1 === undefined && !/[\n\r\u2028\u2029]/.test(full) && !/\.\s*$/.test(whole.slice(Math.max(0, at - 64), at));
+    const declaration = spec1 === undefined && !/[\n\r\u2028\u2029]/.test(full) && !dotBefore(whole, at);
     if (spec1 === undefined && !declaration && whole[skipTrivia(whole, at + full.length)] === "/") viaOther = true;
     return removedText(declaration);
   });
@@ -1023,10 +1030,11 @@ function provablyStatic(source: string): boolean {
 
 // exec/eval/compile, a dynamic import, or a loader that runs another file.
 // A static `import helper` does not match. Docs stay out unless a literal names them.
-function runsOtherFile(text: string): boolean {
+export function runsOtherFile(text: string): boolean {
   if (/\b(?:exec|eval|compile)\s*\(/.test(text)) return true;
   if (/\b(?:__import__|importlib|import_module|execfile|runpy|run_path|load_source|SourceFileLoader)\b/.test(text)) return true;
-  if (/import\s*\(/.test(codeOnly(text, [], true) ?? text)) return true;
+  // Raw text on purpose: callers here are shell, Python and Ruby, where // and /* are not comments.
+  if (/import\s*\(/.test(text)) return true;
   return false;
 }
 
@@ -1383,7 +1391,8 @@ function narrowWiden(ctx: Ctx, fromKey: string): void {
 }
 
 function widenJs(ctx: Ctx, key: string, text: string): void {
-  const tier = classifyJs(key, text);
+  // Comment-free text, so a comment inside an eval argument cannot end its argument list early. Unreadable text stays raw.
+  const tier = classifyJs(key, codeOnly(text, [], true) ?? text);
   if (tier.all) widenEvery(ctx);
   else if (tier.pkg) widenPackage(ctx, tier.tests, tier.flows);
   else {
