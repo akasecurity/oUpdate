@@ -5166,7 +5166,7 @@ function runnerFlags(name: string): { code: RegExp; value: RegExp } {
 // Commands whose output is a number, a version or a platform name: unquoted, it cannot split into a second flag. A path or a
 // host name can hold spaces (pwd, npm root|prefix, hostname, whoami, uname -n -a -v), and a bare date prints the time zone name,
 // so those are quiet only quoted; sysctl and getconf only for numeric keys.
-const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[smrpio])?|date \+(?:[A-Za-z0-9._:/-]|%[YmdHMSyjuwUVWFTDRsz%])+|arch|getconf (?:_?NPROCESSORS_[A-Z]+|PAGE_?SIZE|ARG_MAX|LONG_BIT)|sysctl -n (?:hw\.(?:ncpu|logicalcpu|physicalcpu|activecpu|availcpu|memsize|pagesize|cpufrequency|l[123]dcachesize|cachelinesize))|node (?:-v|--version))$/;
+const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[smrpio])?|date \+%[-0_^]?[YmdHMSyjuwUVWFTDRszN%](?:[:._-]|%[-0_^]?[YmdHMSyjuwUVWFTDRszN%])*|arch|getconf (?:_?NPROCESSORS_[A-Z]+|PAGE_?SIZE|ARG_MAX|LONG_BIT)|sysctl -n (?:hw\.(?:ncpu|logicalcpu|physicalcpu|activecpu|availcpu|memsize|pagesize|cpufrequency|l[123]dcachesize|cachelinesize))|node (?:-v|--version))$/;
 // Flags whose substituted value is a number or a target, not a program.
 const SAFE_FLAG_SUB: Record<string, RegExp> = {
   make: /^-j/,

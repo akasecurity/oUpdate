@@ -530,6 +530,14 @@ const dateLines: [string, string][] = [
   ["date with a format from a variable", `X=${U}; cmake -DCMAKE_BUILD_TYPE=$(date +"$X") -B b . | cat`],
   ["date with %n in the format", "cmake -DCMAKE_BUILD_TYPE=$(date +Release%n-P%ndocs/evil.js) | cat"],
   ["date with %t in the format", "cmake -DCMAKE_BUILD_TYPE=$(date +a%t-P) | cat"],
+  ["date with a literal format", "cmake -DCMAKE_BUILD_TYPE=$(date +Release) | cat"],
+  ["date with a format that prints a make file flag", "make -j $(date +-fdocs/evil.mk) | cat"],
+  ["date with a format that prints a cmake script flag", "cmake $(date +-P) docs/evil.cmake | cat"],
+  ["date with a format that prints a node option", "node $(date +--import=./x.js) | cat"],
+  ["date with a format that prints a shell flag", "sh $(date +-c) | cat"],
+  ["date with a format that starts with a separator", "cmake -DFOO=$(date +-%Y) | cat"],
+  ["date with a slash in the format", "cmake -DFOO=$(date +%Y/%m) | cat"],
+  ["date with a letter in the format", "cmake -DFOO=$(date +%Y-x) | cat"],
   ["date with a substituted format", `cmake -DCMAKE_BUILD_TYPE=$(date +$(cat name.txt)) | cat`],
   ["a flag from an unquoted variable set by printf -v", `printf -v X '%s' "${U}"; cmake -DCMAKE_BUILD_TYPE=$X | cat`],
   ["let on a variable set from a substitution", `printf -v X '%s' "${U}"; let X | cat`],
@@ -601,6 +609,10 @@ const pathQuiet: [string, string][] = [
   ["date +%H:%M", "cmake -DFOO_VERSION=$(date +%H:%M) | cat"],
   ["date +%F", "cmake -DFOO_VERSION=$(date +%F) | cat"],
   ["date +%s", "cmake -DFOO_VERSION=$(date +%s) | cat"],
+  ["date +%0d", "cmake -DFOO_VERSION=$(date +%0d) | cat"],
+  ["date +%-d", "cmake -DFOO_VERSION=$(date +%-d) | cat"],
+  ["date +%_d", "cmake -DFOO_VERSION=$(date +%_d) | cat"],
+  ["date +%N", "cmake -DFOO_VERSION=$(date +%N) | cat"],
 ];
 
 for (const [label, hook] of pathQuiet) {
@@ -632,7 +644,6 @@ const keyQuiet: [string, string][] = [
   ["sysctl of the memory size", "cmake -DFOO_VERSION=$(sysctl -n hw.memsize) | cat"],
   ["getconf of the CPU count", "make -j$(getconf _NPROCESSORS_ONLN) | tee log"],
   ["getconf of the page size", "cmake -DFOO_VERSION=$(getconf PAGESIZE) | cat"],
-  ["a date with a literal format", "cmake -DCMAKE_BUILD_TYPE=$(date +Release) | cat"],
   ["a quoted bare date", 'cmake -DCMAKE_BUILD_TYPE="$(date)" | cat'],
   ["a quoted sysctl of the host name", 'cmake -DCMAKE_BUILD_TYPE="$(sysctl -n kern.hostname)" | cat'],
 ];
