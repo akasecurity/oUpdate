@@ -979,7 +979,7 @@ const LINE_END_WORDS = new Set(["break", "continue", "debugger"]);
 const KEYWORD_MAYBE = new Set(["yield", "await", "of"]);
 // Sticky, so a token is matched in place and the text is never copied.
 const TOK_PRIVATE = /#[A-Za-z_$][\w$]*/y;
-const TOK_WORD = /(?:[A-Za-z_$][\w$]*|[^\x00-\x7f]+)/y;
+const TOK_WORD = /(?:[A-Za-z_$][\w$]*|[^\x00-\x7f\s]+)/y;
 const TOK_NUMBER = /(?:0[xXbBoO][0-9a-fA-F_]*n?|\d[\d_]*(?:\.(?!\.)\d*)?(?:[eE][+-]?\d+)?n?)/y;
 const TOK_PUNCT = /(?:\.\.\.|\+\+|--|\?\.(?!\d))/y;
 
@@ -1097,6 +1097,8 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
     } else if (c === "'" || c === '"') {
       const st = i;
       i++;
+      // A string the line ends is not read, so a string with a line or paragraph separator in it, or a backslash before a CRLF, makes the file
+      // unreadable: processHazardScan treats an unreadable file as a hazard.
       for (; i < n && text[i] !== c && !eol(text[i]); i++) if (text[i] === "\\") i++;
       if (text[i] !== c) return undefined;
       i++;
@@ -2519,13 +2521,14 @@ function processHazardScan(source: string): boolean {
   // Comments out first (strings kept) so the alias statements can be read, then strings out so no word inside a message counts.
   const names = ["process"];
   const keep = codeOnly(source, [], true);
-  // A file the scan cannot read is a hazard only when it can name the process object or spell a name with an escape.
-  const unreadable = () => /process|global|\\/.test(source);
-  if (keep === undefined) return unreadable();
+  // A file the scan cannot read is a hazard: it stopped at something it could not settle (an ambiguous slash, a bracket it cannot match, an
+  // HTML-like comment that a script reads as a comment and a module as code, a string with a line separator in it), and whatever it hides
+  // would have been caught if it had read. No test on the raw text can say what the rest of the file holds, so none is tried.
+  if (keep === undefined) return true;
   const code = codeOnly(stripProcessAliases(keep, names), names);
-  if (code === undefined) return unreadable();
+  if (code === undefined) return true;
   if (PROCESS_LOADER_WORDS.test(code) || steeringKey(code)) return true;
-  if (bracketIndex(code).mismatch) return unreadable();
+  if (bracketIndex(code).mismatch) return true;
   // A computed member of the global object can be the process object.
   if (/(?<![\w$.])(?:globalThis|global)\s*(?:\?\.)?\s*\[/.test(code)) return true;
   // An escape in code can spell process or a loader word.
