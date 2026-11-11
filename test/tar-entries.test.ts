@@ -1349,6 +1349,18 @@ describe("pypi files pair with their own old file", () => {
     expect(tarHolds(w)).toEqual([`${whole}: symlink x-2/docs/link`]);
   });
 
+  test("a name that spells a cut label is not shown as one: a literal ~ stays distinguishable", async () => {
+    const long = `x-2-py3-none-${"a".repeat(60)}.whl`;
+    const hash = new Bun.CryptoHasher("sha256").update(long).digest("hex").slice(0, 6);
+    const spelled = `x-2-py3-none-aaaaaaaaaaa~${hash}~aaaaaaaaaaaaaaaaaaaa.whl`;
+    expect(spelled.length).toBe(56);
+    const r = await load([[`x-1-py3-none-${"a".repeat(60)}.whl`, sdist("1", true)]], [[long, sdist("2", true, "a")], [spelled, sdist("2", true, "b")]]);
+    const carried = r.carriedTarNotes![0]!.split(": ")[0]!;
+    const held = tarHolds(r)[0]!.split(": ")[0]!;
+    expect(carried).toBe(`x-2-py3-none-aaaaaaaaaaa~${hash}~aaaaaaaaaaaaaaaaaaaa.whl`);
+    expect(held).toBe(`x-2-py3-none-aaaaaaaaaaa\\~${hash}\\~aaaaaaaaaaaaaaaaaaaa.whl`);
+  });
+
   test("a version that is no PEP 440 version pairs by the same string: x-1.0-final with x-2.0-final", async () => {
     const r = await load([["x-1.0-final.tar.gz", sdist("1", true)]], [["x-2.0-final.tar.gz", sdist("2", true)]], "x", "1.0-final", "2.0-final");
     expect(tarHolds(r)).toEqual([]);

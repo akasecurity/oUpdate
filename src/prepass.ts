@@ -1058,11 +1058,12 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
   const carriedTarNotes: string[] = [];
   const linkAt = (n: TarNote) => n.paths?.[0] ?? n.note.slice(n.kind.length + 1);
   // A merged note names its artifact, so a hold and a carry with one text tell which file each is about.
-  // The name is shown with backslashes and control characters escaped, so two names never show alike, and a long one is
-  // cut in the middle: the head and the tail with a short hash of the whole name between, so the note's own path is what
-  // the detail keeps. Cuts fall between code points, never inside an escape.
+  // The name is shown with backslashes, tildes and control characters escaped, so two names never show alike and a
+  // cut name's bare `~hash~` is never a real name's. A long name is cut in the middle: the head and the tail with a
+  // short hash of the whole name between, so the note's own path is what the detail keeps. Cuts fall between code
+  // points, never inside an escape.
   const label = (from: string) => {
-    const unit = (c: string) => (c === "\\" ? "\\\\" : /[\u0000-\u001f\u007f]/.test(c) ? `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}` : c);
+    const unit = (c: string) => (c === "\\" || c === "~" ? `\\${c}` : /[\u0000-\u001f\u007f]/.test(c) ? `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}` : c);
     const units = [...from].map(unit);
     if (units.join("").length <= 60) return units.join("");
     const take = (list: string[]) => {
