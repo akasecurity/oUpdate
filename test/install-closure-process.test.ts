@@ -392,3 +392,27 @@ test("a span that ends in a keyword is not static (round 14)", () => {
   expect(held(L2(`const a = (1) / typeof / ${Y} / 1;`))).toBe(true);
   expect(held(L2("const n = (2) / 3;\nconst m = (n) / 4;\np.cwd()"))).toBe(false);
 });
+
+// Round 15: from and import are not always import declarations.
+const QX = `/'/; ${Y} // '`;
+for (const [label, pre] of [
+  ["a variable named from and a string on the next line", `${A}var from = 1;\nvar y = from\n"x"\n${QX}\n`],
+  ["a property named import and a string on the next line", `${A}var a = {};\nvar y = a.import\n"x"\n${QX}\n`],
+  ["a property named from and a string on the next line", `${A}var a = {};\nvar y = a.from\n"x"\n${QX}\n`],
+  ["an import keyword, a line break and a string, then a regex", `${A}import\n"fs"\n${QX}\n`],
+  ["from, a line break and a string after a clause, then a regex", `${A}import {a} from\n"fs"\n${QX}\n`],
+  ["a plain npm_package_config require then in and a regex", `${A}var x = require(process.env.npm_package_config_a)in ${QX}\n`],
+] as const) {
+  test(`${label} is not static (round 15)`, () => expect(held(pre)).toBe(true));
+}
+test("an import declaration with its string on the same line stays an import (round 15)", () => {
+  expect(held(`${A}import q from "fs"\nconst r = /x/.test(1)\nexports.main = () => p.cwd() + r\n`)).toBe(false);
+  expect(held(`${A}import "fs"\n${QX}\n`)).toBe(true);
+});
+for (const [label, pre] of [
+  ["a variable named from, a string, then a division that holds the use", `${A}var from = 1;\nvar y = from\n"x"\n/ ${Y} / 1;\n`],
+  ["a property named import, a string, then a division that holds the use", `${A}var a = {};\nvar y = a.import\n"x"\n/ ${Y} / 1;\n`],
+  ["a property named from, a string, then a division that holds the use", `${A}var a = {};\nvar y = a.from\n"x"\n/ ${Y} / 1;\n`],
+] as const) {
+  test(`${label} is not static (round 15, division)`, () => expect(held(pre)).toBe(true));
+}

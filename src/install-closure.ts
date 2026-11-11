@@ -722,6 +722,20 @@ function stripLiteralLoad(raw: string): boolean {
 // One predicate for JS. A file that fails it widens by the shape of its computed loads.
 // A name for the process module is a whole statement: when the next token continues the expression (a member, a call,
 // a computed member, a ? or a template), the load is not a plain name and is left in the text.
+// The index of the first character after "i" that is not whitespace or a comment.
+function skipTrivia(whole: string, from: number): number {
+  let i = from;
+  for (;;) {
+    while (i < whole.length && /\s/.test(whole[i]!)) i++;
+    if (whole.startsWith("//", i)) {
+      while (i < whole.length && !/[\n\r\u2028\u2029]/.test(whole[i]!)) i++;
+    } else if (whole.startsWith("/*", i)) {
+      const end = whole.indexOf("*/", i + 2);
+      i = end < 0 ? whole.length : end + 2;
+    } else return i;
+  }
+}
+
 function stripProcessAliases(text: string, aliases: string[]): string {
   return text.replace(PROCESS_ALIAS, (m, a1, _q, a2, _q4, at: number, whole: string) => {
     let i = at + m.length;
@@ -822,7 +836,8 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
     }
     return -1;
   };
-  // A span ends in a name or a number, not in a keyword: after a keyword the closing / would open a regular expression.
+  // A span ends in a name or a number. The keyword exclusion is defense in depth: a keyword is also in "danger", so a span
+  // ending in one is already refused.
   const endsInOperand = (span: string): boolean => {
     const m = /([A-Za-z_$][\w$]*|\d[\w.]*)\s*$/.exec(span);
     return m !== null && !KEYWORD_REGEX.has(m[1]!) && !KEYWORD_MAYBE.has(m[1]!);
@@ -972,10 +987,16 @@ function provablyStatic(text: string): boolean {
   let rest = stripProcessAliases(text, aliases);
   if (hidesNames(codeOnly(text, aliases))) return false;
   rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), removedText(false));
-  rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3) => {
+  rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3, at: number, whole: string) => {
     const spec = String(spec1 || spec2 || spec3 || "");
     if (builtinRoot(loadedSpec(spec) ?? "") === "process") viaOther = true;
-    return stripLiteralLoad(spec) ? removedText(spec1 === undefined) : full;
+    if (!stripLiteralLoad(spec)) return full;
+    // from "x" and import "x" end an import declaration only when the string is on the keyword's line and no . comes before
+    // it (a variable named from, a property named import, are not declarations). Anything else is read as an expression, and
+    // a / right after it could be a regular expression or a division: not static.
+    const declaration = spec1 === undefined && !/[\n\r\u2028\u2029]/.test(full) && !/\.\s*$/.test(whole.slice(Math.max(0, at - 64), at));
+    if (spec1 === undefined && !declaration && whole[skipTrivia(whole, at + full.length)] === "/") viaOther = true;
+    return removedText(declaration);
   });
   if (viaOther) return false;
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);
