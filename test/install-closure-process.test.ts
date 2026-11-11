@@ -725,3 +725,32 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} stays static (round 22)`, () => expect(held(pre)).toBe(false));
 }
+
+// Round 24: dangerous property names as strings, operands that do not end, calls that return process, the function keyword by
+// its neighbors, package-root reads, exact module names, an explicit list of global members, assignments through a read.
+for (const [label, pre] of [
+  ["a computed constructor chain with string keys", 'exports.main = () => []["constructor"]["constructor"](process.env.X)()\n'],
+  ["a computed constructor chain with a name holding the key", 'const k = "constructor";\nexports.main = () => [][k][k](process.env.X)()\n'],
+  ["typeof of a globalThis chain that goes on", 'exports.main = () => typeof globalThis.globalThis.process["main" + "Module"]["req" + "uire"]("../docs/x")\n'],
+  ["process.on whose result is used", 'exports.main = () => { const p = process.on("x", () => 1); return p["y"] }\n'],
+  ["a property named function taking process", 'exports.main = () => api. function(process)\n'],
+  ["an object key named function next to a call with process", 'exports.main = () => ({ function: 1, a: run(process) })\n'],
+  ["a class field named function next to a call with process", 'class C { function = run(process) }\nexports.main = () => new C()\n'],
+  ["a name ending in function taking process", 'exports.main = () => éfunction(process)\n'],
+  ["a manifest path in front of a string", 'exports.main = () => require(process.env.npm_package_json + "/../docs/x.js")\n'],
+  ["window?.eval", 'exports.main = () => window?.eval(process.env.X)\n'],
+  ["self?.eval", 'exports.main = () => self?.eval(process.env.X)\n'],
+  ["an assignment through a read of a non-literal", 'exports.main = () => { process.env.NODE_OPTIONS = process.env.Y || "" }\n'],
+  ["a global member that is not on the list", 'exports.main = () => globalThis.Error\n'],
+] as const) {
+  test(`${label} widens the closure (round 24)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["process.on as a statement", 'exports.main = () => { process.on("exit", () => 1);\n process.once("x", () => 2) }\n'],
+  ["a require of a package whose name starts with process", 'exports.main = () => require("process-nextick-args")\n'],
+  ["an assignment of a literal through a read", 'exports.main = () => { process.env.X = "1"; process.exitCode = 1 }\n'],
+  ["typeof globalThis compared", 'exports.main = () => typeof globalThis === "undefined"\n'],
+  ["a require of cwd() in front of a string", 'exports.main = () => require(process.cwd() + "/tools/x.js")\n'],
+] as const) {
+  test(`${label} does not widen the closure (round 24)`, () => expect(widensAll(pre)).toBe(false));
+}

@@ -681,7 +681,9 @@ const LITERAL_LOAD = new RegExp(
 const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global|window)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
 // child_process only counts as the name of a module being loaded; the word inside a message does not.
 // A load of the process module by name, in any shape.
-const LOADS_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*['"](?:node:)?process\b/;
+const LOADS_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*(['"])(?:node:)?process\1/;
+// A string that is exactly a property name reaching Function or a loader, as a computed key or bound to a name ([][k][k]). A comparison (key === "constructor") is a guard, not a use.
+const DANGEROUS_STRING = /(?:\[\s*|(?<![=!<>])=(?!=)\s*)(['"`])(?:constructor|getBuiltinModule|mainModule|_?linkedBinding|createRequire|prepareStackTrace|getThis|getFunction)\1/;
 const LOADS_CHILD_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*['"](?:node:)?(?:child_process|vm|module|worker_threads)\b/;
 // The plain reads of the process object, or of a name for the process module, a static file may make. Any other use (an
 // alias, a computed member, binding, getBuiltinModule, mainModule, an argument to a call) can reach a loader or a native
@@ -999,7 +1001,7 @@ function dotBefore(text: string, at: number): boolean {
 
 const READ_AFTER = new RegExp(`\\s*(?:\\?\\.|\\.)\\s*${PROCESS_READ}`, "y");
 // Reads of the global object that cannot reach process or a loader.
-const HARMLESS_GLOBAL = /^\s*(?:\?\.|\.)\s*(?:crypto|document|window|location|localStorage|sessionStorage|atob|btoa|isNaN|parseInt|parseFloat|encodeURIComponent|decodeURIComponent|addEventListener|setTimeout|setInterval|setImmediate|clearTimeout|clearInterval|clearImmediate|queueMicrotask|console|URL|URLSearchParams|TextEncoder|TextDecoder|performance|navigator|fetch|structuredClone|Promise|Symbol|JSON|Math|Date|Array|AbortController|Intl)\b|^\s*(?:\?\.|\.)\s*(?!(?:Function|Reflect|Proxy|WebAssembly)\b)[A-Z][\w$]*\b/;
+const HARMLESS_GLOBAL = /^\s*(?:\?\.|\.)\s*(?:crypto|document|window|location|localStorage|sessionStorage|atob|btoa|isNaN|parseInt|parseFloat|encodeURIComponent|decodeURIComponent|addEventListener|setTimeout|setInterval|setImmediate|clearTimeout|clearInterval|clearImmediate|queueMicrotask|console|URL|URLSearchParams|TextEncoder|TextDecoder|performance|navigator|fetch|structuredClone|Promise|Symbol|JSON|Math|Date|Array|AbortController|AbortSignal|Intl|Event|EventTarget|Blob|File|FormData|Headers|Request|Response|ReadableStream|WritableStream|TransformStream|Map|Set|WeakMap|WeakSet|WeakRef|FinalizationRegistry|BigInt|Number|String|Boolean|RegExp|Buffer|Uint8Array|Int32Array|Float64Array|ArrayBuffer|DataView)\b/;
 // Members of process that run no code the file does not show and hand out no loader.
 const HARMLESS_MEMBER = /^\s*\.\s*(?:env|report|features|version|versions|argv|exitCode|cwd|nextTick|hrtime|memoryUsage|cpuUsage|uptime|umask|emitWarning|on|once|off|emit|addListener|removeListener|stdout|stderr|stdin|title|pid|ppid|execPath|execArgv|argv0|release|getuid|getgid|geteuid|getegid|getgroups|platform|arch)\b/;
 const MEMBER_AFTER = /\s*\.\s*[A-Za-z_$][\w$]*/y;
@@ -1062,6 +1064,10 @@ function readEnds(code: string, start: number, lenient = false): boolean {
       i += m[0].length;
       continue;
     }
+    if (c === "=" && code[i + 1] !== "=" && code[i + 1] !== ">") {
+      // An assignment through a read (process.env.X = ...): only a plain literal on the right is harmless.
+      return /^\s*(?:""|-?\d+|true|false|null)\s*(?:[;,)}\n]|$)/.test(code.slice(i + 1));
+    }
     if (c === "(" || c === "`") return false;
     if (c === "?" && code[i + 1] === "." && !/[0-9]/.test(code[i + 2] ?? "")) return false;
     return true;
@@ -1084,7 +1090,14 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
   const id = "[A-Za-z_$][\\w$]*";
   const params = `\\(\\s*${id}(?:\\s*,\\s*${id})*\\s*\\)`;
   const declared = (list: string) => list.replace(new RegExp(`${L}(?:${alt})${R}`, "g"), "_");
-  rest = rest.replace(new RegExp(`(?<![\\w$.])function\\b[^(){}]*(${params})`, "g"), (m, p: string) => m.slice(0, m.length - p.length) + declared(p));
+  rest = rest.replace(new RegExp(`(?<![\\w$])(?<![^\\x00-\\x7f\\s])function(?![\\w$])[^(){}]*(${params})`, "g"), (m, p: string, at: number, whole: string) => {
+    // A property (api. function(...)), an object key or a class field named function is not a declaration.
+    let j = at;
+    while (j > 0 && /\s/.test(whole[j - 1]!)) j--;
+    if (whole[j - 1] === ".") return m;
+    if (/^function\s*[:=,}]/.test(m)) return m;
+    return m.slice(0, m.length - p.length) + declared(p);
+  });
   rest = rest.replace(new RegExp(`(${params})(?=\\s*=>)`, "g"), (p: string) => declared(p));
   rest = rest.replace(/(?<![\w$.])(?<![^\x00-\x7f\s])(?:globalThis|global)\s*(?:\?\.|\.)\s*process(?![\w$])(?![^\x00-\x7f\s])/g, "process");
   // process taken out of the global object by a pattern or a spread.
@@ -1144,6 +1157,11 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
           if (args === undefined) return true;
           after = j2 + args.length + 2;
         }
+        // on, once, off, emit, addListener and removeListener return the object: only as a statement whose value is dropped.
+        if (/^\s*\.\s*(?:on|once|off|addListener|removeListener)\b/.test(mem[0])) {
+          const stmtStart = prev === "" || prev === ";" || prev === "{" || prev === "}";
+          if (!stmtStart || !/^[ \t]*(?:\r?\n|;|\}|$)/.test(rest.slice(after))) return true;
+        }
         if (readEnds(rest, after, true)) continue;
         return true;
       }
@@ -1177,7 +1195,7 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
     let j = at;
     while (j > 0 && /\s/.test(rest[j - 1]!)) j--;
     if (rest[j - 1] === "." && !rest.slice(0, j).endsWith("...")) continue;
-    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(rest.slice(Math.max(0, j - 11), j))) continue;
+    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(rest.slice(Math.max(0, j - 11), j)) && readEnds(rest, at + m[0].length)) continue;
     if (m[0] !== "this" && HARMLESS_GLOBAL.test(rest.slice(at + m[0].length, at + m[0].length + 40))) continue;
     if (m[0] === "this" && /^\s*(?:\?\.|\.)\s*[A-Za-z_$]/.test(rest.slice(at + 4, at + 44))) continue;
     return true;
@@ -1210,8 +1228,8 @@ function provablyStatic(source: string): boolean {
   // No space after this one on purpose: a property access can follow it (module.exports.in is a property).
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
-  if (/(?:\brequire\s*\(|\bfrom|\bimport)\s*['"](?:node:)?process\b/.test(rest)) return false;
-  if (LOADS_CHILD_PROCESS.test(rest)) return false;
+  if (/(?:\brequire\s*\(|\bfrom|\bimport)\s*(['"])(?:node:)?process\1/.test(rest)) return false;
+  if (LOADS_CHILD_PROCESS.test(rest) || DANGEROUS_STRING.test(rest)) return false;
   const code = codeOnly(rest, aliases);
   if (code === undefined) return false;
   // Strings are gone from this text: a loader word or the word process inside a message is not a use.
@@ -1623,7 +1641,7 @@ function processHazard(source: string): boolean {
   if (code.includes("\\")) return true;
   // Any load of the process module other than the plain alias statement (require("process")[..], import("process"),
   // import { default as p } from "process") is a name for it that is not tracked.
-  if (LOADS_PROCESS.test(stripProcessAliases(keep, [])) ) return true;
+  if (LOADS_PROCESS.test(stripProcessAliases(keep, [])) || DANGEROUS_STRING.test(keep)) return true;
   // A require, import() or require.resolve whose argument reads process cannot be classified, unless every read is a complete
   // read put in front of a string (process.cwd() + "/tools/") or the manifest path (dirname(process.env.npm_package_json)).
   const flat = code.replace(/`/g, " ");
@@ -1637,7 +1655,7 @@ function processHazard(source: string): boolean {
       const read = READ_AFTER.exec(args);
       if (!read) return true;
       const after = args.slice(at + w[0].length + read[0].length);
-      const prefixed = /^\s*\+\s*""/.test(after);
+      const prefixed = /^\s*\+\s*""/.test(after) && (/^\s*\.\s*cwd\s*\(\s*\)$/.test(read[0]) || /^\s*\.\s*env\s*\.\s*INIT_CWD$/.test(read[0]));
       const manifest = /\.\s*npm_package_json$/.test(read[0]) && /dirname\s*\(\s*$/.test(args.slice(0, at));
       if (!prefixed && !manifest) return true;
     }
@@ -1663,7 +1681,7 @@ function hasUnbounded(text: string): boolean {
   // Indirect and optional eval, new Function, the global object's eval, a computed member of a global, and a timer given code.
   const plain = codeOnly(text) ?? text;
   if (/(?<![\w$.])(?<!instanceof\s+)(?:eval|Function)\b(?!\s*\()/.test(plain)) return true;
-  if (/(?<![\w$.])(?:globalThis|global|window|self)\s*(?:\?\.)?\s*\.\s*(?:eval|Function)\b|(?<![\w$.])window\s*(?:\?\.)?\s*\[/.test(plain)) return true;
+  if (/(?<![\w$.])(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*(?:eval|Function)\b|(?<![\w$.])window\s*(?:\?\.)?\s*\[/.test(plain)) return true;
   if (timerGetsCode(plain)) return true;
   const re = /\b(?:eval|Function)\s*\(|\bvm\s*\.\s*(?:runInThisContext|runInNewContext|runInContext|compileFunction)\s*\(/g;
   const ok = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
