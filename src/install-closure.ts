@@ -1671,26 +1671,24 @@ function skipSpaceBack(code: string, end: number): number {
   return i;
 }
 
-const UNICODE_ESCAPE_END = /\\u(?:[0-9a-fA-F]{4}|\{[0-9a-fA-F]+\})$/;
+// A character of an identifier: ID_Continue, $, the joiners, and the halves of a surrogate pair (an astral name stays whole).
+// Whitespace and line terminators (no-break space, U+FEFF, U+2028 and the like) are not ID_Continue, so they end a word.
+function identChar(c: string): boolean {
+  return /[\p{ID_Continue}$\u200c\u200d\ud800-\udfff]/u.test(c);
+}
 
-// The identifier that ends at `end` (no window: the whole identifier, with non-ASCII letters and \u escapes as part of it).
+// The identifier that ends at `end` (no window: the whole identifier). A backslash never reaches here: the hazard check refuses
+// a file with one first, so a \u escape in a name is not read.
 function identBack(code: string, end: number): { word: string; start: number } {
   let i = end;
-  for (;;) {
-    if (i > 0 && /[\w$\u0080-\uffff]/.test(code[i - 1]!)) {
-      i--;
-      continue;
-    }
-    const esc = UNICODE_ESCAPE_END.exec(code.slice(Math.max(0, i - 12), i));
-    if (!esc) break;
-    i -= esc[0].length;
-  }
+  while (i > 0 && identChar(code[i - 1]!)) i--;
   return { word: code.slice(i, end), start: i };
 }
 
 // The word function at `start` is the keyword and not a property name (o.function, o. function, o?.function).
 function notProperty(code: string, start: number): boolean {
-  return code[skipSpaceBack(code, start) - 1] !== ".";
+  const r = skipSpaceBack(code, start);
+  return code[r - 1] !== "." || code.slice(r - 3, r) === "...";
 }
 
 // A ( at index k opens the parameter list of a function head: function (a), function f(a), function* f(a), async function f(a).
@@ -1726,6 +1724,11 @@ function isMethodHead(code: string, k: number, outer: BraceKind | undefined): bo
     }
     if (i < 0) return false;
     p = skipSpaceBack(code, i);
+  } else if (/["'`]/.test(code[p - 1] ?? "")) {
+    // A quoted name ("m"(a) {): the text has its strings blanked, so the literal is its two quotes.
+    const open = code.lastIndexOf(code[p - 1]!, p - 2);
+    if (open < 0) return false;
+    p = skipSpaceBack(code, open);
   } else {
     const id = identBack(code, p);
     if (id.word === "") return false;
@@ -1752,7 +1755,7 @@ function braceKind(code: string, at: number, outer?: BraceKind): BraceKind {
   const j = skipSpaceBack(code, at);
   if (code.slice(Math.max(0, j - 2), j) === "=>") return "arrow";
   // The word class opens a class body, not an object key (class: function () {}) or a member (x.class).
-  if (/(?<![\w$.])class(?![\w$])(?!\s*:)[^{};]*$/.test(code.slice(Math.max(0, j - 200), j))) return "class";
+  if (/(?<![\p{ID_Continue}$.\u200c\u200d\ud800-\udfff])class(?![\p{ID_Continue}$\u200c\u200d\ud800-\udfff])(?!\s*:)[^{};]*$/u.test(code.slice(Math.max(0, j - 200), j))) return "class";
   if (code[j - 1] === ")") {
     let depth = 0;
     let k = j - 1;
@@ -1767,10 +1770,36 @@ function braceKind(code: string, at: number, outer?: BraceKind): BraceKind {
     if (/[\r\n\u2028\u2029]/.test(code.slice(j, at)) && !isFunctionHead(code, k) && !isMethodHead(code, k, outer)) return "block";
     return "fn";
   }
-  // An object literal follows an operator, an opening bracket, a comma or a keyword that takes a value.
+  // An object literal follows an operator, an opening bracket or a comma (across line ends), or a keyword that takes a value on
+  // the same line (return, yield and the like end a statement at a line end; await, yield and of are plain names in sloppy
+  // code).
+  const prev = code[j - 1] ?? "";
+  if (code.slice(j - 3, j) === "...") return "object";
+  if (/[=,(\[?|&!*%<>^~]/.test(prev) || ((prev === "+" || prev === "-") && code[j - 2] !== prev)) return "object";
   const w = identBack(code, j).word;
-  if (/[=,(\[?|&!]/.test(code[j - 1] ?? "") || /^(?:return|yield|await|throw|typeof|void|new|in|of|delete|instanceof|default)$/.test(w)) return "object";
+  if (w !== "" && !/[\r\n\u2028\u2029]/.test(code.slice(j, at)) && /^(?:return|yield|await|throw|typeof|void|new|in|of|delete|instanceof|default)$/.test(w)) return "object";
+  // The value of a key (a: {) in an object literal, or the alternate of a ternary (c ? a : {).
+  if (prev === ":" && (outer === "object" || closesTernary(code, j - 1))) return "object";
   return "block";
+}
+
+// The : at index c closes a ? of a conditional expression in the same statement (scanned back a bounded way; no answer is false).
+function closesTernary(code: string, c: number): boolean {
+  let pending = 0;
+  let depth = 0;
+  for (let i = c - 1; i >= 0 && c - i < 2000; i--) {
+    const ch = code[i]!;
+    if (ch === ")" || ch === "]" || ch === "}") depth++;
+    else if (ch === "(" || ch === "[" || ch === "{") {
+      if (--depth < 0) return false;
+    } else if (ch === ";" && depth === 0) return false;
+    else if (depth === 0 && ch === ":") pending++;
+    else if (depth === 0 && ch === "?" && code[i + 1] !== "." && code[i + 1] !== "?" && code[i - 1] !== "?") {
+      if (pending === 0) return true;
+      pending--;
+    }
+  }
+  return false;
 }
 
 // A this in sloppy code is the global object inside a plain function call, and this at the top of a CommonJS file or

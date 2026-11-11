@@ -1429,7 +1429,7 @@ for (const [label, pre] of [
   ["an optional-chain call named function with a space", `const o = { function() { return 0 } };\no?. function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
   ["a property named function on the next line", `const o = { function() { return 0 } };\no\n.function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
   ["an identifier with a non-ASCII letter before function", `const ñfunction = () => 0;\nñfunction(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
-  ["an identifier that spells function with a unicode escape", `const \\u0066unction = () => 0;\n\\u0066unction(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["an identifier that spells function with a unicode escape (refused by the backslash check, not read by the scan)", `const \\u0066unction = () => 0;\n\\u0066unction(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
   ["new on a property named function", `const o = { function: class {} };\nnew o. function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
   ["a call statement and a block inside a plain block", `if (x) { f(1)\n{ ${ASI_BODY} } }\nexports.main = () => 1\n`],
   ["a call statement and a block inside a bare block", `{ f(1)\n{ ${ASI_BODY} } }\nexports.main = () => 1\n`],
@@ -1452,6 +1452,68 @@ for (const [label, pre] of [
   ["an object method with arguments and its body on the next line", "const o = { m(a)\n{ return arguments[0] } };\nexports.main = () => o.m(1)\n"],
 ] as const) {
   test(`${label} stays static (asi head)`, () => expect(held(pre)).toBe(false));
+}
+// A word before a { counts for an object literal only on the same line (return and yield end a statement at a line end; await,
+// yield and of are plain names in sloppy code), the class keyword is read with a Unicode-aware boundary, and a statement-position
+// call is never a method.
+const MM = "const m = () => 0;\n";
+for (const [label, pre] of [
+  ["a block after return and a line end", `${MM}if (0) return\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a block after await used as a name", `${MM}var await = 0; await\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a block after yield used as a name", `${MM}var yield = 0; yield\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a block after of used as a name", `${MM}var of = 0; of\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a block after a name with a non-ASCII prefix on the word class", `${MM}var ñclass = 0; ñclass\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call after a postfix increment and a line end", `${MM}var x = 0; x++\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call after a postfix decrement and a line end", `${MM}var x = 0; x--\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call after a regex literal and a line end", `${MM}/x/\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call in a block at the start of a statement", `${MM}{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call after a comma expression", `${MM}var a = 1, b = m(2)\n{ ${ASI_BODY} }\n`],
+  ["a call after a case label", `${MM}switch (1) { case 1: m(2)\n{ ${ASI_BODY} } }\n`],
+  ["a call named get", `const get = () => 0;\nget(1)\n{ ${ASI_BODY} }\n`],
+  ["a call named async", `const async = () => 0;\nasync(1)\n{ ${ASI_BODY} }\n`],
+  ["a call through a computed member", `const o = { k: () => 0 };\no["k"](1)\n{ ${ASI_BODY} }\n`],
+  ["a call after a labeled block that follows a ternary", `${MM}var c = 1 ? 2 : 3; lbl: { m(1)\n{ ${ASI_BODY} } }\n`],
+] as const) {
+  test(`${label} is not static (asi object)`, () => expect(held(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a quoted method name with its body on the next line", 'const o = {\n "m"(a)\n { return arguments[0] }\n};\nexports.main = () => o.m(1)\n'],
+  ["a quoted method name in a strict file", '"use strict";\nconst o = {\n "m"(a)\n { return this }\n};\nexports.main = () => o.m(1)\n'],
+  ["a single-quoted method name", "const o = {\n 'm'(a)\n { return arguments[0] }\n};\nexports.main = () => o.m(1)\n"],
+  ["an object in the alternate of a ternary", "const o = false ? null : {\n m(a)\n { return arguments[0] }\n};\nexports.main = () => o.m(1)\n"],
+  ["an object after a binary plus", "const o = 1 + {\n m(a)\n { return arguments[0] }\n};\nexports.main = () => 1\n"],
+  ["an object after a logical or", "const o = null || {\n m(a)\n { return arguments[0] }\n};\nexports.main = () => o.m(1)\n"],
+  ["an object as the value of a key", "const o = { a: {\n m(a)\n { return arguments[0] }\n} };\nexports.main = () => o.a.m(1)\n"],
+  ["an object returned on the same line", "function f() { return {\n m(a)\n { return arguments[0] }\n} }\nexports.main = () => f()\n"],
+] as const) {
+  test(`${label} stays static (asi object)`, () => expect(held(pre)).toBe(false));
+}
+// A non-ASCII space or line terminator ends a word, as it does in the engine: it is not part of the keyword before a paren or a
+// brace, and not part of a name.
+const SPACES: [string, string][] = [["a no-break space", "\u00a0"], ["a byte order mark", "\ufeff"], ["an ideographic space", "\u3000"], ["a line separator", "\u2028"], ["a paragraph separator", "\u2029"], ["an en space", "\u2002"]];
+for (const [sn, w] of SPACES) {
+  for (const [kw, pre] of [
+    ["if", `x = 1;${w}if (1) { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["while", `x = 1;${w}while (0) { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["for", `x = 1;${w}for (;;) { ${ASI_BODY}; break }\nexports.main = () => 1\n`],
+    ["switch", `x = 1;${w}switch (1) { default: ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["catch", `try { x = 1 }${w}catch (e) { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["with", `x = 1;${w}with ({}) { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["else", `if (0) { y = 1 }${w}else { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["a function property", `const o = { function() { return 0 } };\no.${w}function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ] as const) {
+    test(`${kw} after ${sn} keeps its block as a block (widens the closure)`, () => expect(widensAll(pre)).toBe(true));
+  }
+}
+test("an astral identifier ending in function is one name, not the keyword", () => {
+  expect(widensAll(`const \u{20bb7}function = () => 0;\n\u{20bb7}function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`)).toBe(true);
+});
+for (const [label, pre] of [
+  ["a spread of an object with a method body on the next line", "const o = { ...{\n m(a)\n { return arguments[0] }\n} };\nexports.main = () => o.m(1)\n"],
+  ["a spread of a function head with its body on the next line", "const g = (x) => x;\ng(...function (a)\n{ return arguments[0] });\nexports.main = () => 1\n"],
+  ["a method after a spread entry with its body on the next line", "const o = { ...base, m(a)\n{ return arguments[0] } };\nexports.main = () => o.m(1)\n"],
+] as const) {
+  test(`${label} stays static (asi spread)`, () => expect(held(pre)).toBe(false));
 }
 for (const [label, pre] of [
   ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
