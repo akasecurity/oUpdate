@@ -737,11 +737,9 @@ function stripProcessAliases(text: string, aliases: string[]): string {
     }
     if (i < whole.length && ".[(?`".includes(whole[i]!)) return m;
     aliases.push(String(a1 || a2));
-    // A name (with its ; when the statement had one), not nothing. The token before what follows can still differ from the
-    // original (a statement without ; ended in ), which is ambiguous, and is now a name), so the second scan is safe only
-    // because the first scan, on the original text, has already refused every ambiguous span that could hide a use.
-    // The whitespace the match took (a line break) is put back: it separates the next token from the placeholder.
-    return (m.trimEnd().endsWith(";") ? `${REMOVED};` : REMOVED) + m.slice(m.trimEnd().length);
+    // An import declaration is a statement; a const statement without ; continues as an expression after its ) and is a
+    // name. The second scan is safe only because the first scan, on the original text, refuses every ambiguous span.
+    return removedText(a1 === undefined || m.trimEnd().endsWith(";"), m.slice(m.trimEnd().length));
   });
 }
 
@@ -824,6 +822,11 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
     }
     return -1;
   };
+  // A span ends in a name or a number, not in a keyword: after a keyword the closing / would open a regular expression.
+  const endsInOperand = (span: string): boolean => {
+    const m = /([A-Za-z_$][\w$]*|\d[\w.]*)\s*$/.exec(span);
+    return m !== null && !KEYWORD_REGEX.has(m[1]!) && !KEYWORD_MAYBE.has(m[1]!);
+  };
   // What follows a closing / must not be a name, a flag, a number or another / : only the end of an expression.
   const closesCleanly = (at: number): boolean => {
     let q = at;
@@ -886,7 +889,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       // or the two readings would fall out of step. Read as a regex, what follows must end an expression.
       if (kind === "amb" && end >= 0) {
         const span = text.slice(i + 1, end);
-        if (danger.test(span) || !/[\w$]\s*$/.test(span) || !closesCleanly(end + 1)) return undefined;
+        if (danger.test(span) || !endsInOperand(span) || !closesCleanly(end + 1)) return undefined;
       }
       if (end >= 0) {
         i = end + 1;
@@ -952,17 +955,27 @@ function hidesNames(code: string | undefined): boolean {
 // before what follows is a name, never a number or a keyword.
 const REMOVED = "__removed_text__";
 
+/**
+ * What the second scan sees where text was removed. A removed expression (a require call, a plain load) is a name; a removed
+ * statement (an import declaration, an alias statement ending in ;) is a name and a ; so a / after it opens a regular
+ * expression as it does after a real statement. Whitespace the match took is put back, and a space always follows, so the
+ * placeholder never joins the next word.
+ */
+function removedText(statement: boolean, spaceAfter = ""): string {
+  return `${REMOVED}${statement ? ";" : ""}${spaceAfter || " "}`;
+}
+
 function provablyStatic(text: string): boolean {
   if (text.includes(REMOVED)) return false;
   const aliases: string[] = [];
   let viaOther = false;
   let rest = stripProcessAliases(text, aliases);
   if (hidesNames(codeOnly(text, aliases))) return false;
-  rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), REMOVED);
+  rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), removedText(false));
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3) => {
     const spec = String(spec1 || spec2 || spec3 || "");
     if (builtinRoot(loadedSpec(spec) ?? "") === "process") viaOther = true;
-    return stripLiteralLoad(spec) ? REMOVED : full;
+    return stripLiteralLoad(spec) ? removedText(spec1 === undefined) : full;
   });
   if (viaOther) return false;
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);

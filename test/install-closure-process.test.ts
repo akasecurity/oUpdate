@@ -366,3 +366,29 @@ test("an alias statement with no semicolon and plain reads on the next line stay
 test("a keyword on the line after a no-semicolon alias statement is still a keyword (round 13)", () => {
   expect(held(`const p = require("process");\nconst q = require("process")\ntypeof /'/; ${Y} // '\n`)).toBe(true);
 });
+
+// Round 14: a removed statement ends like a statement (a / after it is a regex); a removed expression is a name that
+// never joins the next word; every separator between a removed form and what follows.
+const RX = `/'/; ${Y} // '`;
+for (const [label, pre] of [
+  ["an import declaration without a semicolon, then a bare regex", `import p from "process" ${RX}\n`],
+  ["an import declaration without a semicolon on its own line, then a bare regex", `import p from "process"\n${RX}\n`],
+  ["a literal import after an alias, then a bare regex", `const p = require("process");\nimport "fs"\n${RX}\n`],
+  ["a named import after an alias, then a bare regex", `import p from "node:process";\nimport {existsSync} from "fs"\n${RX}\n`],
+  ["a literal require then in and a regex", `const p = require("process");\nrequire("fs")in ${RX}\n`],
+  ["a dynamic import then instanceof and a regex", `const p = require("process");\nimport("fs")instanceof ${RX}\n`],
+  ["an alias without a semicolon then in directly after the paren", `const p = require("process")in ${RX}\n`],
+  ["a plain const require then in directly after the paren", `const p = require("process");\nconst fs = require("fs")in ${RX}\n`],
+  ["a removed form and CRLF then a keyword regex", `const p = require("process");\nconst q = require("process")\r\ntypeof ${RX}\n`],
+  ["a removed form and U+2028 then a keyword regex", `const p = require("process");\nconst q = require("process") typeof ${RX}\n`],
+  ["a removed form and a tab then a keyword regex", `const p = require("process");\nconst q = require("process")\t\ntypeof ${RX}\n`],
+  ["a removed form and a block comment then a keyword regex", `const p = require("process");\nconst q = require("process")/*c*/\ntypeof ${RX}\n`],
+  ["a removed form and a line comment then a keyword regex", `const p = require("process");\nconst q = require("process") // c\ntypeof ${RX}\n`],
+  ["a removed form and a space before a semicolon then a regex", `const p = require("process");\nconst q = require("process") ;\n${RX}\n`],
+] as const) {
+  test(`${label} is not static (round 14)`, () => expect(held(pre)).toBe(true));
+}
+test("a span that ends in a keyword is not static (round 14)", () => {
+  expect(held(L2(`const a = (1) / typeof / ${Y} / 1;`))).toBe(true);
+  expect(held(L2("const n = (2) / 3;\nconst m = (n) / 4;\np.cwd()"))).toBe(false);
+});
