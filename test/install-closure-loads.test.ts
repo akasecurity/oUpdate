@@ -532,3 +532,23 @@ for (const [label, hook] of [
     expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
   });
 }
+
+// Thirteenth review batch: a data key or a shadowing parameter named module is not the loader.
+for (const [label, hook] of [
+  ["Object.entries of an object with a module key", `Object.entries({ module: 1 });`],
+  ["Object.assign of an object with a module key", `Object.assign({}, { module: 1 });`],
+  ["Reflect.get of a data object by the key module", `Reflect.get({ a: 1 }, "module");`],
+  ["Object.entries of an object with a require key and a module string", `Object.entries({ require: "module" });`],
+  ["Object.entries of a parameter named module", `function f(module) { Object.entries(module); }\nf({ a: 1 });`],
+  ["Object.assign of a parameter named module in an arrow", `const f = (module) => Object.assign({}, module);\nf({ a: 1 });`],
+] as [string, string][]) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
+  });
+}
+for (const [label, hook] of [
+  ["a Reflect.get of module after a function with a module parameter", `function f(module) { return module; }\nconst k = "require";\nReflect.get(module, k).call(module, ${BX});`],
+  ["an Object.entries of module with a data key beside it", `const d = Object.entries({ module: 1 });\nconst e = Object.entries(Object.getPrototypeOf(module));\ne.find(([n]) => n === "req" + "uire")[1].call(module, ${BX});`],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
+}
