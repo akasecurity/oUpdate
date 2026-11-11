@@ -638,3 +638,24 @@ test("a file the scan cannot read that never names process does not widen to the
 test("a destructuring of a member that is not on the allowlist widens (round 19)", () => {
   expect(widensAll('const { x } = process; exports.main = () => x["y"]\n')).toBe(true);
 });
+
+// The global object handed on is as good as process: it widens however it is handed on.
+for (const [label, pre] of [
+  ["a call argument", 'function f(g) { return g["x"] }\nexports.main = () => f(globalThis)\n'],
+  ["an array element", 'exports.main = () => [globalThis][0]["x"]\n'],
+  ["a return value", 'function f() { return globalThis }\nexports.main = () => f()["x"]\n'],
+  ["a default parameter", 'exports.main = (g = globalThis) => g["x"]\n'],
+  ["new f(globalThis)", 'exports.main = () => new F(globalThis)\n'],
+  ["the global alias passed on", 'exports.main = () => f(global)\n'],
+  ["a bare this at the top level", 'const t = this; exports.main = () => t["x"]\n'],
+] as const) {
+  test(`${label} of the global object widens the closure (round 20)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["typeof globalThis", 'exports.main = () => typeof globalThis\n'],
+  ["a member read of globalThis", 'exports.main = () => globalThis.setTimeout(() => 1, 1)\n'],
+  ["this inside a function", 'exports.main = function () { return this.x }\n'],
+  ["a loop index into argv", 'exports.main = () => { for (let i = 2; i < process.argv.length; i++) if (process.argv[i] === "-v") return 1 }\n'],
+] as const) {
+  test(`${label} stays static (round 20)`, () => expect(held(pre)).toBe(false));
+}

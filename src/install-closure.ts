@@ -1002,6 +1002,7 @@ const DESTRUCTURE_OK = "(?:env|platform|arch|versions?|argv|cwd|exit|exitCode)(?
 // a call, a template or an optional chain. A few string and array methods and a numeric index are read through.
 function readEnds(code: string, start: number, lenient = false): boolean {
   let i = start;
+  let indexed = false;
   for (let guard = 0; guard < 64; guard++) {
     while (i < code.length && /\s/.test(code[i]!)) i++;
     const c = code[i];
@@ -1045,8 +1046,10 @@ function readEnds(code: string, start: number, lenient = false): boolean {
       continue;
     }
     if (c === "[") {
-      const m = /^\[\s*\d+\s*\]/.exec(code.slice(i, i + 24));
-      if (!m) return false;
+      // One index by a number or a plain name (process.argv[i]); a second index or a key built from strings is not read through.
+      const m = /^\[\s*[\w$\s+\-*]+\]/.exec(code.slice(i, i + 40));
+      if (!m || indexed) return false;
+      indexed = true;
       i += m[0].length;
       continue;
     }
@@ -1140,8 +1143,26 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
     if ((prev === "{" || prev === "}" || prev === "," || prev === ";" || prev === "") && /^\s*\([^()]*\)\s*\{/.test(tail)) continue;
     return true;
   }
-  // The global object bound to a name can be read for process later.
-  if (/(?:\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=|(?<![=!<>])=(?!=))\s*globalThis(?![\w$.])/.test(rest)) return true;
+  // The global object handed on (bound, passed, returned, put in an array, a default value, new f(globalThis)) can be read for
+  // process later. Only a member read of it (globalThis.name) and typeof / in are not a hand-over. At the top level of a
+  // CommonJS file this is the exports object, so a bare top-level this counts the same.
+  let depth = 0;
+  for (const m of rest.matchAll(/(?<![\w$\u0080-\uffff])(?:globalThis|global|this)(?![\w$\u0080-\uffff])|[{}]/g)) {
+    const at = m.index ?? 0;
+    if (m[0] === "{") { depth++; continue; }
+    if (m[0] === "}") { depth = Math.max(0, depth - 1); continue; }
+    if (m[0] === "this" && depth > 0) continue;
+    // An object key (global: true) is a name, not the global object.
+    if (m[0] !== "this" && /^\s*:/.test(rest.slice(at + m[0].length, at + m[0].length + 8)) && /[{,]\s*$/.test(rest.slice(Math.max(0, at - 12), at))) continue;
+    // (this && this.__x) is a test: its value is the right side. A comparison does not hand it on either.
+    if (m[0] === "this" && /^\s*(?:&&|[!=]==?)/.test(rest.slice(at + 4, at + 20))) continue;
+    let j = at;
+    while (j > 0 && /\s/.test(rest[j - 1]!)) j--;
+    if (rest[j - 1] === "." && !rest.slice(0, j).endsWith("...")) continue;
+    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(rest.slice(Math.max(0, j - 11), j))) continue;
+    if (/^\s*(?:\?\.|\.)\s*[A-Za-z_$]/.test(rest.slice(at + m[0].length, at + m[0].length + 40))) continue;
+    return true;
+  }
   return false;
 }
 
