@@ -172,3 +172,26 @@ for (const hook of ["node --title t .", "node -C dev .", "node --conditions dev 
 }
 test("node scripts/build.js . stays quiet with an option before the script", () =>
   expect(rootHeld("node --title t scripts/build.js .", "docs/runtime.js", { ...rtMain, "scripts/build.js": 'console.log("ok")\n' })).toBe(false));
+
+// A runner's own options that take a value are skipped, and a package manager that runs node is followed.
+for (const hook of [
+  "npx --registry https://registry.npmjs.org node .",
+  "npx --cache /tmp/cache node .",
+  "bunx --cwd . node .",
+  "npx --loglevel silent node .",
+  "npx --registry=https://r.example node .",
+  "corepack npm exec -- node .",
+  "corepack npx node .",
+  "node --title=worker .",
+]) {
+  test(`${hook}: the root main changed holds`, () => expect(rootHeld(hook, "docs/runtime.js", rtMain)).toBe(true));
+}
+test("npx --registry URL tsc -p . does not run the manifest main", () =>
+  expect(rootHeld("npx --registry https://registry.npmjs.org tsc -p .", "docs/runtime.js", rtMain)).toBe(false));
+test("corepack pnpm install does not run the manifest main", () =>
+  expect(rootHeld("corepack pnpm install .", "docs/runtime.js", rtMain)).toBe(false));
+
+// After -e or -p the next word is code and the rest are its arguments.
+for (const hook of ['node -e "console.log(1)" .', "node -p process.version .", "node --eval 'x' ."]) {
+  test(`${hook}: the dot is an argument of the code, not the root`, () => expect(rootHeld(hook, "docs/runtime.js", rtMain)).toBe(false));
+}

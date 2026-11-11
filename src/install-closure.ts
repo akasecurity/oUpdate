@@ -4987,15 +4987,29 @@ function restart(ctx: Ctx): void {
   if (start) runScript(ctx, "start", false);
 }
 
-// The program a package runner runs: the first word that is not one of the runner's own options (`-p pkg` takes a value).
-function runnerExecutable(argv: string[], i: number): string {
+// The program a package runner runs: the first word that is not one of the runner's own options. Options that take the next word
+// as a value (`--registry URL`, `--cache DIR`, `--cwd .`, `-p pkg`) are skipped with it. A package manager that runs another
+// program (`corepack npm exec -- node`, `corepack npx node`) is followed to that program.
+const RUNNER_VALUE_FLAGS = /^--(?:registry|cache|userconfig|globalconfig|loglevel|cwd|prefix|workspace|shell|node-arg|node-options|config|tag|scope)$/;
+function runnerExecutable(argv: string[], i: number, depth = 0): string {
   for (let j = i; j < argv.length; j++) {
     const a = argv[j]!;
-    if (a === "--") return runnerName(argv[j + 1] ?? "");
-    if (!a.startsWith("-")) return runnerName(a);
+    let exe: string | undefined;
+    if (a === "--") exe = runnerName(argv[j + 1] ?? "");
+    else if (!a.startsWith("-")) exe = runnerName(a);
+    if (exe !== undefined) {
+      const at = a === "--" ? j + 1 : j;
+      if (depth < 4 && /^(?:npx|bunx|pnpx)$/.test(exe)) return runnerExecutable(argv, at + 1, depth + 1);
+      if (depth < 4 && /^(?:npm|pnpm|yarn|bun)$/.test(exe)) {
+        const sub = argv.findIndex((w, q) => q > at && /^(?:exec|x|dlx)$/.test(w));
+        if (sub > 0) return runnerExecutable(argv, sub + 1, depth + 1);
+      }
+      return exe;
+    }
     const ef = execFlag(a);
     if (ef?.kind === "call") return "";
     if (ef?.kind === "package" && ef.value === undefined) j++;
+    else if (RUNNER_VALUE_FLAGS.test(a)) j++;
   }
   return "";
 }
@@ -5049,6 +5063,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
         const code = take();
         if (code === undefined) return;
         evalCode(ctx, code);
+        scriptSeen = true; // the words after the code are its arguments
         i++;
         continue;
       }
