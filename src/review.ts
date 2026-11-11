@@ -13,7 +13,7 @@ import { installView, otherInstallEntry, prepareInert } from "./install-closure.
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
 import { newFindings, type Finding } from "./adapters/scanner/types.ts";
-import { renderLineDiff } from "./linediff.ts";
+import { diffSeq, renderLineDiff } from "./linediff.ts";
 
 export type LayerName = "cooldown" | "advisory" | "prepass" | "scan" | "reviewer" | "gate";
 export const LAYERS: LayerName[] = ["cooldown", "advisory", "prepass", "scan", "reviewer", "gate"];
@@ -221,49 +221,101 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
   const at = text(after);
   const out = [head, renderLineDiff(bt, at)];
   if (bt !== undefined && at !== undefined && (state === "changed" || state === "loaded by code")) {
-    const defs = unchangedBlobDefs(bt, at);
-    if (defs) out.push(defs);
+    let c = after && blobDefsCache.get(after);
+    if (!c || c.before !== before) {
+      c = { before, out: unchangedBlobDefs(bt, at) };
+      if (after) blobDefsCache.set(after, c);
+    }
+    if (c.out) out.push(c.out);
   }
   return out;
 }
 
 // A changed line that names an identifier whose definition (`D = "<encoded run>"`) sits on an unchanged line:
 // the diff does not show that line, so a new `eval(Buffer.from(D, "base64"))` hides the payload it runs.
-// The definitions of the names added lines use are listed after the diff. One pass over each side: runs are found
-// on lines of BLOB_RUN or more characters only, and the number of definitions and of names read are capped.
+// The definitions of the names added lines use are listed after the diff. "Unchanged" is taken from the diff itself
+// (its `=` lines), so a line the diff already prints, or one that moved, is not listed twice; when the diff fell back to
+// the whole new version, nothing is listed. Runs are found by one character pass over unchanged lines of BLOB_RUN or
+// more characters; the number of lines, the length of each and the total shown are capped, and the result is cached per file pair.
+// Names are read from every added token except a property (`o.D`); a name in a comment or a string also lists its definition (cost only).
 const BLOB_RUN = 400; // the pre-pass encoded-blob threshold
 const BLOB_DEFS_MAX = 8;
-const BLOB_NAMES_MAX = 5000;
+const BLOB_LINE_MAX = 20_000; // a longer line is shown as its head and tail with its length and sha256
+const BLOB_TOTAL_MAX = 60_000; // past this, the remaining lines are a length and sha256 only
+const blobDefsCache = new WeakMap<Uint8Array, { before: Uint8Array | undefined; out: string | undefined }>();
+
+function encodedRunLead(l: string): string[] {
+  const names: string[] = [];
+  let start = -1;
+  const isEnc = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 || c === 61 || c === 95 || c === 45;
+  for (let i = 0; i <= l.length; i++) {
+    if (i < l.length && isEnc(l.charCodeAt(i))) {
+      if (start < 0) start = i;
+      continue;
+    }
+    if (start >= 0 && i - start >= BLOB_RUN && names.length < 16) {
+      const lead = /([\p{L}_$][\p{L}\p{N}_$]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
+      if (lead) names.push(lead[1]!);
+    }
+    start = -1;
+  }
+  return names;
+}
+
 function unchangedBlobDefs(before: string, after: string): string | undefined {
-  const lines = after.split("\n");
-  const runs: { name: string; at: number }[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const l = lines[i]!;
-    if (l.length < BLOB_RUN) continue;
-    for (const m of l.matchAll(/[A-Za-z0-9+/=_-]{400,}/g)) {
-      const lead = /([A-Za-z_$][\w$]*)\s*=\s*['"`]?$/.exec(l.slice(Math.max(0, m.index! - 80), m.index!));
-      if (lead) {
-        runs.push({ name: lead[1]!, at: i });
-        break;
+  const ops = diffSeq(before.split("\n"), after.split("\n"));
+  if (!ops) return undefined;
+  const defs = new Map<string, number[]>();
+  const added: { l: string; at: number }[] = [];
+  const kept: string[] = [];
+  let ni = 0;
+  for (const o of ops) {
+    if (o.op === "-") continue;
+    if (o.op === "+") added.push({ l: o.v, at: ni });
+    else if (o.v.length >= BLOB_RUN) {
+      kept[ni] = o.v;
+      for (const n of encodedRunLead(o.v)) {
+        const at = defs.get(n);
+        if (!at) defs.set(n, [ni]);
+        else if (at[at.length - 1] !== ni) at.push(ni);
       }
     }
+    ni++;
   }
-  if (!runs.length) return undefined;
-  const old = new Set(before.split("\n"));
-  const defs = new Map<string, number>();
-  for (const r of runs) if (old.has(lines[r.at]!) && !defs.has(r.name)) defs.set(r.name, r.at);
-  if (!defs.size) return undefined;
-  const used = new Set<string>();
-  for (const l of lines) {
-    if (old.has(l)) continue;
-    for (const m of l.matchAll(/[A-Za-z_$][\w$]*/g)) {
-      if (used.size >= BLOB_NAMES_MAX) break;
-      used.add(m[0]);
+  if (!defs.size || !added.length) return undefined;
+  const firstUse = new Map<string, number>();
+  for (const { l, at } of added) {
+    for (const m of l.matchAll(/[\p{L}_$][\p{L}\p{N}_$]*/gu)) {
+      const n = m[0];
+      if (!defs.has(n) || firstUse.has(n)) continue;
+      const p = m.index! - 1;
+      if (p >= 0 && l[p] === "." && !(p >= 2 && l[p - 1] === "." && l[p - 2] === ".")) continue; // a property, not the name
+      firstUse.set(n, at);
     }
   }
-  const shown = [...defs].filter(([n]) => used.has(n)).slice(0, BLOB_DEFS_MAX);
-  if (!shown.length) return undefined;
-  return `[unchanged lines that define a name the changed lines use, each holding an encoded run]\n${shown.map(([, at]) => `=${at + 1}: ${lines[at]}\n`).join("")}`;
+  if (!firstUse.size) return undefined;
+  // Names in the order their first use appears; each name's definitions nearest-preceding first.
+  const picked: [string, number][] = [];
+  for (const [n, use] of [...firstUse].sort((a, b) => a[1] - b[1])) {
+    const at = defs.get(n)!;
+    const prior = at.filter((i) => i < use).reverse();
+    for (const i of [...prior, ...at.filter((i) => i >= use)]) picked.push([n, i]);
+  }
+  let total = 0;
+  let out = "";
+  for (const [n, i] of picked.slice(0, BLOB_DEFS_MAX)) {
+    const l = kept[i]!;
+    const h = new Bun.CryptoHasher("sha256").update(l).digest("hex");
+    let shown: string;
+    if (total + Math.min(l.length, BLOB_LINE_MAX) > BLOB_TOTAL_MAX) shown = `[${l.length} chars, sha256 ${h}]`;
+    else {
+      const body = l.length > BLOB_LINE_MAX ? `${l.slice(0, BLOB_LINE_MAX - 2000)}…${l.slice(-2000)} [${l.length} chars, sha256 ${h}]` : l;
+      total += body.length;
+      shown = l.includes("\r") || /[ \t]$/.test(l) ? JSON.stringify(body) : body;
+    }
+    out += `=${i + 1} (a definition of ${n}): ${shown}\n`;
+  }
+  return `[unchanged lines that define a name the changed lines use, each holding an encoded run]\n${out}`;
 }
 
 // Files named as never executing: images, fonts, source maps, type declarations, prose. Prose is judged by the
