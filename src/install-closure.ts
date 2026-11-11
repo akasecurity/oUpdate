@@ -682,7 +682,7 @@ const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWo
 // child_process only counts as the name of a module being loaded; the word inside a message does not.
 // A load of the process module by name, in any shape.
 const LOADS_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*['"](?:node:)?process\b/;
-const LOADS_CHILD_PROCESS = /(?:\brequire\s*\(|\bfrom|\bimport)\s*['"](?:node:)?child_process\b/;
+const LOADS_CHILD_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*['"](?:node:)?(?:child_process|vm|module|worker_threads)\b/;
 // The plain reads of the process object, or of a name for the process module, a static file may make. Any other use (an
 // alias, a computed member, binding, getBuiltinModule, mainModule, an argument to a call) can reach a loader or a native
 // module, so it is not static; the loader words and a bare or computed use also widen the closure to the whole package.
