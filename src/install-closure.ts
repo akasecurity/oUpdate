@@ -902,14 +902,14 @@ const PROCESS_ALIAS = new RegExp(
 );
 
 // A static file may require these. Any other bare builtin is unsafe, so the load stays in the text.
-const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer", "_stream_duplex", "_stream_passthrough", "_stream_readable", "_stream_transform", "_stream_wrap", "_stream_writable"]);
+const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer", "_stream_duplex", "_stream_passthrough", "_stream_readable", "_stream_transform", "_stream_writable"]);
 const NODE_BUILTINS = new Set([
   ...STATIC_BUILTINS,
   "async_hooks", "child_process", "cluster", "console", "constants", "dgram", "diagnostics_channel",
   "dns", "domain", "http", "http2", "https", "inspector", "module", "net", "perf_hooks", "process",
   "punycode", "querystring", "readline", "repl", "sqlite", "string_decoder", "sys", "test", "timers",
   "tls", "trace_events", "tty", "v8", "vm", "wasi", "worker_threads",
-  "_http_agent", "_http_client", "_http_common", "_http_incoming", "_http_outgoing", "_http_server", "_tls_common", "_tls_wrap",
+  "_http_agent", "_http_client", "_http_common", "_http_incoming", "_http_outgoing", "_http_server", "_stream_wrap", "_tls_common", "_tls_wrap",
 ]);
 
 function builtinRoot(spec: string): string | undefined {
@@ -2927,16 +2927,21 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     const args = argsOf(text, after + call[0].length - 1);
     if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text, true);
   }
-  // A code-running builtin that loads a file by name (cluster.setupPrimary({ exec }), cluster.settings, module.register(...), Module._load(...), the run of node:test).
-  // The builtin counts as named when its name is a string anywhere in the file, so a name held by a variable does not hide it, and the
-  // member counts as used by its bare word, so a bracket access or an alias does not hide it.
-  if ((/["'`](?:node:)?(?:cluster|module)["'`]/.test(text) && /\b(?:setupPrimary|setupMaster|settings|register|_load)\b/.test(text)) || (/["'`]node:test["'`]/.test(text) && /\brun\b/.test(text)) || /\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(text) || /\b(?:module|constructor)\s*(?:\.\s*constructor\s*)?\[\s*["'`]_load["'`]\s*\]/.test(text)) {
+  // A code-running builtin that loads a file by name (cluster.setupPrimary({ exec }), cluster.settings = { exec }, module.register(...), Module._load(...), the run of node:test).
+  // The builtin counts as named when its name is a string anywhere in the file, so a name held by a variable does not hide it. The loader operation
+  // itself must be there too, in code position (a call, a member read or a bracket key), so a word that only appears in a string, a variable or a
+  // settings read is not a load.
+  const blank = codeOnly(text, [], false) ?? text;
+  const keyed = (words: string) => new RegExp(`\\[\\s*["'\`](?:${words})["'\`]\\s*\\]`).test(text);
+  const loadsByName = (/["'`](?:node:)?(?:cluster|module)["'`]/.test(text) && (/\b(?:setupPrimary|setupMaster|register|_load)\s*\(|\.\s*(?:setupPrimary|setupMaster|register|_load)\b|\.\s*settings\s*(?:=(?!=)|\.\s*exec\b|\[\s*["'`]exec)/.test(blank) || keyed("setupPrimary|setupMaster|register|_load|settings")))
+    || (/["'`]node:test["'`]/.test(text) && (/\.\s*run\b/.test(blank) || /\bimport\s*\{[^}]*\brun\b[^}]*\}\s*from\s*["'`]node:test["'`]/.test(text) || /\{[^}]*\brun\b[^}]*\}\s*=\s*require\s*\(\s*["'`]node:test["'`]/.test(text) || keyed("run")))
+    || /\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(text) || /\b(?:module|constructor)\s*(?:\.\s*constructor\s*)?\[\s*["'`]_load["'`]\s*\]/.test(text);
+  if (loadsByName) {
     tier.pkg = true;
     tier.tests = true;
     tier.flows = true;
   }
   // Any other mention of require, module.require or a createRequire result that is not itself an immediate call is a loader handed on as a value.
-  const blank = codeOnly(text, [], false) ?? text;
   if (handedOn(blank, [...callers].filter((n) => !/^(?:require|import|fork|execFile|execFileSync)$/.test(n)), text)) {
     tier.pkg = true;
     tier.tests = true;

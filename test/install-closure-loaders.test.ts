@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { provablyStatic } from "../src/install-closure.ts";
+import { classifyJs, provablyStatic } from "../src/install-closure.ts";
 import { prepass, type FileMap } from "../src/prepass.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -10,6 +10,7 @@ const release = (v: string, hook: string) =>
     "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: "node h.js" } }),
     "h.js": hook,
     "lib/a.js": "module.exports = 1\n",
+    "build.js": "module.exports = 2\n",
     "lib/evil.js": `console.log("evil ${v}")\n`,
     "lib/evil.mjs": `console.log("evil ${v}")\n`,
   });
@@ -77,6 +78,32 @@ for (const [name, code] of rooted) {
   }
 }
 
+// Benign hook files that name one of the builtins and use one of the member words without loading a file: only lib/evil.js changes and the
+// hook must not widen to it.
+const benign: [string, string][] = [
+  ["a local function named run beside node:test", `const test = require("node:test"); function run() { return 42 }; console.log(run())`],
+  ["a local object named module with a settings key", `const module = { settings: 1 }; console.log("module", module.settings)`],
+  ["a read of cluster settings", `const c = require("cluster"); console.log(c.settings)`],
+  ["a register package and a sourceType string", `require("@babel/register")({ sourceType: "module" }); require("./build.js")`],
+  ["a type check and a settings variable", `const pkg = require("./package.json"); if (pkg.type === "module") console.log(1); const settings = { color: true }; console.log(settings)`],
+  ["a settings file name", `fs.writeFileSync(".vscode/settings.json", "{}")`],
+  ["a settings file name beside a module require", `const m = require("module"); require("fs").writeFileSync(".vscode/settings.json", "{}"); console.log(m.builtinModules.length)`],
+];
+for (const [name, hook] of benign) {
+  test(`a benign hook is not widened: ${name}`, () => {
+    expect(held(hook)).toBe(false);
+  });
+  test(`a benign hook file is not a package-wide loader: ${name}`, () => {
+    const t = classifyJs("h.js", `${hook}\n`);
+    expect([t.pkg, t.tests, t.flows]).toEqual([false, false, false]);
+  });
+}
+for (const stmt of [`require("_stream_wrap")`, `require("node:_stream_wrap")`, `import "_stream_wrap"`, `import { a } from "node:_stream_wrap"`]) {
+  test(`${stmt} is not static (it reaches net)`, () => {
+    expect(provablyStatic(`${stmt}\nexports.main = () => 1\n`)).toBe(false);
+  });
+}
+
 test("a file that names none of these builtins and only uses the words run and register is not widened", () => {
   expect(held(`const registry = { register(x) { return x } }; function run() { return 1 }; registry.register(run()); run()\n`)).toBe(false);
   expect(held(`const s = "settings"; const t = "test"; module.exports = { run: () => s + t }\n`)).toBe(false);
@@ -89,7 +116,7 @@ for (const mod of ["_http_agent", "_http_client", "_http_common", "_http_incomin
       expect(provablyStatic(`${stmt}\nexports.main = () => 1\n`)).toBe(false);
   });
 }
-for (const mod of ["_stream_duplex", "_stream_passthrough", "_stream_readable", "_stream_transform", "_stream_wrap", "_stream_writable", "stream", "fs", "lodash"]) {
+for (const mod of ["_stream_duplex", "_stream_passthrough", "_stream_readable", "_stream_transform", "_stream_writable", "stream", "fs", "lodash"]) {
   test(`a load of ${mod} stays static`, () => {
     for (const stmt of [`require("${mod}")`, `import "${mod}"`, `import { a } from "${mod}"`])
       expect(provablyStatic(`${stmt}\nexports.main = () => 1\n`)).toBe(true);
