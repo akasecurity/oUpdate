@@ -602,6 +602,48 @@ interface ParsedCode {
 const parsedCache = new WeakMap<Uint8Array, ParsedCode>();
 const EMPTY_PARSED: ParsedCode = { specs: [], requireSpecs: [], importSpecs: [], fallback: [], urls: [], strings: [], code: "", folded: false, rejected: false };
 
+// A top-level `const x: T;` with no initializer, which a declaration file holds and Bun's ts loader rejects, written as
+// `declare const x: T;`. A statement with any `=` (other than `=>` in a type) is left as is, so an initializer is
+// never turned into a declaration that the transform would drop.
+function ambientDeclarations(text: string): string | undefined {
+  let ambiguous = false;
+  const out = text.replace(/^([ \t]*)((?:export[ \t]+)?)(const|let|var)\b/gm, (full, ws: string, exp: string, kw: string, at: number) => {
+    let depth = 0;
+    for (let i = at + full.length; i < text.length; i++) {
+      const c = text[i]!;
+      if (c === "{" || c === "(" || c === "[" || c === "<") depth++;
+      else if (c === "}" || c === ")" || c === "]" || (c === ">" && text[i - 1] !== "=")) depth--;
+      else if (c === "=" && text[i + 1] !== ">") return full;
+      else if (c === "'" || c === '"') {
+        // A quoted key in a type ("zlib-ng"?: string) is skipped whole; an unclosed quote on the line leaves it as is.
+        let j = i + 1;
+        while (j < text.length && text[j] !== c && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+        if (text[j] !== c) {
+          ambiguous = true;
+          return full;
+        }
+        i = j;
+      } else if (c === "/" && (text[i + 1] === "*" || text[i + 1] === "/")) {
+        // A comment is skipped whole (a JSDoc line inside a type is ordinary); an unclosed one leaves the end unknown.
+        const end = text[i + 1] === "*" ? text.indexOf("*/", i + 2) : text.indexOf("\n", i);
+        // A comment that holds a ; or = could stand for the terminator or the initializer: that stays ambiguous.
+        if (end < 0 || /[;=]/.test(text.slice(i, end))) {
+          ambiguous = true;
+          return full;
+        }
+        i = text[i + 1] === "*" ? end + 1 : end;
+      } else if (c === "`") {
+        // A template can hold the terminator or hide the initializer: the statement's end is not known.
+        ambiguous = true;
+        return full;
+      }
+      else if (c === ";" && depth <= 0) return `${ws}${exp}declare ${kw}`;
+    }
+    return full;
+  });
+  return ambiguous ? undefined : out;
+}
+
 function parseCode(path: string, bytes: Uint8Array, forceJs = false): ParsedCode {
   // The skip is not cached: the same bytes can be a real script, or a declaration a load names.
   if (declarationFile(path) && !forceJs) return EMPTY_PARSED;
@@ -642,6 +684,28 @@ function parseCode(path: string, bytes: Uint8Array, forceJs = false): ParsedCode
     foldOk = true;
   } catch {
     folded = "";
+  }
+  // A declaration a load or an entry names, that is not JavaScript (.d.ts, .d.cts, .d.mts type syntax): read as
+  // TypeScript, the way Node's type stripping would, with uninitialized consts made ambient. Rejected only if both fail.
+  if (!scanOk && !foldOk && declarationFile(path)) {
+    const ts = transpiler("ts");
+    const src = ambientDeclarations(text);
+    try {
+      if (src === undefined) throw new Error("ambiguous declaration");
+      folded = ts.transformSync(src);
+      foldOk = true;
+      for (const im of ts.scanImports(src)) {
+        if (!MODULE_KIND.has(im.kind) || !im.path) continue;
+        const spec = im.path.replaceAll("\\", "/");
+        specs.push(spec);
+        if (im.kind === "require-call") requireSpecs.push(spec);
+        else importSpecs.push(spec);
+      }
+      scanOk = true;
+    } catch {
+      folded = "";
+      foldOk = false;
+    }
   }
   const scanned = folded ? scanTransformed(folded) : { urls: [], strings: [] };
   if (folded) take(folded);

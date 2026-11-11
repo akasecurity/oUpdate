@@ -571,11 +571,49 @@ function isManifest(logical: string): boolean {
 
 // A literal require/import is followed exactly. A bare name that resolves inside a
 // bundled node_modules package closes that package. Anything else is not a path.
+/** A string literal's text as JavaScript reads it: \x41, \u0041, \u{41} and the one-character escapes; undefined when unsure. */
+function decodeJsString(raw: string): string | undefined {
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]!;
+    if (c !== "\\") {
+      out += c;
+      continue;
+    }
+    const n = raw[++i];
+    if (n === undefined) return undefined;
+    const simple: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v", "'": "'", '"': '"', "\\": "\\", "/": "/" };
+    if (n in simple) out += simple[n]!;
+    else if (n === "x") {
+      const h = raw.slice(i + 1, i + 3);
+      if (!/^[0-9a-fA-F]{2}$/.test(h)) return undefined;
+      out += String.fromCharCode(parseInt(h, 16));
+      i += 2;
+    } else if (n === "u") {
+      const m = /^(?:\{([0-9a-fA-F]{1,6})\}|([0-9a-fA-F]{4}))/.exec(raw.slice(i + 1));
+      if (!m) return undefined;
+      const cp = parseInt((m[1] ?? m[2])!, 16);
+      if (cp > 0x10ffff) return undefined;
+      out += String.fromCodePoint(cp);
+      i += m[0].length;
+    } else if (/[0-9\r\n\u2028\u2029]/.test(n)) return undefined;
+    else out += n;
+  }
+  return out;
+}
+
 function followLoads(ctx: Ctx, key: string, text: string): void {
-  const re = /(?:\brequire|\bimport)\(\s*(['"])([^'"]+)\1\s*\)|\bfrom\s+(['"])([^'"]+)\3|\bimport\s+(['"])([^'"]+)\5/g;
-  for (const m of text.matchAll(re)) {
+  for (const m of (codeOnly(text, [], true) ?? text).matchAll(new RegExp(LITERAL_LOAD.source, "g"))) {
     if (ctx.hold) return;
-    const spec = m[2] || m[4] || m[6] || "";
+    let spec = m[2] || m[4] || m[6] || "";
+    if (spec.includes("\\")) {
+      const decoded = decodeJsString(spec);
+      if (decoded === undefined) {
+        fail(ctx, "unresolved: path");
+        return;
+      }
+      spec = decoded;
+    }
     if (spec.startsWith(".")) {
       const logical = relFrom(key, spec);
       if (logical) addLogical(ctx, logical);
@@ -632,9 +670,24 @@ function addBundled(ctx: Ctx, root: string): void {
 }
 
 // Literal loads the precise walk already follows, plus the modeled config require.
-const LITERAL_LOAD = /(?:\brequire|\bimport)\(\s*(['"])([^'"]+)\1\s*\)|\bfrom\s+(['"])([^'"]+)\3|\bimport\s+(['"])([^'"]+)\5/g;
+// Between a keyword and its string: none at all is valid (from"x"). Comments are taken out of the text first (codeOnly in
+// keep mode), so whitespace is the only gap left; no pattern here ever scans a comment.
+const GAP = String.raw`\s`;
+const LITERAL_LOAD = new RegExp(
+  String.raw`(?:\brequire|\bimport)\s*\(\s*(['"])([^'"]+)\1\s*\)|\bfrom${GAP}*(['"])([^'"]+)\3|\bimport${GAP}*(['"])([^'"]+)\5`,
+  "g",
+);
 // Anything still able to name a file. module.exports is removed first; it is the static CJS assignment.
 const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bchild_process\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
+// The plain reads of the process object a name for the process module may make. Any other use of such a name (a computed
+// member, binding, getBuiltinModule, an argument to a call) can reach a loader or a native module, so it is not static.
+const PROCESS_READ = "(?:env\\s*\\.\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|versions?\\b(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)?|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
+// `const p = require("process")` or `import p from "node:process"`: the only loads of the process module that stay static.
+const PROCESS_ALIAS = new RegExp(
+  String.raw`\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(?:node:)?process\2\s*\)|import(?:${GAP}+|(?=\*))(?:\*${GAP}*as${GAP}+)?([A-Za-z_$][\w$]*)${GAP}+from${GAP}*(['"])(?:node:)?process\4)\s*;?`,
+  "g",
+);
+
 // A static file may require these. Any other bare builtin is unsafe, so the load stays in the text.
 const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer"]);
 const NODE_BUILTINS = new Set([
@@ -655,7 +708,18 @@ function builtinRoot(spec: string): string | undefined {
 
 // Relative loads and package names are followed elsewhere. An allowlisted builtin is data.
 // Any other node builtin can run code, so that require is left for UNSAFE_JS.
-function stripLiteralLoad(spec: string): boolean {
+/** The module a literal load names once its escapes are read, or undefined when they cannot be. */
+function loadedSpec(raw: string): string | undefined {
+  return raw.includes("\\") ? decodeJsString(raw) : raw;
+}
+
+function stripLiteralLoad(raw: string): boolean {
+  let spec = raw;
+  if (spec.includes("\\")) {
+    const decoded = decodeJsString(spec);
+    if (decoded === undefined) return false;
+    spec = decoded;
+  }
   if (spec.startsWith(".") || spec.startsWith("/")) return true;
   const root = builtinRoot(spec);
   if (!root) return true;
@@ -664,21 +728,314 @@ function stripLiteralLoad(spec: string): boolean {
 }
 
 // One predicate for JS. A file that fails it widens by the shape of its computed loads.
-function provablyStatic(text: string): boolean {
-  let rest = text.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "");
-  rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3) => {
-    const spec = String(spec1 || spec2 || spec3 || "");
-    return stripLiteralLoad(spec) ? "" : full;
+// A name for the process module is a whole statement: when the next token continues the expression (a member, a call,
+// a computed member, a ? or a template), the load is not a plain name and is left in the text.
+// The index of the first character at or after "from" that is not whitespace or a comment.
+function skipTrivia(whole: string, from: number): number {
+  let i = from;
+  for (;;) {
+    while (i < whole.length && /\s/.test(whole[i]!)) i++;
+    if (whole.startsWith("//", i)) {
+      while (i < whole.length && !/[\n\r\u2028\u2029]/.test(whole[i]!)) i++;
+    } else if (whole.startsWith("/*", i)) {
+      const end = whole.indexOf("*/", i + 2);
+      i = end < 0 ? whole.length : end + 2;
+    } else return i;
+  }
+}
+
+function stripProcessAliases(text: string, aliases: string[]): string {
+  return text.replace(PROCESS_ALIAS, (m, a1, _q, a2, _q4, at: number, whole: string) => {
+    const i = skipTrivia(whole, at + m.length);
+    if (whole.startsWith("<!--", i) || whole.startsWith("-->", i)) return m;
+    if (i < whole.length && ".[(?`".includes(whole[i]!)) return m;
+    aliases.push(String(a1 || a2));
+    // An import declaration is a statement; a const statement without ; continues as an expression after its ) and is a
+    // name. The second scan is safe only because the first scan, on the original text, refuses every ambiguous span.
+    return removedText(a1 === undefined || m.trimEnd().endsWith(";"), m.slice(m.trimEnd().length));
   });
-  rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, "");
-  return !UNSAFE_JS.test(rest);
+}
+
+/** Keywords after which a / starts a regular expression; none of these can be a name. */
+const KEYWORD_REGEX = new Set(["return", "typeof", "case", "delete", "void", "throw", "new", "else", "do", "instanceof", "in", "default", "extends"]);
+/** Words after which a statement may end at a line break, so a / on the next line can start a regular expression. */
+const LINE_END_WORDS = new Set(["break", "continue", "debugger"]);
+/** Words that are keywords in some positions and names in others: a / after one is read once, with the span check. */
+const KEYWORD_MAYBE = new Set(["yield", "await", "of"]);
+// Sticky, so a token is matched in place and the text is never copied.
+const TOK_PRIVATE = /#[A-Za-z_$][\w$]*/y;
+const TOK_WORD = /(?:[A-Za-z_$][\w$]*|[^\x00-\x7f]+)/y;
+const TOK_NUMBER = /(?:0[xXbBoO][0-9a-fA-F_]*n?|\d[\d_]*(?:\.(?!\.)\d*)?(?:[eE][+-]?\d+)?n?)/y;
+const TOK_PUNCT = /(?:\.\.\.|\+\+|--|\?\.(?!\d))/y;
+
+/** Words a span read as a regular expression must not hold: with the process names they are what the checks look for. */
+const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "Worker", "process", "globalThis", "global", "Reflect", "Proxy", "constructor", "child_process", "dlopen", "exports"];
+
+/**
+ * The code of a JavaScript file with string and template text, regular-expression bodies and comments blanked, or
+ * undefined when the scan ends inside one of them or cannot tell a regular expression from a division. Whether a / opens a
+ * regular expression is decided from the previous token this scan emitted, never from the source text before it: text
+ * inside a string, template or regular expression is not a token.
+ */
+function codeOnly(text: string, watch: string[] = [], keep = false): string | undefined {
+  type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
+  let out = "";
+  let t1: Tok | undefined;
+  let t2: Tok | undefined;
+  let atLineStart = true; // only whitespace or comments since the last line break
+  let nlSince = false; // a line break since the last token
+  const push = (k: Tok["k"], t: string) => {
+    t2 = t1;
+    t1 = { k, t };
+    atLineStart = false;
+    nlSince = false;
+  };
+  const braces: boolean[] = [];
+  let i = 0;
+  const n = text.length;
+  const names = [...DANGER_WORDS, ...KEYWORD_REGEX, ...KEYWORD_MAYBE, ...watch].map((w) => w.replace(/\$/g, "\\$&"));
+  const danger = new RegExp(`['"\`\\\\\\u0080-\\uffff(){}\\[\\]]|(?<![\\w$])(?:${names.join("|")})(?![\\w$])|<!--|-->`);
+  const eol = (c: string | undefined) => c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029";
+  let opened = false;
+  const template = (st: number): boolean => {
+    opened = false;
+    for (; i < n; i++) {
+      const c = text[i]!;
+      if (c === "\\") i++;
+      else if (c === "`") {
+        i++;
+        // A closing backtick leaves "" so the tokens on either side of a template never join in the output.
+        out += keep ? text.slice(st, i) : '""';
+        return true;
+      } else if (c === "$" && text[i + 1] === "{") {
+        i += 2;
+        braces.push(true);
+        out += keep ? text.slice(st, i) : " `${";
+        opened = true;
+        return true;
+      }
+    }
+    return false;
+  };
+  const afterTemplate = (st: number): boolean => {
+    if (!template(st)) return false;
+    if (opened) push("punct", "{");
+    else push("tpl", "");
+    return true;
+  };
+  // The end of a regular expression body that starts after the / at "at", or -1.
+  const regexEnd = (at: number): number => {
+    let cls = false;
+    for (let j = at + 1; j < n && !eol(text[j]); j++) {
+      const d = text[j]!;
+      if (d === "\\") j++;
+      else if (d === "[") cls = true;
+      else if (d === "]") cls = false;
+      else if (d === "/" && !cls) return j;
+    }
+    return -1;
+  };
+  // A span ends in a name or a number. The keyword exclusion is defense in depth: a keyword is also in "danger", so a span
+  // ending in one is already refused.
+  const endsInOperand = (span: string): boolean => {
+    const m = /([A-Za-z_$][\w$]*|\d[\w.]*)\s*$/.exec(span);
+    return m !== null && !KEYWORD_REGEX.has(m[1]!) && !KEYWORD_MAYBE.has(m[1]!);
+  };
+  // What follows a closing / must not be a name, a flag, a number or another / : only the end of an expression.
+  const closesCleanly = (at: number): boolean => {
+    let q = at;
+    while (q < n && /\s/.test(text[q]!)) q++;
+    return q >= n || ").;,]}".includes(text[q]!);
+  };
+  // "regex" or "div" when the previous token settles it, "amb" when a / could be either.
+  const slashKind = (): "regex" | "div" | "amb" => {
+    if (!t1) return "regex";
+    if (t1.k === "punct") {
+      if (t1.t === ")" || t1.t === "}" || t1.t === "++" || t1.t === "--") return "amb";
+      return t1.t === "]" ? "div" : "regex";
+    }
+    if (t1.k !== "word") return "div";
+    if (t2 && t2.k === "punct" && (t2.t === "." || t2.t === "?.")) return "div";
+    // break, continue and debugger end a statement at a line break, so a / on the next line starts a regular expression.
+    if (nlSince && (LINE_END_WORDS.has(t1.t) || (t2 && t2.k === "word" && (t2.t === "break" || t2.t === "continue")))) return "amb";
+    if (KEYWORD_REGEX.has(t1.t)) return "regex";
+    return KEYWORD_MAYBE.has(t1.t) ? "amb" : "div";
+  };
+  if (text.startsWith("#!")) while (i < n && !eol(text[i])) i++;
+  while (i < n) {
+    const c = text[i]!;
+    if (/\s/.test(c)) {
+      out += c;
+      if (eol(c)) {
+        atLineStart = true;
+        nlSince = true;
+      }
+      i++;
+    } else if (c === "'" || c === '"') {
+      const st = i;
+      i++;
+      for (; i < n && text[i] !== c && !eol(text[i]); i++) if (text[i] === "\\") i++;
+      if (text[i] !== c) return undefined;
+      i++;
+      out += keep ? text.slice(st, i) : '""';
+      push("str", "");
+    } else if (c === "`") {
+      const st = i;
+      i++;
+      if (!afterTemplate(st)) return undefined;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < n && !eol(text[i])) i++;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const e = text.indexOf("*/", i + 2);
+      if (e < 0) return undefined;
+      const multi = /[\n\r\u2028\u2029]/.test(text.slice(i, e));
+      out += multi ? "\n" : " ";
+      if (multi) {
+        atLineStart = true;
+        nlSince = true;
+      }
+      i = e + 2;
+    } else if (c === "/") {
+      const kind = slashKind();
+      const end = kind === "div" ? -1 : regexEnd(i);
+      if (kind === "regex" && end < 0) return undefined;
+      // Both readings must see the same names: the span holds none, and what follows the closing / is not a name,
+      // a flag or another / that could start a comment.
+      // Read as a division, the closing / must also divide: the span has to end in a name or a number (a bracket in a span is refused above),
+      // or the two readings would fall out of step. Read as a regex, what follows must end an expression.
+      if (kind === "amb" && end >= 0) {
+        const span = text.slice(i + 1, end);
+        if (danger.test(span) || !endsInOperand(span) || !closesCleanly(end + 1)) return undefined;
+      }
+      if (end >= 0) {
+        if (keep) out += text.slice(i, end + 1);
+        i = end + 1;
+        if (!keep) out += "/r/";
+        push("regex", "");
+      } else {
+        out += "/";
+        i++;
+        push("punct", "/");
+      }
+    } else {
+      if (c === "<" && text.startsWith("<!--", i)) return undefined;
+      if (c === "-" && atLineStart && text.startsWith("-->", i)) return undefined;
+      if (c === "}") {
+        const tpl = braces.pop();
+        if (tpl) {
+          i++;
+          out += "}";
+          if (!afterTemplate(i)) return undefined;
+          continue;
+        }
+      }
+      if (c === "{") braces.push(false);
+      let tok: string;
+      let m: RegExpExecArray | null;
+      const at = (re: RegExp): RegExpExecArray | null => {
+        re.lastIndex = i;
+        return re.exec(text);
+      };
+      if ((m = at(TOK_PRIVATE))) {
+        tok = m[0];
+        push("priv", tok);
+      } else if ((m = at(TOK_WORD))) {
+        tok = m[0];
+        push("word", tok);
+      } else if ((m = at(TOK_NUMBER))) {
+        // A dot ends a number literal only after plain decimal digits (1. in x); after 0x10, 1e3, 1n or 07 it is a property dot.
+        tok = m[0];
+        // 0[0-7]+ is a legacy octal literal (the dot after it is a property dot); a leading-zero literal with an 8 or 9 is decimal.
+        if (/^0[0-7]+\./.test(tok)) tok = tok.slice(0, tok.indexOf("."));
+        push("num", tok);
+      } else if ((m = at(TOK_PUNCT))) {
+        tok = m[0];
+        push("punct", tok);
+      } else {
+        tok = c;
+        push("punct", tok);
+      }
+      out += tok;
+      i += tok.length;
+    }
+  }
+  // An open template interpolation or brace at the end is a file Bun rejects: not static, like any unterminated span.
+  if (braces.length > 0) return undefined;
+  return out;
+}
+
+// A backslash or a non-ASCII character in code can spell or hide a name (an escaped identifier, a no-break space), and no
+// test below would see it. The file is not static; text inside strings and comments does not count.
+function hidesNames(code: string | undefined): boolean {
+  return code === undefined || /[^\x00-\x7f\\]|\\/.test(code);
+}
+
+// Stands in for text the second scan removed: a plain identifier, so a . after it stays a property dot and the token
+// before what follows is a name, never a number or a keyword.
+const REMOVED = "__removed_text__";
+
+/**
+ * What the second scan sees where text was removed. A removed expression (a require call, a plain load) is a name; a removed
+ * statement (an import declaration, an alias statement ending in ;) is a name and a ; so a / after it opens a regular
+ * expression as it does after a real statement. Whitespace the match took is put back, and a space always follows, so the
+ * placeholder never joins the next word.
+ */
+function removedText(statement: boolean, spaceAfter = ""): string {
+  return `${REMOVED}${statement ? ";" : ""}${spaceAfter || " "}`;
+}
+
+// True when the previous non-whitespace character is a dot, however much whitespace lies between.
+function dotBefore(text: string, at: number): boolean {
+  let j = at;
+  while (j > 0 && /\s/.test(text[j - 1]!)) j--;
+  return j > 0 && text[j - 1] === ".";
+}
+
+function provablyStatic(source: string): boolean {
+  if (source.includes(REMOVED)) return false;
+  // Comments out first, strings kept: the patterns below read code, and a comment can neither hide nor fake a load.
+  const text = codeOnly(source, [], true);
+  if (text === undefined) return false;
+  const aliases: string[] = [];
+  let viaOther = false;
+  let rest = stripProcessAliases(text, aliases);
+  if (hidesNames(codeOnly(text, aliases))) return false;
+  rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), removedText(false));
+  rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3, at: number, whole: string) => {
+    const spec = String(spec1 || spec2 || spec3 || "");
+    if (builtinRoot(loadedSpec(spec) ?? "") === "process") viaOther = true;
+    if (!stripLiteralLoad(spec)) return full;
+    // from "x" and import "x" end an import declaration only when the string is on the keyword's line and no . comes before
+    // it (a variable named from, a property named import, are not declarations). Anything else is read as an expression, and
+    // a / right after it could be a regular expression or a division: not static.
+    const declaration = spec1 === undefined && !/[\n\r\u2028\u2029]/.test(full) && !dotBefore(whole, at);
+    if (spec1 === undefined && !declaration && whole[skipTrivia(whole, at + full.length)] === "/") viaOther = true;
+    return removedText(declaration);
+  });
+  if (viaOther) return false;
+  // No space after this one on purpose: a property access can follow it (module.exports.in is a property).
+  rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);
+  // Any other load of the process module (a bare require, a named import) is not a plain name for it.
+  if (/(?:\brequire\s*\(|\bfrom|\bimport)\s*['"](?:node:)?process\b/.test(rest)) return false;
+  if (UNSAFE_JS.test(rest)) return false;
+  if (aliases.length === 0) return true;
+  const code = codeOnly(rest, aliases);
+  if (code === undefined) return false;
+  rest = code;
+  // Identifier edges: $, _, digits and non-ASCII characters continue a name, so \b is not an edge.
+  const names = aliases.map((n) => n.replace(/\$/g, "\\$"));
+  const L = "(?<![\\w$\\u0080-\\uffff])";
+  const R = "(?![\\w$\\u0080-\\uffff])";
+  for (const n of names) rest = rest.replace(new RegExp(`${L}${n}\\s*\\.\\s*${PROCESS_READ}`, "g"), "");
+  return !new RegExp(`${L}(?:${names.join("|")})${R}`).test(rest);
 }
 
 // exec/eval/compile, a dynamic import, or a loader that runs another file.
 // A static `import helper` does not match. Docs stay out unless a literal names them.
-function runsOtherFile(text: string): boolean {
+export function runsOtherFile(text: string): boolean {
   if (/\b(?:exec|eval|compile)\s*\(/.test(text)) return true;
   if (/\b(?:__import__|importlib|import_module|execfile|runpy|run_path|load_source|SourceFileLoader)\b/.test(text)) return true;
+  // Raw text on purpose: callers here are shell, Python and Ruby, where // and /* are not comments.
   if (/import\s*\(/.test(text)) return true;
   return false;
 }
@@ -727,18 +1084,28 @@ function addLogical(ctx: Ctx, logical: string): void {
     return;
   }
   const key = findKey(ctx, logical);
-  if (!key) {
+  // Node tries the file (logical, logical.js, ...) before the directory, and findKey reads a directory manifest first:
+  // a path that reads both ways has both in the closure.
+  const fileKey = ctx.hold ? undefined : findFile(ctx, logical);
+  if (!key && !fileKey) {
     ctx.missing.add(logical);
     return;
   }
-  // The manifest is not a surface file. Hook text and bin are compared on their own,
-  // and a version bump always changes these bytes.
-  if (isManifest(key)) return;
-  // A file the walk reached by name stays, including docs, markdown, and workflows.
-  // Inert exclusion applies only inside widenAll, addBundled, and the same-directory widen.
-  ctx.files.add(key);
-  if (ctx.fromGyp) ctx.gypFiles.add(key);
-  scanAdded(ctx, key);
+  // Node's require tries only X, X.js, X.json and X.node before the directory: when the file found is another extension
+  // (.cjs, .ts), Node goes on to the directory's index, so that is in the closure too.
+  const nodeHit = fileKey !== undefined && ["", ".js", ".json", ".node"].some((e) => ctx.logical.get(logical + e) === fileKey);
+  const dirKey = ctx.hold || !fileKey || nodeHit ? undefined : findFile(ctx, `${logical}/index`);
+  for (const k of new Set([key, fileKey, dirKey])) {
+    if (!k) continue;
+    // The manifest is not a surface file. Hook text and bin are compared on their own,
+    // and a version bump always changes these bytes.
+    if (isManifest(k)) continue;
+    // A file the walk reached by name stays, including docs, markdown, and workflows.
+    // Inert exclusion applies only inside widenAll, addBundled, and the same-directory widen.
+    ctx.files.add(k);
+    if (ctx.fromGyp) ctx.gypFiles.add(k);
+    scanAdded(ctx, k);
+  }
 }
 
 function addRef(ctx: Ctx, token: string): void {
@@ -1026,7 +1393,8 @@ function narrowWiden(ctx: Ctx, fromKey: string): void {
 }
 
 function widenJs(ctx: Ctx, key: string, text: string): void {
-  const tier = classifyJs(key, text);
+  // Comment-free text, so a comment inside an eval argument cannot end its argument list early. Unreadable text stays raw.
+  const tier = classifyJs(key, codeOnly(text, [], true) ?? text);
   if (tier.all) widenEvery(ctx);
   else if (tier.pkg) widenPackage(ctx, tier.tests, tier.flows);
   else {
