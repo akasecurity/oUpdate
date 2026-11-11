@@ -1779,6 +1779,8 @@ const DECLARATION = /(?:^|\n)([ \t\r\n]*)(?:import(?![\w$])\s*(?:[\w$*{]|"")|exp
 function rawPrologue(raw: string): string[] {
   const out: string[] = [];
   let i = 0;
+  // A leading hashbang line is not code: the prologue starts after it.
+  if (raw.startsWith("#!")) while (i < raw.length && raw[i] !== "\n") i++;
   for (;;) {
     for (;;) {
       while (i < raw.length && /\s/.test(raw[i]!)) i++;
@@ -2254,8 +2256,7 @@ function widenJs(ctx: Ctx, key: string, text: string): void {
   }
 }
 function widenJsScan(ctx: Ctx, key: string, text: string): void {
-  // Comment-free text, so a comment inside an eval argument cannot end its argument list early. Unreadable text stays raw.
-  const tier = classifyJs(key, codeOnly(text, [], true) ?? text);
+  const tier = classifyJs(key, text);
   if (tier.all) widenEvery(ctx);
   else if (tier.pkg) widenPackage(ctx, tier.tests, tier.flows);
   else {
@@ -2275,7 +2276,7 @@ type JsEffect =
   | { t: "pkg"; tests: boolean; flows: boolean }
   | { t: "all" };
 
-type JsTier = { all: boolean; pkg: boolean; tests: boolean; flows: boolean; same: boolean; dirs: string[]; lits: string[] };
+export type JsTier = { all: boolean; pkg: boolean; tests: boolean; flows: boolean; same: boolean; dirs: string[]; lits: string[] };
 
 // eval/Function/vm of a value we cannot see can load any file, docs included.
 // A string literal or a read of a literal path is not that shape.
@@ -2405,16 +2406,17 @@ function steeringKey(code: string): boolean {
 }
 
 const CALL_OK = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
-export function hasUnbounded(text: string): boolean {
+// `text` is comment-free; `source` is the file's own text for the checks that need it (a template literal is not a directive).
+export function hasUnbounded(text: string, source: string): boolean {
   try {
-    return hasUnboundedScan(text);
+    return hasUnboundedScan(text, source);
   } catch {
     scannerFaults++;
     return true;
   }
 }
-function hasUnboundedScan(text: string): boolean {
-  if (processHazard(text)) return true;
+function hasUnboundedScan(text: string, source: string): boolean {
+  if (processHazard(source)) return true;
   // Indirect and optional eval, new Function, the global object's eval, a computed member of a global, and a timer given code.
   const plain = codeOnly(text) ?? text;
   if (/(?<![\w$.])(?<!instanceof\s+)(?:eval|Function)\b(?!\s*\()/.test(plain)) return true;
@@ -2450,17 +2452,21 @@ function hasUnboundedScan(text: string): boolean {
   return false;
 }
 
-function classifyJs(fromKey: string, text: string): JsTier {
+// Takes the file's own source: the hazard check reads the raw text (a template literal is not a directive, which the comment-free
+// text below cannot tell), and the load scan reads the comment-free text, so a comment inside an eval argument cannot end its
+// argument list early. Unreadable text stays raw.
+export function classifyJs(fromKey: string, source: string): JsTier {
   try {
-    return classifyJsScan(fromKey, text);
+    return classifyJsScan(fromKey, source);
   } catch {
     scannerFaults++;
     return { all: true, pkg: true, tests: true, flows: true, same: false, dirs: [], lits: [] };
   }
 }
-function classifyJsScan(fromKey: string, text: string): JsTier {
+function classifyJsScan(fromKey: string, source: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
-  if (hasUnbounded(text)) tier.all = true;
+  const text = codeOnly(source, [], true) ?? source;
+  if (hasUnbounded(text, source)) tier.all = true;
   const re = /(?:^|[^\w$])(?:require|import|fork|execFile|execFileSync)\s*\(/g;
   for (const m of text.matchAll(re)) {
     const paren = (m.index ?? 0) + m[0].lastIndexOf("(");

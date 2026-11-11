@@ -1291,7 +1291,7 @@ test("processHazard answers hazard on its own fault (round 28m)", () => {
 });
 test("hasUnbounded answers unbounded on its own fault (round 28m)", () => {
   const before = scannerFaultCount();
-  faultOn(String.raw`constructor\s*(?:\?\.|\.)\s*constructor`, () => expect(hasUnbounded("exports.main = (x) => require(x)\n")).toBe(true));
+  faultOn(String.raw`constructor\s*(?:\?\.|\.)\s*constructor`, () => expect(hasUnbounded("exports.main = (x) => require(x)\n", "exports.main = (x) => require(x)\n")).toBe(true));
   expect(scannerFaultCount()).toBe(before + 1);
 });
 test("a pattern nested deeper than the chain cap reads cautiously, a shallow one does not widen (round 28m)", () => {
