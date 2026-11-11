@@ -1772,10 +1772,41 @@ function computedCallChain(code: string): boolean {
 // expression (a binary operator, member dot, call, index, ?, comma, template tag or the words in / instanceof; ! ~ and ++ --
 // start a new statement). A template literal is not a directive.
 const DIRECTIVE = /\s*(['"])([^'"\\\n]*)\1[ \t]*/y;
-const CONTINUES = /^(?:[*\/%<>=&|^?,.(\[`]|\+(?!\+)|-(?!-)|(?:in|instanceof)(?![\w$]))/;
+const CONTINUES = /^(?:[*\/%<>=&|^?,.(\[`]|!==?|\+(?!\+)|-(?!-)|(?:in|instanceof)(?![\w$]))/;
 const DECLARATION = /(?:^|\n)([ \t\r\n]*)(?:import(?![\w$])\s*(?:[\w$*{]|"")|export(?![\w$])\s*(?:default\b|const\b|let\b|var\b|function\b|class\b|async\b|[{*]))/g;
+// The leading quoted strings of the source, comments between them skipped. The kept text writes a plain template as a quoted
+// string, so a directive is real only when the source spells the same string with ' or " at the same place in the prologue.
+function rawPrologue(raw: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  for (;;) {
+    for (;;) {
+      while (i < raw.length && /\s/.test(raw[i]!)) i++;
+      if (raw.startsWith("//", i)) {
+        while (i < raw.length && raw[i] !== "\n") i++;
+      } else if (raw.startsWith("/*", i)) {
+        const e = raw.indexOf("*/", i + 2);
+        if (e < 0) return out;
+        i = e + 2;
+      } else break;
+    }
+    const q = raw[i];
+    if (q !== '"' && q !== "'") return out;
+    let j = i + 1;
+    while (j < raw.length && raw[j] !== q && raw[j] !== "\n" && raw[j] !== "\\") j++;
+    if (raw[j] !== q) return out;
+    out.push(raw.slice(i + 1, j));
+    i = j + 1;
+    // Skip to the end of the statement: only a directive keeps the prologue going.
+    while (i < raw.length && /[ \t]/.test(raw[i]!)) i++;
+    if (raw[i] === ";") i++;
+  }
+}
+
 function strictFileOf(keep: string, code: string, raw: string): boolean {
   let pos = 0;
+  let nth = 0;
+  const lits = rawPrologue(raw);
   for (;;) {
     DIRECTIVE.lastIndex = pos;
     const m = DIRECTIVE.exec(keep);
@@ -1788,8 +1819,8 @@ function strictFileOf(keep: string, code: string, raw: string): boolean {
       while (k < keep.length && /\s/.test(keep[k]!)) k++;
       if (CONTINUES.test(keep.slice(k, k + 12))) break;
     }
-    // The kept text writes a plain template as a quoted string: the directive must be spelled with quotes in the source.
-    if (m[2] === "use strict" && /(['"])use strict\1/.test(raw)) return true;
+    if (m[2] === "use strict" && lits[nth] === "use strict") return true;
+    nth++;
     pos = end;
   }
   for (const d of code.matchAll(DECLARATION)) {

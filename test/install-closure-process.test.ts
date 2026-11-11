@@ -1363,6 +1363,10 @@ for (const [label, pre] of [
   ["a directive continued by in on the next line", `"use strict"\nin {};\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
   ["a member named import before a line that starts with a name", `const o = {}; o.\nimport\nx = 1;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
   ["a member named export before a line that starts with const", `const o = {}; o.\nexport\nconst k = 1;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a directive continued by !=", `"use strict"\n!= 0;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a directive continued by !==", `"use strict"\n!== 0;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a template directive with a comment that quotes the directive", `// "use strict"\n\`use strict\`;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a template directive with a quoted directive inside a function", `\`use strict\`;\nfunction f() { "use strict"; }\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
   ["a template literal that spells the directive", `\`use strict\`;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
   ["a directive that a continuing line turns into an expression", `"use strict"\n+ "x";\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
   ["a spread of this", `const o = { ...this }; ${ENVW("o")};\nexports.main = () => 1\n`],
@@ -1401,9 +1405,9 @@ for (const [label, pre] of [
   test(`${label} stays static`, () => expect(held(pre)).toBe(false));
 }
 for (const [label, pre] of [
-  ["a really strict function body", '"use strict";\nexports.main = function () { return this }\n'],
   ["a directive after another directive", '"a directive"; "use strict";\nexports.main = function () { return this }\n'],
   ["a directive ended by a line that starts with !", '"use strict"\n!true;\nexports.main = function () { return this }\n'],
+  ["a directive ended by a line that starts with --", '"use strict"\n--n;\nexports.main = function () { return this }\n'],
   ["a directive ended by a line that starts with ~", '"use strict"\n~1;\nexports.main = function () { return this }\n'],
   ["a directive ended by a line that starts with ++", '"use strict"\n++n;\nexports.main = function () { return this }\n'],
   ["a member named this", 'exports.main = (x) => x.this\n'],
