@@ -4804,7 +4804,7 @@ const PREFIX_VALUE_FLAG: Record<string, RegExp> = {
 };
 const STAGE_KEYWORD = /^(?:\{|\}|!|if|then|elif|else|do|done|fi|while|until)$/;
 
-type StageWord = { t: string; sub: boolean; v: boolean; n: string[]; ar: boolean; an: string[] }; // sub: a command substitution; v: a variable or arithmetic expansion; n: the plain variable names in the word
+type StageWord = { t: string; sub: boolean; v: boolean; n: string[]; ar: boolean; an: string[]; uq: string[]; un: string[] }; // sub: a command substitution; v: a variable or arithmetic expansion; n: the plain variable names in the word
 
 // `text` with each command substitution replaced by a number, so what is left reads as arithmetic or not.
 function blankSubs(text: string): string {
@@ -4890,6 +4890,8 @@ function shellStages(line: string): StageFeed {
   let nowFed = false;
   let names: string[] = [];
   let arithBudget = 16; // scans for the end of a `((` that consume nothing (unclosed or nested runs) are bounded
+  let uqBodies: string[] = []; // unquoted substitutions in the word: their output splits into words
+  let uqNames: string[] = []; // and unquoted variables
   let arSub = false; // the word holds arithmetic with a substitution in it: the substituted value is evaluated
   let arNames: string[] = []; // and the names the arithmetic reads
   const bodies: string[] = [];
@@ -4907,7 +4909,7 @@ function shellStages(line: string): StageFeed {
       skip = false;
       if (hereStr && (sub || v)) nowFedUnres = true;
       hereStr = false;
-    } else words.push({ t: cur, sub, v, n: names, ar: arSub, an: arNames });
+    } else words.push({ t: cur, sub, v, n: names, ar: arSub, an: arNames, uq: uqBodies, un: uqNames });
     cur = "";
     inWord = false;
     sub = false;
@@ -4915,6 +4917,8 @@ function shellStages(line: string): StageFeed {
     names = [];
     arSub = false;
     arNames = [];
+    uqBodies = [];
+    uqNames = [];
   };
   const endStage = (): void => {
     endWord();
@@ -4930,13 +4934,15 @@ function shellStages(line: string): StageFeed {
     }
     words = [];
   };
-  const take = (i: number, tick: boolean): number => {
+  const take = (i: number, tick: boolean, quoted = false): number => {
     const e = tick ? endTick(line, i) : endParen(line, i + 2);
     if (e < 0) {
       unsure = true;
       return line.length;
     }
-    bodies.push(tick ? unTick(line.slice(i + 1, e - 1)) : line.slice(i + 2, e - 1));
+    const text = tick ? unTick(line.slice(i + 1, e - 1)) : line.slice(i + 2, e - 1);
+    bodies.push(text);
+    if (!quoted) uqBodies.push(text);
     sub = true;
     inWord = true;
     cur += UNRESOLVED;
@@ -4968,11 +4974,17 @@ function shellStages(line: string): StageFeed {
       const inner = line.slice(i + 2, e - 1);
       if (!nestedBodies(inner, bodies, 0, dq)) unsure = true;
       const nm = /^[A-Za-z_][A-Za-z0-9_]*$/.exec(inner);
-      if (nm) names.push(nm[0]);
+      if (nm) {
+        names.push(nm[0]);
+        if (!dq) uqNames.push(nm[0]);
+      }
       return e;
     }
     const m = /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/.exec(line.slice(i + 1));
-    if (m && /^[A-Za-z_]/.test(m[0])) names.push(m[0]);
+    if (m && /^[A-Za-z_]/.test(m[0])) {
+      names.push(m[0]);
+      if (!dq) uqNames.push(m[0]);
+    }
     return i + 1 + (m ? m[0].length : 0);
   };
   for (let i = 0; i < line.length; ) {
@@ -5005,8 +5017,8 @@ function shellStages(line: string): StageFeed {
         if (d === "\\") {
           cur += line[j + 1] ?? "";
           j += 2;
-        } else if (d === "`") j = take(j, true);
-        else if (d === "$" && line[j + 1] === "(" && !isArith(line, j)) j = take(j, false);
+        } else if (d === "`") j = take(j, true, true);
+        else if (d === "$" && line[j + 1] === "(" && !isArith(line, j)) j = take(j, false, true);
         else if (d === "$" && line[j + 1] !== undefined && /[A-Za-z_{(0-9@*#?$!-]/.test(line[j + 1]!)) j = dollar(j, true);
         else {
           cur += d;
@@ -5096,7 +5108,7 @@ function shellStages(line: string): StageFeed {
         endStage();
         const inner = inner0;
         if (!nestedBodies(inner, bodies, 0, false)) unsure = true;
-        stages.push([{ t: "((", sub: false, v: false, n: [], ar: /\$\(|`/.test(inner), an: inner.match(/[A-Za-z_]\w*/g) ?? [] }]);
+        stages.push([{ t: "((", sub: false, v: false, n: [], ar: /\$\(|`/.test(inner), an: inner.match(/[A-Za-z_]\w*/g) ?? [], uq: [], un: [] }]);
         feed.push(null);
         fed.push(false);
         fedUnres.push(false);
@@ -5151,6 +5163,8 @@ function runnerFlags(name: string): { code: RegExp; value: RegExp } {
   if (!spec) return { code: /^$/, value: /^$/ };
   return { code: spec.code, value: key === "node" ? new RegExp(spec.value.source.replace(/\)\$$/, "|--title)$")) : spec.value };
 }
+// Commands whose output is a number, a version or a platform name: unquoted, it cannot split into a second flag.
+const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[a-z]+)?|date(?: \+\S*)?|pwd|hostname|whoami|arch|getconf [A-Z_]+|sysctl -n [a-z.]+|node (?:-v|--version)|npm (?:root|prefix))$/;
 // Flags whose substituted value is a number or a target, not a program.
 const SAFE_FLAG_SUB: Record<string, RegExp> = {
   make: /^-j/,
@@ -5176,6 +5190,8 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
     if (wide) inert = true;
   };
   const taints = (w: StageWord): boolean => w.sub || (w.v && w.n.some((x) => tainted.has(x)));
+  // An unquoted substitution or tainted variable splits into words: a second flag can come out of it.
+  const splits = (w: StageWord): boolean => w.uq.some((b) => !BENIGN_SUB.test(b.trim())) || w.un.some((x) => tainted.has(x));
   const holdsUnresolved = (st: StageWord[]): boolean => st.some((w) => w.sub || w.v);
   stages.forEach((words, at) => {
     let h = 0;
@@ -5221,13 +5237,38 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
         for (const w of rest) if (ASSIGN.test(w.t) && taints(w)) tainted.add(w.t.slice(0, w.t.indexOf("=")).replace(/\+$/, ""));
       }
       // A substituted name or number is evaluated as arithmetic by these: a[$(cmd)] runs cmd.
-      const named = rest.some((w) => !ASSIGN.test(w.t) && !w.t.startsWith("-") && taints(w));
+      // The words of `read` that are names: not the values of -p -n -N -t -u -d -i -a.
+      const operands = (): StageWord[] => {
+        const out: StageWord[] = [];
+        for (let k = 0; k < rest.length; k++) {
+          const w = rest[k]!;
+          if (w.t === "--") continue;
+          if (w.t.startsWith("-")) {
+            if (name === "read" && /^-[A-Za-z]*[pnNtudia]$/.test(w.t)) k++;
+            continue;
+          }
+          out.push(w);
+        }
+        return out;
+      };
+      const named = operands().some((w) => !ASSIGN.test(w.t) && taints(w));
       if (/^(?:read|unset|declare|typeset|local|readonly|export)$/.test(name) && named) widen(true);
       if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && rest.some(taints)) widen(true);
-      // Only the name after -v is evaluated: the data arguments of printf are data.
+      // A variable set from a substitution is evaluated as arithmetic when declared -i or unset by name: a[$(cmd)] runs cmd.
+      const namesTainted = operands().some((w) => tainted.has(w.t.replace(/=.*/, "")));
+      if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && namesTainted) widen(true);
+      if (name === "unset" && namesTainted) widen(true);
+      // read keeps what its input holds in its variables.
+      if (name === "read") for (const w of operands()) if (!ASSIGN.test(w.t)) tainted.add(w.t);
+      // Only the name after -v is evaluated: the data arguments of printf are data, and after -- a -v is the format. The
+      // variable it sets keeps what a substituted argument printed.
       if (name === "printf") {
-        const v = rest.findIndex((w) => w.t === "-v");
-        if (v >= 0 && rest[v + 1] !== undefined && taints(rest[v + 1]!)) widen(true);
+        const dd = rest.findIndex((w) => w.t === "--");
+        const v = rest.findIndex((w, k) => w.t === "-v" && (dd < 0 || k < dd));
+        if (v >= 0 && rest[v + 1] !== undefined) {
+          if (taints(rest[v + 1]!)) widen(true);
+          else if (rest.slice(v + 2).some(taints)) tainted.add(rest[v + 1]!.t);
+        }
       }
       if (/^(?:\[|\[\[|test)$/.test(name) && rest.some(taints) && rest.some((w) => w.t === "-v" || /^-(?:eq|ne|lt|le|gt|ge)$/.test(w.t))) widen(true);
       return;
@@ -5264,7 +5305,11 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
           // A preload or loader names a file the runner loads.
           if (joined ? taints(w) : rest[q + 1] !== undefined && taints(rest[q + 1]!)) widen(true);
           q += joined ? 1 : 2;
-        } else q++;
+        } else {
+          // A flag value that splits can carry a second flag (a preload, a loader).
+          if (splits(w)) widen(true);
+          q++;
+        }
       }
       const first = rest[q];
       if (name === "eval" && rest.length > 0) {
@@ -5298,8 +5343,15 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
     }
     // Any other command may run what a substitution in its arguments names; a flag value of a build tool that only sets a
     // number or a target (`make -j$(nproc)`, `node-gyp rebuild --target=$(node -v)`) does not.
+    // The value is exempt only as a literal or a quoted substitution: an unquoted one splits into words, and a word can be a flag.
     const safe = SAFE_FLAG_SUB[name];
-    if (rest.some((w) => taints(w) && !(safe && w.t.startsWith("-") && safe.test(w.t)))) widen(true);
+    const exempt = (w: StageWord, p: StageWord | undefined): boolean => {
+      if (!safe || splits(w)) return false;
+      if (w.t.startsWith("-")) return safe.test(w.t);
+      // the value as the next word of a bare flag: `--target "$(node -v)"`, `-D CMAKE_BUILD_TYPE="$(cmd)"`
+      return !!p && p.t.startsWith("-") && !p.t.includes("=") && !p.sub && !p.v && safe.test(p.t === "-D" ? "-D" + w.t : p.t + "=" + w.t);
+    };
+    if (rest.some((w, k) => taints(w) && !exempt(w, rest[k - 1]))) widen(true);
   });
   if (depth < 6) {
     for (const body of bodies) {

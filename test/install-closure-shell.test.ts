@@ -439,7 +439,7 @@ for (const [label, hook] of toolFlagLines) {
 }
 
 const toolQuiet: [string, string][] = [
-  ["a cmake build type", "cmake -DCMAKE_BUILD_TYPE=$(echo Release) | cat"],
+  ["a cmake build type, quoted", 'cmake -DCMAKE_BUILD_TYPE="$(echo Release)" | cat'],
   ["a cmake version value", "cmake -DFOO_VERSION=$(node -v) > log"],
   ["a node-gyp arch", "node-gyp rebuild --arch=$(uname -m) | cat"],
   ["printf -v with a substituted data argument", "printf -v answer '%s' \"$(date)\" | cat"],
@@ -457,3 +457,70 @@ test("read of a substituted name reads every file", () => {
   const hook = "read $(echo answer) | cat";
   expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js")).length).toBeGreaterThan(0);
 });
+
+// An allowlisted flag value is exempt as a literal or a quoted substitution; an unquoted one splits into words, and a word can be
+// a second flag that names a program.
+const splitLines: [string, string][] = [
+  ["an unquoted cmake build type", `cmake -DCMAKE_BUILD_TYPE=${U} -B b . | cat`],
+  ["an unquoted cmake typed build type", `cmake -DCMAKE_BUILD_TYPE:STRING=${U} -B b . | cat`],
+  ["an unquoted cmake install prefix", `cmake -DCMAKE_INSTALL_PREFIX=${U} -B b . | cat`],
+  ["an unquoted cmake version value", `cmake -DFOO_VERSION=${U} -B b . | cat`],
+  ["a backtick cmake build type", "cmake -DCMAKE_BUILD_TYPE=`cat name.txt` -B b . | cat"],
+  ["an unquoted node-gyp target", `node-gyp rebuild --target=${U} | cat`],
+  ["an unquoted node-gyp arch", `node-gyp rebuild --arch=${U} | cat`],
+  ["an unquoted node-gyp jobs", `node-gyp rebuild --jobs ${U} | cat`],
+  ["an unquoted node-gyp dist-url", `node-gyp rebuild --dist-url=${U} | cat`],
+  ["an unquoted node-gyp runtime", `node-gyp rebuild --runtime=${U} | cat`],
+  ["an unquoted make job count", `make -j${U} | tee log`],
+  ["an unquoted value on a node flag before a literal script", `node --max-old-space-size=${U} lib/ok.js | cat`],
+  ["an unquoted variable set from a substitution as a cmake value", `F=${U}; cmake -DCMAKE_BUILD_TYPE=$F -B b . | cat`],
+  ["a cmake -P script", `cmake -P ${U} | cat`],
+];
+
+for (const [label, hook] of splitLines) {
+  for (const changed of ["lib/evil.js", "docs/evil.js"] as const) {
+    test(`${label} reads every file: a changed ${changed} holds`, () => {
+      expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, changed)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const splitQuiet: [string, string][] = [
+  ["a quoted cmake build type", `cmake -DCMAKE_BUILD_TYPE="${U}" | cat`],
+  ["a quoted node-gyp target as the next word", 'node-gyp rebuild --target "$(node -v)" | cat'],
+  ["a quoted cmake define as the next word", 'cmake -D CMAKE_BUILD_TYPE="$(echo Release)" | cat'],
+  ["a quoted prebuild-install arch as the next word", 'prebuild-install --arch "$(uname -m)" | cat'],
+  ["a quoted make job count as the next word", 'make -j "$(nproc)" | tee log'],
+  ["an unquoted job count from nproc", "make -j$(nproc) | tee log"],
+  ["an unquoted target from node -v", "node-gyp rebuild --target=$(node -v) | cat"],
+  ["read with a prompt value", 'read -p "$(date)" answer | cat'],
+  ["read with a count value", 'read -n "$(echo 1)" answer | cat'],
+  ["read with a timeout value", 'read -t "$(echo 1)" answer | cat'],
+  ["printf with -v after --", 'printf -- -v "$(date)" | cat'],
+  ["printf -v with a substituted data argument", `printf -v answer '%s' "${U}" | cat`],
+];
+
+for (const [label, hook] of splitQuiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
+  });
+}
+
+// A variable set from a substitution by printf -v or read keeps the taint: arithmetic, unset and declare -i on it evaluate it.
+const setLines: [string, string][] = [
+  ["printf -v then an arithmetic command", `printf -v X '%s' "${U}"; (( X )) | cat`],
+  ["printf -v then arithmetic expansion", `printf -v X '%s' "${U}"; echo $(( X )) | cat`],
+  ["printf -v then a numeric test", `printf -v X '%s' "${U}"; [[ $X -eq 0 ]] 2>/dev/null`],
+  ["printf -v then unset", `printf -v X '%s' "${U}"; unset X | cat`],
+  ["printf -v then declare -i", `printf -v X '%s' "${U}"; declare -i X | cat`],
+  ["read then an arithmetic command", "echo $(date); read X; (( X )) | cat"],
+  ["read then declare -i", "echo $(date); read X; declare -i X | cat"],
+];
+
+for (const [label, hook] of setLines) {
+  for (const changed of ["lib/evil.js", "docs/evil.js"] as const) {
+    test(`${label} reads every file: a changed ${changed} holds`, () => {
+      expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, changed)).length).toBeGreaterThan(0);
+    });
+  }
+}
