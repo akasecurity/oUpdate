@@ -128,7 +128,9 @@ function words(cmd: string): string[] {
   for (let ci = 0; ci < cmd.length; ci++) {
     const c = cmd[ci]!;
     if (quote) {
-      if (c === quote) quote = undefined;
+      // In double quotes a backslash before a quote, a backslash, a dollar or a backtick leaves that character (`\"` is `"`).
+      if (c === "\\" && quote === '"' && /["\\$`]/.test(cmd[ci + 1] ?? "")) cur += cmd[++ci]!;
+      else if (c === quote) quote = undefined;
       else cur += c;
       continue;
     }
@@ -438,7 +440,9 @@ function splitCommands(ctx: Ctx, body: string): string[] | null {
     const c = body[i]!;
     if (quote) {
       cur += c;
-      if (c === quote) quote = undefined;
+      // In double quotes a backslash escapes the next character: `\"` does not close the quote.
+      if (c === "\\" && quote === '"' && i + 1 < body.length) cur += body[++i]!;
+      else if (c === quote) quote = undefined;
       continue;
     }
     if (c === "'" || c === '"') {
@@ -4477,8 +4481,12 @@ function markHookFile(ctx: Ctx, token: string): void {
 function noteHookArgCwd(ctx: Ctx, token: string): void {
   // A file named by an expansion the scan could not resolve (`sh tools/$N.sh`) may be any file of the package.
   if (token.includes(UNRESOLVED)) {
-    // A bare word (`node -r $(cat n)`) may name a file anywhere, docs and tests included; a path word keeps its directory.
-    if (!token.includes("/")) ctx.widenInert = true;
+    // An unresolved part may name a file anywhere, docs and tests included: a bare word (`node -r $(cat n)`), a path word
+    // in the package root (`node ./$(cat n)`) or with an unresolved directory. A path word whose directory is known
+    // (`node docs/$(cat b)`) reads every file under that directory, inert ones included, and no others.
+    const dir = token.includes("/") ? normalize(token.slice(0, token.lastIndexOf("/"))) : "";
+    if (!dir || dir.includes(UNRESOLVED) || badPath(dir)) ctx.widenInert = true;
+    else addUnder(ctx, dir);
     widenAll(ctx);
   }
   noteHookArg(ctx, token);
@@ -4953,7 +4961,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
         i++;
         continue;
       }
-      if (name === "-e" || name === "--eval" || name === "-p" || name === "--print") {
+      if (name === "-e" || name === "--eval" || name === "-p" || name === "--print" || name === "-pe" || name === "-ep") {
         const code = take();
         if (code === undefined) return;
         evalCode(ctx, code);

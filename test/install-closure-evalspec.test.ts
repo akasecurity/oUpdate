@@ -59,3 +59,46 @@ for (const [label, hook] of [
 test("control: a path word with an unresolved part keeps its directory-scoped read", () => {
   expect(held("sh ./lib/$N.sh", "docs/payload.txt")).toBe(false);
 });
+
+// A path word with an unresolved part reads its directory, inert files included (`./` is the package root).
+const pathWords: [string, string, string[]][] = [
+  ["a root-relative path word", "node ./$(cat name.txt)", ["lib/evil.js", "docs/payload.txt", "test/t.js"]],
+  ["a path word under docs/", "node docs/$(cat name.txt)", ["docs/payload.txt"]],
+  ["a path word under test/", "node test/$(cat name.txt)", ["test/t.js"]],
+  ["a path word under docs/ with backticks", "node docs/`cat name.txt`", ["docs/payload.txt"]],
+  ["a path word with an unresolved directory", "node $(cat name.txt)/x.js", ["docs/payload.txt", "test/t.js"]],
+];
+for (const [label, hook, changed] of pathWords) {
+  for (const c of changed) test(`${label}: a changed ${c} holds`, () => expect(held(hook, c)).toBe(true));
+}
+
+test("control: a path word under docs/ leaves a changed test file alone", () => {
+  expect(held("node docs/$(cat name.txt)", "test/t.js")).toBe(false);
+});
+
+// The code of -e is read as the shell passes it: escaped quotes are plain quotes, and -pe / -ep are -p plus -e.
+for (const [label, hook] of [
+  ["node -e with escaped double quotes", `node -e "require(\\"./lib/$(cat name.txt)\\")"`],
+  ["node -e with escaped double quotes and backticks", 'node -e "require(\\"./lib/`cat name.txt`\\")"'],
+  ["node -pe with a substituted require spec", `node -pe "require('./lib/$(cat name.txt)')"`],
+  ["node -ep with a substituted require spec", `node -ep "require('./lib/$(cat name.txt)')"`],
+] as const) {
+  for (const changed of ["lib/evil.js", "docs/payload.txt", "test/t.js"]) {
+    test(`${label}: a changed ${changed} holds`, () => expect(held(hook, changed)).toBe(true));
+  }
+}
+
+// A backtick alone reaches -r, --require= and --import like $(...).
+for (const [label, hook] of [
+  ["node -r with a backtick path", "node -r ./`cat name.txt` lib/a.js"],
+  ["node --require= with a backtick path", "node --require=./`cat name.txt` lib/a.js"],
+  ["node --import with a backtick path", "node --import ./`cat name.txt` lib/a.js"],
+] as const) {
+  for (const changed of ["docs/payload.txt", "test/t.js"]) {
+    test(`${label}: a changed ${changed} holds`, () => expect(held(hook, changed)).toBe(true));
+  }
+}
+
+test("control: node -e with escaped quotes and a literal spec leaves an unrelated file alone", () => {
+  expect(held(`node -e "require(\\"./lib/a\\")"`, "lib/evil.js")).toBe(false);
+});
