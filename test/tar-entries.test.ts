@@ -1328,6 +1328,27 @@ describe("pypi files pair with their own old file", () => {
     expect(hold?.detail).toEndWith(": symlink x-2/docs/link");
   });
 
+  test("names that differ only by a backslash and a control character are shown apart", async () => {
+    const r = await load([["x-1-py3-none-a\u0000b.whl", sdist("1", true)]], [["x-2-py3-none-a\u0000b.whl", sdist("2", true, "a")], ["x-2-py3-none-a\\x00b.whl", sdist("2", true, "b")]]);
+    expect(r.carriedTarNotes).toEqual(["x-2-py3-none-a\\x00b.whl: symlink x-2/docs/link"]);
+    expect(tarHolds(r)).toEqual(["x-2-py3-none-a\\\\x00b.whl: symlink x-2/docs/link"]);
+  });
+
+  test("two long names that differ at the end are shown apart, keep the path, and a 60-character name is shown whole", async () => {
+    const wheel = (end: string) => `x-2-py3-none-${"a".repeat(50)}${end}.whl`;
+    const r = await load([[`x-1-py3-none-${"a".repeat(50)}A.whl`, sdist("1", true)]], [[wheel("A"), sdist("2", true, "a")], [wheel("B"), sdist("2", true, "b")]]);
+    const carried = r.carriedTarNotes![0]!;
+    const held = tarHolds(r)[0]!;
+    expect(carried).toEndWith(": symlink x-2/docs/link");
+    expect(held).toEndWith(": symlink x-2/docs/link");
+    expect(carried.split(": ")[0]).not.toBe(held.split(": ")[0]);
+    expect(held.split(": ")[0]!.length).toBeLessThanOrEqual(60);
+    const whole = `x-2-${"a".repeat(49)}.tar.gz`;
+    expect(whole.length).toBe(60);
+    const w = await load([["x-1.tar.gz", sdist("1", true)]], [[whole, sdist("2", true)]], "x", "1", "2");
+    expect(tarHolds(w)).toEqual([`${whole}: symlink x-2/docs/link`]);
+  });
+
   test("a version that is no PEP 440 version pairs by the same string: x-1.0-final with x-2.0-final", async () => {
     const r = await load([["x-1.0-final.tar.gz", sdist("1", true)]], [["x-2.0-final.tar.gz", sdist("2", true)]], "x", "1.0-final", "2.0-final");
     expect(tarHolds(r)).toEqual([]);

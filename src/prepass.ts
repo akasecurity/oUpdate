@@ -1058,10 +1058,25 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
   const carriedTarNotes: string[] = [];
   const linkAt = (n: TarNote) => n.paths?.[0] ?? n.note.slice(n.kind.length + 1);
   // A merged note names its artifact, so a hold and a carry with one text tell which file each is about.
-  // The name is shown with control characters escaped and cut short, so the note's own path is what the detail keeps.
+  // The name is shown with backslashes and control characters escaped, so two names never show alike, and a long one is
+  // cut in the middle: the head and the tail with a short hash of the whole name between, so the note's own path is what
+  // the detail keeps. Cuts fall between code points, never inside an escape.
   const label = (from: string) => {
-    const t = from.replace(/[\u0000-\u001f\u007f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
-    return t.length > 60 ? `${t.slice(0, 57)}...` : t;
+    const unit = (c: string) => (c === "\\" ? "\\\\" : /[\u0000-\u001f\u007f]/.test(c) ? `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}` : c);
+    const units = [...from].map(unit);
+    if (units.join("").length <= 60) return units.join("");
+    const take = (list: string[]) => {
+      const out: string[] = [];
+      let n = 0;
+      for (const u of list) {
+        if (n + u.length > 24) break;
+        out.push(u);
+        n += u.length;
+      }
+      return out;
+    };
+    const hash = new Bun.CryptoHasher("sha256").update(from).digest("hex").slice(0, 6);
+    return `${take(units).join("")}~${hash}~${take([...units].reverse()).reverse().join("")}`;
   };
   const shown = (n: TarNote) => (n.from !== undefined ? `${label(n.from)}: ${n.note}` : n.note);
   // The file the note is about, at its key in this map (a merged key), for the reviewer's pointer.
