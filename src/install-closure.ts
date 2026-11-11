@@ -681,9 +681,7 @@ const LITERAL_LOAD = new RegExp(
 const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global|window)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
 // child_process only counts as the name of a module being loaded; the word inside a message does not.
 // A load of the process module by name, in any shape.
-const LOADS_PROCESS = /(?:\brequire\s*\(|\brequire\s*\.\s*resolve\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*(['"])(?:node:)?process\1/;
-// A string that is exactly a property name reaching Function or a loader, as a computed key or bound to a name ([][k][k]). A comparison (key === "constructor") is a guard, not a use.
-const DANGEROUS_STRING = /(?:\[\s*|(?<![=!<>])=(?!=)\s*)(['"`])(?:constructor|getBuiltinModule|mainModule|_?linkedBinding|createRequire|prepareStackTrace|getThis|getFunction)\1/;
+const LOADS_PROCESS = /(?:\brequire\s*\(|\brequire\s*\.\s*resolve\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*(['"`])(?:node:)?process\1/;
 const DANGEROUS_KEY = /^(?:constructor|getBuiltinModule|mainModule|_?linkedBinding|createRequire|prepareStackTrace|getThis|getFunction)$/;
 // The value of a key made only of string literals, template literals of literals, + and parentheses; undefined for anything else.
 function pureLiteralKey(key: string): string | undefined {
@@ -701,6 +699,26 @@ function pureLiteralKey(key: string): string | undefined {
     if (key[i] !== "+") return undefined;
     i++;
   }
+}
+// True when the file holds a string whose value is a property name reaching Function or a loader, in any position a value can
+// take (a computed key, a binding, an array element, an argument, a returned or conditional value). Escapes are decoded.
+// A comparison (key === "constructor"), a case label, the left side of in and an object key are guards or names, not uses.
+function dangerousStringUse(source: string): boolean {
+  const strings: { raw: string; at: number; len: number }[] = [];
+  const out = codeOnly(source, [], true, strings);
+  if (out === undefined) return false;
+  for (const s of strings) {
+    if (!s.raw.includes("\\") && !DANGEROUS_KEY.test(s.raw)) continue;
+    const v = s.raw.includes("\\") ? decodeJsString(s.raw) : s.raw;
+    if (v === undefined || !DANGEROUS_KEY.test(v)) continue;
+    const before = out.slice(Math.max(0, s.at - 40), s.at).trimEnd();
+    const after = out.slice(s.at + s.len, s.at + s.len + 40).trimStart();
+    if (/[!=]==?$/.test(before) || /^[!=]==?/.test(after)) continue;
+    if (/(?:^|[^\w$.])case$/.test(before) || /^in(?![\w$])/.test(after)) continue;
+    if ((before === "" || before.endsWith("{") || before.endsWith(",")) && after.startsWith(":")) continue;
+    return true;
+  }
+  return false;
 }
 // True when a bracket expression is only literals and spells a dangerous property name.
 function dangerousLiteralKey(keep: string): boolean {
@@ -813,7 +831,7 @@ const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "
  */
 const TEMPLATE_LITERAL = /(?:[^`\\$\n]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*`/y;
 
-function codeOnly(text: string, watch: string[] = [], keep = false): string | undefined {
+function codeOnly(text: string, watch: string[] = [], keep = false, strings?: { raw: string; at: number; len: number }[]): string | undefined {
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
   let t1: Tok | undefined;
@@ -913,6 +931,7 @@ function codeOnly(text: string, watch: string[] = [], keep = false): string | un
       for (; i < n && text[i] !== c && !eol(text[i]); i++) if (text[i] === "\\") i++;
       if (text[i] !== c) return undefined;
       i++;
+      strings?.push({ raw: text.slice(st + 1, i - 1), at: out.length, len: i - st });
       out += keep ? text.slice(st, i) : '""';
       push("str", "");
     } else if (c === "`") {
@@ -925,6 +944,7 @@ function codeOnly(text: string, watch: string[] = [], keep = false): string | un
         const value = lit[0].slice(0, -1).replace(/\$\{\s*(?:"([^"]*)"|'([^']*)')\s*\}/g, (_m, a: string | undefined, b: string | undefined) => a ?? b ?? "");
         if (!/["\\\n\r\u2028\u2029]/.test(value)) {
           i += lit[0].length;
+          strings?.push({ raw: value, at: out.length, len: value.length + 2 });
           out += keep ? `"${value}"` : '""';
           push("str", "");
           continue;
@@ -1041,7 +1061,7 @@ function dotBefore(text: string, at: number): boolean {
 
 const READ_AFTER = new RegExp(`\\s*(?:\\?\\.|\\.)\\s*${PROCESS_READ}`, "y");
 // Reads of the global object that cannot reach process or a loader.
-const HARMLESS_GLOBAL = /^\s*(?:\?\.|\.)\s*(?:crypto|document|window|location|localStorage|sessionStorage|atob|btoa|isNaN|parseInt|parseFloat|encodeURIComponent|decodeURIComponent|addEventListener|setTimeout|setInterval|setImmediate|clearTimeout|clearInterval|clearImmediate|queueMicrotask|console|URL|URLSearchParams|TextEncoder|TextDecoder|performance|navigator|fetch|structuredClone|Promise|Symbol|JSON|Math|Date|Array|AbortController|AbortSignal|Intl|Event|EventTarget|Blob|File|FormData|Headers|Request|Response|ReadableStream|WritableStream|TransformStream|Map|Set|WeakMap|WeakSet|WeakRef|FinalizationRegistry|BigInt|Number|String|Boolean|RegExp|Buffer|Uint8Array|Int32Array|Float64Array|ArrayBuffer|DataView)\b/;
+const HARMLESS_GLOBAL = /^\s*(?:\?\.|\.)\s*(?:crypto|document|window|location|localStorage|sessionStorage|atob|btoa|isNaN|parseInt|parseFloat|encodeURIComponent|decodeURIComponent|addEventListener|setTimeout|setInterval|setImmediate|clearTimeout|clearInterval|clearImmediate|queueMicrotask|console|URL|URLSearchParams|TextEncoder|TextDecoder|performance|navigator|fetch|structuredClone|Promise|Symbol|JSON|Math|Date|Array|Object|AbortController|AbortSignal|Intl|Event|EventTarget|Blob|File|FormData|Headers|Request|Response|ReadableStream|WritableStream|TransformStream|Map|Set|WeakMap|WeakSet|WeakRef|FinalizationRegistry|BigInt|Number|String|Boolean|RegExp|Buffer|Uint8Array|Int32Array|Float64Array|ArrayBuffer|DataView)\b/;
 // Members of process that run no code the file does not show and hand out no loader.
 const HARMLESS_MEMBER = /^\s*\.\s*(?:env|report|features|version|versions|argv|exitCode|cwd|nextTick|hrtime|memoryUsage|cpuUsage|uptime|umask|emitWarning|on|once|off|emit|addListener|removeListener|stdout|stderr|stdin|title|pid|ppid|execPath|execArgv|argv0|release|getuid|getgid|geteuid|getegid|getgroups|platform|arch)\b/;
 const MEMBER_AFTER = /\s*\.\s*[A-Za-z_$][\w$]*/y;
@@ -1050,7 +1070,25 @@ const DESTRUCTURE_OK = "(?:env|platform|arch|versions?|argv|cwd|exit|exitCode)(?
 
 // True when the expression that starts at "i" (right after an allowlisted read) ends there: the next token is not a member,
 // a call, a template or an optional chain. A few string and array methods and a numeric index are read through.
-function readEnds(code: string, start: number, lenient = false): boolean {
+// A write through a read is harmless only for exitCode, title and an environment variable that does not steer the next run.
+const STEERING_ENV = /^(?:NODE_OPTIONS|NODE_PATH|PATH|npm_config_.*)$/i;
+function harmlessTarget(target: string | undefined): boolean {
+  if (target === undefined) return false;
+  if (/^\s*(?:\?\.|\.)\s*(?:exitCode|title)$/.test(target)) return true;
+  const env = /^\s*(?:\?\.|\.)\s*env\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)$/.exec(target);
+  return env !== null && !STEERING_ENV.test(env[1]!);
+}
+// True when the next token of a dropped statement (an event-handler call that ends a line) cannot continue the expression.
+function statementEnds(code: string, at: number): boolean {
+  const rest = code.slice(at);
+  if (/^[ \t]*(?:;|\}|$)/.test(rest)) return true;
+  const nl = /^[ \t]*\r?\n\s*/.exec(rest);
+  if (!nl) return false;
+  const next = rest[nl[0].length];
+  return next === undefined || /[A-Za-z_$}{;"'\d]/.test(next);
+}
+
+function readEnds(code: string, start: number, lenient = false, target?: string): boolean {
   let i = start;
   let indexed = false;
   for (let guard = 0; guard < 64; guard++) {
@@ -1104,9 +1142,9 @@ function readEnds(code: string, start: number, lenient = false): boolean {
       i += m[0].length;
       continue;
     }
-    if (c === "=" && code[i + 1] !== "=" && code[i + 1] !== ">") {
-      // An assignment through a read (process.env.X = ...): only a plain literal on the right is harmless.
-      return /^\s*(?:""|-?\d+|true|false|null)\s*(?:[;,)}\n]|$)/.test(code.slice(i + 1));
+    // An assignment through a read, plain or compound (process.env.X = ..., process.env.X += ...): the target decides, not the right side.
+    if (/^(?:\|\||&&|\?\?|\*\*|>>>|<<|>>|[-+*\/%&|^])=(?!=)/.test(code.slice(i, i + 4)) || (c === "=" && code[i + 1] !== "=" && code[i + 1] !== ">")) {
+      return !indexed && harmlessTarget(target);
     }
     if (c === "(" || c === "`") return false;
     if (c === "?" && code[i + 1] === "." && !/[0-9]/.test(code[i + 2] ?? "")) return false;
@@ -1165,7 +1203,7 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
         if (args === undefined) return true;
         after += args.length + 1;
       }
-      if (readEnds(rest, after)) continue;
+      if (readEnds(rest, after, false, read[0])) continue;
       return true;
     }
     if (/(?:^|[^\w$.])(?:typeof|in)$/.test(rest.slice(Math.max(0, j - 7), j)) && readEnds(rest, end)) continue;
@@ -1177,7 +1215,7 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
         let p2 = end + ev[0].length;
         while (p2 < rest.length && /\s/.test(rest[p2]!)) p2++;
         const args = rest[p2] === "(" ? argsOf(rest, p2) : undefined;
-        if (args !== undefined && args.trimStart().startsWith('""') && /^[ \t]*(?:\r?\n|;|\}|$)/.test(rest.slice(p2 + args.length + 2))) continue;
+        if (args !== undefined && args.trimStart().startsWith('""') && statementEnds(rest, p2 + args.length + 2)) continue;
       }
     }
     if (lenient) {
@@ -1208,12 +1246,14 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
           if (args === undefined) return true;
           after = j2 + args.length + 2;
         }
-        // on, once, off, emit, addListener and removeListener return the object: only as a statement whose value is dropped.
+        // on, once, off, addListener and removeListener return the object: only as a statement whose value is dropped (emit returns a boolean).
         if (/^\s*\.\s*(?:on|once|off|addListener|removeListener)\b/.test(mem[0])) {
           const stmtStart = prev === "" || prev === ";" || prev === "{" || prev === "}" || (/[\n\r]/.test(rest.slice(j, at)) && /[\w$)\]"']/.test(prev));
-          if (!stmtStart || !/^[ \t]*(?:\r?\n|;|\}|$)/.test(rest.slice(after))) return true;
+          if (!stmtStart || !statementEnds(rest, after)) return true;
         }
-        if (readEnds(rest, after, true)) continue;
+        // process.env[k] = v writes a key the file does not show.
+        const computedEnv = /^\s*\.\s*env$/.test(mem[0]) && after > end + mem[0].length;
+        if (readEnds(rest, after, true, computedEnv ? undefined : mem[0])) continue;
         return true;
       }
     }
@@ -1236,17 +1276,24 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
     if (m[0] === "this" && depth > 0) continue;
     // An object key (global: true) is a name, not the global object.
     const nextText = rest.slice(at + m[0].length, at + m[0].length + 8);
-    const before = rest.slice(Math.max(0, at - 12), at);
-    if (m[0] !== "this" && /^\s*:/.test(nextText) && (/[{,;}]\s*$/.test(before) || /^\s*$/.test(before))) continue;
+    let pj = at;
+    while (pj > 0 && /\s/.test(rest[pj - 1]!)) pj--;
+    const before = pj === 0 ? "" : rest[pj - 1]!;
+    if (m[0] !== "this" && /^\s*:/.test(nextText) && (before === "" || /[{,;}]/.test(before))) continue;
     if (m[0] !== "this" && /(?:^|[^\w$.])(?:break|continue)\s*$/.test(rest.slice(Math.max(0, at - 12), at))) continue;
     // A class field (global = 1) is a name too.
-    if (m[0] !== "this" && /^\s*=(?!=)/.test(nextText) && (/[{;}]\s*$/.test(before) || /^\s*$/.test(before))) continue;
+    if (m[0] !== "this" && /^\s*=(?!=)/.test(nextText) && (before === "" || /[{;}]/.test(before))) continue;
     // (this && this.__x) is a test: its value is the right side. A comparison does not hand it on either.
     if (m[0] === "this" && /^\s*(?:&&|[!=]==?)/.test(rest.slice(at + 4, at + 20))) continue;
     let j = at;
     while (j > 0 && /\s/.test(rest[j - 1]!)) j--;
     if (rest[j - 1] === "." && !rest.slice(0, j).endsWith("...")) continue;
-    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(rest.slice(Math.max(0, j - 11), j)) && readEnds(rest, at + m[0].length)) continue;
+    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(rest.slice(Math.max(0, j - 11), j))) {
+      if (readEnds(rest, at + m[0].length)) continue;
+      // typeof globalThis.name is one property read whose value is a string: no hand-over, whatever the name.
+      const prop = /^\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*/.exec(rest.slice(at + m[0].length, at + m[0].length + 80));
+      if (m[0] !== "this" && /(?:^|[^\w$.])typeof$/.test(rest.slice(Math.max(0, j - 11), j)) && prop && readEnds(rest, at + m[0].length + prop[0].length)) continue;
+    }
     if (m[0] !== "this" && HARMLESS_GLOBAL.test(rest.slice(at + m[0].length, at + m[0].length + 40))) continue;
     if (m[0] === "this" && /^\s*(?:\?\.|\.)\s*[A-Za-z_$]/.test(rest.slice(at + 4, at + 44))) continue;
     return true;
@@ -1280,7 +1327,7 @@ function provablyStatic(source: string): boolean {
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
   if (/(?:\brequire\s*\(|\bfrom|\bimport)\s*(['"])(?:node:)?process\1/.test(rest)) return false;
-  if (LOADS_CHILD_PROCESS.test(rest) || DANGEROUS_STRING.test(rest) || dangerousLiteralKey(rest)) return false;
+  if (LOADS_CHILD_PROCESS.test(rest) || dangerousStringUse(source) || dangerousLiteralKey(rest)) return false;
   const code = codeOnly(rest, aliases);
   if (code === undefined) return false;
   // Strings are gone from this text: a loader word or the word process inside a message is not a use.
@@ -1692,7 +1739,7 @@ function processHazard(source: string): boolean {
   if (code.includes("\\")) return true;
   // Any load of the process module other than the plain alias statement (require("process")[..], import("process"),
   // import { default as p } from "process") is a name for it that is not tracked.
-  if (LOADS_PROCESS.test(stripProcessAliases(keep, [])) || DANGEROUS_STRING.test(keep) || dangerousLiteralKey(keep)) return true;
+  if (LOADS_PROCESS.test(stripProcessAliases(keep, [])) || dangerousStringUse(source) || dangerousLiteralKey(keep)) return true;
   // A require, import() or require.resolve whose argument reads process cannot be classified, unless every read is a complete
   // read put in front of a string (process.cwd() + "/tools/") or the manifest path (dirname(process.env.npm_package_json)).
   const flat = code.replace(/`/g, " ");
@@ -1738,7 +1785,9 @@ function hasUnbounded(text: string): boolean {
   if (/(?<![\w$.])(?<!instanceof\s+)(?:eval|Function)\b(?!\s*\()/.test(plain)) return true;
   if (/(?<![\w$.])(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*(?:eval|Function)\b|(?<![\w$.])window\s*(?:\?\.)?\s*\[/.test(plain)) return true;
   if (timerGetsCode(plain)) return true;
-  const re = /\b(?:eval|Function)\s*\(|\bvm\s*\.\s*(?:runInThisContext|runInNewContext|runInContext|compileFunction)\s*\(/g;
+  // .constructor.constructor and .constructor[ reach Function; .constructor( is read like Function( below.
+  if (/(?:\?\.|\.)\s*constructor\s*(?:\?\.|\.)\s*constructor\b|(?:\?\.|\.)\s*constructor\s*\??\.?\s*\[/.test(plain)) return true;
+  const re = /(?:\?\.|\.)\s*constructor\s*\(|\b(?:eval|Function)\s*\(|\bvm\s*\.\s*(?:runInThisContext|runInNewContext|runInContext|compileFunction)\s*\(/g;
   const ok = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
   for (const m of text.matchAll(re)) {
     const paren = (m.index ?? 0) + m[0].lastIndexOf("(");

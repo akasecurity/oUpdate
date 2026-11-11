@@ -797,3 +797,75 @@ for (const [label, pre] of [
 test("a template with no substitution is still a plain string elsewhere (round 26)", () => {
   expect(held('exports.main = () => `hello world`\n')).toBe(false);
 });
+
+// Round 27: every position a dangerous name can take, escapes, the dot spelling of the constructor chain, a line break before
+// a chained call, writes decided by their target, the previous token before a global, typeof members, a template specifier.
+// A changed payload file outside the hook directory must hold: that tells "everything" from "the package".
+const widensDocs = (pre: string) => {
+  const rel = (v: string) => release(v, pre).set("docs/payload.txt", enc(`payload ${v}\n`));
+  return holds(rel("1.0.0"), rel("1.0.1")).some((d) => d.includes("docs/payload.txt"));
+};
+for (const [label, pre] of [
+  ["a dot constructor chain", 'exports.main = () => [].constructor.constructor(process.env.X)()\n'],
+  ["a bracket on constructor", 'exports.main = () => [].constructor["constructor"](process.env.X)()\n'],
+  ["a constructor call with a computed argument", 'exports.main = () => (() => 1).constructor(process.env.X)()\n'],
+  ["a parenthesized key", 'exports.main = () => [][("constructor")][("constructor")](process.env.X)()\n'],
+  ["a key after ||", 'exports.main = (a) => [][a || "constructor"][a || "constructor"](process.env.X)()\n'],
+  ["a key in a ternary", 'exports.main = (a) => [][a ? "constructor" : ""][a ? "constructor" : ""](process.env.X)()\n'],
+  ["a key after an empty string", 'exports.main = () => [][("" + "constructor")][("" + "constructor")](process.env.X)()\n'],
+  ["a key as a later array element", 'const ks = ["a", "constructor"];\nexports.main = () => [][ks[1]][ks[1]](process.env.X)()\n'],
+  ["a key as an object value", 'const o = { k: "constructor" };\nexports.main = () => [][o.k][o.k](process.env.X)()\n'],
+  ["a key returned by an arrow", 'const k = () => "constructor";\nexports.main = () => [][k()][k()](process.env.X)()\n'],
+  ["a key passed as an argument", 'exports.main = () => get([], "constructor")(process.env.X)()\n'],
+  ["an escaped key", 'exports.main = () => []["constru\\x63tor"]["constru\\u0063tor"](process.env.X)()\n'],
+  ["an escaped key with a code point escape", 'const k = "constru\\u{63}tor";\nexports.main = () => [][k][k](process.env.X)()\n'],
+  ["a chained call on the next line after process.on", 'process.on("x", () => 1)\n.dlopen(m, p)\nexports.main = () => 1\n'],
+  ["an optional chained call on the next line after process.on", 'process.on("x", () => 1)\n?.execve("a")\nexports.main = () => 1\n'],
+  ["an assignment of a literal to NODE_OPTIONS", 'exports.main = () => { process.env.NODE_OPTIONS = "--require ./docs/x.js" }\n'],
+  ["a compound assignment to NODE_OPTIONS", 'exports.main = () => { process.env.NODE_OPTIONS += " --require ./docs/x.js" }\n'],
+  ["an or-assignment to NODE_OPTIONS", 'exports.main = () => { process.env.NODE_OPTIONS ||= "--require ./docs/x.js" }\n'],
+  ["an assignment to NODE_PATH", 'exports.main = () => { process.env.NODE_PATH = "./docs" }\n'],
+  ["an assignment of a template to PATH", 'exports.main = (d) => { process.env.PATH = `${d}:/bin` }\n'],
+  ["an assignment to an npm_config_ variable", 'exports.main = () => { process.env.npm_config_prefix = "./docs" }\n'],
+  ["an assignment to a computed env key", 'exports.main = (k) => { process.env[k] = "1" }\n'],
+  ["an assignment to a member that is not on the list", 'exports.main = () => { process.argv = [] }\n'],
+  ["a ternary consequent global on an indented line", 'exports.main = (c) => c ?\n                global : 1\n'],
+  ["a template specifier of the process module", 'const p = require(`process`); exports.main = () => p.dlopen({}, "x")\n'],
+] as const) {
+  test(`${label} widens the closure (round 27)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a dot constructor chain", 'exports.main = () => [].constructor.constructor(process.env.X)()\n'],
+  ["an escaped key", 'exports.main = () => []["constru\\x63tor"]["constru\\u0063tor"](process.env.X)()\n'],
+  ["an assignment of a literal to NODE_OPTIONS", 'exports.main = () => { process.env.NODE_OPTIONS = "--require ./docs/x.js" }\n'],
+] as const) {
+  test(`${label} holds a changed payload outside the hook directory (round 27)`, () => expect(widensDocs(pre)).toBe(true));
+}
+test("a hook with no unbounded use does not hold a changed payload (round 27)", () => {
+  expect(widensDocs('exports.main = () => 1\n')).toBe(false);
+});
+for (const [label, pre] of [
+  ["a comparison with constructor", 'exports.main = (key) => key === "constructor" || key !== "mainModule" || "getThis" == key\n'],
+  ["a case label of constructor", 'exports.main = (k) => { switch (k) { case "constructor": return 1 } }\n'],
+  ["constructor as the left side of in", 'exports.main = (o) => "constructor" in o\n'],
+  ["constructor as an object key", 'exports.main = () => ({ "constructor": 1, a: 2 })\n'],
+  ["process.exitCode set to a variable", 'exports.main = (code) => { process.exitCode = code }\n'],
+  ["process.exitCode set to a ternary", 'exports.main = (failed) => { process.exitCode = failed ? 1 : 0 }\n'],
+  ["a plain env key set to a built string", 'exports.main = (dir) => { process.env.FOO = dir + "/x" }\n'],
+  ["a plain env key set to a template", 'exports.main = (dir) => { process.env.FOO = `${dir}/x` }\n'],
+  ["process.on with a statement on the next line", 'process.on("exit", () => 1)\nconsole.log("x")\nexports.main = () => 1\n'],
+  ["typeof of a runtime global", 'exports.main = () => [typeof globalThis.Bun, typeof globalThis.Deno, typeof global.gc]\n'],
+  ["globalThis.Object.keys", 'exports.main = () => globalThis.Object.keys({})\n'],
+  ["the platform as a file name selector", 'exports.main = () => require("./bin/" + process.platform)\n'],
+] as const) {
+  test(`${label} does not widen the closure (round 27)`, () => expect(widensAll(pre)).toBe(false));
+}
+test("a class field named function with no initializer before a method taking process widens (round 27)", () => {
+  expect(widensAll('class C { function;\n m = run(process) }\nexports.main = () => new C()\n')).toBe(true);
+});
+for (const [label, pre] of [
+  ["in before a global chain", 'exports.main = (o) => "x" in globalThis.document\n'],
+  ["instanceof with a global chain", 'exports.main = (o) => o instanceof globalThis.URL\n'],
+] as const) {
+  test(`${label} stays static (round 27)`, () => expect(held(pre)).toBe(false));
+}
