@@ -992,11 +992,15 @@ const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "
  * regular expression is decided from the previous token this scan emitted, never from the source text before it: text
  * inside a string, template or regular expression is not a token.
  */
+// Set by a codeOnly call that stopped at an HTML-like comment (<!-- anywhere, --> at the start of a line). A script reads the rest of the
+// line as a comment and a module reads it as code, and the text does not say which, so the file is a hazard whichever way it is read.
+let stoppedAtHtmlComment = false;
 const TEMPLATE_LITERAL = /(?:[^`\\$\n]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*`/y;
 
 // A span of the kept text: a string (raw is its text) or text to blank when brackets are matched (a regular expression, template text).
 type SpanNote = { raw: string; at: number; len: number; mask?: boolean };
 function codeOnly(text: string, watch: string[] = [], keep = false, strings?: SpanNote[]): string | undefined {
+  stoppedAtHtmlComment = false;
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
   let t1: Tok | undefined;
@@ -1158,8 +1162,10 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
         push("punct", "/");
       }
     } else {
-      if (c === "<" && text.startsWith("<!--", i)) return undefined;
-      if (c === "-" && atLineStart && text.startsWith("-->", i)) return undefined;
+      if ((c === "<" && text.startsWith("<!--", i)) || (c === "-" && atLineStart && text.startsWith("-->", i))) {
+        stoppedAtHtmlComment = true;
+        return undefined;
+      }
       if (c === "}") {
         const tpl = braces.pop();
         if (tpl) {
@@ -2367,7 +2373,7 @@ function processHazardScan(source: string): boolean {
   const keep = codeOnly(source, [], true);
   // A file the scan cannot read is a hazard only when it can name the process object or spell a name with an escape.
   const unreadable = () => /process|global|\\/.test(source);
-  if (keep === undefined) return unreadable();
+  if (keep === undefined) return stoppedAtHtmlComment || unreadable();
   const code = codeOnly(stripProcessAliases(keep, names), names);
   if (code === undefined) return unreadable();
   if (PROCESS_LOADER_WORDS.test(code) || steeringKey(code)) return true;
