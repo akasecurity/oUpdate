@@ -709,12 +709,21 @@ const STEERING_STRONG_RE = /^(?:NODE_OPTIONS|NODE_PATH|LD_PRELOAD|DYLD_INSERT_LI
 const STEERING_NAME = { test: (v: string) => STEERING_STRONG_RE.test(v) };
 // True when the object literal that holds position "at" spreads process.env or is the value of an env key: PATH and ENV
 // steer the next process there.
-function envObjectLiteral(code: string, at: number): boolean {
-  const top = (enclosingBrackets(code, [at]).get(at) ?? [])[0];
+function envObjectLiteral(code: string, at: number, raw?: string): boolean {
+  const chain = enclosingBrackets(code, [at]).get(at) ?? [];
+  const top = chain[0];
   if (!top || code[top[0]] !== "{") return false;
   if (/\.\.\.\s*process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(code.slice(top[0], top[1] + 1))) return true;
   const [t1, t1At] = prevTok(code, top[0]);
-  return t1 === ":" && prevTok(code, t1At)[0] === "env";
+  if (t1 === ":") {
+    const k = prevTok(code, t1At)[0];
+    // A quoted key is blanked in the scan: the raw text tells whether it is "env".
+    return k === "env" || (raw !== undefined && /(['"])env\1\s*$/.test(raw.slice(0, t1At))) || (raw === undefined && /^["']$/.test(k));
+  }
+  // opts.env = { ... } and Object.assign({}, process.env, { ... }).
+  if (t1 === "=" && prevTok(code, t1At)[0] === "env") return true;
+  const outer = chain[1];
+  return outer !== undefined && code[outer[0]] === "(" && /(?:^|[^\w$.]|\.\.\.)process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(code.slice(outer[0], outer[1] + 1));
 }
 const STATEMENT_KEYWORDS = new Set(["await", "yield", "return", "export", "default", "case", "throw", "typeof", "void", "new", "delete", "in", "of", "else", "do", "instanceof", "extends"]);
 
@@ -790,7 +799,9 @@ function dangerousStringUse(source: string): boolean {
     const after = codeAfter(masked, s.at + s.len, 40);
     const key = (q === 0 || /[{,]$/.test(before)) && after.startsWith(":");
     if (!steering && !danger) {
-      if (key && /[{,]$/.test(before) && envObjectLiteral(masked, s.at)) return true;
+      if (key && /[{,]$/.test(before) && envObjectLiteral(masked, s.at, out)) return true;
+      // An entries pair ["PATH", dir] in a file that handles the environment.
+      if (/\[$/.test(before) && after.startsWith(",") && !/[\w$)\]]/.test(prevTok(masked, q - 1)[0]) && /(?:^|[^\w$.]|\.\.\.)process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(masked)) return true;
       continue;
     }
     if (steering && !danger) {
@@ -1337,7 +1348,7 @@ function writtenOddly(code: string, at: number, end: number, around: Array<[numb
 // A bare process.env is harmless only as a copy or a read: spread, an object value (env: process.env), an argument of a
 // reader (Object.keys, JSON.stringify, String, Object.assign into a new object). Bound, returned or passed on, the live object
 // can be written later.
-function bareEnvOk(code: string, at: number, around: Array<[number, number]>): boolean {
+function bareEnvOk(code: string, at: number, wordEnd: number, around: Array<[number, number]>, spawners?: ModuleNames): boolean {
   let q = at;
   while (q > 0 && /\s/.test(code[q - 1]!)) q--;
   if (code.slice(0, q).endsWith("...")) return true;
@@ -1347,45 +1358,75 @@ function bareEnvOk(code: string, at: number, around: Array<[number, number]>): b
   const inner = around[0];
   if (!inner) return false;
   const prev = q > 0 ? code[q - 1]! : "";
-  const end = at + "process".length;
-  const nextChar = codeAfter(code, end + /^\s*(?:\?\.|\.)\s*env/.exec(code.slice(end))![0].length, 1);
+  const envRead = /^\s*(?:\?\.|\.)\s*env/.exec(code.slice(wordEnd));
+  if (!envRead) return false;
+  const nextChar = codeAfter(code, wordEnd + envRead[0].length, 1);
   const before = (o: number) => {
     let p = o;
     while (p > 0 && /\s/.test(code[p - 1]!)) p--;
     return p;
   };
-  const SPAWNERS = /(?:^|[^\w$])(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)$/;
+  // The callee must be a binding from child_process (a destructured name, or a member of the module's name), not a name alone.
+  const spawns = (text: string) => {
+    const m = /(?<![\w$.])([A-Za-z_$][\w$]*)(?:\s*\.\s*(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork))?$/.exec(text);
+    if (!m || !spawners) return false;
+    return /\.\s*[A-Za-z]+$/.test(m[0]) ? spawners.mods.has(m[1]!) : spawners.fns.has(m[1]!);
+  };
   if (code[inner[0]] === "{" && prev === ":") {
     // { env: process.env } handed straight to a spawn call: an object literal with plain properties, no method or accessor.
     const outer = around[1];
     if (!outer || code[outer[0]] !== "(") return false;
     const lead = code[before(inner[0]) - 1];
     if (lead !== "(" && lead !== ",") return false;
-    if (!SPAWNERS.test(code.slice(Math.max(0, before(outer[0]) - 24), before(outer[0])))) return false;
+    if (!spawns(code.slice(Math.max(0, before(outer[0]) - 64), before(outer[0])))) return false;
     if (nextChar !== "," && nextChar !== "}") return false;
-    return !/=>|\bfunction\b|\b(?:get|set|async)\b|[\w$\]]\s*\([^()]*\)\s*\{/.test(code.slice(inner[0], inner[1] + 1));
+    return !/=>|\bfunction\b|\b(?:get|set|async)\b|__proto__|[\w$\]]\s*\([^()]*\)\s*\{/.test(code.slice(inner[0], inner[1] + 1));
   }
   if (code[inner[0]] === "(") {
     const p = before(inner[0]);
-    const callee = /(?<![\w$.])((?:Object\s*\.\s*(?:keys|entries|values|assign)|JSON\s*\.\s*stringify|String|Boolean))$/.exec(code.slice(Math.max(0, p - 40), p));
+    const callee = /(?<![\w$.])(Object\s*\.\s*(?:keys|entries|values|assign))$/.exec(code.slice(Math.max(0, p - 40), p));
     if (!callee) return false;
+    if (/^(?:\.|\?\.)$/.test(prevTok(code, p - callee[1]!.length)[0])) return false;
     const name = callee[1]!.replace(/\s+/g, "");
     const root = name.split(".")[0]!;
     // A name the file declares itself (const Object = { keys: e => e }) is not the global reader.
-    if (declaresName(code, root)) return false;
+    if (declaresName(code, root) || readersTampered(code)) return false;
     if (name === "Object.assign") return prev === "," && code.slice(inner[0] + 1, q - 1).trim() === "{}" && (nextChar === ")" || nextChar === ",");
-    // One argument only: the second argument of JSON.stringify is a replacer that runs with the live object as this.
-    return prev === "(" && nextChar === ")" && ["Object.keys", "Object.entries", "Object.values", "JSON.stringify", "String", "Boolean"].includes(name);
+    // One argument only. String, Boolean and JSON.stringify run user hooks (toString, toJSON) with the live object as this.
+    return prev === "(" && nextChar === ")";
   }
   return false;
 }
 
-// True when the code declares the name as a variable, function, class, import, parameter or destructured binding anywhere.
+// True when the file reassigns a member of Object or the global object, or writes to a prototype: a reader such as Object.keys
+// can then run file code with the live environment.
+function readersTampered(code: string): boolean {
+  const op = String.raw`(?:\|\||&&|\?\?|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?![=>])`;
+  return (
+    new RegExp(String.raw`(?<![\w$.])(?:Object|globalThis|global|window|self)\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*\s*${op}`).test(code) ||
+    new RegExp(String.raw`\.\s*prototype\s*(?:(?:\?\.|\.)\s*[\w$]+|\[[^\]]*\])?\s*${op}`).test(code) ||
+    /\b(?:defineProperty|defineProperties|setPrototypeOf|__proto__|__defineGetter__|__defineSetter__)\b/.test(code) ||
+    /\bReflect\s*\.\s*(?:set|defineProperty|setPrototypeOf)\b/.test(code) ||
+    /\bObject\s*\.\s*assign\s*\(\s*(?:Object|globalThis|global|window|self)\b/.test(code) ||
+    /(?<![\w$.])with\s*\(/.test(code)
+  );
+}
+
+// True when the code binds the name: after var, let, const, function, class, import, as or catch (, in a pattern of a declaration,
+// in a parameter list (a parenthesis followed by { or =>), as a single arrow parameter, or by a plain assignment. An ordinary
+// argument (console.log(Object)) is not a binding.
 function declaresName(code: string, name: string): boolean {
   const n = name.replace(/\$/g, "\\$");
-  return new RegExp(
-    String.raw`(?<![\w$.])(?:const|let|var|function|class|import|as)\s+(?:[^;=\n]*[,{*\s])?${n}(?![\w$])|[(,]\s*${n}\s*[,)=]|\{[^{}]*(?<![\w$.])${n}(?![\w$])[^{}]*\}\s*=(?!=)|(?<![\w$.])${n}\s*=>`,
-  ).test(code);
+  const word = String.raw`(?<![\w$.])${n}(?![\w$])`;
+  const op = String.raw`(?:\|\||&&|\?\?|\*\*|>>>|<<|>>|[-+*\/%&|^])?`;
+  if (new RegExp(String.raw`(?<![\w$.])(?:var|let|const|function|class|import|as)\s+(?:[A-Za-z_$][\w$]*\s*,\s*)*${word}|catch\s*\(\s*${word}|(?<![\w$.])for\s*(?:await\s*)?\(\s*(?:var|let|const)\s+${word}|${word}\s*=>|${word}\s*${op}=(?![=>])`).test(code)) return true;
+  for (const m of code.matchAll(/(?<![\w$.])(?:var|let|const)\s*(?:\{[^{}]*\}|\[[^\[\]]*\])|(?<![\w$.])catch\s*\(([^()]*)\)/g)) {
+    if (new RegExp(word).test(m[0])) return true;
+  }
+  for (const m of code.matchAll(/\(([^()]*)\)\s*(?:=>|\{)/g)) {
+    if (new RegExp(word).test(m[1]!)) return true;
+  }
+  return false;
 }
 
 function readEnds(code: string, start: number, lenient = false, target?: string): boolean {
@@ -1458,7 +1499,7 @@ function readEnds(code: string, start: number, lenient = false, target?: string)
 // computed member, a spread, a template or call argument, a returned or assigned value, a read followed by a chained
 // call, or the bare global object. A property named like the name (x.process()), an object key (process: 1) and a method
 // definition are not the object. A parameter or variable of that name is not told apart from the global: it counts.
-function processValueUse(code: string, names: string[], lenient = false): boolean {
+function processValueUse(code: string, names: string[], lenient = false, spawners?: ModuleNames): boolean {
   const alt = names.map((n) => n.replace(/\$/g, "\\$")).join("|");
   const L = "(?<![\\w$])(?<![^\\x00-\\x7f\\s])";
   const R = "(?![\\w$])(?![^\\x00-\\x7f\\s])";
@@ -1554,7 +1595,7 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
         if (/^\s*\.\s*env$/.test(mem[0]) && after === end + mem[0].length) {
           let k = after;
           while (k < rest.length && /\s/.test(rest[k]!)) k++;
-          if (rest[k] !== "." && !(rest[k] === "?" && rest[k + 1] === ".") && !bareEnvOk(rest, at, around.get(at) ?? [])) return true;
+          if (rest[k] !== "." && !(rest[k] === "?" && rest[k + 1] === ".") && !bareEnvOk(rest, at, end, around.get(at) ?? [], spawners)) return true;
         }
         let j2 = after;
         while (j2 < rest.length && /\s/.test(rest[j2]!)) j2++;
@@ -1618,7 +1659,20 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
   return false;
 }
 
+// A scanner that throws must not make a file look safe: a fault reads as "not static" and "widen everything".
+let scannerFaults = 0;
+export function scannerFaultCount(): number {
+  return scannerFaults;
+}
 function provablyStatic(source: string): boolean {
+  try {
+    return provablyStaticScan(source);
+  } catch {
+    scannerFaults++;
+    return false;
+  }
+}
+function provablyStaticScan(source: string): boolean {
   if (source.includes(REMOVED)) return false;
   // Comments out first, strings kept: the patterns below read code, and a comment can neither hide nor fake a load.
   const text = codeOnly(source, [], true);
@@ -2049,7 +2103,7 @@ function pathNames(keep: string): { mods: Set<string>; fns: Set<string> } {
   const id = String.raw`[A-Za-z_$][\w$]*`;
   for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*require\(\s*${SPEC}\s*\)`, "g"))) mods.add(m[1]!);
   for (const m of keep.matchAll(new RegExp(String.raw`\bimport\s+(?:\*\s*as\s+)?(${id})\s+from\s*${SPEC}`, "g"))) mods.add(m[1]!);
-  for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*require\(\s*${SPEC}\s*\)\s*\.\s*(?:(?:posix|win32)\s*\.\s*)?(?:join|resolve)(?![\w$])`, "g"))) fns.add(m[1]!);
+  for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*require\(\s*${SPEC}\s*\)\s*\.\s*(?:(?:posix|win32)\s*\.\s*)?(?:join|resolve)(?=[ \t]*(?:;|,|\r?\n|$|\}))`, "g"))) fns.add(m[1]!);
   const members = (list: string) => {
     for (const part of list.split(",")) {
       const mm = /^\s*(join|resolve)\s*(?:(?::|\bas\b)\s*([A-Za-z_$][\w$]*))?\s*$/.exec(part);
@@ -2062,9 +2116,36 @@ function pathNames(keep: string): { mods: Set<string>; fns: Set<string> } {
     for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*${name.replace(/\$/g, "\\$")}(?![\w$])`, "g"))) members(m[1]!);
   }
   for (const name of mods) {
-    for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*${name.replace(/\$/g, "\\$")}\s*\.\s*(?:(?:posix|win32)\s*\.\s*)?(?:join|resolve)(?![\w$])`, "g"))) fns.add(m[1]!);
+    for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*${name.replace(/\$/g, "\\$")}\s*\.\s*(?:(?:posix|win32)\s*\.\s*)?(?:join|resolve)(?=[ \t]*(?:;|,|\r?\n|$|\}))`, "g"))) fns.add(m[1]!);
   }
   return { mods, fns };
+}
+type ModuleNames = { mods: Set<string>; fns: Set<string> };
+// The local names bound to child_process and to its spawning functions.
+function childNames(keep: string): ModuleNames {
+  const mods = new Set<string>();
+  const fns = new Set<string>();
+  const SPEC = String.raw`['"](?:node:)?child_process['"]`;
+  const id = String.raw`[A-Za-z_$][\w$]*`;
+  for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*require\(\s*${SPEC}\s*\)`, "g"))) mods.add(m[1]!);
+  for (const m of keep.matchAll(new RegExp(String.raw`\bimport\s+(?:\*\s*as\s+)?(${id})\s+from\s*${SPEC}`, "g"))) mods.add(m[1]!);
+  const members = (list: string) => {
+    for (const part of list.split(",")) {
+      const mm = /^\s*(spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*(?:(?::|\bas\b)\s*([A-Za-z_$][\w$]*))?\s*$/.exec(part);
+      if (mm) fns.add(mm[2] ?? mm[1]!);
+    }
+  };
+  for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\(\s*${SPEC}\s*\)`, "g"))) members(m[1]!);
+  for (const m of keep.matchAll(new RegExp(String.raw`\bimport\s*\{([^{}]*)\}\s*from\s*${SPEC}`, "g"))) members(m[1]!);
+  for (const set of [mods, fns]) for (const name of set) if (redefined(keep, name)) set.delete(name);
+  return { mods, fns };
+}
+// True when the file declares the name again (a function, a class, a parameter, a plain assignment): the binding is not trusted.
+function redefined(keep: string, name: string): boolean {
+  const n = name.replace(/\$/g, "\\$");
+  return new RegExp(
+    String.raw`(?<![\w$.])(?:function|class)\s+${n}(?![\w$])|(?<![\w$.])(?:const|let|var)\s+${n}\s*=(?!\s*require\s*\()|[(,]\s*${n}\s*[,)=]|(?<![\w$.])${n}\s*=>|(?<![\w$.])${n}\s*(?:\|\||&&|\?\?|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?![=>])(?!\s*require\s*\()`,
+  ).test(keep.replace(new RegExp(String.raw`(?:const|let|var)\s+${n}\s*=\s*require\s*\([^)]*\)`, "g"), ""));
 }
 // True when text ends in a call of path.join or path.resolve through a name bound to the path module.
 function endsInPathCall(before: string, names: { mods: Set<string>; fns: Set<string> }): boolean {
@@ -2073,6 +2154,14 @@ function endsInPathCall(before: string, names: { mods: Set<string>; fns: Set<str
   return m[2] !== undefined ? names.mods.has(m[1]!) : names.fns.has(m[1]!);
 }
 function processHazard(source: string): boolean {
+  try {
+    return processHazardScan(source);
+  } catch {
+    scannerFaults++;
+    return true;
+  }
+}
+function processHazardScan(source: string): boolean {
   // Comments out first (strings kept) so the alias statements can be read, then strings out so no word inside a message counts.
   const names = ["process"];
   const keep = codeOnly(source, [], true);
@@ -2112,7 +2201,7 @@ function processHazard(source: string): boolean {
       if (!prefixed && !manifest && !selector && !joined) return true;
     }
   }
-  return processValueUse(code, names, true);
+  return processValueUse(code, names, true, childNames(keep));
 }
 
 // setTimeout or setInterval whose first argument is a string or built from one: that string is run as code.
@@ -2137,15 +2226,40 @@ function steeringKey(code: string): boolean {
     while (q > 0 && /\s/.test(code[q - 1]!)) q--;
     if ((q === 0 || /[{,]/.test(code[q - 1]!)) && (strong || envObjectLiteral(code, m.index ?? 0))) return true;
   }
-  // Any assignment to a member with such a name (env.NODE_OPTIONS = x on a copied environment).
+  // A computed key in an object literal that spreads process.env or sits under env: the name is not shown.
+  for (const m of code.matchAll(/[{,]\s*\[/g)) {
+    const open = (m.index ?? 0) + m[0].length - 1;
+    let depth = 0;
+    let close = open;
+    for (; close < code.length; close++) {
+      if (code[close] === "[") depth++;
+      else if (code[close] === "]" && --depth === 0) break;
+    }
+    if (close < code.length && codeAfter(code, close + 1, 1) === ":" && envObjectLiteral(code, open)) return true;
+  }
+  const mentionsEnv = /(?:^|[^\w$.]|\.\.\.)process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(code);
+  // Any assignment to a member with such a name (env.NODE_OPTIONS = x on a copied environment); PATH and ENV where the file
+  // handles the environment at all.
   for (const m of code.matchAll(/(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)\s*(?:\|\||&&|\?\?|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?![=>])/g)) {
-    if (STEERING_NAME.test(m[1]!)) return true;
+    if (STEERING_NAME.test(m[1]!) || (mentionsEnv && /^(?:PATH|Path|ENV)$/.test(m[1]!))) return true;
+  }
+  // A shorthand key ({ ...process.env, PATH }).
+  for (const m of code.matchAll(/[{,]\s*(PATH|Path|ENV)\s*(?=[,}])/g)) {
+    if (envObjectLiteral(code, (m.index ?? 0) + m[0].indexOf(m[1]!))) return true;
   }
   return false;
 }
 
 const CALL_OK = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
 function hasUnbounded(text: string): boolean {
+  try {
+    return hasUnboundedScan(text);
+  } catch {
+    scannerFaults++;
+    return true;
+  }
+}
+function hasUnboundedScan(text: string): boolean {
   if (processHazard(text)) return true;
   // Indirect and optional eval, new Function, the global object's eval, a computed member of a global, and a timer given code.
   const plain = codeOnly(text) ?? text;
