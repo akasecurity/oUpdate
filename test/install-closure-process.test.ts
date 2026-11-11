@@ -948,3 +948,90 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} does not widen the closure (round 28b)`, () => expect(widensAll(pre)).toBe(false));
 }
+
+// Round 28c: a literal with a constructor key in a condition, a join without the path module, entries naming a steering variable.
+for (const [label, pre] of [
+  ["an object literal with a constructor key inside an if condition", 'exports.main = (f) => { if (f({ constructor: 1 })) { return 1 } }\n'],
+  ["an object literal with a constructor key inside a while condition", 'exports.main = (f) => { while (f({ constructor: 1 })) { return 1 } }\n'],
+  ["an object literal with a constructor key as a statement argument", 'exports.main = (f) => { f({ constructor: 1 }); return 1 }\n'],
+  ["an object literal with a constructor key returned", 'exports.main = () => { return { constructor: 1 } }\n'],
+  ["an array literal that does not start with a steering name", 'exports.main = () => ["HOME", "PATH"]\n'],
+  ["an index by a steering name", 'exports.main = (e) => e["PATH"]\n'],
+] as const) {
+  test(`${label} does not widen the closure (round 28c)`, () => expect(widensAll(pre)).toBe(false));
+}
+for (const [label, pre] of [
+  ["a join of cwd() when the file loads no path module", 'exports.main = () => require(path.join(process.cwd(), "x.js"))\n'],
+  ["entries that start with a steering name", 'exports.main = () => run("node", { env: Object.fromEntries([["NODE_OPTIONS", "--require ./docs/payload.txt"]]) })\n'],
+  ["a parameter default with a constructor key", 'exports.main = (a = { constructor: 1 }) => a\nfunction g({ constructor: { constructor: F } }) { return F(process.env.X)() }\n'],
+] as const) {
+  test(`${label} widens the closure (round 28c)`, () => expect(widensAll(pre)).toBe(true));
+}
+
+// Round 28d: a process member inside a pattern is a write only when it is the target.
+for (const [label, pre] of [
+  ["a pattern element that indexes another value by a steering variable", 'exports.main = (a) => { [a[process.env.NODE_OPTIONS]] = [1] }\n'],
+  ["a default initializer that reads cwd()", 'exports.main = () => { let x; [x = process.cwd()] = [] }\n'],
+  ["a default initializer that reads a steering variable", 'exports.main = () => { let x; [x = process.env.PATH] = [] }\n'],
+] as const) {
+  test(`${label} does not widen the closure (round 28d)`, () => expect(widensAll(pre)).toBe(false));
+}
+for (const [label, pre] of [
+  ["a target with a default value", 'exports.main = () => { [process.env.NODE_OPTIONS = "x"] = [] }\n'],
+  ["a later array element target", 'exports.main = (a) => { let x; [x, process.env.NODE_OPTIONS] = [1, 2] }\n'],
+  ["a rest target", 'exports.main = () => { [...process.env.NODE_OPTIONS] = [1] }\n'],
+  ["an object pattern value target", 'exports.main = () => { ({ a: process.env.PATH } = { a: 1 }) }\n'],
+] as const) {
+  test(`${label} widens the closure (round 28d)`, () => expect(widensAll(pre)).toBe(true));
+}
+
+// White space of any length between a pattern and what follows it, or between a write and its operator.
+const gap = "\n" + " ".repeat(40);
+for (const [label, pre] of [
+  ["a bare parameter pattern before a far function body", `exports.main = function(${gap}{ constructor: { constructor: F } }${gap})${gap}{ return F(process.env.X)() }\n`],
+  ["a quoted parameter pattern before a far function body", `exports.main = function(${gap}{ "constructor": { "constructor": F } }${gap})${gap}{ return F(process.env.X)() }\n`],
+  ["a pattern with a far =", `let F;\nexports.main = () => { ({ "constructor": { "constructor": F } }${gap}= []); return F(process.env.X)() }\n`],
+  ["a far ++ on a steering variable", `exports.main = () => { process.env.NODE_OPTIONS${gap}++ }\n`],
+  ["a far delete of a steering variable", `exports.main = () => { delete${gap}process.env.PATH }\n`],
+  ["a pattern target followed by a far =", `exports.main = () => { [process.env.NODE_OPTIONS]${gap}= [1] }\n`],
+] as const) {
+  test(`${label} widens the closure (round 28d)`, () => expect(widensAll(pre)).toBe(true));
+}
+
+// Round 28e: reads inside patterns, a bare process.env as a copy or a reader argument, for heads, case, join bindings, steering keys.
+for (const [label, pre] of [
+  ["a default initializer in a parameter pattern", 'function build({ root = process.cwd() } = {}) { return root }\nexports.main = () => build()\n'],
+  ["defaults in a destructuring declaration", 'exports.main = (opts) => { const { cwd = process.cwd(), platform = process.platform } = opts; return [cwd, platform] }\n'],
+  ["a computed key in a pattern", 'exports.main = (impls) => { const { [process.platform]: impl } = impls; return impl }\n'],
+  ["env passed as a spawn option", 'exports.main = () => run("node", ["a.js"], { env: process.env })\n'],
+  ["Object.keys of process.env", 'exports.main = () => Object.keys(process.env).length\n'],
+  ["Object.entries of process.env", 'exports.main = () => Object.entries(process.env).length\n'],
+  ["Object.assign into a new object", 'exports.main = () => Object.assign({}, process.env, { A: "1" })\n'],
+  ["JSON.stringify of process.env", 'exports.main = () => JSON.stringify(process.env)\n'],
+  ["a line ending in i++ before process.stdout.write", 'exports.main = (s) => { let i = 0\ni++\nprocess.stdout.write(s) }\n'],
+  ["an object key named ENV", 'exports.main = () => ({ ENV: "production", PATH: "x" })\n'],
+  ["a destructured PATH from the environment", 'exports.main = () => { const { PATH: p } = process.env; return p }\n'],
+  ["a join bound from the path module", 'const { join } = require("node:path");\nexports.main = () => require(join(process.cwd(), "x.js"))\n'],
+  ["a join through a local alias of the path module", 'const p = require("node:path");\nexports.main = () => require(p.join(process.cwd(), "x.js"))\n'],
+  ["path.posix.join", 'const path = require("path");\nexports.main = () => require(path.posix.join(process.cwd(), "x.js"))\n'],
+] as const) {
+  test(`${label} does not widen the closure (round 28e)`, () => expect(widensAll(pre)).toBe(false));
+}
+for (const [label, pre] of [
+  ["a for-of head with an array pattern target", 'exports.main = (xs) => { for ([process.env.NODE_OPTIONS] of xs) { } }\n'],
+  ["a for-of head with an object pattern target", 'exports.main = (xs) => { for ({ a: process.env.PATH } of xs) { } }\n'],
+  ["a for-of head with a computed env key", 'exports.main = (xs, k) => { for (process.env[k] of xs) { } }\n'],
+  ["a lower-case steering variable written", 'exports.main = () => { process.env.node_options = "--require ./docs/payload.txt" }\n'],
+  ["a mixed-case steering key in an object", 'exports.main = () => run("node", { env: { ...process.env, Node_Options: "--require ./docs/payload.txt" } })\n'],
+  ["a join that is a local function", 'const path = require("path");\nfunction join(a, b) { return b }\nexports.main = (x) => require(join(process.cwd(), x, ""))\n'],
+  ["a resolve that is a local function with path loaded", 'const path = require("path");\nfunction resolve(a, b) { return b }\nexports.main = (x) => require(resolve(process.cwd(), "x.js"))\n'],
+  ["a steering name written on a copied environment", 'exports.main = () => { const env = {}; env.NODE_OPTIONS = "--require ./docs/payload.txt"; return env }\n'],
+  ["a steering name written through an index on a copy", 'exports.main = () => { const env = {}; env["NODE_OPTIONS"] = "--require ./docs/payload.txt"; return env }\n'],
+  ["a computed steering key in a literal", 'exports.main = () => ({ ["NODE_OPTIONS"]: "--require ./docs/payload.txt" })\n'],
+  ["process.env bound to a name", 'exports.main = () => { const e = process.env; return e }\n'],
+  ["process.env returned", 'exports.main = () => process.env\n'],
+  ["a bracket pattern after else", 'exports.main = (v, c) => { if (c) { } else [process.env.NODE_OPTIONS] = [v] }\n'],
+  ["a delete of a parenthesized steering variable", 'exports.main = () => { delete (process.env.PATH) }\n'],
+] as const) {
+  test(`${label} widens the closure (round 28e)`, () => expect(widensAll(pre)).toBe(true));
+}
