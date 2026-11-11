@@ -992,7 +992,9 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
       else if (c === "`") {
         i++;
         // A closing backtick leaves "" so the tokens on either side of a template never join in the output.
-        strings?.push({ raw: "", at: out.length, len: i - st, mask: true });
+        // A template that opens here and holds no substitution is one plain string, whose escapes are read like a quoted one.
+        if (text[st] === "`") strings?.push({ raw: text.slice(st + 1, i - 1), at: out.length, len: i - st });
+        else strings?.push({ raw: "", at: out.length, len: i - st, mask: true });
         out += keep ? text.slice(st, i) : '""';
         return true;
       } else if (c === "$" && text[i + 1] === "{") {
@@ -1635,6 +1637,74 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
   return false;
 }
 
+// Words after which a [ opens an array literal, not a member access.
+const BEFORE_ARRAY = /(?:^|[^\w$.])(?:return|typeof|case|in|of|new|delete|void|throw|yield|await|else|do|instanceof|export|default)$/;
+
+// Names that provably hold a number: the counter of a for header that starts at a number, or a let/var/const set to a number
+// literal and never assigned anything else.
+function numericNames(code: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of code.matchAll(/(?<![\w$.])(?:for\s*\(\s*)?(?:let|var|const)\s+([A-Za-z_$][\w$]*)\s*=\s*-?\d[\d._]*\s*(?=[;,\n)])/g)) names.add(m[1]!);
+  for (const m of code.matchAll(/\bfor\s*\(\s*([A-Za-z_$][\w$]*)\s*=\s*-?\d/g)) names.add(m[1]!);
+  // A symbol is not a string: it cannot be "constructor".
+  for (const m of code.matchAll(/(?<![\w$.])(?:let|var|const)\s+([A-Za-z_$][\w$]*)\s*=\s*Symbol\b/g)) names.add(m[1]!);
+  for (const n of [...names]) {
+    const esc = n.replace(/\$/g, "\\$");
+    const assigned = [...code.matchAll(new RegExp(`(?<![\\w$.])${esc}\\s*(?:=(?!=)|[-+*/%]=)`, "g"))].length;
+    const declared = [...code.matchAll(new RegExp(`(?<![\\w$.])(?:let|var|const)\\s+${esc}\\s*=`, "g"))].length + [...code.matchAll(new RegExp(`\\bfor\\s*\\(\\s*${esc}\\s*=`, "g"))].length;
+    // only the declaration, ++ / --, or += and -= by a number literal
+    const byNumber = [...code.matchAll(new RegExp(`(?<![\\w$.])${esc}\\s*[-+]=\\s*\\d`, "g"))].length;
+    if (assigned > declared + byNumber) names.delete(n);
+  }
+  return names;
+}
+
+// A key that is a number for sure: digits, a counter, x.length, Math.* and arithmetic on those.
+function numericKey(key: string, nums: Set<string>): boolean {
+  if (/^Symbol\s*[.(]/.test(key)) return true;
+  const flat = key.replace(/[A-Za-z_$][\w$]*\s*\.\s*length\b/g, "0").replace(/\bMath\s*\.\s*[A-Za-z]+\s*\(/g, "(");
+  if (!/^[\w$\s+\-*/%()]+$/.test(flat)) return false;
+  return (flat.match(/[A-Za-z_$][\w$]*/g) ?? []).every((id) => nums.has(id));
+}
+
+// True when a computed member access whose key is not a number or one plain string literal is then called, indexed again or
+// used with new: x[k](...), x[k][j], new x[k]. Any value reaches Function through ""["con"+"structor"]["con"+"structor"](...)(),
+// so such a chain can run what the text never spells. A plain read (arr[i], obj[key] as a value) is not a chain.
+// "code" has no strings or comments: a string is "" and a key built from strings is more than that.
+function computedCallChain(code: string): boolean {
+  let nums: Set<string> | undefined;
+  for (let i = code.indexOf("["); i >= 0; i = code.indexOf("[", i + 1)) {
+    let j = i;
+    while (j > 0 && /\s/.test(code[j - 1]!)) j--;
+    const prev = j > 0 ? code[j - 1]! : "";
+    if (!/[\w$)\]"'`\u0080-\uffff]/.test(prev)) continue;
+    if (BEFORE_ARRAY.test(code.slice(Math.max(0, j - 12), j))) continue;
+    let depth = 0;
+    let end = -1;
+    for (let k = i; k < code.length; k++) {
+      if (code[k] === "[") depth++;
+      else if (code[k] === "]" && --depth === 0) {
+        end = k;
+        break;
+      }
+    }
+    if (end < 0) return true;
+    let e = end + 1;
+    while (e < code.length && /\s/.test(code[e]!)) e++;
+    const next = code[e];
+    const tail = code.slice(e, e + 3);
+    const chained = next === "(" || next === "[" || (next === "?" && code[e + 1] === "." && (code[e + 2] === "(" || code[e + 2] === "[")) || /(?<![\w$.])new\s+[\w$.\s]*$/.test(code.slice(Math.max(0, j - 80), i));
+    void tail;
+    if (!chained) continue;
+    const key = code.slice(i + 1, end).trim();
+    if (/^\d+$/.test(key) || key === '""') continue;
+    nums ??= numericNames(code);
+    if (numericKey(key, nums)) continue;
+    return true;
+  }
+  return false;
+}
+
 // A scanner that throws must not make a file look safe: a fault reads as "not static" and "widen everything".
 let scannerFaults = 0;
 export function scannerFaultCount(): number {
@@ -1678,7 +1748,7 @@ function provablyStaticScan(source: string): boolean {
   const code = codeOnly(rest, aliases);
   if (code === undefined) return false;
   // Strings are gone from this text: a loader word or the word process inside a message is not a use.
-  if (PROCESS_LOADER_WORDS.test(code) || UNSAFE_JS.test(code) || timerGetsCode(code) || steeringKey(code)) return false;
+  if (PROCESS_LOADER_WORDS.test(code) || UNSAFE_JS.test(code) || timerGetsCode(code) || steeringKey(code) || computedCallChain(code)) return false;
   // Brackets that do not pair up (a file Bun rejects) are read by nothing below: not static.
   if (bracketIndex(code).mismatch) return false;
   return !processValueUse(code, aliases);
@@ -2220,7 +2290,7 @@ function hasUnboundedScan(text: string): boolean {
   const plain = codeOnly(text) ?? text;
   if (/(?<![\w$.])(?<!instanceof\s+)(?:eval|Function)\b(?!\s*\()/.test(plain)) return true;
   if (/(?<![\w$.])(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*(?:eval|Function)\b|(?<![\w$.])window\s*(?:\?\.)?\s*\[/.test(plain)) return true;
-  if (timerGetsCode(plain)) return true;
+  if (timerGetsCode(plain) || computedCallChain(plain)) return true;
   // .constructor.constructor and .constructor[ reach Function; .constructor( is read like Function( below.
   if (/(?:\?\.|\.)\s*constructor\s*(?:\?\.|\.)\s*constructor\b|(?:\?\.|\.)\s*constructor\s*(?:\?\.\s*)?\[/.test(plain)) return true;
   // A pattern that binds a constructor key ({ constructor: { constructor: F } }) reaches Function without a dot.
