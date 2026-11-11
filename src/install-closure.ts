@@ -4775,17 +4775,19 @@ function isRegistrySpec(o: string): boolean {
 // owner/repo is a GitHub shorthand and name@npm:spec an alias for a registry package: npm fetches both from a remote, so no hook of
 // this package runs. A path that exists in the package tree is a directory spec, so it is not a shorthand.
 function isRemoteSpec(o: string, files: Set<string>): boolean {
-  if (/^(?:@[a-z0-9~._-]+\/)?[a-z0-9~._-]+@npm:(?:@[a-z0-9~._-]+\/)?[a-z0-9~._-]+(?:@[A-Za-z0-9^<>=*~.+|_-]+)?$/.test(o)) return true;
+  if (/^(?:@[a-z0-9~._-]+\/)?[a-z0-9~._-]+@npm:(?:@[a-z0-9~._-]+\/)?(?![.~])[a-z0-9~._-]+(?:@[A-Za-z0-9^<>=*~.+|_-]+)?$/.test(o)) return true;
+  if (/^(?:github|gitlab|bitbucket|gist):[A-Za-z0-9._\/#-]+$/.test(o) || /^git\+(?:ssh|https?):\/\/[A-Za-z0-9._@:\/#~%+-]+$/.test(o)) return true;
   if (!/^(?![.~])[A-Za-z0-9._-]+\/(?![.])[A-Za-z0-9._-]+(?:#[A-Za-z0-9._\/-]+)?$/.test(o)) return false;
   const dir = o.replace(/#.*$/, "");
   for (const f of files) if (f === dir || f.startsWith(dir + "/")) return false;
   return true;
 }
-// A bump word or a valid semver: npm rejects any other plain word before it runs a hook. A word with an expansion or a glob
+// A bump word or anything that reads as a loose semver (npm accepts =v1.2.3 and trailing text): npm rejects any other plain word
+// (`PATCH`, `1`, `1.2`) before it runs a hook. A word with an expansion or a glob
 // may become one at run time, so it counts as an operand that runs.
 function versionOperandRuns(o: string): boolean {
   if (!/^[A-Za-z0-9._+=-]+$/.test(o)) return true;
-  return /^(?:major|minor|patch|premajor|preminor|prepatch|prerelease|from-git)$/.test(o) || /^[=v]?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(o);
+  return /^(?:major|minor|patch|premajor|preminor|prepatch|prerelease|from-git)$/.test(o) || /^[=v]*[0-9]+\.[0-9]+\.[0-9]+/.test(o);
 }
 // A tarball path with a literal name: it is a file, so no hook of this package runs for it.
 function isTarballPath(o: string): boolean {
