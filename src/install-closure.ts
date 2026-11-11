@@ -4340,6 +4340,8 @@ function markHookFile(ctx: Ctx, token: string): void {
 
 // A file named by a command, resolved from the directory an earlier cd moved to as well as from the package root.
 function noteHookArgCwd(ctx: Ctx, token: string): void {
+  // A file named by an expansion the scan could not resolve (`node $(cat name.txt)`) may be any file of the package.
+  if (token.includes(UNRESOLVED)) widenAll(ctx);
   noteHookArg(ctx, token);
   if (ctx.cwd && token && !token.startsWith("-") && !token.startsWith("/")) {
     const j = joinDir(ctx.cwd, token);
@@ -4626,7 +4628,11 @@ function readParts(ctx: Ctx, body: string): void {
     const cmds = loose === null ? null : splitCommands(ctx, loose);
     if (cmds && ctx.depth < DEPTH) {
       ctx.depth++;
-      for (const cmd of cmds) if (!headUnresolved(cmd)) dispatch(ctx, cmd); // an unresolved argument is dispatched as an argument
+      for (const cmd of cmds) {
+        // An unresolved command word may be any runner: every file is read. An unresolved argument is dispatched as an argument.
+        if (headUnresolved(cmd)) widenAll(ctx);
+        else dispatch(ctx, cmd);
+      }
       ctx.depth--;
     }
     if (ctx.hold) return;
@@ -4683,6 +4689,8 @@ function runScript(ctx: Ctx, name: string, optional: boolean): void {
   if (ctx.seen.has(name)) return;
   const raw = ctx.raw[name];
   if (typeof raw !== "string") {
+    // A script named by an unresolved expansion (`npm run "$(cat name.txt)"`) may be any script of the package.
+    if (name.includes(UNRESOLVED)) widenAll(ctx);
     if (!optional) fail(ctx, "unresolved: script");
     return;
   }
@@ -6527,6 +6535,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
         return;
       }
       if (!name.word) {
+        widenAll(ctx);
         if (!ctx.hold) fail(ctx, "unresolved: script");
         return;
       }
@@ -6579,6 +6588,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
     }
     if (sub.word !== "run" && sub.word !== "run-script") {
       if (!ctx.hold) fail(ctx, "unresolved: runner");
+      // A subcommand named by an unresolved expansion may be a script of the package.
+      if (sub.word !== undefined && sub.word.includes(UNRESOLVED)) widenAll(ctx);
       if (sub.word === undefined) {
         widenAll(ctx);
         return;

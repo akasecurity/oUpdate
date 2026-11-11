@@ -74,7 +74,8 @@ describe("install closure", () => {
       expect(hard({ "package.json": p, [A]: oldB }, { "package.json": p, [A]: oldB })).toEqual([]);
     }
     const [cfgOld, cfgNew] = same({ postinstall: "node ${npm_package_config_e:-a.js}" }, { config: { e: "assets/x.bmp" } });
-    expect(hard(cfgOld, cfgNew)).toEqual([]);
+    // The expansion names the changed file through the package's own config: it runs, so it holds.
+    held(cfgOld, cfgNew, /file/);
     const capped: object[] = [
       { postinstall: "node assets/x.bm?" },
       { postinstall: "node assets/" + "*".repeat(300) + "x.bmp" },
