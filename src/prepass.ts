@@ -12,7 +12,7 @@ export type Ecosystem = "npm" | "pypi";
 // These mean the install surface could not be computed. Any other install hold
 // is a form we compared and found unchanged, which is not a hold.
 export function surfaceCap(reason: string): boolean {
-  return /^(glob|pattern length|key count|unresolved: manifest|unresolved: path|unresolved: script depth|case-fold)/.test(reason);
+  return /^(glob|pattern length|key count|unresolved: manifest|unresolved: path|unresolved: script depth|case-fold|scanner fault)/.test(reason);
 }
 
 // Symlink entries from readArtifact. Their bytes are the link target (what pip writes for a wheel's

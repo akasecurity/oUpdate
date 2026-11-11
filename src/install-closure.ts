@@ -607,7 +607,7 @@ function followLoads(ctx: Ctx, key: string, text: string): void {
     followLoadsScan(ctx, key, text);
   } catch {
     scannerFaults++;
-    fail(ctx, "unresolved: scanner");
+    fail(ctx, "scanner fault");
   }
 }
 function followLoadsScan(ctx: Ctx, key: string, text: string): void {
@@ -720,7 +720,8 @@ const STEERING_NAME = { test: (v: string) => STEERING_STRONG_RE.test(v) };
 function envObjectLiteral(code: string, at: number, raw?: string): boolean {
   const chain = bracketChain(code, at);
   const top = chain[0];
-  if (!top || top[0] < 0 || code[top[0]] !== "{") return false;
+  if (top && top[0] < 0) return true;
+  if (!top || code[top[0]] !== "{") return false;
   const memo = bracketIndex(code).memo;
   const spreadKey = "s" + top[0];
   let spreads = memo.get(spreadKey);
@@ -1203,7 +1204,8 @@ const HARMLESS_GLOBAL = /^\s*(?:\?\.|\.)\s*(?:crypto|document|window|location|lo
 const HARMLESS_MEMBER = /^\s*\.\s*(?:env|report|features|version|versions|argv|exitCode|cwd|nextTick|hrtime|memoryUsage|cpuUsage|uptime|umask|emitWarning|on|once|off|emit|addListener|removeListener|stdout|stderr|stdin|title|pid|ppid|execPath|execArgv|argv0|release|getuid|getgid|geteuid|getegid|getgroups|platform|arch)\b/;
 const MEMBER_AFTER = /\s*\.\s*[A-Za-z_$][\w$]*/y;
 const SAFE_SUFFIX = /\.\s*(?:length\b|(?:slice|split|includes|startsWith|endsWith|indexOf|toString|toLowerCase|toUpperCase|trim|join|forEach|map|filter|some|every|find|replace)\s*\()/y;
-const DESTRUCTURE_OK = "(?:env|platform|arch|versions?|argv|cwd|exit|exitCode)(?![\\w$])";
+// env is not here: it binds the live environment object to a name the scan does not follow.
+const DESTRUCTURE_OK = "(?:platform|arch|versions?|argv|cwd|exit|exitCode)(?![\\w$])";
 
 // True when the expression that starts at "i" (right after an allowlisted read) ends there: the next token is not a member,
 // a call, a template or an optional chain. A few string and array methods and a numeric index are read through.
@@ -1257,7 +1259,7 @@ function prevTok(code: string, at: number): [string, number] {
 }
 // One pass over a text gives, for every position, the innermost bracket around it, and each bracket's partner. Kept for the last few
 // texts scanned, so the many lookups of one scan never walk the file again.
-type BracketIndex = { inner: Int32Array; closer: Int32Array; opener: Int32Array; memo: Map<string, boolean> };
+type BracketIndex = { inner: Int32Array; closer: Int32Array; opener: Int32Array; memo: Map<string, boolean>; mismatch: boolean };
 const bracketCache: Array<{ code: string; idx: BracketIndex }> = [];
 function bracketIndex(code: string): BracketIndex {
   for (const e of bracketCache) if (e.code === code) return e.idx;
@@ -1265,19 +1267,22 @@ function bracketIndex(code: string): BracketIndex {
   const closer = new Int32Array(code.length).fill(-1);
   const opener = new Int32Array(code.length).fill(-1);
   const stack: number[] = [];
+  let mismatch = false;
   for (let i = 0; i < code.length; i++) {
     inner[i] = stack.length > 0 ? stack[stack.length - 1]! : -1;
     const c = code[i]!;
     if (c === "(" || c === "[" || c === "{") stack.push(i);
     else if (c === ")" || c === "]" || c === "}") {
       const o = stack.pop();
+      if (o === undefined || code[o] !== (c === ")" ? "(" : c === "]" ? "[" : "{")) mismatch = true;
       if (o !== undefined) {
         closer[o] = i;
         opener[i] = o;
       }
     }
   }
-  const idx: BracketIndex = { inner, closer, opener, memo: new Map() };
+  if (stack.length > 0) mismatch = true;
+  const idx: BracketIndex = { inner, closer, opener, memo: new Map(), mismatch };
   bracketCache.push({ code, idx });
   if (bracketCache.length > 4) bracketCache.shift();
   return idx;
@@ -1287,6 +1292,7 @@ const CHAIN_CAP = 64;
 // pair [-1, length]: callers read it as "unknown" and take the cautious answer.
 function bracketChain(code: string, at: number): Array<[number, number]> {
   const idx = bracketIndex(code);
+  if (idx.mismatch) return [[-1, code.length]];
   const chain: Array<[number, number]> = [];
   let o = at >= 0 && at < code.length ? idx.inner[at]! : -1;
   while (o >= 0) {
@@ -1634,7 +1640,7 @@ let scannerFaults = 0;
 export function scannerFaultCount(): number {
   return scannerFaults;
 }
-function provablyStatic(source: string): boolean {
+export function provablyStatic(source: string): boolean {
   try {
     return provablyStaticScan(source);
   } catch {
@@ -1673,6 +1679,8 @@ function provablyStaticScan(source: string): boolean {
   if (code === undefined) return false;
   // Strings are gone from this text: a loader word or the word process inside a message is not a use.
   if (PROCESS_LOADER_WORDS.test(code) || UNSAFE_JS.test(code) || timerGetsCode(code) || steeringKey(code)) return false;
+  // Brackets that do not pair up (a file Bun rejects) are read by nothing below: not static.
+  if (bracketIndex(code).mismatch) return false;
   return !processValueUse(code, aliases);
 }
 
@@ -2104,7 +2112,7 @@ function endsInPathCall(before: string, names: { mods: Set<string>; fns: Set<str
   if (!m) return false;
   return m[2] !== undefined ? names.mods.has(m[1]!) : names.fns.has(m[1]!);
 }
-function processHazard(source: string): boolean {
+export function processHazard(source: string): boolean {
   try {
     return processHazardScan(source);
   } catch {
@@ -2122,6 +2130,7 @@ function processHazardScan(source: string): boolean {
   const code = codeOnly(stripProcessAliases(keep, names), names);
   if (code === undefined) return unreadable();
   if (PROCESS_LOADER_WORDS.test(code) || steeringKey(code)) return true;
+  if (bracketIndex(code).mismatch) return unreadable();
   // A computed member of the global object can be the process object.
   if (/(?<![\w$.])(?:globalThis|global)\s*(?:\?\.)?\s*\[/.test(code)) return true;
   // An escape in code can spell process or a loader word.
@@ -2197,7 +2206,7 @@ function steeringKey(code: string): boolean {
 }
 
 const CALL_OK = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
-function hasUnbounded(text: string): boolean {
+export function hasUnbounded(text: string): boolean {
   try {
     return hasUnboundedScan(text);
   } catch {
