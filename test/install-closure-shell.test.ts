@@ -284,3 +284,22 @@ for (const [label, hook] of noiseLines) {
     expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
   });
 }
+
+// An unknown executor reads every file, an inert docs file included: the target may sit in docs/ as well as lib/.
+const executorLines: [string, string][] = [
+  ...runnerLines,
+  ["deno run -A", `deno run -A ${U}`],
+  ["npx node", `npx node ${U}`],
+  ["parallel with :::", `parallel node ::: ${U}`],
+  ["awk -f stdin with a here-string", `awk -f /dev/stdin <<< "BEGIN{system(\"node ${U}\")}"`],
+  ["script -q", `script -q /dev/null node ${U}`],
+  ["cmake -E env", `cmake -E env node ${U}`],
+  ["xcrun", `xcrun node ${U}`],
+  ["perl -e with system", `perl -e 'system("node",@ARGV)' ${U}`],
+];
+
+for (const [label, hook] of executorLines) {
+  test(`${label} reads every file: a changed docs/evil.js holds`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js")).length).toBeGreaterThan(0);
+  });
+}
