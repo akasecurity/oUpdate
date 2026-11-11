@@ -710,3 +710,18 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} does not widen the closure (round 21)`, () => expect(widensAll(pre)).toBe(false));
 }
+
+// Round 22: a timer given code through the global object, and labels and class fields named global.
+for (const [label, pre] of [
+  ["globalThis.setTimeout given a string", 'exports.main = () => globalThis.setTimeout("run()" + process.env.X, 0)\n'],
+  ["global.setInterval given a built string", 'exports.main = () => global.setInterval("a" + process.env.X, 0)\n'],
+  ["window.setTimeout given a template", 'exports.main = () => window.setTimeout(`run(${process.env.X})`, 0)\n'],
+] as const) {
+  test(`${label} widens the closure (round 22)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a label named global", 'exports.main = () => { global: for (;;) { break global } }\n'],
+  ["a class field named global", 'class C { global = 1 }\nexports.main = () => new C()\n'],
+] as const) {
+  test(`${label} stays static (round 22)`, () => expect(held(pre)).toBe(false));
+}

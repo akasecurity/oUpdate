@@ -1166,7 +1166,12 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
     if (m[0] === "}") { depth = Math.max(0, depth - 1); continue; }
     if (m[0] === "this" && depth > 0) continue;
     // An object key (global: true) is a name, not the global object.
-    if (m[0] !== "this" && /^\s*:/.test(rest.slice(at + m[0].length, at + m[0].length + 8)) && /[{,]\s*$/.test(rest.slice(Math.max(0, at - 12), at))) continue;
+    const nextText = rest.slice(at + m[0].length, at + m[0].length + 8);
+    const before = rest.slice(Math.max(0, at - 12), at);
+    if (m[0] !== "this" && /^\s*:/.test(nextText) && (/[{,;}]\s*$/.test(before) || /^\s*$/.test(before))) continue;
+    if (m[0] !== "this" && /(?:^|[^\w$.])(?:break|continue)\s*$/.test(rest.slice(Math.max(0, at - 12), at))) continue;
+    // A class field (global = 1) is a name too.
+    if (m[0] !== "this" && /^\s*=(?!=)/.test(nextText) && (/[{;}]\s*$/.test(before) || /^\s*$/.test(before))) continue;
     // (this && this.__x) is a test: its value is the right side. A comparison does not hand it on either.
     if (m[0] === "this" && /^\s*(?:&&|[!=]==?)/.test(rest.slice(at + 4, at + 20))) continue;
     let j = at;
@@ -1644,7 +1649,7 @@ function processHazard(source: string): boolean {
 function timerGetsCode(code: string): boolean {
   // The scan writes a template as a lone backtick, which argsOf would read as an open quote.
   const plain = code.replace(/`/g, "§");
-  for (const m of plain.matchAll(/(?<![\w$.])(?:setTimeout|setInterval)\s*\(/g)) {
+  for (const m of plain.matchAll(/(?<![\w$.])(?:(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*)?(?:setTimeout|setInterval)\s*\(/g)) {
     const args = argsOf(plain, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) return true;
     const first = firstArg(args).trim();
