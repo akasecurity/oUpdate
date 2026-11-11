@@ -679,8 +679,10 @@ const LITERAL_LOAD = new RegExp(
 );
 // Anything still able to name a file. module.exports is removed first; it is the static CJS assignment.
 const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bchild_process\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
-// The plain reads of the process object a name for the process module may make. Any other use of such a name (a computed
-// member, binding, getBuiltinModule, an argument to a call) can reach a loader or a native module, so it is not static.
+// The plain reads of the process object, or of a name for the process module, a static file may make. Any other use (an
+// alias, a computed member, binding, getBuiltinModule, mainModule, an argument to a call) can reach a loader or a native
+// module, so it is not static; the loader words and a bare or computed use also widen the closure to the whole package.
+const PROCESS_LOADER_WORDS = /\b(?:getBuiltinModule|mainModule|_?linkedBinding|binding)\b/;
 const PROCESS_READ = "(?:env\\s*\\.\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|versions?\\b(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)?|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
 // `const p = require("process")` or `import p from "node:process"`: the only loads of the process module that stay static.
 const PROCESS_ALIAS = new RegExp(
@@ -996,10 +998,11 @@ function provablyStatic(source: string): boolean {
   // Comments out first, strings kept: the patterns below read code, and a comment can neither hide nor fake a load.
   const text = codeOnly(source, [], true);
   if (text === undefined) return false;
-  const aliases: string[] = [];
+  const aliases: string[] = ["process"];
   let viaOther = false;
   let rest = stripProcessAliases(text, aliases);
   if (hidesNames(codeOnly(text, aliases))) return false;
+  if (PROCESS_LOADER_WORDS.test(text)) return false;
   rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), removedText(false));
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3, at: number, whole: string) => {
     const spec = String(spec1 || spec2 || spec3 || "");
@@ -1018,7 +1021,6 @@ function provablyStatic(source: string): boolean {
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
   if (/(?:\brequire\s*\(|\bfrom|\bimport)\s*['"](?:node:)?process\b/.test(rest)) return false;
   if (UNSAFE_JS.test(rest)) return false;
-  if (aliases.length === 0) return true;
   const code = codeOnly(rest, aliases);
   if (code === undefined) return false;
   rest = code;
@@ -1418,7 +1420,32 @@ type JsTier = { all: boolean; pkg: boolean; tests: boolean; flows: boolean; same
 
 // eval/Function/vm of a value we cannot see can load any file, docs included.
 // A string literal or a read of a literal path is not that shape.
+function processHazard(source: string): boolean {
+  // Comments out first (strings kept), as in provablyStatic; a file the scan cannot read is checked as written.
+  const text = codeOnly(source, [], true) ?? source;
+  if (PROCESS_LOADER_WORDS.test(text)) return true;
+  const names = ["process"];
+  const rest = stripProcessAliases(text, names);
+  // An escaped or non-ASCII name in code can spell process or a loader word: it is read as a hazard.
+  if (hidesNames(codeOnly(text))) return true;
+  const alt = names.map((n) => n.replace(/\$/g, "\\$")).join("|");
+  const L = "(?<![\\w$\\u0080-\\uffff])";
+  const R = "(?![\\w$\\u0080-\\uffff])";
+  // The object itself used as a value (assigned, passed, returned, indexed): not a plain read of one member.
+  if (new RegExp(`(?:[=(,:?&|!]\\s*|\\breturn\\s+|\\bnew\\s+)${L}(?:${alt})${R}(?!\\s*\\.\\s*[A-Za-z_$])|${L}(?:${alt})\\s*\\[`).test(rest)) return true;
+  // A require, import() or require.resolve whose argument is not a string literal and reads process (env-derived).
+  const word = new RegExp(`${L}(?:${alt})${R}`);
+  for (const m of rest.matchAll(/(?:\brequire(?:\s*\.\s*resolve)?|\bimport)\s*\(/g)) {
+    const args = argsOf(rest, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined) return true;
+    const arg = firstArg(args).trim();
+    if (!/^(['"`])[^'"`\\\${]*\1$/.test(arg) && word.test(arg)) return true;
+  }
+  return false;
+}
+
 function hasUnbounded(text: string): boolean {
+  if (processHazard(text)) return true;
   const re = /\b(?:eval|Function)\s*\(|\bvm\s*\.\s*(?:runInThisContext|runInNewContext|runInContext|compileFunction)\s*\(/g;
   const ok = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
   for (const m of text.matchAll(re)) {

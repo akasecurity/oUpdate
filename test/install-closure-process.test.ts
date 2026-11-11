@@ -328,6 +328,45 @@ for (const [label, pre] of [
   ["a property keyword after a relative require on one line", `${A}require("./helper").in / ${Y} / 1;\n`],
 ] as const) {
   test(`${label} is not static (round 11)`, () => expect(held(pre)).toBe(true));
+
+// The global process is checked like a name for the module. Loader words and a bare or computed use widen the
+// closure to the whole package (the changed build files hold); other uses only make the hook not static.
+const widensAll = (pre: string) => holds(release("1.0.0", pre), release("1.0.1", pre)).length > 0;
+for (const [label, pre] of [
+  ["an alias of process calling binding", 'const p = process; exports.main = () => p.binding("spawn_sync").spawn({})\n'],
+  ["an alias of process with a computed mainModule load", 'const p = process; exports.main = () => p.mainModule["req"+"uire"]("./evil.js")\n'],
+  ["process._linkedBinding", 'exports.main = () => process._linkedBinding("x")\n'],
+  ["process.getBuiltinModule with a computed name", 'exports.main = () => process.getBuiltinModule("child_" + "process").execSync("node ./unreviewed.js")\n'],
+  ["a computed member of process", 'exports.main = () => process["bind"+"ing"]("spawn_sync")\n'],
+  ["process passed to another call", 'exports.main = () => run(process)\n'],
+  ["a require of a process.env value", 'exports.main = () => require(process.env.X)\n'],
+  ["an import() of a process.env value", 'exports.main = () => import(process.env.X)\n'],
+  ["a require.resolve of a process.env value", 'exports.main = () => require.resolve(process.env.X)\n'],
+] as const) {
+  test(`${label} widens the closure to the whole package`, () => expect(widensAll(pre)).toBe(true));
+}
+test("the plain reads on the allowlist stay static: env.X, platform, arch, versions, argv, cwd(), exit(, exitCode, stdout.write(", () => {
+  const pre = 'exports.main = () => { if (process.env.CI || process.platform === "win32" || process.arch === "x" || process.version < "v18") process.exit(1); process.exitCode = 1; process.stdout.write(process.cwd() + process.argv[2] + process.versions.node) }\n';
+  expect(widensAll(pre)).toBe(false);
+  expect(held(pre)).toBe(false);
+});
+test("another member of process (nextTick) makes the hook not static but does not widen to the whole package", () => {
+  const pre = 'exports.main = () => process.nextTick(() => 1)\n';
+  expect(held(pre)).toBe(true);
+  expect(widensAll(pre)).toBe(false);
+});
+test("a word like process in a comment or a message is not a process use", () => {
+  const pre = '// process the options\nexports.main = () => console.log("process done")\n';
+  expect(widensAll(pre)).toBe(false);
+});
+
+// OUP-208 with round 3: the global process under an escaped name, and a loader load that continues past the statement.
+for (const [label, pre] of [
+  ["an escaped global process calling binding", 'exports.main = () => \\u0070rocess.binding("spawn_sync")\n'],
+  ["a braced escape of the global process calling getBuiltinModule", 'exports.main = () => \\u{70}rocess.getBuiltinModule("child_"+"process")\n'],
+  ["a required process module with a member call continuing the statement", 'const x = require("process").binding("spawn_sync")\nexports.main = () => 1\n'],
+] as const) {
+  test(`${label} widens the closure to the whole package`, () => expect(widensAll(pre)).toBe(true));
 }
 
 // Round 12: the span of an ambiguous / must end in an operand; ( x ) / 2 / 3 on one line is not static; real plain require.
