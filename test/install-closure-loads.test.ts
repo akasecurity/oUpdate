@@ -59,6 +59,8 @@ const nested = (v: string, hook: string, changed: string) =>
     "scripts/lib/a.js": "module.exports = 1\n",
     "scripts/evil.js": changed === "scripts/evil.js" ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
     "x/evil.js": changed === "x/evil.js" ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
+    "scripts/workers/evil.js": changed === "scripts/workers/evil.js" ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
+    "scripts/lib/evil.js": changed === "scripts/lib/evil.js" ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
   });
 const PATH = `const path = require("path"); const name = "a"; `;
 const later: [string, string, string][] = [
@@ -198,5 +200,43 @@ test("3000 functions of the same name in a file over 1 MB are read in bounded ti
   const code = Array.from({ length: 3000 }, (_, i) => `function t(e) { return e + ${i} }\n`).join("") + `function u(e) { require(e) }\nu(${BX});\nconst pad = "${"x".repeat(1_050_000)}";\n`;
   const t0 = performance.now();
   holds(nested("1.0.0", code, "scripts/evil.js"), nested("1.0.1", code, "scripts/evil.js"));
+  expect(performance.now() - t0).toBeLessThan(5000);
+});
+
+// Fourth review batch. BX is "../x/evil.js"; R is a restricting load, so the hook folder floor cannot hide the gap.
+const CP = `const cp = require("child_process"); `;
+const fourth: [string, string, string][] = [
+  ["require.main.require of a built path", `require.main.require(${BX})`, "x/evil.js"],
+  ["module.parent.require of a built path", `module.parent.require(${BX})`, "x/evil.js"],
+  ["a name bound to module, then .require", `const m = module; m.require(${BX})`, "x/evil.js"],
+  ["an object holding require, then .require", `const o = { require }; o.require(${BX})`, "x/evil.js"],
+  ["fork of path.join(__dirname, ...) from a hook in a folder", PATH + CP + `cp.fork(path.join(__dirname, "workers", name))`, "scripts/workers/evil.js"],
+  ["fork of a literal head with a cwd option", CP + `cp.fork("./lib/" + process.argv[2], [], { cwd: __dirname })`, "scripts/lib/evil.js"],
+  ["a createRequire statement longer than 200 characters", `const { createRequire } = require("module"); const r = (${"0,".repeat(110)} createRequire(__filename)); r(${BX})`, "x/evil.js"],
+  ["a parameter list with a call in a default", R + `function go(x, y = String(1)) { require(x) } go(${BX})`, "x/evil.js"],
+  ["an arrow with a call in a default", R + `const go = (x, y = String(1)) => require(x); go(${BX})`, "x/evil.js"],
+  ["a named function expression held by a name", R + `const go = function inner(x) { require(x) }; go(${BX})`, "x/evil.js"],
+  ["an exported function the file calls through exports", R + `exports.go = function (x) { require(x) }; exports.go(${BX})`, "x/evil.js"],
+  ["module.exports called in its own file", R + `module.exports = function (x) { require(x) }; module.exports(${BX})`, "x/evil.js"],
+  ["an export called through require(__filename)", R + `exports.go = function (x) { require(x) }; require(__filename).go(${BX})`, "x/evil.js"],
+  ["a property of a parameter", R + `function go(o) { require(o.p) } go({ p: ${BX} })`, "x/evil.js"],
+  ["cluster loaded through a template literal", "const c = require(`cluster`); c.setupPrimary({ exec: [\"../x/\", \"evil.js\"].join(\"\") })", "x/evil.js"],
+  ["require.main.constructor._load of a built path", `require.main.constructor._load(["../x/", "evil.js"].join(""))`, "x/evil.js"],
+  ["an argument vector held by a name bound to a name", R + `const a = [["x/ev", "il.js"].join("")]; const b = a; require("child_process").spawnSync("node", b)`, "x/evil.js"],
+  ["an argument vector that is an expression", R + `require("child_process").spawnSync("node", process.argv.slice(2))`, "x/evil.js"],
+];
+for (const [label, hook, changed] of fourth) {
+  test(`${label} holds the changed ${changed}`, () => expect(nestHolds(hook, changed)).toBe(true));
+}
+
+test("an exported function that requires its parameter and is only exported does not hold an unrelated changed file", () => {
+  const hook = `function go(x) { require(x); }\nexports.go = go;\n`;
+  expect(holds(nested("1.0.0", hook, "x/evil.js"), nested("1.0.1", hook, "x/evil.js"))).toEqual([]);
+});
+
+test("30000 distinct named functions in a file of about 1 MB are read in bounded time", () => {
+  const code = Array.from({ length: 30000 }, (_, i) => `function f${i}(e) { return e }\n`).join("") + `function u(e) { require(e) }\nu(${BX});\nconst pad = "${"x".repeat(250_000)}";\n`;
+  const t0 = performance.now();
+  holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"));
   expect(performance.now() - t0).toBeLessThan(5000);
 });
