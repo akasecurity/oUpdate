@@ -1662,13 +1662,128 @@ function processValueUse(code: string, names: string[], lenient = false, strict 
   return thisOrArgumentsLeaks(rest, strict);
 }
 
-// Where a { opens: a function body ("fn"), an arrow body, a class body or a plain block.
-function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block" {
-  let j = at;
-  while (j > 0 && /\s/.test(code[j - 1]!)) j--;
+type BraceKind = "fn" | "arrow" | "class" | "object" | "block";
+
+// The index just after the last non-space character before `end`.
+function skipSpaceBack(code: string, end: number): number {
+  let i = end;
+  while (i > 0 && /\s/.test(code[i - 1]!)) i--;
+  return i;
+}
+
+// A character of an identifier: ID_Continue, $, the joiners, and the halves of a surrogate pair (an astral name stays whole).
+// Whitespace and line terminators (no-break space, U+FEFF, U+2028 and the like) are not ID_Continue, so they end a word.
+function identChar(c: string): boolean {
+  return /[\p{ID_Continue}$\u200c\u200d\ud800-\udfff]/u.test(c);
+}
+
+// The identifier that ends at `end` (no window: the whole identifier). A backslash never reaches here: the hazard check refuses
+// a file with one first, so a \u escape in a name is not read.
+function identBack(code: string, end: number): { word: string; start: number } {
+  let i = end;
+  while (i > 0 && identChar(code[i - 1]!)) i--;
+  return { word: code.slice(i, end), start: i };
+}
+
+// The word function at `start` is the keyword and not a property name (o.function, o. function, o?.function).
+function notProperty(code: string, start: number): boolean {
+  const r = skipSpaceBack(code, start);
+  return code[r - 1] !== "." || code.slice(r - 3, r) === "...";
+}
+
+// A ( at index k opens the parameter list of a function head: function (a), function f(a), function* f(a), async function f(a).
+// The scan runs over the whole text: a long name or long gaps never cut the keyword off.
+function isFunctionHead(code: string, k: number): boolean {
+  let p = skipSpaceBack(code, k);
+  let id = identBack(code, p);
+  if (id.word === "") {
+    if (code[p - 1] !== "*") return false;
+    p = skipSpaceBack(code, p - 1);
+    id = identBack(code, p);
+    return id.word === "function" && notProperty(code, id.start);
+  }
+  if (id.word === "function") return notProperty(code, id.start);
+  let q = skipSpaceBack(code, id.start);
+  if (code[q - 1] === "*") q = skipSpaceBack(code, q - 1);
+  const kw = identBack(code, q);
+  return kw.word === "function" && notProperty(code, kw.start);
+}
+
+// How far back from the ] of a computed method name its [ is looked for.
+const METHOD_KEY_REACH = 256;
+
+// A method or accessor at member position of an object literal or class body: name(...) {, get name(...) {, async *name(...) {,
+// [key](...) {. A call statement (f(1)) inside a block is not a member.
+function isMethodHead(code: string, k: number, outer: BraceKind | undefined): boolean {
+  if (outer === "class") return true;
+  if (outer !== "object") return false;
+  let p = skipSpaceBack(code, k);
+  if (code[p - 1] === "]") {
+    let depth = 0;
+    let i = p - 1;
+    // A bounded walk back to the opening [: a longer key is not read as a method head (a hold, never a miss), so nested keys
+    // never rescan one another.
+    for (; i >= 0 && p - i <= METHOD_KEY_REACH; i--) {
+      if (code[i] === "]") depth++;
+      else if (code[i] === "[" && --depth === 0) break;
+    }
+    if (i < 0 || p - i > METHOD_KEY_REACH) return false;
+    p = skipSpaceBack(code, i);
+  } else if (/["'`]/.test(code[p - 1] ?? "")) {
+    // A quoted name ("m"(a) {): the text has its strings blanked, so the literal is its two quotes.
+    const open = code.lastIndexOf(code[p - 1]!, p - 2);
+    if (open < 0) return false;
+    p = skipSpaceBack(code, open);
+  } else {
+    const id = identBack(code, p);
+    if (id.word === "") return false;
+    p = skipSpaceBack(code, id.start);
+  }
+  for (;;) {
+    if (code[p - 1] === "*") {
+      p = skipSpaceBack(code, p - 1);
+      continue;
+    }
+    const m = identBack(code, p);
+    if (/^(?:get|set|async|static)$/.test(m.word)) {
+      p = skipSpaceBack(code, m.start);
+      continue;
+    }
+    break;
+  }
+  return code[p - 1] === "{" || code[p - 1] === ",";
+}
+
+// A { at index `at` (j: the end of the text before it) opens a class body when a real class keyword stands in the same statement
+// before it. The keyword is a whole word, not a member name (o.class, o. class, o?.class, o.#class), a key (class: ...) or a
+// method or call (class(...)). The word is found in a bounded stretch back to the last brace or semicolon, and judged against
+// the whole text, so a cut never splits a longer name into the keyword.
+function opensClassBody(code: string, j: number): boolean {
+  let lo = j - 1;
+  while (lo >= 0 && j - lo <= 200 && code[lo] !== "{" && code[lo] !== "}" && code[lo] !== ";") lo--;
+  const from = Math.max(0, lo + 1);
+  // Search the stretch only (never the rest of the file: that makes every brace scan the whole text).
+  const stretch = code.slice(from, j);
+  for (let at = stretch.indexOf("class"); at >= 0; at = stretch.indexOf("class", at + 1)) {
+    const i = from + at;
+    if ((i > 0 && identChar(code[i - 1]!)) || identChar(code[i + 5] ?? " ")) continue;
+    const r = skipSpaceBack(code, i);
+    if (code[r - 1] === "#" || (code[r - 1] === "." && code.slice(r - 3, r) !== "...")) continue;
+    let k = i + 5;
+    while (k < code.length && /\s/.test(code[k]!)) k++;
+    if (/[:(=,)]/.test(code[k] ?? "")) continue;
+    return true;
+  }
+  return false;
+}
+
+// Where a { opens: a function body ("fn"), an arrow body, a class body, an object literal or a plain block. `outer` is the kind
+// of the brace around it.
+function braceKind(code: string, at: number, outer?: BraceKind): BraceKind {
+  const j = skipSpaceBack(code, at);
   if (code.slice(Math.max(0, j - 2), j) === "=>") return "arrow";
-  // The word class opens a class body, not an object key (class: function () {}) or a member (x.class).
-  if (/(?<![\w$.])class(?![\w$])(?!\s*:)[^{};]*$/.test(code.slice(Math.max(0, j - 200), j))) return "class";
+  // The word class opens a class body, not an object key (class: function () {}) or a member (x.class, x. class, x?.#class).
+  if (opensClassBody(code, j)) return "class";
   if (code[j - 1] === ")") {
     let depth = 0;
     let k = j - 1;
@@ -1676,10 +1791,49 @@ function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block"
       if (code[k] === ")") depth++;
       else if (code[k] === "(" && --depth === 0) break;
     }
-    const word = /([A-Za-z_$][\w$]*)\s*$/.exec(code.slice(Math.max(0, k - 40), Math.max(0, k)))?.[1] ?? "";
-    return /^(?:if|for|while|switch|catch|with)$/.test(word) ? "block" : "fn";
+    const word = identBack(code, skipSpaceBack(code, Math.max(0, k))).word;
+    if (/^(?:if|for|while|switch|catch|with)$/.test(word)) return "block";
+    // A { on the next line after a ) that is not a function head or a member of an object or class is a block after a finished
+    // statement, by automatic semicolon insertion: (1)\n{ ... }, void (0)\n{ ... }, f(1)\n{ ... }.
+    if (/[\r\n\u2028\u2029]/.test(code.slice(j, at)) && !isFunctionHead(code, k) && !isMethodHead(code, k, outer)) return "block";
+    return "fn";
   }
+  // An object literal follows an operator, an opening bracket or a comma (across line ends), or a keyword that takes a value on
+  // the same line (return, yield and the like end a statement at a line end; await, yield and of are plain names in sloppy
+  // code).
+  const prev = code[j - 1] ?? "";
+  if (code.slice(j - 3, j) === "...") return "object";
+  if (/[=,(\[?|&!*%<>^~]/.test(prev) || ((prev === "+" || prev === "-") && code[j - 2] !== prev)) return "object";
+  const w = identBack(code, j).word;
+  if (w !== "" && !/[\r\n\u2028\u2029]/.test(code.slice(j, at)) && /^(?:return|yield|await|throw|typeof|void|new|in|of|delete|instanceof|default)$/.test(w)) return "object";
+  // The value of a key (a: {) in an object literal, or the alternate of a ternary (c ? a : {).
+  if (prev === ":" && (outer === "object" || closesTernary(code, j - 1))) return "object";
   return "block";
+}
+
+// How far back from a : the scan looks for its ? (an alternate object farther than this holds as a block: a hold, never a miss).
+const TERNARY_REACH = 256;
+
+// The : at index c closes a ? of a conditional expression in the same statement (scanned back a bounded way; no answer is false).
+function closesTernary(code: string, c: number): boolean {
+  // A bounded stretch, and no ? in it ends the scan at native speed: the cost per : never depends on the size of the file.
+  const from = Math.max(0, c - TERNARY_REACH);
+  if (!code.slice(from, c).includes("?")) return false;
+  let pending = 0;
+  let depth = 0;
+  for (let i = c - 1; i >= from; i--) {
+    const ch = code[i]!;
+    if (ch === ")" || ch === "]" || ch === "}") depth++;
+    else if (ch === "(" || ch === "[" || ch === "{") {
+      if (--depth < 0) return false;
+    } else if (ch === ";" && depth === 0) return false;
+    else if (depth === 0 && ch === ":") pending++;
+    else if (depth === 0 && ch === "?" && code[i + 1] !== "." && code[i + 1] !== "?" && code[i - 1] !== "?") {
+      if (pending === 0) return true;
+      pending--;
+    }
+  }
+  return false;
 }
 
 // A this in sloppy code is the global object inside a plain function call, and this at the top of a CommonJS file or
@@ -1687,11 +1841,11 @@ function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block"
 // computed or process-like member, and arguments outside a function of its own, are not provably harmless. this.name and
 // this.method() stay. Strict code (a class body, "use strict", import/export) has no global this.
 function thisOrArgumentsLeaks(code: string, strictFile: boolean): boolean {
-  const stack: ("fn" | "arrow" | "class" | "block")[] = [];
+  const stack: BraceKind[] = [];
   for (const m of code.matchAll(/[{}]|(?<![\w$])(?:this|arguments)(?![\w$])/g)) {
     const at = m.index ?? 0;
     if (m[0] === "{") {
-      stack.push(braceKind(code, at));
+      stack.push(braceKind(code, at, stack[stack.length - 1]));
       continue;
     }
     if (m[0] === "}") {

@@ -1383,6 +1383,214 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} is not static`, () => expect(held(pre)).toBe(true));
 }
+// A { on the line after a ) that is not a parameter list is a block (automatic semicolon insertion), so arguments in it is
+// the module wrapper's, not a function's own.
+const ASI_BODY = 'const r = arguments[1]; r("child_"+"pro"+"cess")';
+const GB = 'const { ["getBuiltin"+"Module"]: gb } = p; gb("child_"+"pro"+"cess");';
+for (const [label, pre] of [
+  ["arguments in a block after a parenthesized statement", `let x = (1)\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  ["arguments in a block after void (0)", `void (0)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["arguments in a block after typeof (0)", `typeof (0)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["arguments in a block after delete (0)", `delete (0)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["arguments in a block after a call statement", `f(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["arguments in a block after a parenthesized statement with CRLF", `let x = (1)\r\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  ["arguments in a block after a call with a comment between", `f(1) // c\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["a template directive and then an arguments block", `\`use strict\`\nlet x = (1)\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  ["arguments in a block after a parenthesized statement that follows a function", `function f(a) { return 1 }\nlet x = (1)\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  ["a function with its body on the next line and then an arguments block", `function f(a)\n{ return 1 }\nlet x = (1)\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  // Already held before this change and kept: the value of a sloppy this, a call site's this through an alias of Error, and a
+  // template that spells the directive.
+  ["this.valueOf() handed on", `function f(){ return this.valueOf() }\nconst p = f().process;\n${GB}\nexports.main = () => 1\n`],
+  ["a call site's this through an alias of Error", `const E = Error;\nE.prepareStackTrace = (e, s) => s;\nconst t = new E().stack[0].getThis();\nconst p = t.process;\n${GB}\nexports.main = () => 1\n`],
+  ["a template directive and then this handed on", `\`use strict\`;\nfunction f(){ return this }\nconst p = f().process;\n${GB}\nexports.main = () => 1\n`],
+] as const) {
+  test(`${label} is not static (asi blocks)`, () => expect(held(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["arguments in a function declaration with its body on the next line", "function f(a)\n{ return arguments[0] }\nexports.main = () => f(1)\n"],
+  ["arguments in a generator declaration with its body on the next line", "function* g(a)\n{ yield arguments[0] }\nexports.main = () => g(1)\n"],
+  ["arguments in an async function declaration with its body on the next line", "async function h(a)\n{ return arguments[0] }\nexports.main = () => h(1)\n"],
+  ["arguments in a function expression with its body on the next line", "const f = function (a)\n{ return arguments[0] }\nexports.main = () => f(1)\n"],
+  ["arguments.length in a block after a parenthesized statement", "let x = (1)\n{ const n = arguments.length }\nexports.main = () => x\n"],
+  ["a block after an if with a condition", "if (1)\n{ const y = 2 }\nexports.main = () => 1\n"],
+  ["a block after a while", "while (0)\n{ const y = 2 }\nexports.main = () => 1\n"],
+  ["arguments in a function with its body on the same line", "function f(a) { return arguments[0] }\nexports.main = () => f(1)\n"],
+  ["arguments in a method with its body on the same line", "const o = { m(a) { return arguments[0] } }\nexports.main = () => o.m(1)\n"],
+] as const) {
+  test(`${label} stays static (asi blocks)`, () => expect(held(pre)).toBe(false));
+}
+// The function head is found by scanning the whole text, not a window, and a property or a longer identifier named function
+// is not the keyword.
+const PAD = " ".repeat(72);
+for (const [label, pre] of [
+  ["a property named function padded past a scan window", `const a = { function() { return 0 } };\na.function${PAD}(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["an identifier ending in function padded past a scan window", `const xfunction = () => 0;\nxfunction${PAD}(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["a property named function with a space after the dot", `const o = { function() { return 0 } };\no. function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["an optional-chain call named function with a space", `const o = { function() { return 0 } };\no?. function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["a property named function on the next line", `const o = { function() { return 0 } };\no\n.function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["an identifier with a non-ASCII letter before function", `const ñfunction = () => 0;\nñfunction(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["an identifier that spells function with a unicode escape (refused by the backslash check, not read by the scan)", `const \\u0066unction = () => 0;\n\\u0066unction(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["new on a property named function", `const o = { function: class {} };\nnew o. function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["a call statement and a block inside a plain block", `if (x) { f(1)\n{ ${ASI_BODY} } }\nexports.main = () => 1\n`],
+  ["a call statement and a block inside a bare block", `{ f(1)\n{ ${ASI_BODY} } }\nexports.main = () => 1\n`],
+  ["a call statement and a block inside a case block", `switch (1) { case 1: { f(1)\n{ ${ASI_BODY} } } }\nexports.main = () => 1\n`],
+] as const) {
+  test(`${label} is not static (asi head)`, () => expect(held(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a declaration with a 72-character name", `function ${"f".repeat(72)}(a)\n{ return arguments[0] }\nexports.main = () => 1\n`],
+  ["a declaration with 80 spaces before the name", `function${" ".repeat(80)}f(a)\n{ return arguments[0] }\nexports.main = () => f(1)\n`],
+  ["a generator declaration with a long gap", `function${" ".repeat(80)}*${" ".repeat(80)}g(a)\n{ yield arguments[0] }\nexports.main = () => g(1)\n`],
+  ["an anonymous function expression with a long gap", `const f = function${" ".repeat(80)}(a)\n{ return arguments[0] }\nexports.main = () => f(1)\n`],
+  ["a strict object method with its body on the next line", '"use strict";\nconst o = { m()\n{ return this } };\nexports.main = () => o.m()\n'],
+  ["a strict object getter with its body on the next line", '"use strict";\nconst o = { get g()\n{ return this } };\nexports.main = () => o.g\n'],
+  ["a strict object async generator method on the next line", '"use strict";\nconst o = { async *gen(a)\n{ return this } };\nexports.main = () => o.gen(1)\n'],
+  ["a second strict object method with its body on the next line", '"use strict";\nconst o = { a: 1, m(b)\n{ return this } };\nexports.main = () => o.m(1)\n'],
+  ["a computed strict object method with its body on the next line", '"use strict";\nconst k = "m";\nconst o = { [k](a)\n{ return this } };\nexports.main = () => o.m(1)\n'],
+  ["a class method with arguments and its body on the next line", "class A { m(a)\n{ return arguments[0] } }\nexports.main = () => new A()\n"],
+  ["a static class method with its body on the next line", '"use strict";\nclass A { static m(a)\n{ return this } }\nexports.main = () => A.m(1)\n'],
+  ["an object method with arguments and its body on the next line", "const o = { m(a)\n{ return arguments[0] } };\nexports.main = () => o.m(1)\n"],
+] as const) {
+  test(`${label} stays static (asi head)`, () => expect(held(pre)).toBe(false));
+}
+// A word before a { counts for an object literal only on the same line (return and yield end a statement at a line end; await,
+// yield and of are plain names in sloppy code), the class keyword is read with a Unicode-aware boundary, and a statement-position
+// call is never a method.
+const MM = "const m = () => 0;\n";
+for (const [label, pre] of [
+  ["a block after return and a line end", `${MM}if (0) return\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a block after await used as a name", `${MM}var await = 0; await\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a block after yield used as a name", `${MM}var yield = 0; yield\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a block after of used as a name", `${MM}var of = 0; of\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a block after a name with a non-ASCII prefix on the word class", `${MM}var ñclass = 0; ñclass\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call after a postfix increment and a line end", `${MM}var x = 0; x++\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call after a postfix decrement and a line end", `${MM}var x = 0; x--\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call after a regex literal and a line end", `${MM}/x/\n{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call in a block at the start of a statement", `${MM}{ m(1)\n{ ${ASI_BODY} } }\n`],
+  ["a call after a comma expression", `${MM}var a = 1, b = m(2)\n{ ${ASI_BODY} }\n`],
+  ["a call after a case label", `${MM}switch (1) { case 1: m(2)\n{ ${ASI_BODY} } }\n`],
+  ["a call named get", `const get = () => 0;\nget(1)\n{ ${ASI_BODY} }\n`],
+  ["a call named async", `const async = () => 0;\nasync(1)\n{ ${ASI_BODY} }\n`],
+  ["a call through a computed member", `const o = { k: () => 0 };\no["k"](1)\n{ ${ASI_BODY} }\n`],
+  ["a call after a labeled block that follows a ternary", `${MM}var c = 1 ? 2 : 3; lbl: { m(1)\n{ ${ASI_BODY} } }\n`],
+] as const) {
+  test(`${label} is not static (asi object)`, () => expect(held(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a quoted method name with its body on the next line", 'const o = {\n "m"(a)\n { return arguments[0] }\n};\nexports.main = () => o.m(1)\n'],
+  ["a quoted method name in a strict file", '"use strict";\nconst o = {\n "m"(a)\n { return this }\n};\nexports.main = () => o.m(1)\n'],
+  ["a single-quoted method name", "const o = {\n 'm'(a)\n { return arguments[0] }\n};\nexports.main = () => o.m(1)\n"],
+  ["an object in the alternate of a ternary", "const o = false ? null : {\n m(a)\n { return arguments[0] }\n};\nexports.main = () => o.m(1)\n"],
+  ["an object after a binary plus", "const o = 1 + {\n m(a)\n { return arguments[0] }\n};\nexports.main = () => 1\n"],
+  ["an object after a logical or", "const o = null || {\n m(a)\n { return arguments[0] }\n};\nexports.main = () => o.m(1)\n"],
+  ["an object as the value of a key", "const o = { a: {\n m(a)\n { return arguments[0] }\n} };\nexports.main = () => o.a.m(1)\n"],
+  ["an object returned on the same line", "function f() { return {\n m(a)\n { return arguments[0] }\n} }\nexports.main = () => f()\n"],
+] as const) {
+  test(`${label} stays static (asi object)`, () => expect(held(pre)).toBe(false));
+}
+// A non-ASCII space or line terminator ends a word, as it does in the engine: it is not part of the keyword before a paren or a
+// brace, and not part of a name.
+const SPACES: [string, string][] = [["a no-break space", "\u00a0"], ["a byte order mark", "\ufeff"], ["an ideographic space", "\u3000"], ["a line separator", "\u2028"], ["a paragraph separator", "\u2029"], ["an en space", "\u2002"]];
+for (const [sn, w] of SPACES) {
+  for (const [kw, pre] of [
+    ["if", `x = 1;${w}if (1) { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["while", `x = 1;${w}while (0) { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["for", `x = 1;${w}for (;;) { ${ASI_BODY}; break }\nexports.main = () => 1\n`],
+    ["switch", `x = 1;${w}switch (1) { default: ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["catch", `try { x = 1 }${w}catch (e) { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["with", `x = 1;${w}with ({}) { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["else", `if (0) { y = 1 }${w}else { ${ASI_BODY} }\nexports.main = () => 1\n`],
+    ["a function property", `const o = { function() { return 0 } };\no.${w}function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ] as const) {
+    test(`${kw} after ${sn} keeps its block as a block (widens the closure)`, () => expect(widensAll(pre)).toBe(true));
+  }
+}
+test("an astral identifier ending in function is one name, not the keyword", () => {
+  expect(widensAll(`const \u{20bb7}function = () => 0;\n\u{20bb7}function(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`)).toBe(true);
+});
+for (const [label, pre] of [
+  ["a spread of an object with a method body on the next line", "const o = { ...{\n m(a)\n { return arguments[0] }\n} };\nexports.main = () => o.m(1)\n"],
+  ["a spread of a function head with its body on the next line", "const g = (x) => x;\ng(...function (a)\n{ return arguments[0] });\nexports.main = () => 1\n"],
+  ["a method after a spread entry with its body on the next line", "const o = { ...base, m(a)\n{ return arguments[0] } };\nexports.main = () => o.m(1)\n"],
+] as const) {
+  test(`${label} stays static (asi spread)`, () => expect(held(pre)).toBe(false));
+}
+// The word class opens a class body only as a real keyword: not as a member name (o.class, o. class, o?.class, a line-broken dot,
+// a comment before the dot), not as a key, not as a call.
+const CK = "const o = { class: () => 0 };\n";
+const IN = `{ m(1)\n{ ${ASI_BODY} } }`;
+for (const [label, pre] of [
+  ["a member named class", `${CK}o.class(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named class with a space after the dot", `${CK}o. class(1)\n${IN}\nexports.main = () => 1\n`],
+  ["an optional-chain member named class", `${CK}o?. class(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named class after a line-broken dot", `${CK}o.\nclass(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named class after a comment and a dot", `${CK}o /*c*/ . class(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a key named class and then a call statement block", `const o = { class: f(1)\n${IN} }\nexports.main = () => 1\n`],
+  ["a key named class padded with spaces before the colon", `const f = () => 0;\nconst o = { class${" ".repeat(60)}: f(1)\n${IN} }\nexports.main = () => 1\n`],
+  ["a member named get", `const o = { get: () => 0 };\no. get(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named async", `const o = { async: () => 0 };\no?. async(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named static", `const o = { static: () => 0 };\no.\nstatic(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a call named class and then a block", `const f = { class: () => 0 };\nvar x = f.class\n${IN}\nexports.main = () => 1\n`],
+] as const) {
+  test(`${label} is not a class body (widens the closure)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a class declaration with a method whose body is on the next line", "class A { m(a)\n{ return arguments[0] } }\nexports.main = () => new A()\n"],
+  ["a class expression with a method whose body is on the next line", "const C = class { m(a)\n{ return arguments[0] } };\nexports.main = () => new C()\n"],
+  ["a class with a heritage and a method whose body is on the next line", "class B {}\nclass A extends B { m(a)\n{ return arguments[0] } }\nexports.main = () => new A()\n"],
+  ["a class with a heritage call and a method whose body is on the next line", "const f = () => class {};\nclass A extends f(1)\n{ m(a)\n{ return arguments[0] } }\nexports.main = () => new A()\n"],
+  ["a spread of a class expression", "const o = { ...class { static m(a)\n{ return arguments[0] } } };\nexports.main = () => o\n"],
+] as const) {
+  test(`${label} stays static (class keyword)`, () => expect(held(pre)).toBe(false));
+}
+// The brace scans look a bounded way back from each brace: a large file of many braces is read in linear time (a search that ran to
+// the end of the text for every brace took many seconds per MB). 2 MB reads in about a second where it should; the quadratic
+// forms took over thirty seconds.
+// The scan back from a : looks 256 characters for its ?: an alternate object farther away is read as a block (a hold, never a miss).
+test("an object in a ternary alternate beyond the scan reach is a block (a documented false hold)", () => {
+  const pre = `const o = false ?${" ".repeat(300)}null : {\n m(a)\n { return arguments[0] }\n};\nexports.main = () => 1\n`;
+  expect(held(pre)).toBe(true);
+});
+const bigOf = (unit: string) => unit.repeat(Math.ceil((2048 * 1024) / unit.length)) + "exports.main = () => 1;";
+for (const [label, make] of [
+  ["empty blocks", () => bigOf("{}\n")],
+  ["nested blocks", () => "{".repeat(1024 * 1024) + "}".repeat(1024 * 1024) + "\nexports.main = () => 1;"],
+  ["a call statement and an empty block", () => bigOf("f(1)\n{}\n")],
+  ["conditional expressions with an empty object", () => bigOf("c ? 1 : {}\n")],
+  ["empty object methods", () => bigOf("o = { m(a)\n{} }\n")],
+] as const) {
+  test(`2 MB of ${label} is scanned in linear time`, () => {
+    const text = make();
+    const t0 = performance.now();
+    provablyStatic(text);
+    expect(performance.now() - t0).toBeLessThan(4000);
+  }, 60000);
+}
+// The walk back over a computed method name is bounded, so nested names never rescan one another (this took seconds at a depth of
+// 16,000 and grew by four per doubling).
+for (const [label, n, limit, make] of [
+  ["nested computed method names", 16000, 1000, (d: number) => "const o = " + "{[".repeat(d) + "0" + "]()\n{}}".repeat(d) + ";"],
+  ["nested computed method names, 64,000 deep", 64000, 2000, (d: number) => "const o = " + "{[".repeat(d) + "0" + "]()\n{}}".repeat(d) + ";"],
+  ["nested accessor computed names", 16000, 1000, (d: number) => "const o = " + "{get [".repeat(d) + "0" + "]()\n{}}".repeat(d) + ";"],
+  ["nested mixed brackets and parens", 16000, 1000, (d: number) => "const o = " + "{[(".repeat(d) + "0" + ")]()\n{}}".repeat(d) + ";"],
+] as const) {
+  test(`${label} are scanned in linear time`, () => {
+    const text = make(n);
+    const t0 = performance.now();
+    provablyStatic(text);
+    expect(performance.now() - t0).toBeLessThan(limit);
+  }, 120000);
+}
+// A computed method name longer than the walk is not read as a method head: its body is a block (a hold, never a miss).
+test("a computed method name longer than the scan reach holds as a block (a documented false hold)", () => {
+  const key = "k" + "+k".repeat(150);
+  const pre = `const k = "m";\nconst o = {\n [${key}](a)\n { return arguments[0] }\n};\nexports.main = () => 1\n`;
+  expect(held(pre)).toBe(true);
+});
+test("a computed method name inside the scan reach stays a method head", () => {
+  const pre = `const k = "m";\nconst o = {\n [k + "x"](a)\n { return arguments[0] }\n};\nexports.main = () => 1\n`;
+  expect(held(pre)).toBe(false);
+});
 for (const [label, pre] of [
   ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
   ["arguments bound to a name", 'const a = arguments; exports.main = () => a[1]("child_"+"pro"+"cess")\n'],
