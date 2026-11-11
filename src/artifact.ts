@@ -51,6 +51,17 @@ function run(args: string[]): { text: string; localeLost: boolean } {
   return { text: Buffer.from(p.stdout).toString("latin1"), localeLost: LOCALE_FAILED.test(err) };
 }
 
+/**
+ * The format bsdtar itself reports for an archive (the last line of `bsdtar -tvv`, "Archive Format: ZIP 2.0 (deflation),
+ * Compression: none"): "ZIP" for a zip, "POSIX ustar format", "ASCII cpio (SVR4 with no CRC)", "7-Zip" and so on for the
+ * rest. Empty if bsdtar prints none.
+ */
+export function bsdtarFormat(path: string): string {
+  const lines = run(["-tvv", "-f", path]).text.split("\n").filter(Boolean);
+  const m = /^Archive Format: (.*?),\s+Compression: /.exec(lines[lines.length - 1] ?? "");
+  return m?.[1] ?? "";
+}
+
 function normalize(name: string): string {
   return name.replace(/^(\.\/)+/, "");
 }
@@ -384,7 +395,11 @@ export async function readArtifact(path: string, opts: { passphrase?: string; ma
     } finally {
       closeSync(fd);
     }
-    const polyglot: TarNote[] = zipEnd && tarMagic(head) ? [{ note: "a tar that is also a zip: bsdtar reads one, zipfile the other", key: "tar and zip polyglot", kind: "unreadable tar entry" }] : [];
+    // Any file zipfile opens that bsdtar reads in another format (cpio, 7z, xar, iso9660, ar, rar) is the same: the format
+    // is bsdtar's own report, not a guess from magic bytes.
+    const format = zipEnd ? bsdtarFormat(path) : "";
+    const notZip = zipEnd && !/^ZIP\b/.test(format);
+    const polyglot: TarNote[] = notZip || (zipEnd && tarMagic(head)) ? [{ note: `a tar that is also a zip: bsdtar reads one (${format || "unknown format"}), zipfile the other`, key: "tar and zip polyglot", kind: "unreadable tar entry" }] : [];
     if (polyglot.length || (!isZip(path) && !(zipEnd && /\.(whl|zip|egg)$/i.test(path)))) {
       markTarNotes(out, [...lost, ...polyglot, ...markUnstored(archiveNotes(listing, members, listedNames), unstoredMembers(listing, members, out)), ...(zipEnd ? zipNameNotes(path, members, out) : [])]);
       NPM_MEMBERS.set(out, members);

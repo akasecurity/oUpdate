@@ -69,12 +69,19 @@ function extraIds(extra: Uint8Array): { ids: number[]; zip64?: Uint8Array } {
 
 type Reader = (at: number, n: number) => Uint8Array;
 
-// The last end-of-central-directory signature in the final 64 KiB + 22 bytes, as zipfile looks for it.
-function endRecord(read: Reader, size: number): { tail: Uint8Array; at: number; tailAt: number } {
+// CPython's _EndRecData: the last 22 bytes when they are an end record with no comment, else the last signature
+// anywhere in the final 64 KiB + 22 bytes. A signature with fewer than 22 bytes after it is a truncated record, which
+// zipfile refuses (BadZipFile): `truncated` is set, and zipfile opens no archive at all.
+function endRecord(read: Reader, size: number): { tail: Uint8Array; at: number; tailAt: number; truncated?: boolean } {
+  if (size >= 22) {
+    const last = read(size - 22, 22);
+    if (last.length === 22 && U32(last, 0) === 0x06054b50 && last[20] === 0 && last[21] === 0) return { tail: last, at: 0, tailAt: size - 22 };
+  }
   const tailAt = Math.max(0, size - 22 - 65535);
   const tail = read(tailAt, size - tailAt);
-  for (let i = tail.length - 22; i >= 0; i--) if (U32(tail, i) === 0x06054b50) return { tail, at: i, tailAt };
-  return { tail, at: -1, tailAt };
+  const at = Buffer.from(tail).lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (at < 0) return { tail, at: -1, tailAt };
+  return { tail, at, tailAt, ...(tail.length - at < 22 ? { truncated: true } : {}) };
 }
 
 /** Whether zipfile finds an end record: it opens such a file as a zip whatever its first bytes are (a prepended stub). */
@@ -87,6 +94,7 @@ export function hasZipEnd(path: string): boolean {
       if (buf.length) readSync(fd, buf, 0, buf.length, at);
       return buf;
     };
+    // A truncated record counts: bsdtar may read the file as a zip while zipfile refuses it, which holds as unreadable.
     return endRecord(read, size).at >= 0;
   } finally {
     closeSync(fd);
@@ -103,7 +111,7 @@ export function zipEntries(path: string): ZipEntry[] {
  * (not ZIP64 placeholders) name another directory than the ZIP64 record does. zipfile takes the ZIP64 one; a reader
  * that takes the ordinary one sees other members.
  */
-export function zipDirectory(path: string): { entries: ZipEntry[]; endDiff?: string; tarBefore?: boolean } {
+export function zipDirectory(path: string, readBudget = ZIP_READ_BUDGET): { entries: ZipEntry[]; endDiff?: string; tarBefore?: boolean } {
   const fd = openSync(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -112,8 +120,9 @@ export function zipDirectory(path: string): { entries: ZipEntry[]; endDiff?: str
       if (buf.length) readSync(fd, buf, 0, buf.length, at);
       return buf;
     };
-    const { tail, at: eocd, tailAt } = endRecord(read, size);
+    const { tail, at: eocd, tailAt, truncated } = endRecord(read, size);
     if (eocd < 0) throw new Error("no end of central directory");
+    if (truncated) throw new Error("truncated end of central directory record");
     let count = U16(tail, eocd + 10);
     let cdSize = U32(tail, eocd + 12);
     let cdOffset = U32(tail, eocd + 16);
@@ -122,24 +131,47 @@ export function zipDirectory(path: string): { entries: ZipEntry[]; endDiff?: str
     // archive may carry one, and its directory then starts that much earlier. The record sits right before the locator.
     const loc = end >= 20 ? read(end - 20, 20) : new Uint8Array();
     let endDiff: string | undefined;
+    let recAt = end;
     if (loc.length === 20 && U32(loc, 0) === 0x07064b50) {
-      const rec = end >= 76 ? read(end - 76, 56) : new Uint8Array();
-      if (rec.length !== 56 || U32(rec, 0) !== 0x06064b50) throw new Error("corrupt zip64 end record");
+      // Patched zipfile (3.11.17, 3.12.15, 3.14.10) reads the record at the locator's offset first, and the record may be
+      // followed by extensible data up to the locator; only when no record signature sits there does it take the one
+      // right before the locator (a stub shifts every offset). A reader that always takes the one before the locator reads
+      // another directory, so a file where the two differ holds.
+      const justBefore = end - 76;
+      if (justBefore < 0 || U32(loc, 4) !== 0 || U32(loc, 16) > 1) throw new Error("corrupt zip64 end record locator");
+      const reloff = U64(loc, 8);
+      if (reloff > justBefore) throw new Error("corrupt zip64 end record locator");
+      const sigAt = (o: number) => {
+        const r = read(o, 56);
+        return r.length === 56 && U32(r, 0) === 0x06064b50 ? r : undefined;
+      };
+      const viaLocator = sigAt(reloff);
+      const beforeLocator = sigAt(justBefore);
+      const rec = viaLocator ?? beforeLocator;
+      if (!rec) throw new Error("corrupt zip64 end record");
+      recAt = viaLocator ? reloff : justBefore;
       const [c64, s64, o64] = [U64(rec, 32), U64(rec, 40), U64(rec, 48)];
+      // The record plus its extensible data ends at the locator, and with no stub the directory ends where it starts.
+      if (U64(rec, 4) + 12 !== end - 20 - recAt) throw new Error("corrupt zip64 end record: its size field does not reach the locator");
+      // reloff is the record's offset as the writer stored it (without any prefix), as the directory's own offset is.
+      if (o64 + s64 !== reloff) throw new Error("corrupt zip64 end record: the directory does not end where the record starts");
+      // Extensible data between the record and the locator hides the record from a reader that looks just before the locator
+      // (older zipfile), and a second directory can sit in it; real wheels carry none.
+      if (viaLocator && reloff !== justBefore) endDiff = beforeLocator ? `the ZIP64 locator names a record at ${reloff}, the bytes before the locator hold another at ${justBefore}` : `the ZIP64 record is not directly before its locator (the locator names ${reloff}, not ${justBefore}), so a reader that looks just before the locator misses it`;
       const differs = (ord: number, max: number, v: number) => ord !== max && ord !== v;
       if (differs(count, 0xffff, c64) || differs(cdSize, 0xffffffff, s64) || differs(cdOffset, 0xffffffff, o64)) {
-        endDiff = `the end record names ${count} entries at ${cdOffset}, the ZIP64 record ${c64} at ${o64}`;
+        endDiff = [endDiff, `the end record names ${count} entries at ${cdOffset}, the ZIP64 record ${c64} at ${o64}`].filter(Boolean).join("; ");
       }
       count = c64;
       cdSize = s64;
       cdOffset = o64;
-      end -= 20 + 56;
+      end = recAt;
     } else if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) throw new Error("no zip64 locator");
     // Bytes before the archive (a self-extractor stub): zipfile shifts every offset by them.
     const concat = end - cdSize - cdOffset;
     const cd = read(cdOffset + concat, cdSize);
     const out: ZipEntry[] = [];
-    let budget = ZIP_READ_BUDGET;
+    let budget = readBudget;
     let firstLocal = Infinity;
     // zipfile walks the directory by its byte size, not by the end record's count: a count that differs holds.
     let i = 0;
@@ -174,7 +206,7 @@ export function zipDirectory(path: string): { entries: ZipEntry[]; endDiff?: str
       const localIds = okLocal ? extraIds(read(local + concat + 30 + U16(lh, 26), U16(lh, 28))).ids : [];
       const entry: ZipEntry = { name, mode: attr >>> 16, size: usize, extras: [...ids, ...localIds] };
       const localRaw = okLocal ? read(local + concat + 30, U16(lh, 26)) : new Uint8Array();
-      const localName = U16(lh, 6) & 0x800 ? new TextDecoder().decode(localRaw) : cp437(localRaw);
+      const localName = flags & 0x800 ? new TextDecoder().decode(localRaw) : cp437(localRaw);
       if (!okLocal) entry.headerDiff = "no local header at its offset";
       else if (localName !== orig) entry.headerDiff = "the local header names another file (zipfile refuses it)";
       else if (U16(lh, 8) !== method) entry.headerDiff = `local method ${U16(lh, 8)}, central ${method}`;
@@ -183,8 +215,8 @@ export function zipDirectory(path: string): { entries: ZipEntry[]; endDiff?: str
       if (refused) entry.content = { error: refused };
       else if (!name.endsWith("/")) {
         // A budget on what the compare reads and decodes, the artifact cap's size: past it a member holds unread.
-        budget -= csize + usize;
-        if (budget < 0) entry.content = { error: `the compare's read budget of ${ZIP_READ_BUDGET} bytes is spent` };
+        budget -= Math.max(csize, usize);
+        if (budget < 0) entry.content = { error: `the compare's read budget of ${readBudget} bytes is spent` };
         else entry.content = okLocal ? zipfileBytes(read(local + concat + 30 + U16(lh, 26) + U16(lh, 28), csize), method, usize, crc, flags) : { error: "no local header" };
       }
       out.push(entry);
@@ -347,43 +379,153 @@ export function tarMagic(head: Uint8Array): boolean {
   return at(0, 0x1f, 0x8b) || at(0, 0x42, 0x5a, 0x68) || at(0, 0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00) || at(0, 0x28, 0xb5, 0x2f, 0xfd) || at(257, 0x75, 0x73, 0x74, 0x61, 0x72);
 }
 
-const ZIP_READ_BUDGET = 300_000_000;
+// The artifact cap's size (MAX_TOTAL_BYTES): each member counts once, at the larger of its two sizes, so a wheel that fits
+// the cap never spends it.
+export const ZIP_READ_BUDGET = 300_000_000;
 
+const RECORD_CAP = 10_000;
 const S_IFMT = 0o170000;
 const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 // Info-ZIP Unicode Path and Unicode Comment: bsdtar takes the name from them, zipfile never does.
 const UNICODE_EXTRAS = new Set([0x7075, 0x6375]);
 
-function wheelRecord(entries: readonly ZipEntry[], out: FileMap): string[] {
-  const rec = entries.find((e) => /^[^/]+\.dist-info\/RECORD$/.test(e.name));
-  const bytes = rec && out.get(rec.name);
-  if (!bytes) return [];
-  // The first field of each CSV record, read over the whole text: a quoted field ("a,b", "" for a quote) may hold a
-  // newline, which a member name can.
-  const text = new TextDecoder().decode(bytes);
+// Python's str.splitlines: \n \r \r\n and the vertical tab, form feed, file/group/record separators, NEL and the two
+// Unicode line and paragraph separators.
+const LINE_BREAK = /\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]/;
+
+/** The first field of each row, as pip reads RECORD: csv.reader(text.splitlines()) with the default dialect. */
+export function recordPaths(text: string): { paths: string[]; bad?: string } {
   const paths: string[] = [];
-  let i = 0;
-  while (i < text.length) {
-    let field = "";
-    if (text[i] === '"') {
-      for (i++; i < text.length; i++) {
-        if (text[i] === '"' && text[i + 1] === '"') (field += '"'), i++;
-        else if (text[i] === '"') break;
-        else field += text[i];
+  let bad: string | undefined;
+  const lines = text.split(LINE_BREAK);
+  // A final line break leaves one empty piece that splitlines does not return.
+  if (lines[lines.length - 1] === "") lines.pop();
+  // _csv.c's states: a quote opens a quoted field only at a field's start (inside an unquoted field it is a plain
+  // character), "" inside a quoted field is one quote, a line end inside a quoted field adds nothing (the field goes on
+  // in the next line), and a quote followed by anything but a comma or the line end drops back into an ordinary field.
+  let state: "record" | "start" | "field" | "quoted" | "quote" = "record";
+  let field = "";
+  let saved = 0;
+  const save = () => {
+    if (saved === 0) paths.push(field);
+    saved++;
+    field = "";
+  };
+  for (const line of lines) {
+    if (line.includes(" ")) return { paths, bad: "a NUL character" };
+    if (state === "record") {
+      if (line === "") {
+        bad ??= "a blank row, which pip's RECORD reader fails on";
+        continue;
       }
-      i++;
-    } else while (i < text.length && text[i] !== "," && text[i] !== "\n" && text[i] !== "\r") field += text[i++];
-    if (field) paths.push(field);
-    // The rest of the record: other fields, quoted ones included, up to the record's end.
-    let quoted = false;
-    for (; i < text.length; i++) {
-      if (text[i] === '"') quoted = !quoted;
-      else if (!quoted && text[i] === "\n") break;
+      state = "start";
+      saved = 0;
     }
-    i++;
+    for (const c of line) {
+      if (state === "start") {
+        if (c === '"') state = "quoted";
+        else if (c === ",") save();
+        else (field += c), (state = "field");
+      } else if (state === "field") {
+        if (c === ",") (save(), (state = "start"));
+        else field += c;
+      } else if (state === "quoted") {
+        if (c === '"') state = "quote";
+        else field += c;
+      } else if (c === '"') (field += c), (state = "quoted");
+      else if (c === ",") (save(), (state = "start"));
+      else (field += c), (state = "field");
+      if (field.length > 131072) return { paths, bad: "a field over csv's 131072-character limit" };
+    }
+    if (state !== "quoted") (save(), (state = "record"));
   }
-  return paths;
+  if (state === "quoted") save();
+  if (paths.some((p) => p === "")) bad ??= "an empty path, which pip resolves to the install directory itself";
+  return { paths: paths.filter((p) => p !== ""), ...(bad === undefined ? {} : { bad }) };
+}
+
+/** Python's str.strip(): its whitespace set (str.isspace) is not JavaScript's (it has \x1c-\x1f and \x85, not \uFEFF). */
+const PY_SPACE = "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const PY_STRIP = new RegExp(`^[${PY_SPACE}]+|[${PY_SPACE}]+$`, "g");
+const pyStrip = (t: string) => t.replace(PY_STRIP, "");
+
+/**
+ * What pip does with .data/scripts members for the entry points of the single raw top-level dist-info directory, or "unclear"
+ * when the file is not read cleanly (several or no dist-info, a second member reaching the same path, not UTF-8, a BOM, an
+ * odd line end, text outside a section, an entry without "=", a repeated section). This copies importlib.metadata's Sectioned:
+ * each line is stripped (Python's whitespace), empty and "#" lines are dropped, a line that starts with "[" and ends with "]"
+ * is a section named by strip("[]") (case-sensitive), and an entry splits at the first "=" with both sides stripped.
+ * Two things lose a reviewed scripts member: pip skips it when its basename is EP, EP.exe, EP-script.py or EP.pya for an
+ * entry EP (is_entrypoint_wrapper), and it is overwritten when its path is a launcher pip (distlib) writes: EP, EP.exe (a
+ * ".py*" extension of EP dropped first), and for pip and easy_install their versioned names (pip's launcher maker has
+ * add_launchers on, so it never writes EP.py or EP.pyw).
+ */
+function launcherNames(entries: readonly ZipEntry[], out: FileMap, dist: string | undefined): "unclear" | { skipped: Set<string>; written: Set<string>; versioned: RegExp[] } {
+  const skipped = new Set<string>();
+  const written = new Set<string>();
+  const versioned: RegExp[] = [];
+  const none = { skipped, written, versioned };
+  if (dist === undefined) return entries.some((e) => /\.dist-info\/entry_points\.txt$/i.test(e.name)) ? "unclear" : none;
+  const want = foldKey(`${dist}/entry_points.txt`);
+  const members = entries.filter((e) => !e.name.endsWith("/") && foldKey(writtenAt(e.name)) === want);
+  if (members.length === 0) return none;
+  if (members.length !== 1 || members[0]!.name !== `${dist}/entry_points.txt`) return "unclear";
+  const raw = out.get(members[0]!.name) ?? out.get(byNfdEarly(out, members[0]!.name) ?? "");
+  if (!raw) return "unclear";
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw);
+  } catch {
+    return "unclear";
+  }
+  if (text.startsWith("\uFEFF") || /\r(?!\n)|[\v\f\x1c-\x1e\x85\u2028\u2029]/.test(text)) return "unclear";
+  const seen = new Set<string>();
+  let section: boolean | undefined;
+  for (const line of text.split("\n")) {
+    const l = pyStrip(line);
+    if (l === "" || l.startsWith("#")) continue;
+    if (l.startsWith("[") && l.endsWith("]")) {
+      // Both readers pip has: importlib.metadata takes strip("[]") and pkg_resources takes the text between the outer brackets
+      // stripped, so a section counts when either reading is console_scripts or gui_scripts.
+      const names = [l.replace(/^[[\]]+|[[\]]+$/g, ""), pyStrip(l.slice(1, -1))];
+      if (names.some((n) => seen.has(n))) return "unclear";
+      for (const n of names) seen.add(n);
+      section = names.some((n) => n === "console_scripts" || n === "gui_scripts");
+      continue;
+    }
+    if (section === undefined) return "unclear";
+    if (!section) continue;
+    const eq = l.indexOf("=");
+    if (eq <= 0) return "unclear";
+    const name = pyStrip(l.slice(0, eq));
+    // distlib finds the launcher's name with its own pattern (from the last space), so a name with whitespace or any odd
+    // character is not modeled: it holds every scripts member.
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) return "unclear";
+    const lower = name.toLowerCase();
+    for (const n of [name, `${name}.exe`, `${name}-script.py`, `${name}.pya`]) skipped.add(foldKey(n));
+    const ext = /\.py[^.]*$/i.exec(name);
+    for (const n of [name, `${name}.exe`, ...(ext ? [`${name.slice(0, ext.index)}.exe`] : [])]) written.add(foldKey(n));
+    if (lower === "pip") versioned.push(/^pip\d*(?:\.\d+)?(?:\.exe)?$/i);
+    if (lower === "easy_install") versioned.push(/^easy_install(?:-\d+\.\d+)?(?:\.exe)?$/i);
+  }
+  return { skipped, written, versioned };
+}
+
+function wheelRecord(entries: readonly ZipEntry[], treeGet: (path: string) => Uint8Array | undefined): { paths: string[]; bad?: string } {
+  // pip installs a member at its collapsed path, so x-1.dist-info/./RECORD and x-1.dist-info//RECORD are the RECORD it
+  // uninstalls by; the last member written there wins.
+  const recs = entries.filter((e) => !e.name.endsWith("/") && /^[^/]+\.dist-info\/RECORD$/.test(writtenAt(e.name)));
+  const rec = recs[recs.length - 1];
+  const bytes = rec && treeGet(writtenAt(rec.name));
+  if (!bytes) return { paths: [] };
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return { paths: [], bad: "RECORD is not UTF-8, which pip refuses" };
+  }
+  return recordPaths(text);
 }
 
 /**
@@ -391,7 +533,7 @@ function wheelRecord(entries: readonly ZipEntry[], out: FileMap): string[] {
  * extra, a backslash in a name, a mode whose type is not what pip writes (pip writes a directory only for a name ending
  * in "/", and a regular file for any other), a directory entry with data, and a wheel RECORD path with no member.
  */
-export function zipNameNotes(path: string, listed: readonly string[], out: FileMap): TarNote[] {
+export function zipNameNotes(path: string, listed: readonly string[], out: FileMap, readBudget?: number): TarNote[] {
   const notes: TarNote[] = [];
   const at = (why: string, name: string) => {
     const n: TarNote = { note: `zip member ${name}: ${why}`, key: "", kind: "zip member", raw: [name], paths: [name] };
@@ -399,7 +541,7 @@ export function zipNameNotes(path: string, listed: readonly string[], out: FileM
   };
   let entries: ZipEntry[];
   try {
-    const dir = zipDirectory(path);
+    const dir = zipDirectory(path, readBudget);
     entries = dir.entries;
     if (dir.endDiff) at(`the end records and the directory disagree: ${dir.endDiff}`, "(archive)");
     if (dir.tarBefore) at("a tar header sits before the zip: bsdtar can read the tar, zipfile reads the zip", "(archive)");
@@ -446,6 +588,21 @@ export function zipNameNotes(path: string, listed: readonly string[], out: FileM
     for (const k of inst.keys) places.set(foldKey(k), (places.get(foldKey(k)) ?? new Set()).add(e));
     for (const t of inst.tops) homesOf.set(foldKey(t.name), (homesOf.get(foldKey(t.name)) ?? new Set()).add(t.home));
   }
+  // A console_scripts or gui_scripts name in entry_points.txt (the one raw top-level dist-info's) is a launcher pip generates
+  // in the scripts directory (on Windows name.exe and name-script.py; pip and easy_install also write versioned names),
+  // replacing a reviewed .data/scripts member of that name. pip strips each line and splits an entry at the first "=", so
+  // the parse here does the same and holds every .data/scripts member whenever the file is not read cleanly.
+  const launchers = launcherNames(entries, out, distDirs.size === 1 ? [...distDirs][0] : undefined);
+  for (const e of entries) {
+    const w = writtenAt(e.name);
+    if (e.name.endsWith("/") || !w.split("/", 1)[0]!.endsWith(".data")) continue;
+    const [, scheme, ...rest] = w.split("/");
+    if (scheme?.toLowerCase() !== "scripts" || rest.length === 0) continue;
+    const path = rest.join("/");
+    if (launchers === "unclear" || launchers.written.has(foldKey(path)) || launchers.skipped.has(foldKey(rest[rest.length - 1]!)) || launchers.versioned.some((re) => re.test(path))) {
+      at(launchers === "unclear" ? "a scripts member beside an entry_points.txt that cannot be read the way pip reads it, so a generated launcher may be written over it" : "a scripts member with the name of a console_scripts or gui_scripts entry point, whose generated launcher pip writes over it", e.name);
+    }
+  }
   // A path component that Windows reads as another name, or refuses: one file for two members there, or an install that
   // writes elsewhere. No real wheel has one, so each holds (the whole raw name is checked, which covers the part left
   // after a .data/<scheme>/ prefix).
@@ -461,6 +618,14 @@ export function zipNameNotes(path: string, listed: readonly string[], out: FileM
   for (const k of out.keys()) if (!byNfd.has(k.normalize("NFD"))) byNfd.set(k.normalize("NFD"), k);
   for (const e of entries) {
     if (e.headerDiff) at(`local and central headers differ: ${e.headerDiff}`, e.name);
+    if (e.name.endsWith("/")) {
+      // zipfile makes a directory of it; the unpacked tree holding a file or link at that path means bsdtar read it
+      // as another entry (a cpio file of the same name ahead of the zip).
+      const dpath = writtenAt(e.name);
+      const dkey = dpath === "" ? undefined : out.has(dpath) ? dpath : byNfd.get(dpath.normalize("NFD"));
+      const held = dkey === undefined ? undefined : out.get(dkey);
+      if (held) at(`zipfile makes a directory of it, the unpacked archive has ${isLink(held) ? "a link" : "a file"} at ${dpath}`, e.name);
+    }
     if (!e.content) continue;
     if (!(e.content instanceof Uint8Array) && e.name.endsWith("/")) {
       at(`zipfile cannot read it: ${e.content.error}`, e.name);
@@ -491,6 +656,11 @@ export function zipNameNotes(path: string, listed: readonly string[], out: FileM
   // Against the unpacked tree, not the directory: a member bsdtar wrote under another name leaves its RECORD path empty.
   // Both in NFD: bsdtar on macOS writes a zip's names decomposed.
   const tree = new Set([...out.keys()].map((k) => k.normalize("NFD")));
-  for (const p of wheelRecord(entries, out).slice(0, 10_000)) if (!tree.has(p.normalize("NFD"))) at("the wheel RECORD names it, the unpacked archive has no such file", p);
+  const rec = wheelRecord(entries, (p) => (out.has(p) ? out.get(p) : byNfd.has(p.normalize("NFD")) ? out.get(byNfd.get(p.normalize("NFD"))!) : undefined));
+  if (rec.bad) at(`the wheel RECORD cannot be read as pip reads it: ${rec.bad}`, "(archive)");
+  // Each distinct path once; a RECORD over the cap holds, so no row past it goes unchecked.
+  const distinct = [...new Set(rec.paths)];
+  if (distinct.length > RECORD_CAP) at(`the wheel RECORD lists ${distinct.length} distinct paths, over the ${RECORD_CAP} that are checked`, "(archive)");
+  for (const p of distinct.slice(0, RECORD_CAP)) if (!tree.has(p.normalize("NFD"))) at("the wheel RECORD names it, the unpacked archive has no such file", p);
   return notes;
 }
