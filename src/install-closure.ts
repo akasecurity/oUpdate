@@ -1749,13 +1749,33 @@ function isMethodHead(code: string, k: number, outer: BraceKind | undefined): bo
   return code[p - 1] === "{" || code[p - 1] === ",";
 }
 
+// A { at index `at` (j: the end of the text before it) opens a class body when a real class keyword stands in the same statement
+// before it. The keyword is a whole word, not a member name (o.class, o. class, o?.class, o.#class), a key (class: ...) or a
+// method or call (class(...)). The word is found in a bounded stretch back to the last brace or semicolon, and judged against
+// the whole text, so a cut never splits a longer name into the keyword.
+function opensClassBody(code: string, j: number): boolean {
+  let lo = j - 1;
+  while (lo >= 0 && j - lo <= 200 && code[lo] !== "{" && code[lo] !== "}" && code[lo] !== ";") lo--;
+  const from = Math.max(0, lo + 1);
+  for (let i = code.indexOf("class", from); i >= 0 && i < j; i = code.indexOf("class", i + 1)) {
+    if ((i > 0 && identChar(code[i - 1]!)) || identChar(code[i + 5] ?? " ")) continue;
+    const r = skipSpaceBack(code, i);
+    if (code[r - 1] === "#" || (code[r - 1] === "." && code.slice(r - 3, r) !== "...")) continue;
+    let k = i + 5;
+    while (k < code.length && /\s/.test(code[k]!)) k++;
+    if (/[:(=,)]/.test(code[k] ?? "")) continue;
+    return true;
+  }
+  return false;
+}
+
 // Where a { opens: a function body ("fn"), an arrow body, a class body, an object literal or a plain block. `outer` is the kind
 // of the brace around it.
 function braceKind(code: string, at: number, outer?: BraceKind): BraceKind {
   const j = skipSpaceBack(code, at);
   if (code.slice(Math.max(0, j - 2), j) === "=>") return "arrow";
-  // The word class opens a class body, not an object key (class: function () {}) or a member (x.class).
-  if (/(?<![\p{ID_Continue}$.\u200c\u200d\ud800-\udfff])class(?![\p{ID_Continue}$\u200c\u200d\ud800-\udfff])(?!\s*:)[^{};]*$/u.test(code.slice(Math.max(0, j - 200), j))) return "class";
+  // The word class opens a class body, not an object key (class: function () {}) or a member (x.class, x. class, x?.#class).
+  if (opensClassBody(code, j)) return "class";
   if (code[j - 1] === ")") {
     let depth = 0;
     let k = j - 1;

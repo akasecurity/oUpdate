@@ -1515,6 +1515,34 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} stays static (asi spread)`, () => expect(held(pre)).toBe(false));
 }
+// The word class opens a class body only as a real keyword: not as a member name (o.class, o. class, o?.class, a line-broken dot,
+// a comment before the dot), not as a key, not as a call.
+const CK = "const o = { class: () => 0 };\n";
+const IN = `{ m(1)\n{ ${ASI_BODY} } }`;
+for (const [label, pre] of [
+  ["a member named class", `${CK}o.class(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named class with a space after the dot", `${CK}o. class(1)\n${IN}\nexports.main = () => 1\n`],
+  ["an optional-chain member named class", `${CK}o?. class(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named class after a line-broken dot", `${CK}o.\nclass(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named class after a comment and a dot", `${CK}o /*c*/ . class(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a key named class and then a call statement block", `const o = { class: f(1)\n${IN} }\nexports.main = () => 1\n`],
+  ["a key named class padded with spaces before the colon", `const f = () => 0;\nconst o = { class${" ".repeat(60)}: f(1)\n${IN} }\nexports.main = () => 1\n`],
+  ["a member named get", `const o = { get: () => 0 };\no. get(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named async", `const o = { async: () => 0 };\no?. async(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a member named static", `const o = { static: () => 0 };\no.\nstatic(1)\n${IN}\nexports.main = () => 1\n`],
+  ["a call named class and then a block", `const f = { class: () => 0 };\nvar x = f.class\n${IN}\nexports.main = () => 1\n`],
+] as const) {
+  test(`${label} is not a class body (widens the closure)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a class declaration with a method whose body is on the next line", "class A { m(a)\n{ return arguments[0] } }\nexports.main = () => new A()\n"],
+  ["a class expression with a method whose body is on the next line", "const C = class { m(a)\n{ return arguments[0] } };\nexports.main = () => new C()\n"],
+  ["a class with a heritage and a method whose body is on the next line", "class B {}\nclass A extends B { m(a)\n{ return arguments[0] } }\nexports.main = () => new A()\n"],
+  ["a class with a heritage call and a method whose body is on the next line", "const f = () => class {};\nclass A extends f(1)\n{ m(a)\n{ return arguments[0] } }\nexports.main = () => new A()\n"],
+  ["a spread of a class expression", "const o = { ...class { static m(a)\n{ return arguments[0] } } };\nexports.main = () => o\n"],
+] as const) {
+  test(`${label} stays static (class keyword)`, () => expect(held(pre)).toBe(false));
+}
 for (const [label, pre] of [
   ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
   ["arguments bound to a name", 'const a = arguments; exports.main = () => a[1]("child_"+"pro"+"cess")\n'],
