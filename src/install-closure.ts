@@ -1805,7 +1805,8 @@ function computedCallChain(code: string): boolean {
 // start a new statement). A template literal is not a directive.
 const DIRECTIVE = /\s*(['"])([^'"\\\n]*)\1[ \t]*/y;
 const CONTINUES = /^(?:[*\/%<>=&|^?,.(\[`]|!==?|\+(?!\+)|-(?!-)|(?:in|instanceof)(?![\w$]))/;
-const DECLARATION = /(?:^|\n)([ \t\r\n]*)(?:import(?![\w$])\s*(?:[\w$*{]|"")|export(?![\w$])\s*(?:default\b|const\b|let\b|var\b|function\b|class\b|async\b|[{*]))/g;
+// An import or export declaration; strictFileOf looks for it after the whitespace that follows a line break (or the file start).
+const DECLARATION = /(?:import(?![\w$])\s*(?:[\w$*{]|"")|export(?![\w$])\s*(?:default\b|const\b|let\b|var\b|function\b|class\b|async\b|[{*]))/y;
 // The leading quoted strings of the source, comments between them skipped. The kept text writes a plain template as a quoted
 // string, so a directive is real only when the source spells the same string with ' or " at the same place in the prologue.
 function rawPrologue(raw: string): string[] {
@@ -1857,12 +1858,22 @@ function strictFileOf(keep: string, code: string, raw: string): boolean {
     nth++;
     pos = end;
   }
-  for (const d of code.matchAll(DECLARATION)) {
-    // o.\nimport\nx is a member named import, not a declaration.
-    let k = (d.index ?? 0) - 1;
-    while (k >= 0 && /\s/.test(code[k]!)) k--;
-    if (k >= 0 && code[k] === ".") continue;
-    return true;
+  // A declaration starts a line: the file start or a line feed, then blanks and line breaks, then the word. Every line feed inside
+  // one run of blanks ends at the same place, so the word is tested once per run and the scan stays linear in blank lines.
+  const isBlank = (c: string | undefined) => c === " " || c === "\t" || c === "\r" || c === "\n";
+  for (let from = 0, start = 0; start >= 0; ) {
+    let e = start === 0 && from === 0 ? 0 : start + 1;
+    while (e < code.length && isBlank(code[e])) e++;
+    DECLARATION.lastIndex = e;
+    const d = DECLARATION.exec(code);
+    if (d) {
+      // o.\nimport\nx is a member named import, not a declaration.
+      let k = start - 1;
+      while (k >= 0 && /\s/.test(code[k]!)) k--;
+      if (!(k >= 0 && code[k] === ".")) return true;
+      from = DECLARATION.lastIndex;
+    } else from = e;
+    start = code.indexOf("\n", from);
   }
   return false;
 }
