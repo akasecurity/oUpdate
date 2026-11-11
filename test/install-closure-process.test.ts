@@ -91,3 +91,56 @@ test("a $ name for the process module used for plain reads stays static", () => 
 test("an escaped specifier for a builtin that is static stays static", () => {
   expect(held(via("const fs = require('\\x66s');", "fs.existsSync('x')"))).toBe(false);
 });
+
+// Round 2: the alias must be a whole statement, and escapes must not hide a name or a load.
+const rd = "require('fs').readFileSync(__dirname + '/../build/payload.js', 'utf8')";
+for (const [label, pre] of [
+  ["a process load followed by a member call on the same statement", `const r = require("process").getBuiltinModule("v"+"m").runInThisContext(${rd})\nexports.main = () => 1\n`],
+  ["a process load followed by binding", 'const x = require("process").binding("spawn_sync").spawn({})\nexports.main = () => 1\n'],
+  ["a process load followed by a computed member", 'const x = require("process")["bind"+"ing"]("spawn_sync")\nexports.main = () => 1\n'],
+  ["a process load whose member access is on the next line", 'const x = require("process");\n.binding("spawn_sync")\nexports.main = () => 1\n'],
+  ["a process load without a semicolon followed by a member on the next line", 'const x = require("process")\n.binding("spawn_sync")\nexports.main = () => 1\n'],
+  ["a process load without a semicolon followed by a bracket on the next line", 'const x = require("process")\n["binding"]("spawn_sync")\nexports.main = () => 1\n'],
+  ["a process load followed by a call", 'const x = require("process")(1)\nexports.main = () => 1\n'],
+  ["a p$ name used for binding", via("const p$ = require('process');", "p$.binding('spawn_sync')")],
+  ["an escaped child_process", via("const c = require('\\x63hild_process');", "c.execSync('node build/index.js')")],
+  ["an escaped process with binding", `exports.main = () => require("pro\\x63ess").binding("spawn_sync")\n`],
+  ["an escaped node:module", `exports.main = () => require("node:\\x6dodule")._load("../build/payload.js")\n`],
+  ["a unicode-escaped vm", `exports.main = () => require("\\u0076m").runInThisContext(${rd})\n`],
+  ["an escaped alias identifier", `const p = require("process"); exports.main = () => \\u0070.binding("spawn_sync")\n`],
+  ["an escaped require identifier", `exports.main = () => \\u0072equire("../build/payload.js")\n`],
+  ["an escaped eval identifier", `exports.main = () => \\u0065val(${rd})\n`],
+] as const) {
+  test(`${label} is not static (round 2)`, () => expect(held(pre)).toBe(true));
+}
+test("an alias statement ending in a semicolon or a newline stays static", () => {
+  expect(held('const p = require("process");\nconst q = require("node:process")\nexports.main = () => p.cwd() + q.platform\n')).toBe(false);
+});
+test("a backslash inside a string that is not an identifier does not make the file not static", () => {
+  expect(held('const p = require("process"); exports.main = () => p.cwd() + "a\\u0041b"\n')).toBe(false);
+});
+
+// Round 3: a backslash or a non-ASCII character in code makes the file not static; text in strings and comments does not.
+for (const [label, pre] of [
+  ["a computed getBuiltinModule member on an alias", `const p = require("process"); exports.main = () => p["getBuiltinModule"]("mo"+"dule")["createRequire"](__filename)("../build/evil.js")\n`],
+  ["a no-break space before the use", `const p = require("process");\u00a0exports.main = () => p["bind"+"ing"]("spawn_sync")\n`],
+  ["a line separator before the use", `const p = require("process");\u2028exports.main = () => p["bind"+"ing"]("spawn_sync")\n`],
+  ["a braced code point escape for the name", `const p = require("process"); \\u{70}.getBuiltinModule("child_"+"process")\n`],
+  ["an escaped name in a template expression", "const p = require(\"process\"); exports.main = () => `${\\u0070.binding('spawn_sync')}`\n"],
+  ["a non-ASCII name", `const é = 1; const p = require("process"); exports.main = () => run(é)\n`],
+] as const) {
+  test(`${label} is not static (round 3)`, () => expect(held(pre)).toBe(true));
+}
+test("non-ASCII text and escapes inside strings, comments and regular expressions stay static", () => {
+  expect(held('// Zoë \\u0041\n/* é */ const p = require("process");\nconst re = /[\\u0000-\\u001f"\']/;\nexports.main = () => "é\\u0041" + `ü ${p.cwd()} é` + p.platform + re.test("x") + (1 / 2) / 3\n')).toBe(false);
+});
+test("an unterminated string makes the file not static", () => {
+  expect(held('const p = require("process"); exports.main = () => "oops\n')).toBe(true);
+});
+
+// Node's require tries X, X.js, X.json and X.node before the directory, never X.cjs: a changed helper/index.js is loaded.
+test("an unchanged helper.cjs beside a changed helper/index.js: the directory index is in the closure", () => {
+  const pre = 'var v = require("node:process"); require("./helper"); exports.main = () => v.exit(0)\n';
+  const rel = (v: string, idx: string) => release(v, pre).set("preinstall/helper.cjs", enc("module.exports = 1\n")).set("preinstall/helper/index.js", enc(idx));
+  expect(holds(rel("1.0.0", "module.exports = 1\n"), rel("1.0.1", "module.exports = 2\n"))).toContain("file preinstall/helper/index.js");
+});

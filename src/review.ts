@@ -623,8 +623,17 @@ function ambientDeclarations(text: string): string | undefined {
           return full;
         }
         i = j;
-      } else if (c === "`" || (c === "/" && (text[i + 1] === "*" || text[i + 1] === "/"))) {
-        // A template or a comment can hold the terminator or hide the initializer: the statement's end is not known.
+      } else if (c === "/" && (text[i + 1] === "*" || text[i + 1] === "/")) {
+        // A comment is skipped whole (a JSDoc line inside a type is ordinary); an unclosed one leaves the end unknown.
+        const end = text[i + 1] === "*" ? text.indexOf("*/", i + 2) : text.indexOf("\n", i);
+        // A comment that holds a ; or = could stand for the terminator or the initializer: that stays ambiguous.
+        if (end < 0 || /[;=]/.test(text.slice(i, end))) {
+          ambiguous = true;
+          return full;
+        }
+        i = text[i + 1] === "*" ? end + 1 : end;
+      } else if (c === "`") {
+        // A template can hold the terminator or hide the initializer: the statement's end is not known.
         ambiguous = true;
         return full;
       }

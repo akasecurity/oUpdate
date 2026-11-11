@@ -1135,6 +1135,14 @@ describe("newly reached files", () => {
     expect(r.rev.verdict).toBe("pass");
   });
 
+  test("a JSDoc comment inside the type of an uninitialized const does not make the declaration parser-rejected", async () => {
+    const decl = (v: string) => `export const versions: {\n  /** the vips version (${v}) */\n  vips: string; // trailing\n  sharp?: string;\n};\nexport const y: number;\n`;
+    const exp = { main: "./dist/index.cjs", types: "./dist/index.d.cts", exports: { ".": { require: { types: "./dist/index.d.cts", default: "./dist/index.cjs" } } } };
+    const rel = (v: string) => files({ "package.json": pj({ version: v, ...exp }), "dist/index.cjs": "module.exports = 1\n", "dist/index.d.cts": decl(v), ...gyp });
+    const r = await run(rel("1.0.0"), rel("1.0.1"));
+    expect(r.rev.detail).not.toMatch(/parser rejected/);
+  });
+
   test("a declaration with a real initializer keeps it: the load in it is still found, and a file neither loader reads is rejected", async () => {
     const exp = (types: string) => ({ main: "index.js", types, exports: { ".": { import: { types: "./" + types, default: "./index.js" } } } });
     const loads = await run(

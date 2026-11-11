@@ -720,13 +720,120 @@ function stripLiteralLoad(raw: string): boolean {
 }
 
 // One predicate for JS. A file that fails it widens by the shape of its computed loads.
-function provablyStatic(text: string): boolean {
-  const aliases: string[] = [];
-  let viaOther = false;
-  let rest = text.replace(PROCESS_ALIAS, (_m, a1, _q, a2) => {
+// A name for the process module is a whole statement: when the next token continues the expression (a member, a call,
+// a computed member, a ? or a template), the load is not a plain name and is left in the text.
+function stripProcessAliases(text: string, aliases: string[]): string {
+  return text.replace(PROCESS_ALIAS, (m, a1, _q, a2, _q4, at: number, whole: string) => {
+    let i = at + m.length;
+    for (;;) {
+      while (i < whole.length && /\s/.test(whole[i]!)) i++;
+      if (whole.startsWith("//", i)) {
+        const nl = whole.indexOf("\n", i);
+        i = nl < 0 ? whole.length : nl;
+      } else if (whole.startsWith("/*", i)) {
+        const end = whole.indexOf("*/", i + 2);
+        i = end < 0 ? whole.length : end + 2;
+      } else break;
+    }
+    if (i < whole.length && ".[(?`".includes(whole[i]!)) return m;
     aliases.push(String(a1 || a2));
     return "";
   });
+}
+
+/**
+ * The code of a JavaScript file with string and template text, regular-expression bodies and comments blanked, or
+ * undefined when the scan ends inside one of them (the file is not read as code then). Positions are not kept.
+ */
+function codeOnly(text: string): string | undefined {
+  let out = "";
+  let prev = "";
+  const braces: boolean[] = [];
+  const regexAfter = new Set(["", "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "<", ">", "~", "^"]);
+  let i = 0;
+  const n = text.length;
+  const template = (): boolean => {
+    for (; i < n; i++) {
+      const c = text[i]!;
+      if (c === "\\") i++;
+      else if (c === "`") {
+        i++;
+        return true;
+      } else if (c === "$" && text[i + 1] === "{") {
+        i += 2;
+        braces.push(true);
+        out += " `${";
+        return true;
+      }
+    }
+    return false;
+  };
+  while (i < n) {
+    const c = text[i]!;
+    if (c === "'" || c === '"') {
+      i++;
+      for (; i < n && text[i] !== c && text[i] !== "\n"; i++) if (text[i] === "\\") i++;
+      if (text[i] !== c) return undefined;
+      i++;
+      out += '""';
+      prev = '"';
+    } else if (c === "`") {
+      i++;
+      if (!template()) return undefined;
+      prev = "`";
+    } else if (c === "/" && text[i + 1] === "/") {
+      const nl = text.indexOf("\n", i);
+      i = nl < 0 ? n : nl;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const e = text.indexOf("*/", i + 2);
+      if (e < 0) return undefined;
+      i = e + 2;
+      out += " ";
+    } else if (c === "/" && regexAfter.has(prev)) {
+      let cls = false;
+      i++;
+      for (; i < n && text[i] !== "\n"; i++) {
+        const d = text[i]!;
+        if (d === "\\") i++;
+        else if (d === "[") cls = true;
+        else if (d === "]") cls = false;
+        else if (d === "/" && !cls) break;
+      }
+      if (text[i] !== "/") return undefined;
+      i++;
+      out += "/r/";
+      prev = "r";
+    } else {
+      if (c === "{") braces.push(false);
+      if (c === "}") {
+        const tpl = braces.pop();
+        if (tpl) {
+          i++;
+          out += "}";
+          if (!template()) return undefined;
+          prev = "`";
+          continue;
+        }
+      }
+      out += c;
+      if (!/\s/.test(c)) prev = c;
+      i++;
+    }
+  }
+  return out;
+}
+
+// A backslash or a non-ASCII character in code can spell or hide a name (an escaped identifier, a no-break space), and no
+// test below would see it. The file is not static; text inside strings and comments does not count.
+function hidesNames(code: string | undefined): boolean {
+  return code === undefined || /[^\x00-\x7f\\]|\\/.test(code);
+}
+
+function provablyStatic(text: string): boolean {
+  const aliases: string[] = [];
+  let viaOther = false;
+  if (hidesNames(codeOnly(text))) return false;
+  let rest = stripProcessAliases(text, aliases);
   rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "");
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3) => {
     const spec = String(spec1 || spec2 || spec3 || "");
@@ -739,6 +846,9 @@ function provablyStatic(text: string): boolean {
   if (/(?:\brequire\s*\(|\bfrom\s+|\bimport\s+)\s*['"](?:node:)?process\b/.test(rest)) return false;
   if (UNSAFE_JS.test(rest)) return false;
   if (aliases.length === 0) return true;
+  const code = codeOnly(rest);
+  if (code === undefined) return false;
+  rest = code;
   // Identifier edges: $, _, digits and non-ASCII characters continue a name, so \b is not an edge.
   const names = aliases.map((n) => n.replace(/\$/g, "\\$"));
   const L = "(?<![\\w$\\u0080-\\uffff])";
@@ -807,7 +917,11 @@ function addLogical(ctx: Ctx, logical: string): void {
     ctx.missing.add(logical);
     return;
   }
-  for (const k of new Set([key, fileKey])) {
+  // Node's require tries only X, X.js, X.json and X.node before the directory: when the file found is another extension
+  // (.cjs, .ts), Node goes on to the directory's index, so that is in the closure too.
+  const nodeHit = fileKey !== undefined && ["", ".js", ".json", ".node"].some((e) => ctx.logical.get(logical + e) === fileKey);
+  const dirKey = ctx.hold || !fileKey || nodeHit ? undefined : findFile(ctx, `${logical}/index`);
+  for (const k of new Set([key, fileKey, dirKey])) {
     if (!k) continue;
     // The manifest is not a surface file. Hook text and bin are compared on their own,
     // and a version bump always changes these bytes.
