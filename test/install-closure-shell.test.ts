@@ -188,3 +188,99 @@ for (const [label, hook] of holeLines) {
     });
   }
 }
+
+// Any command that is not a plain one runs what a substitution in its arguments names; only the plain commands stay quiet.
+const U = "$(cat name.txt)";
+const runnerLines: [string, string][] = [
+  ["node -e with the file as an argument", `node -e "require(process.argv[1])" ${U}`],
+  ["sh -c with the file as a positional argument", `sh -c 'node "$1"' _ ${U}`],
+  ["node -r before a substituted script", `node -r ./lib/ok.js ${U}`],
+  ["node with a flag value before the script", `node --title test "${U}" | cat`],
+  ["deno run", `deno run "${U}" | cat`],
+  ["npx -p then node", `npx -p node@18 node ${U}`],
+  ["npm exec -- node", `npm exec -- node "${U}" | cat`],
+  ["nice -n before the runner", `nice -n 10 node ${U} | cat`],
+  ["sudo -u before the runner", `sudo -u nobody node ${U} | cat`],
+  ["env -u before the runner", `env -u X node ${U} | cat`],
+  ["exec -a before the runner", `exec -a x node ${U} | cat`],
+  ["timeout -s before the runner", `timeout -s KILL 9 node ${U} | cat`],
+  ["timeout -k before the runner", `timeout -k 5 9 node ${U} | cat`],
+  ["stdbuf -o before the runner", `stdbuf -o L node ${U} | cat`],
+  ["bunx", `bunx ${U} | cat`],
+  ["ash", `ash ${U} | cat`],
+  ["cross-env", `cross-env A=1 node ${U} | cat`],
+  ["parallel", `parallel node "${U}" | cat`],
+  ["flock", `flock x node ${U} | cat`],
+  ["busybox sh", `busybox sh ${U} | cat`],
+  ["awk -f", `awk -f ${U} x | cat`],
+  ["arch", `arch node ${U} | cat`],
+  ["su -c", `su -c "node ${U}" x | cat`],
+  ["cmake -P", `cmake -P "${U}" | cat`],
+  ["find -exec", `find . -exec node ${U} \\; | cat`],
+];
+
+for (const [label, hook] of runnerLines) {
+  test(`${label} reads every file: a changed lib/evil.js holds`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "lib/evil.js")).length).toBeGreaterThan(0);
+  });
+}
+
+// The stdin rule: a shell with no script reads what the stage before it, or a here-string or heredoc, feeds it.
+const stdinLines: [string, string][] = [
+  ["a here-string with a substitution into sh", `sh <<< "node ${U}"`],
+  ["an unquoted heredoc with a substitution into sh", `sh <<EOF\nnode ${U}\nEOF`],
+  ["a pipe into a subshell that runs sh", `echo "node ${U}" | (cd lib; sh)`],
+  ["a pipe from a substitution into sh", `cat ${U} | sh`],
+  ["a pipe from a printed substitution into bash", `printf '%s\\n' "node ${U}" | bash`],
+];
+
+for (const [label, hook] of stdinLines) {
+  test(`${label} reads every file: a changed lib/evil.js holds`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "lib/evil.js")).length).toBeGreaterThan(0);
+  });
+}
+
+const stdinQuiet: [string, string][] = [
+  ["a shell fed by a pipe that holds no expansion, with a substitution on another stage", `echo hi | sh; echo ${"$(date)"}`],
+  ["a shell fed a here-string with no expansion", `sh <<< "echo hi"; echo $(date)`],
+  ["a shell fed a quoted heredoc", `sh <<'EOF'\necho $(cat name.txt)\nEOF`],
+  ["a shell fed an unquoted heredoc with no expansion", `sh <<EOF\necho hi\nEOF`],
+];
+
+for (const [label, hook] of stdinQuiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
+  });
+}
+
+// Parsing: `$((node x) )` is a subshell in a substitution, a single quote in a double-quoted ${...} is an ordinary character.
+const parseLines: [string, string][] = [
+  ["a subshell in a substitution that looks like arithmetic", `x=$((node ${U}) )`],
+  ["a single quote inside a double-quoted default value", `echo "\${X:-'$(node ${U})'}" | cat`],
+  ["a variable set by export and used as a preload", `export F=${U}; node --require="$F" lib/ok.js`],
+  ["a variable set by a for loop and used as a preload", `for x in ${U}; do node --require=$x lib/ok.js; done`],
+  ["a variable copied from a tainted one", `G=${U}; H=$G; node -r $H lib/ok.js`],
+  ["a variable used inside a substitution body", `F=${U}; echo $(node -r "$F" lib/ok.js)`],
+  ["a variable used as the argument of a path command", `F=${U}; ./lib/ok.js "$F" | cat`],
+];
+
+for (const [label, hook] of parseLines) {
+  test(`${label} reads every file: a changed lib/evil.js holds`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "lib/evil.js")).length).toBeGreaterThan(0);
+  });
+}
+
+const noiseLines: [string, string][] = [
+  ["a find without -exec", "find $(pwd) -name x | cat"],
+  ["a single quote in a double-quoted default", `echo "\${X:-it's}" | cat`],
+  ["arithmetic with a plain number", "echo $((1+2)) | cat"],
+  ["a flag value on a node run of a literal script", "node lib/ok.js --out=$(date) | cat"],
+  ["a for loop over a plain command", "for f in a b; do echo $f; done"],
+  ["npm ls with a substitution", "npm ls $(echo x) | cat"],
+];
+
+for (const [label, hook] of noiseLines) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
+  });
+}
