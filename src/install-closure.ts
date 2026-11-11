@@ -4768,16 +4768,60 @@ const HARMLESS_STAGE = new Set(["echo", "printf", "true", "false", ":", "cat", "
 // Commands that run a script, a program or the text on their standard input.
 const STAGE_RUNNER = /^(?:sh|bash|dash|zsh|ksh|source|\.|eval|node|nodejs|bun|deno|python[0-9.]*|py|perl|ruby|php)$/;
 const STAGE_PM = /^(?:npm|npx|yarn|pnpm)$/;
-const STAGE_PREFIX = /^(?:env|command|builtin|exec|nohup|time|nice|sudo|stdbuf)$/;
+const STAGE_PREFIX = /^(?:env|command|builtin|exec|nohup|time|nice|sudo|stdbuf|timeout)$/;
+// Commands that run the program or script an argument names, though they are not an interpreter themselves.
+const STAGE_ARG_RUNNER = /^(?:make|gmake|tsx|ts-node|babel-node|xargs|find|nodemon|concurrently)$/;
 const STAGE_KEYWORD = /^(?:\{|\}|!|if|then|elif|else|do|done|fi|while|until)$/;
 
-type StageWord = { t: string; sub: boolean; v: boolean }; // sub: a command substitution; v: a variable or arithmetic expansion
+type StageWord = { t: string; sub: boolean; v: boolean; n: string[] }; // sub: a command substitution; v: a variable or arithmetic expansion; n: the plain variable names in the word
+
+// The substitutions inside the text of a \`${...}\` or an arithmetic expansion: each body is a command to read.
+function nestedBodies(text: string, out: string[], depth = 0): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === "\\") i++;
+    else if (c === "'") {
+      const e = text.indexOf("'", i + 1);
+      if (e < 0) return false;
+      i = e;
+    } else if (c === "`") {
+      const e = endTick(text, i);
+      if (e < 0) return false;
+      out.push(unTick(text.slice(i + 1, e - 1)));
+      i = e - 1;
+    } else if (c === "$" && text[i + 1] === "(") {
+      const arith = text[i + 2] === "(";
+      const e = endParen(text, i + 2);
+      if (e < 0) return false;
+      if (arith) {
+        if (depth > 6 || !nestedBodies(text.slice(i + 3, e - 2), out, depth + 1)) return false;
+      } else out.push(text.slice(i + 2, e - 1));
+      i = e - 1;
+    } else if (c === "$" && text[i + 1] === "{") {
+      const e = endBrace(text, i + 2);
+      if (e < 0) return false;
+      if (depth > 6 || !nestedBodies(text.slice(i + 2, e - 1), out, depth + 1)) return false;
+      i = e - 1;
+    }
+  }
+  return true;
+}
+
+// The command text inside backticks: a backslash before \`, $ or \\ is dropped, as the shell does before it reads the body.
+function unTick(body: string): string {
+  return body.replace(/\\([`$\\])/g, "$1");
+}
 
 // The commands of a line cut apart the way the shell reads them: quotes and backslashes tracked, each `$(...)` and backtick
 // body collected (and its place in the word marked), redirections and their operands left out. `unsure` is a quote or a
 // substitution that never closes.
-function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; unsure: boolean } {
+function shellStages(line: string): { stages: StageWord[][]; piped: boolean[]; fed: boolean[]; bodies: string[]; unsure: boolean } {
   const stages: StageWord[][] = [];
+  const piped: boolean[] = []; // the stage reads the output of the stage before it
+  const fed: boolean[] = []; // the stage has a here-string or a heredoc on its standard input
+  let nextPiped = false;
+  let nowFed = false;
+  let names: string[] = [];
   const bodies: string[] = [];
   let words: StageWord[] = [];
   let cur = "";
@@ -4790,15 +4834,22 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
   const endWord = (): void => {
     if (!inWord) return;
     if (skip) skip = false;
-    else words.push({ t: cur, sub, v });
+    else words.push({ t: cur, sub, v, n: names });
     cur = "";
     inWord = false;
     sub = false;
     v = false;
+    names = [];
   };
   const endStage = (): void => {
     endWord();
-    if (words.length) stages.push(words);
+    if (words.length) {
+      stages.push(words);
+      piped.push(nextPiped);
+      fed.push(nowFed);
+      nextPiped = false;
+      nowFed = false;
+    }
     words = [];
   };
   const take = (i: number, tick: boolean): number => {
@@ -4807,7 +4858,7 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
       unsure = true;
       return line.length;
     }
-    bodies.push(tick ? line.slice(i + 1, e - 1) : line.slice(i + 2, e - 1));
+    bodies.push(tick ? unTick(line.slice(i + 1, e - 1)) : line.slice(i + 2, e - 1));
     sub = true;
     inWord = true;
     cur += UNRESOLVED;
@@ -4824,7 +4875,7 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
         unsure = true;
         return line.length;
       }
-      bodies.push(line.slice(i + 3, e - 2));
+      if (!nestedBodies(line.slice(i + 3, e - 2), bodies)) unsure = true;
       return e;
     }
     if (line[i + 1] === "{") {
@@ -4833,9 +4884,14 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
         unsure = true;
         return line.length;
       }
+      const inner = line.slice(i + 2, e - 1);
+      if (!nestedBodies(inner, bodies)) unsure = true;
+      const nm = /^[A-Za-z_][A-Za-z0-9_]*$/.exec(inner);
+      if (nm) names.push(nm[0]);
       return e;
     }
     const m = /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/.exec(line.slice(i + 1));
+    if (m && /^[A-Za-z_]/.test(m[0])) names.push(m[0]);
     return i + 1 + (m ? m[0].length : 0);
   };
   for (let i = 0; i < line.length; ) {
@@ -4914,6 +4970,7 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
       const h = heredocWord(line, i + 2);
       if (h.delim && !/^\d+$|^=/.test(h.delim)) {
         endWord();
+        nowFed = true;
         pend.push(h);
         i = h.end;
         continue;
@@ -4926,6 +4983,7 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
       } else endWord();
       let j = i;
       while (j < line.length && /[<>&|]/.test(line[j]!)) j++;
+      if (line.startsWith("<<<", i)) nowFed = true;
       skip = true; // the operand: a file, a descriptor or a here-string
       i = j;
       continue;
@@ -4936,9 +4994,20 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
       pend.length = 0;
       continue;
     }
+    if (c === "|" && line[i + 1] !== "|" && line[i - 1] !== "|") {
+      endStage();
+      nextPiped = true;
+      i += line[i + 1] === "&" ? 2 : 1;
+      continue;
+    }
     if (c === "|" || c === ";" || c === "\n" || c === "(" || c === ")" || (c === "&" && line[i + 1] !== ">")) {
       endStage();
       i++;
+      continue;
+    }
+    if (c === "#" && !inWord) {
+      // a comment runs to the end of the line
+      while (i < line.length && line[i] !== "\n") i++;
       continue;
     }
     if (/\s/.test(c)) {
@@ -4951,13 +5020,14 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
     i++;
   }
   endStage();
-  return { stages, bodies, unsure };
+  return { stages, piped, fed, bodies, unsure };
 }
 
 // True when a stage of the line (or of a substitution in it) may run a file of the package that the text does not name.
 function stageHazard(line: string, depth: number): { hit: boolean; inert: boolean } {
-  const { stages, bodies, unsure } = shellStages(line);
+  const { stages, piped, fed, bodies, unsure } = shellStages(line);
   if (unsure) return { hit: true, inert: true };
+  const tainted = new Set<string>(); // variables set from a substitution earlier on the line
   let hit = false;
   let inert = false;
   const widen = (wide: boolean): void => {
@@ -4969,10 +5039,14 @@ function stageHazard(line: string, depth: number): { hit: boolean; inert: boolea
     let h = 0;
     while (h < words.length) {
       const w = words[h]!;
-      if (ASSIGN.test(w.t) || STAGE_KEYWORD.test(w.t)) h++;
-      else if (!w.sub && !w.v && STAGE_PREFIX.test(w.t)) {
+      if (ASSIGN.test(w.t) || STAGE_KEYWORD.test(w.t)) {
+        if (w.sub && ASSIGN.test(w.t)) tainted.add(w.t.slice(0, w.t.indexOf("=")).replace(/\+$/, ""));
+        h++;
+      } else if (!w.sub && !w.v && STAGE_PREFIX.test(w.t)) {
+        const timed = w.t === "timeout";
         h++;
         while (h < words.length && (words[h]!.t.startsWith("-") || ASSIGN.test(words[h]!.t))) h++;
+        if (timed && h < words.length && /^[0-9.]+[smhd]?$/.test(words[h]!.t)) h++;
       } else break;
     }
     const head = words[h];
@@ -4985,18 +5059,24 @@ function stageHazard(line: string, depth: number): { hit: boolean; inert: boolea
     if (!head.t.includes("/") && HARMLESS_STAGE.has(head.t)) return;
     const rest = words.slice(h + 1);
     const name = binName(head.t);
+    // An option word that holds a substitution, or a variable set from one on this line, may name a file the runner loads.
+    const loads = (w: StageWord): boolean => w.sub || (w.v && w.n.some((x) => tainted.has(x)));
     if (STAGE_RUNNER.test(name)) {
-      const first = rest.find((w) => !w.t.startsWith("-"));
+      const k = rest.findIndex((w) => !w.t.startsWith("-"));
+      const first = k >= 0 ? rest[k] : undefined;
       if (!first) {
-        if (at > 0 && unresolved) widen(true); // no script: it reads its standard input, which an earlier stage feeds
-      } else if (first.sub || first.v || rest.some((w) => w.sub)) widen(true);
+        // no script: it reads its standard input, which a pipe or a here-string feeds
+        if ((piped[at] || fed[at]) && unresolved) widen(true);
+        else if (rest.some(loads)) widen(true);
+      } else if (first.sub || first.v || rest.slice(0, k).some(loads)) widen(true);
       return;
     }
     if (STAGE_PM.test(name)) {
-      if (rest.filter((w) => !w.t.startsWith("-")).slice(0, 2).some((w) => w.sub || w.v) || rest.some((w) => w.sub)) widen(true);
+      if (rest.filter((w) => !w.t.startsWith("-")).slice(0, 2).some((w) => w.sub || w.v) || rest.some((w) => w.sub && w.t.startsWith("-"))) widen(true);
       return;
     }
-    if (rest.some((w) => w.sub)) widen(true);
+    // A path word is a file of the package: it may run what its argument names.
+    if ((head.t.includes("/") || STAGE_ARG_RUNNER.test(name)) && rest.some((w) => w.sub)) widen(true);
   });
   if (depth < 6) {
     for (const body of bodies) {
@@ -5007,15 +5087,11 @@ function stageHazard(line: string, depth: number): { hit: boolean; inert: boolea
   return { hit, inert };
 }
 
-// The text of the gyp command being read: a gyp `<!(...)` command runs at build time with its own `$1`-style words, so the rule
-// below is not applied to that one command (a script it reaches is read as any hook line is).
-let gypBodyText: string | undefined;
-
 // A line the shell reader could not split (a pipe, a redirect, a subshell) that holds an expansion it could not resolve: each
 // stage and each substitution body is read as a command, and a stage that runs a command or file named by the expansion, or
 // reads its standard input, may run any file of the package, so every file is read.
 function unreadableUnresolved(ctx: Ctx, loose: string, orig: string): void {
-  if (!loose.includes(UNRESOLVED) || orig.trim() === gypBodyText) return;
+  if (!loose.includes(UNRESOLVED)) return;
   const r = stageHazard(orig, 0);
   if (!r.hit) return;
   if (r.inert) ctx.widenInert = true;
@@ -5025,7 +5101,7 @@ function unreadableUnresolved(ctx: Ctx, loose: string, orig: string): void {
 // A line that did split into commands still runs whatever its substitutions hold (`: $(node $(cat n))`, `x=$(sh $(cat n))`): each
 // substitution body is read as a command line of its own.
 function substBodiesHazard(ctx: Ctx, orig: string): void {
-  if (orig.trim() === gypBodyText || (!orig.includes("$(") && !orig.includes("`"))) return;
+  if ((!orig.includes("$(") && !orig.includes("`"))) return;
   const { bodies, unsure } = shellStages(orig);
   let hit = unsure;
   let inert = unsure;
@@ -7343,14 +7419,9 @@ function scanGyp(ctx: Ctx, logical: string, seen: Set<string>): void {
   const saved = ctx.fromGyp;
   ctx.fromGyp = true;
   const gypVars = gypStringVars(text);
-  try {
-    for (const cmd of gypCommands(text)) {
-      const body = substGypVars(cmd, gypVars);
-      gypBodyText = body.trim();
-      runBody(ctx, body);
-    }
-  } finally {
-    gypBodyText = undefined;
+  for (const cmd of gypCommands(text)) {
+    const body = substGypVars(cmd, gypVars);
+    runBody(ctx, body);
   }
   const includes = takeList(text, "includes");
   if (includes === null) fail(ctx, "unresolved: gyp");
