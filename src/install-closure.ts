@@ -4342,7 +4342,10 @@ function markHookFile(ctx: Ctx, token: string): void {
 // A file named by a command, resolved from the directory an earlier cd moved to as well as from the package root.
 function noteHookArgCwd(ctx: Ctx, token: string): void {
   // A file named by an expansion the scan could not resolve (`node $(cat name.txt)`) may be any file of the package.
-  if (token.includes(UNRESOLVED)) widenAll(ctx);
+  if (token.includes(UNRESOLVED)) {
+    ctx.widenInert = true;
+    widenAll(ctx);
+  }
   noteHookArg(ctx, token);
   if (ctx.cwd && token && !token.startsWith("-") && !token.startsWith("/")) {
     const j = joinDir(ctx.cwd, token);
@@ -4427,8 +4430,10 @@ function evalCode(ctx: Ctx, code: string): void {
   if (/[+`$]/.test(code) || code.includes("process.env") || !specs.length || !/^[\s;]*$/.test(rest)) {
     fail(ctx, "unresolved: eval");
     // The inline code runs like a file named "-e" in the package root: the same JS hardening applies to it.
-    if (code.includes(UNRESOLVED)) widenAll(ctx);
-    else if (!provablyStatic(code)) widenJs(ctx, "-e", code);
+    if (code.includes(UNRESOLVED)) {
+      ctx.widenInert = true;
+      widenAll(ctx);
+    } else if (!provablyStatic(code)) widenJs(ctx, "-e", code);
   }
 }
 
@@ -4634,8 +4639,10 @@ function readParts(ctx: Ctx, body: string): void {
       ctx.depth++;
       for (const cmd of cmds) {
         // An unresolved command word may be any runner: every file is read. An unresolved argument is dispatched as an argument.
-        if (headUnresolved(cmd)) widenAll(ctx);
-        else dispatch(ctx, cmd);
+        if (headUnresolved(cmd)) {
+          ctx.widenInert = true;
+          widenAll(ctx);
+        } else dispatch(ctx, cmd);
       }
       ctx.depth--;
     }
@@ -4694,7 +4701,10 @@ function runScript(ctx: Ctx, name: string, optional: boolean): void {
   const raw = ctx.raw[name];
   if (typeof raw !== "string") {
     // A script named by an unresolved expansion (`npm run "$(cat name.txt)"`) may be any script of the package.
-    if (name.includes(UNRESOLVED)) widenAll(ctx);
+    if (name.includes(UNRESOLVED)) {
+      ctx.widenInert = true;
+      widenAll(ctx);
+    }
     if (!optional) fail(ctx, "unresolved: script");
     return;
   }
@@ -6539,7 +6549,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
         return;
       }
       if (!name.word) {
-        widenAll(ctx);
+        // A bare `npm run` only lists the scripts; an argument naming an unresolved expansion may be any script.
+        if (argv.slice(sub.i + 1).some((a) => a.includes(UNRESOLVED))) {
+          ctx.widenInert = true;
+          widenAll(ctx);
+        }
         if (!ctx.hold) fail(ctx, "unresolved: script");
         return;
       }
@@ -6593,7 +6607,10 @@ function dispatch(ctx: Ctx, cmd: string): void {
     if (sub.word !== "run" && sub.word !== "run-script") {
       if (!ctx.hold) fail(ctx, "unresolved: runner");
       // A subcommand named by an unresolved expansion may be a script of the package.
-      if (sub.word !== undefined && sub.word.includes(UNRESOLVED)) widenAll(ctx);
+      if (sub.word !== undefined && sub.word.includes(UNRESOLVED)) {
+        ctx.widenInert = true;
+        widenAll(ctx);
+      }
       if (sub.word === undefined) {
         widenAll(ctx);
         return;
@@ -6757,6 +6774,7 @@ function closePatches(ctx: Ctx, argv: string[], i: number): void {
     if (a === "--patch-dir") {
       const next = argv[++j];
       if (next === undefined || next.startsWith("-")) {
+        ctx.widenInert = true;
         widenAll(ctx);
         fail(ctx, "unresolved: runner");
         return;
@@ -6764,12 +6782,17 @@ function closePatches(ctx: Ctx, argv: string[], i: number): void {
       rel = next;
     } else if (a.startsWith("--patch-dir=")) rel = a.slice("--patch-dir=".length);
     else {
-      widenAll(ctx);
+      // A package name creates a patch (nothing that runs); a flag this does not model, or an unresolved word, may run any file.
+      if (a.startsWith("-") || a.includes(UNRESOLVED)) {
+        ctx.widenInert = true;
+        widenAll(ctx);
+      }
       fail(ctx, "unresolved: runner");
       return;
     }
     const logical = normalize(rel);
-    if (!logical || badPath(logical) || /[*?[]/.test(logical)) {
+    if (!logical || badPath(logical) || /[*?[]/.test(logical) || logical.includes(UNRESOLVED)) {
+      ctx.widenInert = true;
       widenAll(ctx);
       fail(ctx, "unresolved: runner");
       return;

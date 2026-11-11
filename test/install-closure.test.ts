@@ -45,6 +45,12 @@ describe("install closure", () => {
     }
   });
 
+  test("a hook that runs a file named through the package's own config holds when that file changes, and not when it does not", () => {
+    const [cfgOld, cfgNew] = same({ postinstall: "node ${npm_package_config_e:-a.js}" }, { config: { e: "assets/x.bmp" } });
+    held(cfgOld, cfgNew, /file/);
+    expect(hard(cfgOld, cfgOld)).toEqual([]);
+  });
+
   test("an unresolved command does not hold when the closed bytes match", () => {
     const quiet: object[] = [
       { postinstall: "(npm run setup)", setup: "node assets/x.bmp" },
@@ -73,9 +79,6 @@ describe("install closure", () => {
       const p = pj(scripts);
       expect(hard({ "package.json": p, [A]: oldB }, { "package.json": p, [A]: oldB })).toEqual([]);
     }
-    const [cfgOld, cfgNew] = same({ postinstall: "node ${npm_package_config_e:-a.js}" }, { config: { e: "assets/x.bmp" } });
-    // The expansion names the changed file through the package's own config: it runs, so it holds.
-    held(cfgOld, cfgNew, /file/);
     const capped: object[] = [
       { postinstall: "node assets/x.bm?" },
       { postinstall: "node assets/" + "*".repeat(300) + "x.bmp" },
