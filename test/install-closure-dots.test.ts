@@ -195,3 +195,20 @@ test("corepack pnpm install does not run the manifest main", () =>
 for (const hook of ['node -e "console.log(1)" .', "node -p process.version .", "node --eval 'x' ."]) {
   test(`${hook}: the dot is an argument of the code, not the root`, () => expect(rootHeld(hook, "docs/runtime.js", rtMain)).toBe(false));
 }
+
+// An option's value that names a real file is not the script; a directory or dotfile script is.
+const withOk = { ...rtMain, "lib/index.js": "1\n", ".build.js": "1\n" };
+for (const hook of ["node --title lib/ok.js .", "node --conditions lib/ok.js .", "node -C lib/ok.js .", "node --title=lib/ok.js ."]) {
+  test(`${hook}: the root main changed holds`, () => expect(rootHeld(hook, "docs/runtime.js", withOk)).toBe(true));
+}
+for (const hook of ["node lib/ .", "node lib .", "node .build.js ."]) {
+  test(`${hook}: the dot is an argument of the script, not the root`, () => expect(rootHeld(hook, "docs/runtime.js", withOk)).toBe(false));
+}
+test("node -r ./lib/ok.js . still runs the root main", () => expect(rootHeld("node -r ./lib/ok.js .", "docs/runtime.js", withOk)).toBe(true));
+test("node --import ./lib/ok.js . still runs the root main", () => expect(rootHeld("node --import ./lib/ok.js .", "docs/runtime.js", withOk)).toBe(true));
+
+// Past the nesting limit of package runners the program is not known: it may be node.
+test("npx npx npx npx npx npx node . : the root main changed holds", () =>
+  expect(rootHeld("npx npx npx npx npx npx node .", "docs/runtime.js", rtMain)).toBe(true));
+test("npx npx npx npx npx npx tsc -p . : still holds past the limit (the program is not known)", () =>
+  expect(rootHeld("npx npx npx npx npx npx tsc -p .", "docs/runtime.js", rtMain)).toBe(true));

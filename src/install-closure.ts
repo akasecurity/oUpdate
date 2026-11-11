@@ -4999,10 +4999,11 @@ function runnerExecutable(argv: string[], i: number, depth = 0): string {
     else if (!a.startsWith("-")) exe = runnerName(a);
     if (exe !== undefined) {
       const at = a === "--" ? j + 1 : j;
-      if (depth < 4 && /^(?:npx|bunx|pnpx)$/.test(exe)) return runnerExecutable(argv, at + 1, depth + 1);
-      if (depth < 4 && /^(?:npm|pnpm|yarn|bun)$/.test(exe)) {
+      // Past the depth limit the program is not known: it may be node.
+      if (/^(?:npx|bunx|pnpx)$/.test(exe)) return depth < 4 ? runnerExecutable(argv, at + 1, depth + 1) : "node";
+      if (/^(?:npm|pnpm|yarn|bun)$/.test(exe)) {
         const sub = argv.findIndex((w, q) => q > at && /^(?:exec|x|dlx)$/.test(w));
-        if (sub > 0) return runnerExecutable(argv, sub + 1, depth + 1);
+        if (sub > 0) return depth < 4 ? runnerExecutable(argv, sub + 1, depth + 1) : "node";
       }
       return exe;
     }
@@ -5014,11 +5015,16 @@ function runnerExecutable(argv: string[], i: number, depth = 0): string {
   return "";
 }
 
+// Node's own options that take the next word as a value (`--title t`, `-C dev`): that word is not the script.
+const NODE_VALUE_OPTS =
+  /^(?:-C|--(?:title|conditions|env-file|env-file-if-exists|inspect-port|debug-port|stack-size|max-old-space-size|input-type|loader|experimental-loader|disable-warning|redirect-warnings|report-[a-z-]+|icu-data-dir|openssl-config|watch-path|diagnostic-dir|dns-result-order|secure-heap|experimental-default-type|cpu-prof-[a-z-]+|heap-prof-[a-z-]+|trace-event-categories|trace-event-file-pattern|unhandled-rejections|stack-trace-limit|max-http-header-size|heapsnapshot-signal|heapsnapshot-near-heap-limit|tls-cipher-list|tls-keylog))$/;
+
 function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
   // The first operand that names a file of the package is the script, and the words after it are its own arguments: a `.`
   // before that (after an option and its value, `--title t .`) is the directory node runs.
   const allow = ctx.rootRuns;
   let scriptSeen = false;
+  let optValue = false;
   while (i < argv.length) {
     ctx.rootRuns = false;
     if (ctx.hold) return;
@@ -5079,6 +5085,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       // the next word as its value or load a file: widen, and keep reading the words that follow as files.
       widenAll(ctx);
       if (inline) noteHookArgCwd(ctx, inline);
+      else if (NODE_VALUE_OPTS.test(name)) optValue = true;
       i++;
       continue;
     }
@@ -5090,11 +5097,14 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
     }
     ctx.rootRuns = allow && !scriptSeen;
     noteHookArgCwd(ctx, a);
-    if (!scriptSeen) {
-      const n = normalize(a);
-      // A dotfile (`.env` after `--env-file`) is an option's value, not a script.
-      scriptSeen = Boolean(n) && !badPath(n) && !n.slice(n.lastIndexOf("/") + 1).startsWith(".") && nodeFile(ctx, n) !== undefined;
+    // The value of a value-taking option (`--title lib/ok.js`, `--env-file .env`) is not the script. A file, a dotfile or a
+    // directory with an index or manifest that is not the root is the script; `.`, `./` and `lib/..` name the root.
+    if (!scriptSeen && !optValue) {
+      const n = normalize(a).replace(/\/+$/, "");
+      scriptSeen =
+        Boolean(n) && !badPath(n) && (nodeFile(ctx, n) !== undefined || nodeFile(ctx, `${n}/index`) !== undefined || ctx.logical.has(`${n}/package.json`));
     }
+    optValue = false;
     i++;
   }
 }
