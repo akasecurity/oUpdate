@@ -68,7 +68,6 @@ const dec = new TextDecoder("utf-8", { fatal: false });
 
 interface Ctx {
   hold?: string;
-  gitOverride?: boolean; // a script sets npm's git binary or git allowance (npm_config_git, --git): no pack spec is a remote one
   noEnvIgnore?: boolean; // inside a wrapper other than env: a leading assignment is a command word, not the environment
   ignoreHooks?: boolean; // --ignore-scripts or npm_config_ignore_scripts: no pre/post script runs, and no lifecycle script of pack/version/it
   files: Set<string>;
@@ -4773,27 +4772,14 @@ const NPM_RUNS_NAMED: Record<string, string[]> = { it: ["test"], cit: ["test"], 
 function isRegistrySpec(o: string): boolean {
   return /^(?:@[a-z0-9~._-]+\/)?[a-z0-9~._-]+(?:@(?:[A-Za-z0-9^<>=*]|~[0-9])[A-Za-z0-9^~<>=*.+|_-]*)?$/.test(o) && !/^[.]/.test(o);
 }
-// npm runs the binary named by npm_config_git or --git to fetch a remote spec, and the allow-git setting widens what it may fetch.
-const GIT_OVERRIDE_TEXT = /npm_config_(?:allow_)?git|--(?:allow-)?git(?![A-Za-z0-9-])/i;
-const GIT_OVERRIDE = /npm_config_(?:allow_)?git|^--(?:allow-)?git(?![A-Za-z0-9-])/i;
-// owner/repo is a GitHub shorthand and name@npm:spec an alias for a registry package: npm fetches both from a remote, so no hook of
-// this package runs. A path that exists in the package tree is a directory spec, so it is not a shorthand.
-function isRemoteSpec(o: string, files: Set<string>): boolean {
-  if (/^(?:@[a-z0-9~._-]+\/)?[a-z0-9~._-]+@npm:(?:@[a-z0-9~._-]+\/)?(?![.~])[a-z0-9~._-]+(?:@[A-Za-z0-9^<>=*~.+|_-]+)?$/.test(o)) return true;
-  if (/^(?:github|gitlab|bitbucket|gist):[A-Za-z0-9._\/#:^-]+$/.test(o) || /^git\+(?:ssh|https?):\/\/[A-Za-z0-9._@:\/#~%+-]+$/.test(o)) return true;
-  if (!/^(?![.~])[A-Za-z0-9._-]+\/(?![.])[A-Za-z0-9._-]+(?:#[A-Za-z0-9._\/:^-]+)?$/.test(o)) return false;
-  const dir = o.replace(/#.*$/, "");
-  for (const f of files) if (f === dir || f.startsWith(dir + "/")) return false;
-  return true;
-}
 // A tarball path with a literal name: it is a file, so no hook of this package runs for it.
 function isTarballPath(o: string): boolean {
   return /^(?:file:)?[A-Za-z0-9._/@+-]+\.(?:tgz|tar\.gz|tar)$/.test(o);
 }
 // `npm pack` and `npm version` run this package's lifecycle scripts for a directory spec (pack) or a version operand (version):
 // `npm pack ms@2.1.3` packs a registry package and a bare `npm version` only lists versions. Pack is quiet only when every
-// operand is a literal registry spec or tarball path; a computed or local operand keeps the lifecycle.
-function npmLifecycleApplies(sub: string, rest: string[], files: Set<string>, gitOverride = false): boolean {
+// operand is a literal registry spec or tarball path; a computed, local, git or alias operand keeps the lifecycle.
+function npmLifecycleApplies(sub: string, rest: string[]): boolean {
   if (sub !== "pack" && sub !== "version") return true;
   const ops: string[] = [];
   let unsure = false; // a flag this does not know may take the next word as its value
@@ -4804,6 +4790,7 @@ function npmLifecycleApplies(sub: string, rest: string[], files: Set<string>, gi
       break;
     }
     if (w.startsWith("-")) {
+      if (NPM_WORKSPACE_WIDEN.test(w)) return true; // a workspace or prefix flag moves the run to another package: its scripts run
       if (NPM_VALUE_FLAG.test(w) && !w.includes("=")) k++;
       else if (w === "--ignore-scripts" && /^(?:true|false|1|0)$/.test(rest[k + 1] ?? "")) k++;
       else if (w.startsWith("--") && !w.includes("=") && !NPM_BOOL_FLAG.test(w)) unsure = true;
@@ -4811,7 +4798,7 @@ function npmLifecycleApplies(sub: string, rest: string[], files: Set<string>, gi
     }
     ops.push(w);
   }
-  if (sub === "pack") return unsure || ops.length === 0 || !ops.every((o) => isRegistrySpec(o) || isTarballPath(o) || (!gitOverride && !rest.some((w) => GIT_OVERRIDE.test(w)) && isRemoteSpec(o, files)));
+  if (sub === "pack") return unsure || ops.length === 0 || !ops.every((o) => isRegistrySpec(o) || isTarballPath(o));
   return ops.length > 0; // npm reads any operand as a version (any run of v and = is stripped), so every operand counts
 }
 // `env -i`, `env -` and `env -u npm_config_ignore_scripts` clear the variable.
@@ -4988,7 +4975,7 @@ function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
     // Only the parsed subcommand names lifecycle scripts (`npm run build pack` runs build): and --ignore-scripts switches them off.
     const life = bin === "npm" && npmSub !== undefined ? NPM_LIFECYCLE[npmSub] : undefined;
     if (life) {
-      if (!npmLifecycleApplies(npmSub!, npmRest, ctx.files, ctx.gitOverride)) return;
+      if (!npmLifecycleApplies(npmSub!, npmRest)) return;
       ctx.depth++;
       if (ignore) for (const name of NPM_RUNS_NAMED[npmSub!] ?? []) runNamed(ctx, name, true);
       else for (const name of life) runScript(ctx, name, true);
@@ -7621,6 +7608,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
       // The unknown flags are dropped and the rest is dispatched, once with the next word kept and once with it
       // taken as the flag's value (a flag with no `=` may take a value).
       const end = dd2 < 0 ? argv.length : dd2;
+      // `npm version -w a` and `npm pack --workspaces` run the lifecycle scripts of the workspaces and of this package.
+      const lifeSub = argv.slice(i, end).find((t) => t === "version" || t === "pack");
+      if (lifeSub && argv.slice(i, end).some((t) => NPM_WORKSPACE_WIDEN.test(t)) && !(flagIgnore(argv.slice(i, end)) ?? !!ctx.ignoreHooks)) {
+        for (const name of NPM_LIFECYCLE[lifeSub] ?? []) runScript(ctx, name, true);
+      }
       const strip = (takesValue: boolean): string[] => {
         const out: string[] = [];
         for (let q = i; q < argv.length; q++) {
@@ -7695,7 +7687,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     }
     // `npm it`, `npm pack` and the like run lifecycle scripts without naming them: those scripts are read as named ones, unless
     // --ignore-scripts switches them off.
-    if (!ignoreNow && npmLifecycleApplies(sub.word, argv.slice(sub.i + 1), ctx.files, ctx.gitOverride)) for (const name of NPM_LIFECYCLE[sub.word] ?? []) runScript(ctx, name, true);
+    if (!ignoreNow && npmLifecycleApplies(sub.word, argv.slice(sub.i + 1))) for (const name of NPM_LIFECYCLE[sub.word] ?? []) runScript(ctx, name, true);
     else for (const name of NPM_RUNS_NAMED[sub.word] ?? []) runNamed(ctx, name, true);
     if (sub.word.includes(UNRESOLVED)) ctx.widenInert = true;
     widenAll(ctx);
@@ -8210,7 +8202,6 @@ export function installView(files: FileMap): InstallView {
   const done = (gyp?: string) => finish(ctx, manifest, gyp, hook, stamp);
   const scripts = root.scripts;
   ctx.raw = scripts && typeof scripts === "object" && !Array.isArray(scripts) ? (scripts as Record<string, unknown>) : {};
-  ctx.gitOverride = Object.values(ctx.raw).some((t) => typeof t === "string" && GIT_OVERRIDE_TEXT.test(t));
   const config = root.config;
   ctx.config = config && typeof config === "object" && !Array.isArray(config) ? (config as Record<string, unknown>) : {};
   walkStrings(root.exports, (s) => {
