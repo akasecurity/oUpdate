@@ -1677,7 +1677,13 @@ function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block"
       else if (code[k] === "(" && --depth === 0) break;
     }
     const word = /([A-Za-z_$][\w$]*)\s*$/.exec(code.slice(Math.max(0, k - 40), Math.max(0, k)))?.[1] ?? "";
-    return /^(?:if|for|while|switch|catch|with)$/.test(word) ? "block" : "fn";
+    if (/^(?:if|for|while|switch|catch|with)$/.test(word)) return "block";
+    // A { on the next line after a ) that is not a function's parameter list is a block after a finished statement, by
+    // automatic semicolon insertion: (1)\n{ ... }, void (0)\n{ ... }, f(1)\n{ ... }. Only a function head (function f(a),
+    // function* (a), async function) keeps its body on the next line; a method written that way counts as a block (a hold at
+    // most, never a miss).
+    if (/[\r\n\u2028\u2029]/.test(code.slice(j, at)) && !/(?:^|[^\w$.])function\s*\*?\s*(?:[A-Za-z_$][\w$]*)?\s*$/.test(code.slice(Math.max(0, k - 80), k))) return "block";
+    return "fn";
   }
   return "block";
 }

@@ -1383,6 +1383,42 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} is not static`, () => expect(held(pre)).toBe(true));
 }
+// A { on the line after a ) that is not a parameter list is a block (automatic semicolon insertion), so arguments in it is
+// the module wrapper's, not a function's own.
+const ASI_BODY = 'const r = arguments[1]; r("child_"+"pro"+"cess")';
+const GB = 'const { ["getBuiltin"+"Module"]: gb } = p; gb("child_"+"pro"+"cess");';
+for (const [label, pre] of [
+  ["arguments in a block after a parenthesized statement", `let x = (1)\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  ["arguments in a block after void (0)", `void (0)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["arguments in a block after typeof (0)", `typeof (0)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["arguments in a block after delete (0)", `delete (0)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["arguments in a block after a call statement", `f(1)\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["arguments in a block after a parenthesized statement with CRLF", `let x = (1)\r\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  ["arguments in a block after a call with a comment between", `f(1) // c\n{ ${ASI_BODY} }\nexports.main = () => 1\n`],
+  ["a template directive and then an arguments block", `\`use strict\`\nlet x = (1)\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  ["arguments in a block after a parenthesized statement that follows a function", `function f(a) { return 1 }\nlet x = (1)\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  ["a function with its body on the next line and then an arguments block", `function f(a)\n{ return 1 }\nlet x = (1)\n{ ${ASI_BODY} }\nexports.main = () => x\n`],
+  // Already held before this change and kept: the value of a sloppy this, a call site's this through an alias of Error, and a
+  // template that spells the directive.
+  ["this.valueOf() handed on", `function f(){ return this.valueOf() }\nconst p = f().process;\n${GB}\nexports.main = () => 1\n`],
+  ["a call site's this through an alias of Error", `const E = Error;\nE.prepareStackTrace = (e, s) => s;\nconst t = new E().stack[0].getThis();\nconst p = t.process;\n${GB}\nexports.main = () => 1\n`],
+  ["a template directive and then this handed on", `\`use strict\`;\nfunction f(){ return this }\nconst p = f().process;\n${GB}\nexports.main = () => 1\n`],
+] as const) {
+  test(`${label} is not static (asi blocks)`, () => expect(held(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["arguments in a function declaration with its body on the next line", "function f(a)\n{ return arguments[0] }\nexports.main = () => f(1)\n"],
+  ["arguments in a generator declaration with its body on the next line", "function* g(a)\n{ yield arguments[0] }\nexports.main = () => g(1)\n"],
+  ["arguments in an async function declaration with its body on the next line", "async function h(a)\n{ return arguments[0] }\nexports.main = () => h(1)\n"],
+  ["arguments in a function expression with its body on the next line", "const f = function (a)\n{ return arguments[0] }\nexports.main = () => f(1)\n"],
+  ["arguments.length in a block after a parenthesized statement", "let x = (1)\n{ const n = arguments.length }\nexports.main = () => x\n"],
+  ["a block after an if with a condition", "if (1)\n{ const y = 2 }\nexports.main = () => 1\n"],
+  ["a block after a while", "while (0)\n{ const y = 2 }\nexports.main = () => 1\n"],
+  ["arguments in a function with its body on the same line", "function f(a) { return arguments[0] }\nexports.main = () => f(1)\n"],
+  ["arguments in a method with its body on the same line", "const o = { m(a) { return arguments[0] } }\nexports.main = () => o.m(1)\n"],
+] as const) {
+  test(`${label} stays static (asi blocks)`, () => expect(held(pre)).toBe(false));
+}
 for (const [label, pre] of [
   ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
   ["arguments bound to a name", 'const a = arguments; exports.main = () => a[1]("child_"+"pro"+"cess")\n'],
