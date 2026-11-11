@@ -603,7 +603,7 @@ function decodeJsString(raw: string): string | undefined {
 }
 
 function followLoads(ctx: Ctx, key: string, text: string): void {
-  for (const m of text.matchAll(new RegExp(LITERAL_LOAD.source, "g"))) {
+  for (const m of (codeOnly(text, [], true) ?? text).matchAll(new RegExp(LITERAL_LOAD.source, "g"))) {
     if (ctx.hold) return;
     let spec = m[2] || m[4] || m[6] || "";
     if (spec.includes("\\")) {
@@ -670,10 +670,11 @@ function addBundled(ctx: Ctx, root: string): void {
 }
 
 // Literal loads the precise walk already follows, plus the modeled config require.
-// Whitespace and comments between a keyword and its string: none at all is valid (from"x"), and a comment may stand there.
-const GAP = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n\r\u2028\u2029]*)`;
+// Between a keyword and its string: none at all is valid (from"x"). Comments are taken out of the text first (codeOnly in
+// keep mode), so whitespace is the only gap left; no pattern here ever scans a comment.
+const GAP = String.raw`\s`;
 const LITERAL_LOAD = new RegExp(
-  String.raw`(?:\brequire|\bimport)\(\s*(['"])([^'"]+)\1\s*\)|\bfrom${GAP}*(['"])([^'"]+)\3|\bimport${GAP}*(['"])([^'"]+)\5`,
+  String.raw`(?:\brequire|\bimport)\s*\(\s*(['"])([^'"]+)\1\s*\)|\bfrom${GAP}*(['"])([^'"]+)\3|\bimport${GAP}*(['"])([^'"]+)\5`,
   "g",
 );
 // Anything still able to name a file. module.exports is removed first; it is the static CJS assignment.
@@ -776,7 +777,7 @@ const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "
  * regular expression is decided from the previous token this scan emitted, never from the source text before it: text
  * inside a string, template or regular expression is not a token.
  */
-function codeOnly(text: string, watch: string[] = []): string | undefined {
+function codeOnly(text: string, watch: string[] = [], keep = false): string | undefined {
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
   let t1: Tok | undefined;
@@ -796,7 +797,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
   const danger = new RegExp(`['"\`\\\\\\u0080-\\uffff(){}\\[\\]]|(?<![\\w$])(?:${names.join("|")})(?![\\w$])|<!--|-->`);
   const eol = (c: string | undefined) => c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029";
   let opened = false;
-  const template = (): boolean => {
+  const template = (st: number): boolean => {
     opened = false;
     for (; i < n; i++) {
       const c = text[i]!;
@@ -804,20 +805,20 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       else if (c === "`") {
         i++;
         // A closing backtick leaves "" so the tokens on either side of a template never join in the output.
-        out += '""';
+        out += keep ? text.slice(st, i) : '""';
         return true;
       } else if (c === "$" && text[i + 1] === "{") {
         i += 2;
         braces.push(true);
-        out += " `${";
+        out += keep ? text.slice(st, i) : " `${";
         opened = true;
         return true;
       }
     }
     return false;
   };
-  const afterTemplate = (): boolean => {
-    if (!template()) return false;
+  const afterTemplate = (st: number): boolean => {
+    if (!template(st)) return false;
     if (opened) push("punct", "{");
     else push("tpl", "");
     return true;
@@ -871,15 +872,17 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       }
       i++;
     } else if (c === "'" || c === '"') {
+      const st = i;
       i++;
       for (; i < n && text[i] !== c && !eol(text[i]); i++) if (text[i] === "\\") i++;
       if (text[i] !== c) return undefined;
       i++;
-      out += '""';
+      out += keep ? text.slice(st, i) : '""';
       push("str", "");
     } else if (c === "`") {
+      const st = i;
       i++;
-      if (!afterTemplate()) return undefined;
+      if (!afterTemplate(st)) return undefined;
     } else if (c === "/" && text[i + 1] === "/") {
       while (i < n && !eol(text[i])) i++;
     } else if (c === "/" && text[i + 1] === "*") {
@@ -905,8 +908,9 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
         if (danger.test(span) || !endsInOperand(span) || !closesCleanly(end + 1)) return undefined;
       }
       if (end >= 0) {
+        if (keep) out += text.slice(i, end + 1);
         i = end + 1;
-        out += "/r/";
+        if (!keep) out += "/r/";
         push("regex", "");
       } else {
         out += "/";
@@ -921,7 +925,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
         if (tpl) {
           i++;
           out += "}";
-          if (!afterTemplate()) return undefined;
+          if (!afterTemplate(i)) return undefined;
           continue;
         }
       }
@@ -978,8 +982,11 @@ function removedText(statement: boolean, spaceAfter = ""): string {
   return `${REMOVED}${statement ? ";" : ""}${spaceAfter || " "}`;
 }
 
-function provablyStatic(text: string): boolean {
-  if (text.includes(REMOVED)) return false;
+function provablyStatic(source: string): boolean {
+  if (source.includes(REMOVED)) return false;
+  // Comments out first, strings kept: the patterns below read code, and a comment can neither hide nor fake a load.
+  const text = codeOnly(source, [], true);
+  if (text === undefined) return false;
   const aliases: string[] = [];
   let viaOther = false;
   let rest = stripProcessAliases(text, aliases);
@@ -1000,7 +1007,7 @@ function provablyStatic(text: string): boolean {
   // No space after this one on purpose: a property access can follow it (module.exports.in is a property).
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
-  if (/(?:\brequire\s*\(|\bfrom\s+|\bimport\s+)\s*['"](?:node:)?process\b/.test(rest)) return false;
+  if (/(?:\brequire\s*\(|\bfrom|\bimport)\s*['"](?:node:)?process\b/.test(rest)) return false;
   if (UNSAFE_JS.test(rest)) return false;
   if (aliases.length === 0) return true;
   const code = codeOnly(rest, aliases);
@@ -1019,7 +1026,7 @@ function provablyStatic(text: string): boolean {
 function runsOtherFile(text: string): boolean {
   if (/\b(?:exec|eval|compile)\s*\(/.test(text)) return true;
   if (/\b(?:__import__|importlib|import_module|execfile|runpy|run_path|load_source|SourceFileLoader)\b/.test(text)) return true;
-  if (/import\s*\(/.test(text)) return true;
+  if (/import\s*\(/.test(codeOnly(text, [], true) ?? text)) return true;
   return false;
 }
 

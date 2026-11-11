@@ -454,3 +454,37 @@ test("a relative import written without spaces is followed to its file (round 16
   const rel = (ver: string, h: string) => release(ver, pre).set("preinstall/helper.js", enc(h));
   expect(holds(rel("1.0.0", "export const x = 1\n"), rel("1.0.1", "export const x = 2\n"))).toContain("file preinstall/helper.js");
 });
+
+// Round 17: comments are taken out before any pattern reads the text.
+for (const [label, pre] of [
+  ["code between a from and a later comment before a string", `${A}const o = {};\nvar y = o.from/*a*/ eval("1") /*b*/"x";\nexports.main = () => 1\n`],
+  ["an eval hidden between two comments after from", `from/*a*/ eval("1") /*b*/"x"\nexports.main = () => 1\n`],
+  ["a process alias use hidden between two comments", `import/*a*/ q.binding("spawn_sync") /*b*/ p from "process"\n`],
+  ["a quote in a line comment after from, a variable named from and a division on the next line", `${A}var from = 1;\nvar y = from // "./a"\n/ ${Y} / 1;\n`],
+  ["a commented dynamic import with a computed path", `import/*c*/("./" + "evil.js");\n`],
+  ["a commented dynamic import of an environment value", `import /*c*/ (process.env.TARGET);\n`],
+] as const) {
+  test(`${label} is not static (round 17)`, () => expect(held(pre)).toBe(true));
+}
+test("scanning a 200 KB run of block comments, line comments and from/import words finishes quickly (round 17)", () => {
+  const runs = ["/**/".repeat(50_000), "//".repeat(100_000), "from /*".repeat(30_000) + "*/", "import /**/ ".repeat(20_000), "// from \"x\"\n".repeat(15_000)];
+  for (const body of runs) {
+    const t0 = performance.now();
+    held(`const p = require("process");\n${body}\nexports.main = () => p.cwd()\n`);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  }
+});
+
+// A literal dynamic import with a comment around it is a literal load: the walk follows it to the file.
+for (const [label, call] of [
+  ["a comment between import and the paren", 'import /*c*/ ("./evil.js")'],
+  ["no space and a comment between import and the paren", 'import/*c*/("./evil.js")'],
+  ["a comment inside the parens before the string", 'import(/*c*/"./evil.js")'],
+  ["a comment after the string", 'import("./evil.js" /*c*/)'],
+] as const) {
+  test(`a dynamic import with ${label} is followed to its file (round 17)`, () => {
+    const pre = `var v = require("node:process"); ${call}; exports.main = () => v.exit(0)\n`;
+    const rel = (ver: string, evil: string) => release(ver, pre).set("preinstall/evil.js", enc(evil));
+    expect(holds(rel("1.0.0", "module.exports = 1\n"), rel("1.0.1", "module.exports = 2\n"))).toContain("file preinstall/evil.js");
+  });
+}
