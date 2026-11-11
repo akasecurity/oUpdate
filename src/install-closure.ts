@@ -987,7 +987,7 @@ function removedText(statement: boolean, spaceAfter = ""): string {
 // True when the previous non-whitespace character is a dot, however much whitespace lies between.
 function dotBefore(text: string, at: number): boolean {
   let j = at;
-  while (j > 0 && /\s/.test(text[j - 1])) j--;
+  while (j > 0 && /\s/.test(text[j - 1]!)) j--;
   return j > 0 && text[j - 1] === ".";
 }
 

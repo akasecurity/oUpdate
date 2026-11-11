@@ -360,6 +360,7 @@ describe("runsOtherFile on its own (shell, Python and Ruby text)", () => {
   test("// and /* are not comments there", () => {
     expect(runsOtherFile("echo http://x/y; import(a)\n")).toBe(true);
     expect(runsOtherFile("x = a // 2; y = import (z)\n")).toBe(true);
+    expect(runsOtherFile("puts 'http://x'; y = import(z)\n")).toBe(true);
     expect(runsOtherFile("ls /tmp/*; import(a); echo '*/'\n")).toBe(true);
   });
   test("no dynamic import is false", () => {

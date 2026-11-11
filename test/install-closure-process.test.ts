@@ -509,17 +509,27 @@ test("a dot before from is seen however far back it lies (round 18)", () => {
 
 // A comment in an eval argument cannot end the argument list early.
 test("an eval whose argument hides a closing paren in a comment still widens (round 18)", () => {
-  expect(held(`${A}var s = require("fs"); eval(s.readFileSync /* ) */ + x);\nexports.main = () => 1\n`)).toBe(true);
+  // build/index.js is outside the hook directory: only a wide closure holds it.
+  const pre = `var p = require("process"); eval(path /* ) */ + y);\nexports.main = () => p.cwd()\n`;
+  expect(holds(release("1.0.0", pre), release("1.0.1", pre))).toContain("file build/index.js");
 });
 
 // Round 18: a template interpolation or brace still open at the end of the file is not static.
 for (const [label, body] of [
   ["an unterminated template interpolation", "const t = `x${p.cwd()"],
-  ["an unterminated interpolation inside a nested template", "const t = `a${`b${p.cwd()`}"],
+  ["an unterminated interpolation inside a nested template", "const t = `a${`b` + p.cwd()"],
   ["an open brace at the end of the file", "function f() { return p.cwd()"],
 ] as const) {
   test(`${label} is not static (round 18)`, () => expect(held(`${A}${body}\n`)).toBe(true));
 }
+test("a { or ${ inside a string, a comment or a regex keeps a file static (round 18)", () => {
+  for (const body of ['var s = "{ ${"; ', "var s = '}{';", "// {\nvar r = /{/;", "/* ${ */ var t = `{`;"]) {
+    expect(held(`${A}${body}\nexports.main = () => p.cwd()\n`)).toBe(false);
+  }
+});
+test("a comment between the dot and from does not hide the dot (round 18)", () => {
+  expect(held(`${A}var o = {};\nvar y = o./*c*/from "./a"\n/ ${Y} / 1;\n`)).toBe(true);
+});
 test("balanced nested templates stay static (round 18)", () => {
   expect(held(`${A}exports.main = () => \`a\${\`b\${p.cwd()}\`}\`\n`)).toBe(false);
 });
