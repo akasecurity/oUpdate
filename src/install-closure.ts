@@ -863,8 +863,8 @@ const LOADS_CHILD_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*
 // The plain reads of the process object, or of a name for the process module, a static file may make. Any other use (an
 // alias, a computed member, binding, getBuiltinModule, mainModule, an argument to a call) can reach a loader or a native
 // module, so it is not static; the loader words and a bare or computed use also widen the closure to the whole package.
-const PROCESS_LOADER_WORDS = /\b(?:getBuiltinModule|mainModule|_?linkedBinding)\b|\.\s*binding\b/;
-const PROCESS_READ = "(?:env\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|(?:version\\b|versions\\b(?:\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*)?)|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
+const PROCESS_LOADER_WORDS = /\b(?:getBuiltinModule|mainModule|_?linkedBinding|prepareStackTrace|getThis|getFunction)\b|\.\s*binding\b/;
+const PROCESS_READ = "(?:env\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|(?:version\\b|versions\\b(?:\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*)?)|argv\\b|title\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
 // `const p = require("process")` or `import p from "node:process"`: the only loads of the process module that stay static.
 const PROCESS_ALIAS = new RegExp(
   String.raw`\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(?:node:)?process\2\s*\)|import(?:${GAP}+|(?=\*))(?:\*${GAP}*as${GAP}+)?([A-Za-z_$][\w$]*)${GAP}+from${GAP}*(['"])(?:node:)?process\4)\s*;?`,
@@ -1477,7 +1477,7 @@ function readEnds(code: string, start: number, lenient = false, target?: string)
 // computed member, a spread, a template or call argument, a returned or assigned value, a read followed by a chained
 // call, or the bare global object. A property named like the name (x.process()), an object key (process: 1) and a method
 // definition are not the object. A parameter or variable of that name is not told apart from the global: it counts.
-function processValueUse(code: string, names: string[], lenient = false): boolean {
+function processValueUse(code: string, names: string[], lenient = false, strict = false): boolean {
   const alt = names.map((n) => n.replace(/\$/g, "\\$")).join("|");
   const L = "(?<![\\w$])(?<![^\\x00-\\x7f\\s])";
   const R = "(?![\\w$])(?![^\\x00-\\x7f\\s])";
@@ -1604,12 +1604,8 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
   // The global object handed on (bound, passed, returned, put in an array, a default value, new f(globalThis)) can be read for
   // process later. Only a member read of it (globalThis.name) and typeof / in are not a hand-over. At the top level of a
   // CommonJS file this is the exports object, so a bare top-level this counts the same.
-  let depth = 0;
-  for (const m of rest.matchAll(/(?<![\w$])(?<![^\x00-\x7f\s])(?:globalThis|global|this)(?![\w$])(?![^\x00-\x7f\s])|[{}]/g)) {
+  for (const m of rest.matchAll(/(?<![\w$])(?<![^\x00-\x7f\s])(?:globalThis|global)(?![\w$])(?![^\x00-\x7f\s])/g)) {
     const at = m.index ?? 0;
-    if (m[0] === "{") { depth++; continue; }
-    if (m[0] === "}") { depth = Math.max(0, depth - 1); continue; }
-    if (m[0] === "this" && depth > 0) continue;
     // An object key (global: true) is a name, not the global object.
     const nextText = rest.slice(at + m[0].length, at + m[0].length + 8);
     let pj = at;
@@ -1619,8 +1615,6 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
     if (m[0] !== "this" && /(?:^|[^\w$.])(?:break|continue)\s*$/.test(rest.slice(Math.max(0, at - 12), at))) continue;
     // A class field (global = 1) is a name too.
     if (m[0] !== "this" && /^\s*=(?!=)/.test(nextText) && (before === "" || /[{;}]/.test(before))) continue;
-    // (this && this.__x) is a test: its value is the right side. A comparison does not hand it on either.
-    if (m[0] === "this" && /^\s*(?:&&|[!=]==?)/.test(rest.slice(at + 4, at + 20))) continue;
     let j = at;
     while (j > 0 && /\s/.test(rest[j - 1]!)) j--;
     if (rest[j - 1] === "." && !rest.slice(0, j).endsWith("...")) continue;
@@ -1631,7 +1625,67 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
       if (m[0] !== "this" && /(?:^|[^\w$.])typeof$/.test(rest.slice(Math.max(0, j - 11), j)) && prop && readEnds(rest, at + m[0].length + prop[0].length)) continue;
     }
     if (m[0] !== "this" && HARMLESS_GLOBAL.test(rest.slice(at + m[0].length, at + m[0].length + 40))) continue;
-    if (m[0] === "this" && /^\s*(?:\?\.|\.)\s*[A-Za-z_$]/.test(rest.slice(at + 4, at + 44))) continue;
+    return true;
+  }
+  return thisOrArgumentsLeaks(rest, strict);
+}
+
+// Where a { opens: a function body ("fn"), an arrow body, a class body or a plain block.
+function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block" {
+  let j = at;
+  while (j > 0 && /\s/.test(code[j - 1]!)) j--;
+  if (code.slice(Math.max(0, j - 2), j) === "=>") return "arrow";
+  if (/(?<![\w$.])class\b[^{};]*$/.test(code.slice(Math.max(0, j - 200), j))) return "class";
+  if (code[j - 1] === ")") {
+    let depth = 0;
+    let k = j - 1;
+    for (; k >= 0; k--) {
+      if (code[k] === ")") depth++;
+      else if (code[k] === "(" && --depth === 0) break;
+    }
+    const word = /([A-Za-z_$][\w$]*)\s*$/.exec(code.slice(Math.max(0, k - 40), Math.max(0, k)))?.[1] ?? "";
+    return /^(?:if|for|while|switch|catch|with)$/.test(word) ? "block" : "fn";
+  }
+  return "block";
+}
+
+// A this in sloppy code is the global object inside a plain function call, and this at the top of a CommonJS file or
+// arguments there are the module wrapper's (exports, require, module). So this that is handed on or read through a
+// computed or process-like member, and arguments outside a function of its own, are not provably harmless. this.name and
+// this.method() stay. Strict code (a class body, "use strict", import/export) has no global this.
+function thisOrArgumentsLeaks(code: string, strictFile: boolean): boolean {
+  const stack: ("fn" | "arrow" | "class" | "block")[] = [];
+  for (const m of code.matchAll(/[{}]|(?<![\w$.])(?:this|arguments)(?![\w$])/g)) {
+    const at = m.index ?? 0;
+    if (m[0] === "{") {
+      stack.push(braceKind(code, at));
+      continue;
+    }
+    if (m[0] === "}") {
+      stack.pop();
+      continue;
+    }
+    const after = code.slice(at + m[0].length, at + m[0].length + 60);
+    if (m[0] === "arguments") {
+      if (/^\s*\.\s*length\b/.test(after)) continue;
+      let own = false;
+      for (let i = stack.length - 1; i >= 0; i--) {
+        if (stack[i] === "fn") {
+          own = true;
+          break;
+        }
+      }
+      if (own) continue;
+      return true;
+    }
+    if (strictFile || stack.includes("class")) continue;
+    // (this && this.__x) is a test: its value is the right side. A comparison does not hand it on either.
+    if (/^\s*(?:&&|[!=]==?)/.test(after)) continue;
+    let j = at;
+    while (j > 0 && /\s/.test(code[j - 1]!)) j--;
+    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(code.slice(Math.max(0, j - 11), j))) continue;
+    const member = /^\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)/.exec(after);
+    if (member && !/^(?:process|globalThis|global|constructor|__proto__)$/.test(member[1]!)) continue;
     return true;
   }
   return false;
@@ -1705,6 +1759,11 @@ function computedCallChain(code: string): boolean {
   return false;
 }
 
+// "use strict" first in the file, or import / export declarations: strict code.
+function strictFileOf(keep: string, code: string): boolean {
+  return /^\s*(['"])use strict\1/.test(keep) || /(?:^|\n)\s*(?:import\s*(?:[\w$*{]|"")|export\s)/.test(code);
+}
+
 // A scanner that throws must not make a file look safe: a fault reads as "not static" and "widen everything".
 let scannerFaults = 0;
 export function scannerFaultCount(): number {
@@ -1751,7 +1810,7 @@ function provablyStaticScan(source: string): boolean {
   if (PROCESS_LOADER_WORDS.test(code) || UNSAFE_JS.test(code) || timerGetsCode(code) || steeringKey(code) || computedCallChain(code)) return false;
   // Brackets that do not pair up (a file Bun rejects) are read by nothing below: not static.
   if (bracketIndex(code).mismatch) return false;
-  return !processValueUse(code, aliases);
+  return !processValueUse(code, aliases, false, strictFileOf(text, code));
 }
 
 // exec/eval/compile, a dynamic import, or a loader that runs another file.
@@ -2232,7 +2291,7 @@ function processHazardScan(source: string): boolean {
       if (!prefixed && !manifest && !selector && !joined) return true;
     }
   }
-  return processValueUse(code, names, true);
+  return processValueUse(code, names, true, strictFileOf(keep, code));
 }
 
 // setTimeout or setInterval whose first argument is a string or built from one: that string is run as code.

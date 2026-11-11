@@ -1345,3 +1345,40 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} stays static (computed chain)`, () => expect(widensDocs(pre)).toBe(false));
 }
+
+// A this in sloppy code, the module wrapper's arguments and CallSite objects hand out the global object or require.
+const GBM = '["getBuiltin"+"Module"]("child_"+"process")';
+for (const [label, pre] of [
+  ["a sloppy function returning this, indexed with a built key", `exports.main = () => (function () { return this })()["pro"+"cess"]${GBM}\n`],
+  ["a sloppy function returning this.process", `function f() { return this.process }\nexports.main = () => f()${GBM}\n`],
+  ["a sloppy function binding this to a name", `function f() { const g = this; return g }\nexports.main = () => f().process${GBM}\n`],
+  ["this from call() with no argument", `exports.main = () => { const t = (function () { return this }).call(); return t.process${GBM} }\n`],
+  ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
+  ["arguments bound to a name", 'const a = arguments; exports.main = () => a[1]("child_"+"pro"+"cess")\n'],
+  ["arguments[2] at the top level", 'exports.main = () => arguments[2]["req"+"uire"]("child_"+"pro"+"cess")\n'],
+  ["an arrow body reading the wrapper's arguments", 'exports.main = () => { return arguments[1]("fs") }\n'],
+  ["a prepareStackTrace that reads the call site's this", 'Error.prepareStackTrace = (e, s) => s[0].getThis();\nexports.main = () => new Error().stack\n'],
+  ["getFunction on a call site", 'exports.main = (s) => s[0].getFunction()\n'],
+] as const) {
+  test(`${label} widens the closure (round 23)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["this.x = 1 in a class method", 'class A { m() { this.x = 1 } }\nexports.main = () => new A()\n'],
+  ["this.name and this.method() in a function", 'exports.main = function () { this.a = 1; return this.run(2) }\n'],
+  ["arguments.length", 'exports.main = function () { return arguments.length }\n'],
+  ["arguments inside a function of its own", 'exports.main = function () { return arguments[0] }\n'],
+  ["return this inside a class", 'class A { m() { return this } }\nexports.main = () => new A()\n'],
+  ["this handed on in a strict file", '"use strict";\nexports.main = function () { return this }\n'],
+  ["(this && this.x) at the top of a file", 'var h = (this && this.h) || 1;\nexports.main = () => h\n'],
+] as const) {
+  test(`${label} stays static (round 23)`, () => expect(held(pre)).toBe(false));
+}
+for (const [label, pre] of [
+  ["a read of process.title", "exports.main = () => process.title\n"],
+  ["an assignment to process.title", "process.title = 'x'\nexports.main = () => 1\n"],
+] as const) {
+  test(`${label} stays static`, () => expect(held(pre)).toBe(false));
+}
+test("process.title with a chained member still widens", () => {
+  expect(widensAll('exports.main = () => process.title.constructor.constructor("return process")()\n')).toBe(true);
+});
