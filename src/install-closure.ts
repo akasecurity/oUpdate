@@ -741,43 +741,37 @@ function stripProcessAliases(text: string, aliases: string[]): string {
   });
 }
 
-/**
- * The code of a JavaScript file with string and template text, regular-expression bodies and comments blanked, or
- * undefined when the scan ends inside one of them (the file is not read as code then). Positions are not kept.
- */
-/** Words a span read as a regular expression could hide from the checks; with the process names they are what decides. */
+/** Keywords after which a / starts a regular expression; none of these can be a name. */
 const KEYWORD_REGEX = new Set(["return", "typeof", "case", "delete", "void", "throw", "new", "else", "do", "instanceof", "in"]);
-const KEYWORD_MAYBE = new Set(["yield", "await", "of", "let", "static", "async", "get", "set"]);
+/** Words that are keywords in some positions and names in others: a / after one is read once, with the span check. */
+const KEYWORD_MAYBE = new Set(["yield", "await", "of"]);
+/** Words a span read as a regular expression must not hold: with the process names they are what the checks look for. */
 const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "Worker", "process", "globalThis", "global", "Reflect", "Proxy", "constructor", "child_process", "dlopen", "exports"];
 
+/**
+ * The code of a JavaScript file with string and template text, regular-expression bodies and comments blanked, or
+ * undefined when the scan ends inside one of them or cannot tell a regular expression from a division. Whether a / opens a
+ * regular expression is decided from the previous token this scan emitted, never from the source text before it: text
+ * inside a string, template or regular expression is not a token.
+ */
 function codeOnly(text: string, watch: string[] = []): string | undefined {
+  type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
-  let prev = "";
-  let opened = false;
+  let t1: Tok | undefined;
+  let t2: Tok | undefined;
+  const push = (k: Tok["k"], t: string) => {
+    t2 = t1;
+    t1 = { k, t };
+  };
   const braces: boolean[] = [];
-  const regexAfter = new Set(["", "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", ";", "+", "-", "*", "%", "<", ">", "~", "^"]);
   let i = 0;
   const n = text.length;
-  const danger = new RegExp(
-    `['"\`\\\\\\u0080-\\uffff(){}\\[\\]]|(?<![\\w$])(?:${[...DANGER_WORDS, ...watch].map((w) => w.replace(/\$/g, "\\$&")).join("|")})(?![\\w$])`,
-  );
+  const names = [...DANGER_WORDS, ...KEYWORD_REGEX, ...KEYWORD_MAYBE, ...watch].map((w) => w.replace(/\$/g, "\\$&"));
+  const danger = new RegExp(`['"\`\\\\\\u0080-\\uffff(){}\\[\\]]|(?<![\\w$])(?:${names.join("|")})(?![\\w$])`);
   const eol = (c: string | undefined) => c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029";
-  // The word before a /: "regex" for a keyword that is never a name, "maybe" for one that is also an identifier in sloppy
-  // scripts (read as a division with the span check), "no" for anything else. A property name after . or ?. or # is not a
-  // keyword; a . that is part of ... or ends a number literal is not a property dot.
-  const wordKind = (code: string): "regex" | "maybe" | "no" => {
-    const t = code.trimEnd();
-    const m = /(?:^|[^\w$])([A-Za-z_$][\w$]*)$/.exec(t);
-    if (!m) return "no";
-    const w = m[1]!;
-    const kind = KEYWORD_REGEX.has(w) ? "regex" : KEYWORD_MAYBE.has(w) ? "maybe" : "no";
-    if (kind === "no") return "no";
-    const before = t.slice(0, t.length - w.length).trimEnd();
-    if (before.endsWith("#")) return "no";
-    if (before.endsWith(".") && !before.endsWith("...") && !/(?:^|[^\w$.])\d[\w]*\.$/.test(before)) return "no";
-    return kind;
-  };
+  let opened = false;
   const template = (): boolean => {
+    opened = false;
     for (; i < n; i++) {
       const c = text[i]!;
       if (c === "\\") i++;
@@ -794,40 +788,52 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
     }
     return false;
   };
-  // After a ) or a } a / is a division or the start of a regular expression, and the two readings hide different text.
-  // It is read as a division, unless the rest of the line holds a closing / around anything that could name a thing: then
-  // the file is not read as code at all.
-  let ambiguous = false;
-  const ambiguousRegex = (at: number, before: string): boolean => {
-    if (before !== ")" && before !== "}" && !/(?:\+\+|--)$/.test(out.trimEnd()) && wordKind(out) !== "maybe") return false;
+  const afterTemplate = (): boolean => {
+    if (!template()) return false;
+    if (opened) push("punct", "{");
+    else push("tpl", "");
+    return true;
+  };
+  // The end of a regular expression body that starts after the / at "at", or -1.
+  const regexEnd = (at: number): number => {
     let cls = false;
     for (let j = at + 1; j < n && !eol(text[j]); j++) {
       const d = text[j]!;
       if (d === "\\") j++;
       else if (d === "[") cls = true;
       else if (d === "]") cls = false;
-      else if (d === "/" && !cls) {
-        if (danger.test(text.slice(at + 1, j))) ambiguous = true;
-        return false;
-      }
+      else if (d === "/" && !cls) return j;
     }
-    return false;
+    return -1;
+  };
+  // "regex" or "div" when the previous token settles it, "amb" when a / could be either.
+  const slashKind = (): "regex" | "div" | "amb" => {
+    if (!t1) return "regex";
+    if (t1.k === "punct") {
+      if (t1.t === ")" || t1.t === "}" || t1.t === "++" || t1.t === "--") return "amb";
+      return t1.t === "]" || t1.t === "/" ? "div" : "regex";
+    }
+    if (t1.k !== "word") return "div";
+    if (t2 && t2.k === "punct" && (t2.t === "." || t2.t === "?.")) return "div";
+    if (KEYWORD_REGEX.has(t1.t)) return "regex";
+    return KEYWORD_MAYBE.has(t1.t) ? "amb" : "div";
   };
   if (text.startsWith("#!")) while (i < n && !eol(text[i])) i++;
   while (i < n) {
     const c = text[i]!;
-    if (c === "'" || c === '"') {
+    if (/\s/.test(c)) {
+      out += c;
+      i++;
+    } else if (c === "'" || c === '"') {
       i++;
       for (; i < n && text[i] !== c && !eol(text[i]); i++) if (text[i] === "\\") i++;
       if (text[i] !== c) return undefined;
       i++;
       out += '""';
-      prev = '"';
+      push("str", "");
     } else if (c === "`") {
       i++;
-      opened = false;
-      if (!template()) return undefined;
-      prev = opened ? "{" : "`";
+      if (!afterTemplate()) return undefined;
     } else if (c === "/" && text[i + 1] === "/") {
       while (i < n && !eol(text[i])) i++;
     } else if (c === "/" && text[i + 1] === "*") {
@@ -835,41 +841,62 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       if (e < 0) return undefined;
       out += /[\n\r\u2028\u2029]/.test(text.slice(i, e)) ? "\n" : " ";
       i = e + 2;
-    } else if (c === "/" && ((regexAfter.has(prev) && !/(?:\+\+|--)$/.test(out.trimEnd())) || wordKind(out) === "regex" || ambiguousRegex(i, prev))) {
-      let cls = false;
-      i++;
-      for (; i < n && !eol(text[i]); i++) {
-        const d = text[i]!;
-        if (d === "\\") i++;
-        else if (d === "[") cls = true;
-        else if (d === "]") cls = false;
-        else if (d === "/" && !cls) break;
+    } else if (c === "/") {
+      const kind = slashKind();
+      const end = kind === "div" ? -1 : regexEnd(i);
+      if (kind === "regex" && end < 0) return undefined;
+      // Both readings must see the same names: the span holds none, and what follows the closing / is not a name,
+      // a flag or another / that could start a comment.
+      if (kind === "amb" && end >= 0 && (danger.test(text.slice(i + 1, end)) || !(end + 1 >= n || /[\s).;,\]}]/.test(text[end + 1]!)))) return undefined;
+      if (end >= 0) {
+        i = end + 1;
+        out += "/r/";
+        push("regex", "");
+      } else {
+        out += "/";
+        i++;
+        push("punct", "/");
       }
-      if (text[i] !== "/") return undefined;
-      i++;
-      out += "/r/";
-      prev = "r";
     } else {
       if (c === "<" && text.startsWith("<!--", i)) return undefined;
       if (c === "-" && text.startsWith("-->", i) && /(?:^|[\n\r\u2028\u2029])[^\S\n\r\u2028\u2029]*$/.test(out)) return undefined;
-      if (c === "{") braces.push(false);
       if (c === "}") {
         const tpl = braces.pop();
         if (tpl) {
           i++;
           out += "}";
-          opened = false;
-          if (!template()) return undefined;
-          prev = opened ? "{" : "`";
+          if (!afterTemplate()) return undefined;
           continue;
         }
       }
-      out += c;
-      if (!/\s/.test(c)) prev = c;
-      i++;
+      if (c === "{") braces.push(false);
+      const rest = text.slice(i, i + 64);
+      let tok: string;
+      let m: RegExpExecArray | null;
+      if ((m = /^#[A-Za-z_$][\w$]*/.exec(rest))) {
+        tok = m[0];
+        push("priv", tok);
+      } else if ((m = /^(?:[A-Za-z_$][\w$]*|[^\x00-\x7f]+)/.exec(rest))) {
+        tok = m[0];
+        push("word", tok);
+      } else if ((m = /^(?:0[xXbBoO][0-9a-fA-F_]*n?|\d[\d_]*(?:\.(?!\.)\d*)?(?:[eE][+-]?\d+)?n?)/.exec(rest))) {
+        // A dot ends a number literal only after plain decimal digits (1. in x); after 0x10, 1e3, 1n or 07 it is a property dot.
+        tok = m[0];
+        if (/^0\d/.test(tok) && tok.includes(".")) tok = tok.slice(0, tok.indexOf("."));
+        if (/[nN]$/.test(tok) || /[eE][+-]?\d+$/.test(tok) || /^0[xXbBoO]/.test(tok)) tok = tok.replace(/\.$/, "");
+        push("num", tok);
+      } else if ((m = /^(?:\.\.\.|\+\+|--|\?\.(?!\d))/.exec(rest))) {
+        tok = m[0];
+        push("punct", tok);
+      } else {
+        tok = c;
+        push("punct", tok);
+      }
+      out += tok;
+      i += tok.length;
     }
   }
-  return ambiguous ? undefined : out;
+  return out;
 }
 
 // A backslash or a non-ASCII character in code can spell or hide a name (an escaped identifier, a no-break space), and no

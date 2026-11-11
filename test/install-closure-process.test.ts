@@ -219,3 +219,34 @@ test("a regex body after return holds a quote and is blanked, so the file stays 
 test("a decrement before a comparison mid-line stays static (round 7)", () => {
   expect(held(`${A}let n = 3; while (n --> 0) { p.cwd() }\nexports.main = () => n\n`)).toBe(false);
 });
+
+// Round 8: whether a / opens a regex comes from the previous token the scan emitted, never from text inside a regex or string.
+const L2 = (s: string) => `${A}${s}\n`;
+for (const [label, pre] of [
+  ["a regex after await whose body is a keyword", L2(`async function f() { await /typeof /; ${Y} // x } f();`)],
+  ["a regex after yield whose body is a keyword", L2(`function* g() { yield /typeof /; ${Y} // x } g().next();`)],
+  ["a regex after of whose body is a keyword", L2(`for (const x of /typeof /.source) {} ${Y} // x`)],
+  ["a regex after an if header whose body is a keyword", L2(`if (1) /typeof /; ${Y} // x`)],
+  ["an arrow function awaiting a regex", L2(`const f = async () => { await /in /; ${Y} // x };`)],
+  ["a regex literal whose text ends like a keyword, then a quote regex and the use", L2(`const x = /typeof /; /'/; ${Y} // '`)],
+  ["a regex literal that is a keyword, then a division", L2(`const x = /return /; const y = 1 / ${Y} / 1;`)],
+  ["yield opening a regex that holds a quote", L2(`function* g() { yield /'/; ${Y} // ' }`)],
+  ["a division with a bracket after yield", L2(`function* g() { yield / (2) / 3; ${Y} }`)],
+  ["a hex literal then a property dot before a keyword", L2(`const o = {delete: 1}; 0x10.delete / ${Y} / 1;`)],
+  ["a binary literal then a property dot before a keyword", L2(`0b1.delete / ${Y} / 1;`)],
+  ["an octal literal then a property dot before a keyword", L2(`0o7.delete / ${Y} / 1;`)],
+  ["an exponent literal then a property dot before a keyword", L2(`1e3.delete / ${Y} / 1;`)],
+  ["a bigint literal then a property dot before a keyword", L2(`1n.delete / ${Y} / 1;`)],
+  ["a legacy octal literal then a property dot before a keyword", L2(`07.delete / ${Y} / 1;`)],
+] as const) {
+  test(`${label} is not static (round 8)`, () => expect(held(pre)).toBe(true));
+}
+test("names that never precede a regex are plain divisions and stay static (round 8)", () => {
+  for (const w of ["let", "static", "async", "get", "set"]) expect(held(L2(`var ${w} = 6; const q = ${w} / (2) / 3; p.cwd()`))).toBe(false);
+});
+test("a number literal ending in a dot before a keyword is a keyword (round 8)", () => {
+  expect(held(L2(`const b = 1. in /'/; p.cwd()`))).toBe(false);
+});
+test("ordinary regexes and divisions stay static (round 8)", () => {
+  expect(held(L2(`const re = /typeof /; const z = re.test("typeof ") ? 1 / 2 : 3; const w = x => x / 2 / 4; function f() { return /'/.test("a") } p.cwd()`))).toBe(false);
+});
