@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { hostname, tmpdir } from "node:os";
 import { readArtifact, normalizePaths, mergeArtifactPair, mergeUnpairedNotes } from "./artifact.ts";
+import { normalizeVersion } from "./pep440.ts";
 import { cachedReviewer, forgetEntries, FORGET_USAGE, markStoreAnswer, recordResult, reviewerFingerprint, rollupHolds, storeEntries, verdictDirOutsideRepo, type CachedReviewer } from "./verdict-store.ts";
 import { reviewUpdate, stripTerminal, LAYERS, type LayerName, type LayerVerdict, type ReviewResult } from "./review.ts";
 import type { Ecosystem, FileMap } from "./prepass.ts";
@@ -159,11 +160,6 @@ export async function loadArtifacts(a: ReviewArgs, registry: Registry, work: str
 
 const MAX_RELEASE_BYTES = 1_000_000_000;
 
-// Pairs a file with its counterpart in the other release: a wheel by its tags, the sdist by type.
-function pairLabel(x: ArtifactFile): string {
-  return x.packagetype === "sdist" ? "sdist" : `${x.filename.replace(/\.whl$/, "").split("-").slice(2).join("-")}.whl`;
-}
-
 /**
  * Every wheel and the sdist of both releases, each checked against PyPI's sha256, merged into one old/new pair:
  * an installer picks the file for its platform, so no file goes unread. Anything unlisted, unfetched or
@@ -183,24 +179,46 @@ async function loadPypiRelease(a: ReviewArgs, registry: Registry, work: string, 
     writeFileSync(file, bytes);
     return normalizePaths(await readArtifact(file));
   };
-  // A file's counterpart is the old file of the same kind and format, independent of listing order: the project name
-  // (PEP 503-normalized, so Foo-Bar-1.0.tar.gz pairs with foo_bar-2.0.tar.gz) and "-<version>" are cut off the start,
-  // the version must end at a boundary ("." before an sdist extension, "-" before wheel tags, so x-10 is not x-1), and
-  // what is left must match: the sdist extension, or the wheel tags with a build tag dropped. A new file with no such
-  // old file, or one whose key repeats on either side, has no old side: all its notes hold.
+  // A file's counterpart is the old file of the same kind, independent of listing order. The project name (PEP
+  // 503-normalized, so Foo-Bar-1.0.tar.gz pairs with foo_bar-2.0.tar.gz) is cut off the start, and the rest up to the
+  // wheel tags or the sdist extension must be the whole release version, compared as PEP 440 normalizes it (1.0 is 1.0.0,
+  // 1.0-1 is 1.0.post1), so x-10 is not x-1 and x-1.post1 is not version 1. A wheel pairs by its tags with a build tag
+  // dropped. An sdist pairs with the one sdist of the other release whatever its format (x-1.zip with x-2.tar.gz); with
+  // two or more on a side, only the same extension pairs. A new file with no such old file, or one whose key repeats on
+  // either side, has no old side: all its notes hold.
   const pep503 = (s: string) => s.toLowerCase().replace(/[-_.]+/g, "_");
-  const counterpartKey = (x: ArtifactFile, version: string) => {
+  const SDIST_EXT = /\.(tar\.gz|tgz|tar\.bz2|tbz|tar\.xz|txz|tar\.z|tar|zip)$/i;
+  // The release version is the file's whole version: PEP 440-equal, or the same string when either does not normalize.
+  const dist = (x: ArtifactFile, version: string): { kind: "sdist" | "wheel"; tail: string } | undefined => {
+    const want = normalizeVersion(version);
+    const same = (v: string) => v === version || (want !== undefined && normalizeVersion(v) === want);
     const f = x.filename;
-    for (let i = f.indexOf("-"); i > 0; i = f.indexOf("-", i + 1)) {
-      if (pep503(f.slice(0, i)) !== pep503(a.name) || !f.startsWith(`-${version}`, i)) continue;
-      const rest = f.slice(i + 1 + version.length);
-      if (x.packagetype === "sdist") return rest.startsWith(".") ? `sdist\0${rest.toLowerCase()}` : undefined;
-      if (!rest.startsWith("-") || !rest.endsWith(".whl")) return undefined;
-      const tags = rest.slice(1, -4).split("-");
+    if (x.packagetype === "sdist") {
+      const ext = SDIST_EXT.exec(f);
+      if (!ext) return undefined;
+      const stem = f.slice(0, ext.index);
+      for (let i = stem.indexOf("-"); i > 0; i = stem.indexOf("-", i + 1))
+        if (pep503(stem.slice(0, i)) === pep503(a.name) && same(stem.slice(i + 1))) return { kind: "sdist", tail: ext[1]!.toLowerCase() };
+      return undefined;
+    }
+    if (!f.endsWith(".whl")) return undefined;
+    const body = f.slice(0, -4);
+    // A project name with a raw "-" is read the way an sdist's is: the first dash after which the name matches.
+    for (let i = body.indexOf("-"); i > 0; i = body.indexOf("-", i + 1)) {
+      if (pep503(body.slice(0, i)) !== pep503(a.name)) continue;
+      const fields = body.slice(i + 1).split("-");
+      if (fields.length < 4 || !same(fields[0]!)) continue;
+      const tags = fields.slice(1);
       if (tags.length === 4 && /^\d/.test(tags[0]!)) tags.shift();
-      return tags.length === 3 ? `wheel\0${tags.join("-")}` : undefined;
+      if (tags.length === 3) return { kind: "wheel", tail: tags.join("-") };
     }
     return undefined;
+  };
+  // Cross-format sdist pairing is unambiguous only when each release lists exactly one sdist of any name.
+  const oneSdist = before.filter((x) => x.packagetype === "sdist").length === 1 && now.filter((x) => x.packagetype === "sdist").length === 1;
+  const counterpartKey = (x: ArtifactFile, version: string) => {
+    const d = dist(x, version);
+    return d === undefined ? undefined : d.kind === "sdist" && oneSdist ? "sdist" : `${d.kind}\0${d.tail}`;
   };
   const tally = (files: ArtifactFile[], version: string) => {
     const m = new Map<string, ArtifactFile[]>();
@@ -220,20 +238,20 @@ async function loadPypiRelease(a: ReviewArgs, registry: Registry, work: string, 
   // Paired files first; a file in an unpaired one is read again unless the same bytes were already shown whole.
   const ordered = [...now.filter((x) => counterpart(x)), ...now.filter((x) => !counterpart(x))];
   const merged = { old: new Map() as FileMap, new: new Map() as FileMap };
-  const seen = new Map<string, FileMap>();
+  const seen = new Map<string, { files: FileMap; placed: Map<string, string> }>();
   for (const x of ordered) {
-    const label = pairLabel(x);
+    // The label is the file's own name: it is the prefix a crowded path goes under and the name a note shows.
+    const label = x.filename;
     const sha = (x.sha256 ?? "").toLowerCase();
     // Bytes another merged file has are read once; this artifact's notes still go in as its own, with no old side.
     const dup = seen.get(sha);
     if (dup) {
-      mergeUnpairedNotes(merged, label, dup);
+      mergeUnpairedNotes(merged, label, dup.files, dup.placed);
       continue;
     }
     const o = counterpart(x);
     const now = await read(x);
-    mergeArtifactPair(merged, label, o ? await read(o) : new Map(), now);
-    seen.set(sha, now);
+    seen.set(sha, { files: now, placed: mergeArtifactPair(merged, label, o ? await read(o) : new Map(), now) });
     let total = 0;
     for (const m of [merged.old, merged.new]) for (const b of m.values()) total += b.length;
     if (total > MAX_RELEASE_BYTES) throw new Error(`release files over ${MAX_RELEASE_BYTES} bytes: ${a.name} ${a.to}`);

@@ -32,13 +32,14 @@ export function isLink(bytes: Uint8Array): boolean {
 // npm skips link entries; bsdtar does not. The note survives path normalization.
 // `note` is shown as read (with the archive's top dir). `paths` are the note's members where this map holds them,
 // carried through every step that moves a file (npm strip, normalizePaths, mergeArtifactPair; after a merge they are
-// merged keys, possibly under a `label/` prefix, and `key` keeps the pre-merge paths), and `raw` the member names as listed. `key` compares one release's note with the other's: a JSON array of the kind and the normalized
-// paths (a hardlink adds its target), never the display text, so "top dirs a b c" from {a, "b c"} and {"a b", c}
-// differ. `pair` names the one mergeArtifactPair call (an artifact instance, not its label) the note came from: a note
-// is compared only with that pair's old notes. `collided`: the map does not hold the note's member as listed, so the
-// note always holds. Either a path or target of the note is where two distinct paths of its release landed after
-// normalizing (demo-1.data/x and demo-2.data/x), or the unpacked tree did not hold one of its members under its own
-// name (a filesystem stored two names as one file).
+// merged keys, possibly under a `label/` prefix, and `key` keeps the pre-merge paths), and `raw` the member names as
+// listed. `key` compares one release's note with the other's: a JSON array of the kind and the normalized paths (a
+// hardlink adds its target), never the display text, so "top dirs a b c" from {a, "b c"} and {"a b", c} differ. `pair`
+// names the one mergeArtifactPair call (an artifact instance, not its label) the note came from: a note is compared
+// only with that pair's old notes, and `from` is the artifact's own name, shown with the note. `collided`: the map does not hold the note's member as listed, so the note always
+// holds. Either a path or target of the note is where two distinct paths of its release landed after normalizing
+// (demo-1.data/x and demo-2.data/x), or the unpacked tree did not hold one of its members under its own name (a
+// filesystem stored two names as one file).
 export type TarNote = {
   note: string;
   key: string;
@@ -49,6 +50,7 @@ export type TarNote = {
   rawTarget?: string | null;
   words?: string[];
   pair?: string;
+  from?: string;
   collided?: boolean;
 };
 
@@ -1056,7 +1058,28 @@ export function prepass(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): P
   const carriedTarNotes: string[] = [];
   const linkAt = (n: TarNote) => n.paths?.[0] ?? n.note.slice(n.kind.length + 1);
   // A merged note names its artifact, so a hold and a carry with one text tell which file each is about.
-  const shown = (n: TarNote) => (n.pair ? `${n.pair.split("\0")[0]}: ${n.note}` : n.note);
+  // The name is shown with backslashes, tildes and control characters escaped, so two names never show alike and a
+  // cut name's bare `~hash~` is never a real name's. A long name is cut in the middle: the head and the tail with a
+  // short hash of the whole name between, so the note's own path is what the detail keeps. Cuts fall between code
+  // points, never inside an escape.
+  const label = (from: string) => {
+    const unit = (c: string) => (c === "\\" || c === "~" ? `\\${c}` : /[\u0000-\u001f\u007f]/.test(c) ? `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}` : c);
+    const units = [...from].map(unit);
+    if (units.join("").length <= 60) return units.join("");
+    const take = (list: string[]) => {
+      const out: string[] = [];
+      let n = 0;
+      for (const u of list) {
+        if (n + u.length > 24) break;
+        out.push(u);
+        n += u.length;
+      }
+      return out;
+    };
+    const hash = new Bun.CryptoHasher("sha256").update(from).digest("hex").slice(0, 6);
+    return `${take(units).join("")}~${hash}~${take([...units].reverse()).reverse().join("")}`;
+  };
+  const shown = (n: TarNote) => (n.from !== undefined ? `${label(n.from)}: ${n.note}` : n.note);
   // The file the note is about, at its key in this map (a merged key), for the reviewer's pointer.
   const pathOf = (n: TarNote) => (n.paths?.[0] && !n.paths[0].startsWith("\0") ? n.paths[0] : n.note.split(" ").slice(1).join(" ") || "archive");
   const sameLink = (o: TarNote, n: TarNote) => {
