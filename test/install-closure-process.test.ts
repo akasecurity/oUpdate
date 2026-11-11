@@ -621,7 +621,7 @@ for (const [label, pre] of [
   ["a parameter named process that is only declared", 'exports.main = function (process) { return 1 }\n'],
   ["an arrow parameter named process", 'exports.main = (a, process) => 1\n'],
   ["the words process and binding inside a message", 'exports.main = () => console.log("error: process failed", "build/Release/binding.node", "binding.gyp")\n'],
-  ["destructuring allowlisted members of process", 'const { env, platform: plat, argv } = process; exports.main = () => env.X + plat + argv[2]\n'],
+  ["destructuring allowlisted members of process", 'const { env, platform, argv } = process; exports.main = () => env.X + platform + argv[2]\n'],
   ["complete reads", 'exports.main = () => [process.env.NODE_ENV === "production", process.platform === "win32", process.cwd() + "/x", process.argv.slice(2), process.env.HOME.split("/").length]\n'],
   ["process.exit and stdout.write", 'exports.main = () => { process.stdout.write("ok"); process.exit(1) }\n'],
 ] as const) {
@@ -658,4 +658,55 @@ for (const [label, pre] of [
   ["a loop index into argv", 'exports.main = () => { for (let i = 2; i < process.argv.length; i++) if (process.argv[i] === "-v") return 1 }\n'],
 ] as const) {
   test(`${label} stays static (round 20)`, () => expect(held(pre)).toBe(false));
+}
+
+// Round 21: callbacks, renamed bindings, typeof chains, the global under other spellings, indirect eval, process loaded other ways.
+for (const [label, pre] of [
+  ["a callback passed to a method on argv", 'exports.main = () => process.argv.map((v, i, a) => a["x"])\n'],
+  ["a callback passed to replace on cwd()", 'exports.main = () => process.cwd().replace(/./, (...a) => a["x"])\n'],
+  ["a renamed destructured member", 'const { argv: a } = process; exports.main = () => a["x"]\n'],
+  ["a typeof operand followed by a call chain", 'exports.main = () => typeof process["x"]("y")\n'],
+  ["a typeof operand followed by a member call", 'exports.main = () => typeof process.a.b()\n'],
+  ["a parenthesized globalThis", 'exports.main = () => (globalThis).process\n'],
+  ["globalThis.globalThis.process", 'exports.main = () => globalThis.globalThis.process\n'],
+  ["a doubled global", 'exports.main = () => global.global["x"]\n'],
+  ["a comma expression ending in globalThis", 'exports.main = () => (0, globalThis)["x"]\n'],
+  ["globalThis as an arrow body", 'exports.main = () => globalThis\n'],
+  ["process next to a no-break space", 'exports.main = () => [\u00a0process]\n'],
+  ["process next to a byte order mark", 'exports.main = () => [\ufeffprocess]\n'],
+  ["process next to a line separator", 'exports.main = () => [\u2028process]\n'],
+  ["a process member that loads code", 'exports.main = () => process.dlopen({}, "x")\n'],
+  ["require of the process module followed by a computed member", 'exports.main = () => require("process")["x"]\n'],
+  ["import() of the process module", 'exports.main = () => import("process")\n'],
+  ["import { default as p } from the process module", 'import { default as p } from "process"; exports.main = () => p["x"]\n'],
+  ["an indirect eval", 'exports.main = () => (0, eval)(process.env.X)\n'],
+  ["an optional eval", 'exports.main = () => eval?.(process.env.X)\n'],
+  ["new Function", 'exports.main = () => new Function(process.env.X)\n'],
+  ["globalThis.eval", 'exports.main = () => globalThis.eval(process.env.X)\n'],
+  ["a computed member of window", 'exports.main = () => window["ev" + "al"](process.env.X)\n'],
+  ["setTimeout given a string", 'exports.main = () => setTimeout("run()" + process.env.X, 1)\n'],
+  ["a require with a string fallback", 'exports.main = () => require(process.env.X || "./a")\n'],
+  ["a require with a string prepended to process", 'exports.main = () => require("" + process.env.X)\n'],
+  ["a require of a template holding process", 'exports.main = () => require(`${process.env.X}`)\n'],
+  ["a function property named function with process as argument", 'exports.main = () => api.function(process)\n'],
+] as const) {
+  test(`${label} widens the closure (round 21)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a label named process", 'exports.main = () => { process: for (;;) { break process } }\n'],
+  ["a class field named process", 'class C { process = 1 }\nexports.main = () => new C()\n'],
+  ["typeof process", 'exports.main = () => typeof process === "undefined"\n'],
+  ["in process", 'exports.main = () => "env" in process\n'],
+  ["a binding variable", 'const binding = 1; exports.main = () => binding\n'],
+  ["a message that names require and eval", 'exports.main = () => console.log("require eval constructor child_process")\n'],
+  ["a literal-argument method on cwd()", 'exports.main = () => process.cwd().split("/").slice(1).join("/")\n'],
+] as const) {
+  test(`${label} stays static (round 21)`, () => expect(held(pre)).toBe(false));
+}
+for (const [label, pre] of [
+  ["a computed env key", 'const k = "X"; exports.main = () => process.env[k]\n'],
+  ["an optional call of a process member", 'exports.main = () => process.getuid?.()\n'],
+  ["a loop index into argv", 'exports.main = () => { for (let i = 0; i < 3; i++) process.argv[i] }\n'],
+] as const) {
+  test(`${label} does not widen the closure (round 21)`, () => expect(widensAll(pre)).toBe(false));
 }
