@@ -66,7 +66,7 @@ const later: [string, string, string][] = [
   ["an earlier directory restriction and a later joined string", PATH + `let p = path.join(__dirname, "lib", name); p = ["./ev", "il.js"].join(""); require(p);`, "scripts/evil.js"],
   ["an alias call that restricts and a load of an unresolved parameter", PATH + `const r = require; r(path.join(__dirname, "lib", name)); function go(x) { require(x); } go(atob("Li9ldmlsLmpz"));`, "scripts/evil.js"],
   ["require handed on as a value", `["../x/evil"].map(require)`, "x/evil.js"],
-  ["import handed on as a value", `["../x/evil"].map((m) => import(m)); [import].length`, "x/evil.js"],
+  ["import handed on as a value", `["../x/evil"].map((m) => import(m))`, "x/evil.js"],
   ["a process argument vector with a built element", `require("child_process").spawnSync("node", [["x/ev", "il.js"].join("")])`, "x/evil.js"],
 ];
 for (const [label, code, changed] of later) {
@@ -86,6 +86,7 @@ const rootRel = (v: string, hook: string, changed: string) =>
     "h.js": hook,
     "lib/a.js": "module.exports = 1\n",
     "lib/index.js": "module.exports = 2\n",
+    "lib/notes.md": changed === "lib/notes.md" ? `evil ${v}\n` : "notes\n",
     "lib/evil.js": changed === "lib/evil.js" ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
     "docs/index.js": changed === "docs/index.js" ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
     "docs/payload.js": changed === "docs/payload.js" ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
@@ -155,3 +156,47 @@ for (const [label, hook] of [
 ] as [string, string][]) {
   test(`${label} still holds the changed scripts/evil.js`, () => expect(nestHolds(hook, "scripts/evil.js")).toBe(true));
 }
+
+// Third review batch.
+const R = PATH + `require(path.join(__dirname, "lib", name)); `; // a restricting load: without it the hook folder floor hides the gap
+const BX = `atob("Li4veC9ldmlsLmpz")`; // "../x/evil.js"
+const third: [string, string, string, "root" | "nested"][] = [
+  ["a package-wide trigger next to a docs prefix load", `require("./docs/" + x); ["x"].map(require)`, "docs/payload.js", "root"],
+  ["a package-wide trigger next to a lib prefix load and a changed .md", `require("./lib/" + x); ["x"].map(require)`, "lib/notes.md", "root"],
+  ["the module wrapper's require parameter next to a docs prefix load", `(function (require, exports, module) { require("./docs/" + x) })(require)`, "docs/payload.js", "root"],
+  ["fork of a joined string from the package root", R + `require("child_process").fork(["x/ev", "il.js"].join(""))`, "x/evil.js", "nested"],
+  ["an alias of a function that requires its parameter", R + `function go(x) { require(x) } const g = go; g(${BX})`, "x/evil.js", "nested"],
+  ["a member call of a function that requires its parameter", R + `function go(x) { require(x) } const o = { go }; o.go(${BX})`, "x/evil.js", "nested"],
+  ["go.call", R + `function go(x) { require(x) } go.call(null, ${BX})`, "x/evil.js", "nested"],
+  ["go.apply", R + `function go(x) { require(x) } go.apply(null, [${BX}])`, "x/evil.js", "nested"],
+  ["a destructured parameter", R + `function go({ p }) { require(p) } go({ p: ${BX} })`, "x/evil.js", "nested"],
+  ["a method parameter", R + `const o = { go(x) { require(x) } }; o.go(${BX})`, "x/evil.js", "nested"],
+  ["an IIFE parameter", R + `(function (x) { require(x) })(${BX})`, "x/evil.js", "nested"],
+  ["an arrow IIFE parameter", R + `((x) => require(x))(${BX})`, "x/evil.js", "nested"],
+  ["a callback parameter", R + `[${BX}].forEach((x) => require(x))`, "x/evil.js", "nested"],
+  ["an argument vector held by a name", R + `const a = [["x/ev", "il.js"].join("")]; require("child_process").spawnSync("node", a)`, "x/evil.js", "nested"],
+  ["an argument vector held by a name that is a call result", R + `const a = JSON.parse(process.argv[2]); require("child_process").spawnSync("node", a)`, "x/evil.js", "nested"],
+  ["a parameter assigned inside its function", R + `function go(x) { x = x; require(x) } go(${BX})`, "x/evil.js", "nested"],
+  ["an inline callback that imports its parameter", R + `["../x/evil"].map((m) => import(m))`, "x/evil.js", "nested"],
+  ["assignments that disagree between a docs prefix and a lib join", `let p = "./docs/" + process.argv[2]; p = ["./lib/", "a"].join(""); require(p)`, "docs/payload.js", "root"],
+  ["cluster.settings.exec set to a joined string", `const c = require("cluster"); c.settings.exec = ["../x/", "evil.js"].join("")`, "x/evil.js", "nested"],
+  ["module.constructor._load of a joined string", `module.constructor._load(["../x/", "evil.js"].join(""))`, "x/evil.js", "nested"],
+];
+for (const [label, hook, changed, layout] of third) {
+  test(`${label} holds the changed ${changed}`, () => expect((layout === "root" ? rootHolds : nestHolds)(hook, changed)).toBe(true));
+}
+
+// Cost bounds: generous, since the point is a file that took seconds (or never ended) before. Main takes tens of milliseconds.
+test("1000 loader aliases in a file over 1 MB are read in bounded time", () => {
+  const code = Array.from({ length: 1000 }, (_, i) => `const a${i} = require;\n`).join("") + `const pad = "${"x".repeat(1_050_000)}";\na999(process.argv[2]);\n`;
+  const t0 = performance.now();
+  holds(nested("1.0.0", code, "scripts/evil.js"), nested("1.0.1", code, "scripts/evil.js"));
+  expect(performance.now() - t0).toBeLessThan(5000);
+});
+
+test("3000 functions of the same name in a file over 1 MB are read in bounded time", () => {
+  const code = Array.from({ length: 3000 }, (_, i) => `function t(e) { return e + ${i} }\n`).join("") + `function u(e) { require(e) }\nu(${BX});\nconst pad = "${"x".repeat(1_050_000)}";\n`;
+  const t0 = performance.now();
+  holds(nested("1.0.0", code, "scripts/evil.js"), nested("1.0.1", code, "scripts/evil.js"));
+  expect(performance.now() - t0).toBeLessThan(5000);
+});

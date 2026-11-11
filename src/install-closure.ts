@@ -2266,12 +2266,16 @@ function widenJs(ctx: Ctx, key: string, text: string): void {
     widenEvery(ctx);
   }
 }
+function addSameDirIf(ctx: Ctx, key: string, tier: JsTier): void {
+  if (tier.pkg || tier.dirs.length === 0 || tier.same) addSameDir(ctx, key);
+}
 function widenJsScan(ctx: Ctx, key: string, text: string): void {
   const tier = classifyJs(key, text);
   if (tier.all) widenEvery(ctx);
-  else if (tier.pkg) widenPackage(ctx, tier.tests, tier.flows);
   else {
-    if (tier.dirs.length === 0 || tier.same) addSameDir(ctx, key);
+    if (tier.pkg) widenPackage(ctx, tier.tests, tier.flows);
+    // The package tier leaves docs out; a directory a literal-headed load names, and the hook's own folder, stay in whole.
+    if (!tier.pkg || tier.same) addSameDirIf(ctx, key, tier);
     for (const dir of tier.dirs) addPrefixDir(ctx, dir);
   }
   for (const path of tier.lits) addLogical(ctx, path);
@@ -2478,7 +2482,7 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
   const text = codeOnly(source, [], true) ?? source;
   if (hasUnbounded(text, source)) tier.all = true;
-  cls = { text, ...pathNames(text), bind: new Map(), memo: new Map(), visiting: new Set(), steps: 0 };
+  cls = { text, ...pathNames(text), bind: new Map(), memo: new Map(), visiting: new Set(), steps: 0, refs: new Map() };
   try {
     classifyLoads(tier, fromKey, text);
   } finally {
@@ -2493,17 +2497,25 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
   return tier;
 }
 function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
-  const callers = loaderNames(text);
-  const re = new RegExp(`(?:^|[^\\w$])(?:require(?:\\s*\\.\\s*resolve)?|import|fork|execFile|execFileSync${callers.map((n) => `|${n.replace(/\$/g, "\\$")}`).join("")})\\s*\\(`, "g");
-  for (const m of text.matchAll(re)) {
-    const paren = (m.index ?? 0) + m[0].lastIndexOf("(");
-    const args = argsOf(text, paren);
+  const callers = new Set(["require", "import", "fork", "execFile", "execFileSync", ...loaderNames(text)]);
+  // One pass over every call, whatever it is called through, keeps a file with thousands of aliases linear.
+  for (const m of text.matchAll(/(?<![\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const callee = m[1]!;
+    if (!callers.has(callee)) continue;
+    // After a dot only the process calls count (child_process.fork(x)); require.x and obj.require are not loads.
+    if (/\.\s*$/.test(text.slice(Math.max(0, (m.index ?? 0) - 3), m.index ?? 0)) && !/^(?:fork|execFile|execFileSync)$/.test(callee)) continue;
+    const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) continue;
-    // An alias, require.resolve and a name held string leave the hook's own folder in the set: only a direct literal-headed
-    // argument restricts to a directory.
-    const callee = m[0].replace(/^[^\w$]/, "").replace(/\s*\($/, "").replace(/\s+/g, "");
+    const arg = firstArg(args);
+    // fork and execFile name their file from the package root (the working directory); a load names it from this file's folder.
+    const spawns = /^(?:fork|execFile|execFileSync)$/.test(callee);
+    // An alias and a name held string leave the hook's own folder in the set: only a direct literal-headed argument restricts.
     const direct = /^(?:require|import|fork|execFile|execFileSync)$/.test(callee);
-    loadEffect(tier, fromKey, firstArg(args), text, !direct || /^[A-Za-z_$][\w$]*$/.test(firstArg(args).trim()));
+    loadEffect(tier, spawns ? "package.json" : fromKey, arg, text, !direct || /^[A-Za-z_$][\w$]*$/.test(arg.trim()));
+  }
+  for (const m of text.matchAll(/(?<![\w$.])(?:require\s*\.\s*resolve|module\s*\.\s*require)\s*\(/g)) {
+    const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
+    if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text, true);
   }
   // createRequire(...)(x) loads x like require does.
   for (const m of text.matchAll(new RegExp(`\\b(?:${createRequireNames(text).join("|")})\\s*\\(`, "g"))) {
@@ -2517,7 +2529,7 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text, true);
   }
   // A code-running builtin that loads a file by name (cluster.setupPrimary({ exec }), module.register(...), Module._load(...)).
-  if (/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["'](?:node:)?(?:cluster|module)["']/.test(text) && /\b(?:setupPrimary|setupMaster)\s*\(|\bregister\s*\(|\b_load\s*\(/.test(text)) {
+  if ((/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["'](?:node:)?(?:cluster|module)["']/.test(text) && /\b(?:setupPrimary|setupMaster)\s*\(|\bsettings\s*\.\s*exec\b|\bregister\s*\(|\b_load\s*\(/.test(text)) || /\bmodule\s*\.\s*constructor\s*\.\s*_load\b/.test(text)) {
     tier.pkg = true;
     tier.tests = true;
     tier.flows = true;
@@ -2528,16 +2540,24 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     tier.tests = true;
     tier.flows = true;
   }
-  // A process call whose argument vector holds an element that is not a plain string names a file the same way.
-  for (const m of text.matchAll(/(?:^|[^\w$])(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\(/g)) {
-    const args = argsOf(text, (m.index ?? 0) + m[0].lastIndexOf("("));
+  // A process call whose argument vector holds an element that is not a plain string names a file the same way. The vector may
+  // be a literal or a name bound to one.
+  for (const m of text.matchAll(/(?<![\w$])(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\(/g)) {
+    const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) continue;
     for (const a of splitTop(args, ",")) {
       const t = a.trim();
-      if (!t.startsWith("[") || !t.endsWith("]")) continue;
-      for (const el of splitTop(t.slice(1, -1), ",")) {
-        const e = el.trim();
-        if (e && strLit(e) === undefined && !/^-/.test(e)) loadEffect(tier, "package.json", e, text, true); // an argument vector names files from the package root
+      const vectors = /^[A-Za-z_$][\w$]*$/.test(t) ? bindingsOf(t) : [t];
+      for (const v of vectors) {
+        if (!v.startsWith("[") || !v.endsWith("]")) {
+          // A vector held by a name that is not a list literal (a slice of argv, a call result) names whatever it holds.
+          if (/^[A-Za-z_$][\w$]*$/.test(t) && /[([`]/.test(v)) loadEffect(tier, "package.json", v, text, true);
+          continue;
+        }
+        for (const el of splitTop(v.slice(1, -1), ",")) {
+          const e = el.trim();
+          if (e && strLit(e) === undefined && !/^-/.test(e)) loadEffect(tier, "package.json", e, text, true); // an argument vector names files from the package root
+        }
       }
     }
   }
@@ -4125,11 +4145,21 @@ function mergeEffect(tier: JsTier, eff: JsEffect): void {
 function loaderNames(text: string): string[] {
   const id = "[A-Za-z_$][\\w$]*";
   const names = new Set<string>();
-  const add = (re: RegExp) => { for (const m of text.matchAll(re)) names.add(m[1]!); };
-  add(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*(?:(?:module\\s*\\.\\s*)?require\\b(?!\\s*\\()(?!\\s*\\.\\s*(?!bind\\b))|[^;\\n]*\\bcreateRequire\\s*\\()`, "g"));
-  for (const alias of createRequireNames(text)) add(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*[^;\\n]*\\b${alias.replace(/\$/g, "\\$")}\\s*\\(`, "g"));
-  for (let round = 0; round < 3; round++) {
-    for (const n of [...names]) add(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*${n.replace(/\$/g, "\\$")}(?![\\w$])(?!\\s*[(.])`, "g"));
+  for (const m of text.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*(?:(?:module\\s*\\.\\s*)?require\\b(?!\\s*\\()(?!\\s*\\.\\s*(?!bind\\b))|[^;\\n]{0,200}\\bcreateRequire\\s*\\()`, "g"))) names.add(m[1]!);
+  const makers = createRequireNames(text);
+  if (makers.length > 1) for (const m of text.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*[^;\\n]{0,200}\\b(?:${makers.map((a) => a.replace(/\$/g, "\\$")).join("|")})\\s*\\(`, "g"))) names.add(m[1]!);
+  // name = other: one scan builds the edges, then three rounds walk them, so a thousand aliases cost one pass.
+  const edges = new Map<string, string[]>();
+  for (const m of text.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*(${id})(?![\\w$])(?!\\s*[(.])`, "g"))) {
+    const list = edges.get(m[2]!);
+    if (list) list.push(m[1]!);
+    else edges.set(m[2]!, [m[1]!]);
+  }
+  let frontier = [...names];
+  for (let round = 0; round < 3 && frontier.length; round++) {
+    const next: string[] = [];
+    for (const n of frontier) for (const to of edges.get(n) ?? []) if (!names.has(to)) { names.add(to); next.push(to); }
+    frontier = next;
   }
   return [...names];
 }
@@ -4185,7 +4215,8 @@ function bindingsOf(name: string): string[] {
 
 // One classify call's view of the file: the path-module names, and the bindings it has already read. A name is read once,
 // a name met again while it is being read counts for nothing more, and past this many names the answer is the package.
-type ClsCtx = { text: string; mods: Set<string>; fns: Set<string>; bind: Map<string, string[]>; memo: Map<string, JsEffect>; visiting: Set<string>; steps: number };
+type FnDef = { fname?: string; params: string[]; kind: "named" | "export" | "anon" | "method"; destructured: string };
+type ClsCtx = { text: string; mods: Set<string>; fns: Set<string>; bind: Map<string, string[]>; memo: Map<string, JsEffect>; visiting: Set<string>; steps: number; defs?: FnDef[]; refs: Map<string, { calls: string[]; other: boolean }> };
 let cls: ClsCtx | undefined;
 const BIND_STEPS = 200;
 const WIDE: JsEffect = { t: "pkg", tests: true, flows: true };
@@ -4199,7 +4230,7 @@ function combineEffects(effects: JsEffect[]): JsEffect {
   // directory leaves the whole package possible.
   const first = JSON.stringify(effects[0]);
   if (effects.every((e) => JSON.stringify(e) === first)) return effects[0]!;
-  return WIDE;
+  return { t: "all" };
 }
 
 function nameEffect(fromKey: string, name: string, depth: number): JsEffect {
@@ -4225,35 +4256,113 @@ function nameEffectScan(fromKey: string, name: string, depth: number): JsEffect 
   const n = name.replace(/\$/g, "\\$");
   // A name taken out of a structure or a loop (`const { p } = o`, `for (const p of list)`, `catch (p)`) is data the scan cannot follow.
   if (new RegExp(`\\b(?:const|let|var)\\s*[{\\[][^;=]*?(?<![\\w$.])${n}(?![\\w$])[^;=]*?[}\\]]\\s*=|\\bfor\\s*\\(\\s*(?:const|let|var)\\s+${n}\\s+(?:of|in)\\b|\\bcatch\\s*\\(\\s*${n}\\s*\\)`).test(c.text)) return WIDE;
-  const inits = bindingsOf(name);
-  if (inits.length) return combineEffects(inits.map((init) => effectOf(fromKey, init, "", depth + 1)));
-  return paramEffect(fromKey, name, depth);
+  const effects = bindingsOf(name).map((init) => effectOf(fromKey, init, "", depth + 1));
+  // A parameter that is also assigned still gets the arguments of its function's calls.
+  const param = paramEffect(fromKey, name, depth);
+  if (param.t !== "none" || effects.length === 0) effects.push(param);
+  return combineEffects(effects);
 }
 
-// A function parameter names nothing until the function is called: the arguments at its call sites in this file are what it loads.
-// A function that is never called here (an export) names nothing.
+// Every function-like construct of the file with its parameter names, found once: declarations, function expressions, arrows,
+// and method shorthand. `kind` says how the function can be reached: by its own name, as an export, or not by a name at all.
+function fnDefs(): FnDef[] {
+  const c = cls!;
+  if (c.defs) return c.defs;
+  const text = c.text;
+  const defs: FnDef[] = [];
+  const parse = (list: string): { params: string[]; destructured: string } => {
+    const params: string[] = [];
+    let destructured = "";
+    for (const raw of splitTop(list, ",")) {
+      const x = raw.trim().replace(/^\.\.\./, "");
+      if (/^[{[]/.test(x)) {
+        destructured += ` ${x}`;
+        params.push("");
+      } else params.push(x.replace(/\s*=.*$/s, "").trim());
+    }
+    return { params, destructured };
+  };
+  const heads = (at: number) => text.slice(Math.max(0, at - 80), at);
+  const stored = (at: number): { fname?: string; kind: FnDef["kind"] } => {
+    const before = heads(at);
+    const bound = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?$/.exec(before);
+    if (bound) return { fname: bound[1]!, kind: "named" };
+    if (/(?:\bexports|\bmodule\s*\.\s*exports)(?:\s*\.\s*[\w$]+)?\s*=\s*(?:async\s*)?$/.test(before)) return { kind: "export" };
+    return { kind: "anon" };
+  };
+  for (const m of text.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(([^()]*)\)/g)) {
+    const { params, destructured } = parse(m[2]!);
+    if (m[1]) defs.push({ fname: m[1], params, kind: "named", destructured });
+    else defs.push({ ...stored(m.index ?? 0), params, destructured });
+  }
+  for (const m of text.matchAll(/(?:\basync\s*)?\(([^()]*)\)\s*=>|(?<![\w$.)])([A-Za-z_$][\w$]*)\s*=>/g)) {
+    const { params, destructured } = parse(m[1] ?? m[2] ?? "");
+    defs.push({ ...stored(m.index ?? 0), params, destructured });
+  }
+  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*\{/g)) {
+    if (/^(?:if|for|while|switch|catch|with|function|return|else|do)$/.test(m[1]!)) continue;
+    if (/\bfunction\s*\*?\s*$/.test(heads(m.index ?? 0))) continue;
+    const { params, destructured } = parse(m[2]!);
+    defs.push({ params, kind: "method", destructured });
+  }
+  c.defs = defs;
+  return defs;
+}
+
+// The references to a function name: its direct calls (with their argument lists) and whether anything else mentions it
+// (an alias, a member call, call/apply, an export). Read once per name.
+function refsOf(fname: string): { calls: string[]; other: boolean } {
+  const c = cls!;
+  const hit = c.refs.get(fname);
+  if (hit) return hit;
+  const text = c.text;
+  const out = { calls: [] as string[], other: false };
+  const n = fname.replace(/\$/g, "\\$");
+  for (const m of text.matchAll(new RegExp(`(?<![\\w$])${n}(?![\\w$])`, "g"))) {
+    const at = m.index ?? 0;
+    const before = text.slice(Math.max(0, at - 24), at);
+    if (/\bfunction\s*\*?\s*$/.test(before)) continue; // its own declaration
+    if (/\b(?:const|let|var)\s+$/.test(before) && /^\s*=\s*(?:async\s*)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/.test(text.slice(at + fname.length, at + fname.length + 80))) continue; // its own binding
+    if (/\.\s*$/.test(before)) {
+      out.other = true; // a member call such as o.go(x)
+      continue;
+    }
+    const call = /^\s*\(/.exec(text.slice(at + fname.length));
+    if (!call) {
+      out.other = true;
+      continue;
+    }
+    const args = argsOf(text, at + fname.length + call[0].length - 1);
+    if (args === undefined) out.other = true;
+    else if (out.calls.length < 50) out.calls.push(args);
+    else out.other = true;
+  }
+  c.refs.set(fname, out);
+  return out;
+}
+
+// A parameter names nothing until its function is called. A function reached only by direct calls takes the arguments of those
+// calls; one reached any other way (an alias, a member, call/apply, an IIFE, a callback, a method, a destructured parameter) can be
+// handed anything, so the load widens to the package. An exported function nobody calls here names nothing.
 function paramEffect(fromKey: string, name: string, depth: number): JsEffect {
-  const text = cls!.text;
   const effects: JsEffect[] = [];
-  const params = (list: string) => splitTop(list, ",").map((x) => x.trim().replace(/\s*=.*$/s, "").replace(/^\.\.\./, ""));
-  const sites = (fname: string, at: number) => {
-    const re = new RegExp(`(?<![\\w$.])${fname.replace(/\$/g, "\\$")}\\s*\\(`, "g");
-    for (const m of text.matchAll(re)) {
-      if (/\bfunction\s*$/.test(text.slice(Math.max(0, (m.index ?? 0) - 12), m.index ?? 0))) continue;
-      const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
-      if (args === undefined) continue;
+  const done = new Set<string>();
+  for (const def of fnDefs()) {
+    const at = def.params.indexOf(name);
+    const hidden = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, "\\$")}(?![\\w$])`).test(def.destructured);
+    if (at < 0 && !hidden) continue;
+    if (hidden || def.kind === "method") return WIDE;
+    if (def.kind === "export") continue;
+    if (def.kind === "anon" || !def.fname) return WIDE;
+    const key = `${def.fname}:${at}`;
+    if (done.has(key)) continue;
+    done.add(key);
+    const refs = refsOf(def.fname);
+    if (refs.other) return WIDE;
+    for (const args of refs.calls) {
       const arg = splitTop(args, ",")[at];
       if (arg !== undefined && arg.trim()) effects.push(effectOf(fromKey, arg, "", depth + 1));
     }
-  };
-  for (const m of text.matchAll(/\bfunction\s+([A-Za-z_$][\w$]*)\s*\(([^()]*)\)/g)) {
-    const at = params(m[2]!).indexOf(name);
-    if (at >= 0) sites(m[1]!, at);
-  }
-  for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\s*\(([^()]*)\)|\(([^()]*)\)\s*=>|([A-Za-z_$][\w$]*)\s*=>)/g)) {
-    const list = m[2] ?? m[3] ?? m[4] ?? "";
-    const at = params(list).indexOf(name);
-    if (at >= 0) sites(m[1]!, at);
   }
   return combineEffects(effects);
 }
