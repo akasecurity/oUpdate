@@ -217,7 +217,53 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
     return [`${head}[binary, ${after?.length ?? 0} bytes, sha256 ${h}]\n`];
   }
   const text = (b: Uint8Array | undefined) => b && dec.decode(b).replaceAll("\0", "\\x00");
-  return [head, renderLineDiff(text(before), text(after))];
+  const bt = text(before);
+  const at = text(after);
+  const out = [head, renderLineDiff(bt, at)];
+  if (bt !== undefined && at !== undefined && (state === "changed" || state === "loaded by code")) {
+    const defs = unchangedBlobDefs(bt, at);
+    if (defs) out.push(defs);
+  }
+  return out;
+}
+
+// A changed line that names an identifier whose definition (`D = "<encoded run>"`) sits on an unchanged line:
+// the diff does not show that line, so a new `eval(Buffer.from(D, "base64"))` hides the payload it runs.
+// The definitions of the names added lines use are listed after the diff. One pass over each side: runs are found
+// on lines of BLOB_RUN or more characters only, and the number of definitions and of names read are capped.
+const BLOB_RUN = 400; // the pre-pass encoded-blob threshold
+const BLOB_DEFS_MAX = 8;
+const BLOB_NAMES_MAX = 5000;
+function unchangedBlobDefs(before: string, after: string): string | undefined {
+  const lines = after.split("\n");
+  const runs: { name: string; at: number }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (l.length < BLOB_RUN) continue;
+    for (const m of l.matchAll(/[A-Za-z0-9+/=_-]{400,}/g)) {
+      const lead = /([A-Za-z_$][\w$]*)\s*=\s*['"`]?$/.exec(l.slice(Math.max(0, m.index! - 80), m.index!));
+      if (lead) {
+        runs.push({ name: lead[1]!, at: i });
+        break;
+      }
+    }
+  }
+  if (!runs.length) return undefined;
+  const old = new Set(before.split("\n"));
+  const defs = new Map<string, number>();
+  for (const r of runs) if (old.has(lines[r.at]!) && !defs.has(r.name)) defs.set(r.name, r.at);
+  if (!defs.size) return undefined;
+  const used = new Set<string>();
+  for (const l of lines) {
+    if (old.has(l)) continue;
+    for (const m of l.matchAll(/[A-Za-z_$][\w$]*/g)) {
+      if (used.size >= BLOB_NAMES_MAX) break;
+      used.add(m[0]);
+    }
+  }
+  const shown = [...defs].filter(([n]) => used.has(n)).slice(0, BLOB_DEFS_MAX);
+  if (!shown.length) return undefined;
+  return `[unchanged lines that define a name the changed lines use, each holding an encoded run]\n${shown.map(([, at]) => `=${at + 1}: ${lines[at]}\n`).join("")}`;
 }
 
 // Files named as never executing: images, fonts, source maps, type declarations, prose. Prose is judged by the
