@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { classifyJs, provablyStatic } from "../src/install-closure.ts";
+import { classifyJs, hasUnbounded, provablyStatic } from "../src/install-closure.ts";
 import { prepass, type FileMap } from "../src/prepass.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -32,6 +32,8 @@ const sloppyPrologues: [string, string][] = [
   ["a directive continued by a binary +", '"use strict" + "ignored";'],
   ["a template after a comment", '// "use strict"\n`use strict`;'],
   ["no prologue", ""],
+  ["a hashbang then a template spelling the directive", "#!/usr/bin/env node\n`use strict`;"],
+  ["a hashbang then a non-directive statement", "#!/usr/bin/env node\n1;"],
 ];
 const strictPrologues: [string, string][] = [
   ["a double quoted directive", '"use strict";'],
@@ -41,6 +43,7 @@ const strictPrologues: [string, string][] = [
   ["a directive after another directive", '"other";\n"use strict";'],
   ["a directive then a template", '"use strict";\n`use strict`;'],
   ["a directive followed by a unary statement", '"use strict"\n!true;'],
+  ["a hashbang then a directive", '#!/usr/bin/env node\n"use strict";'],
 ];
 
 for (const [label, prologue] of sloppyPrologues) {
@@ -65,4 +68,12 @@ test("the static check and the hazard agree on every prologue", () => {
     const src = sloppy(prologue);
     expect(provablyStatic(src), label).toBe(!classifyJs("pkg/lib/x.js", src).all);
   }
+});
+
+test("hasUnbounded reads the source, not the comment-free text, for the strict test", () => {
+  const src = sloppy("`use strict`;");
+  // The comment-free text writes the template as a quoted string; only the source tells it from a directive.
+  const kept = src.replace("`use strict`", '"use strict"');
+  expect(hasUnbounded(kept, src)).toBe(true);
+  expect(hasUnbounded(kept, kept)).toBe(false);
 });

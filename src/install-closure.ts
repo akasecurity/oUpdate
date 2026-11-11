@@ -1779,6 +1779,8 @@ const DECLARATION = /(?:^|\n)([ \t\r\n]*)(?:import(?![\w$])\s*(?:[\w$*{]|"")|exp
 function rawPrologue(raw: string): string[] {
   const out: string[] = [];
   let i = 0;
+  // A leading hashbang line is not code: the prologue starts after it.
+  if (raw.startsWith("#!")) while (i < raw.length && raw[i] !== "\n") i++;
   for (;;) {
     for (;;) {
       while (i < raw.length && /\s/.test(raw[i]!)) i++;
@@ -2405,7 +2407,7 @@ function steeringKey(code: string): boolean {
 
 const CALL_OK = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
 // `text` is comment-free; `source` is the file's own text for the checks that need it (a template literal is not a directive).
-export function hasUnbounded(text: string, source: string = text): boolean {
+export function hasUnbounded(text: string, source: string): boolean {
   try {
     return hasUnboundedScan(text, source);
   } catch {
