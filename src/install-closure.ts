@@ -911,6 +911,8 @@ function stripLiteralLoad(raw: string): boolean {
   const root = builtinRoot(spec);
   if (!root) return true;
   if (STATIC_BUILTINS.has(root)) return true;
+  // A node: name that is not on the allowlist is a builtin too, including one this list does not know yet.
+  if (spec.startsWith("node:")) return false;
   return !NODE_BUILTINS.has(root);
 }
 
@@ -1865,7 +1867,12 @@ function provablyStaticScan(source: string): boolean {
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3, at: number, whole: string) => {
     const spec = String(spec1 || spec2 || spec3 || "");
     if (builtinRoot(loadedSpec(spec) ?? "") === "process") viaOther = true;
-    if (!stripLiteralLoad(spec)) return full;
+    if (!stripLiteralLoad(spec)) {
+      // A require call stays in the text and UNSAFE_JS sees it; an import declaration or export-from has no such word, so a
+      // builtin that can run or load code (cluster, inspector, v8, sqlite, http, ...) makes the file not static here.
+      if (spec1 === undefined) viaOther = true;
+      return full;
+    }
     // from "x" and import "x" end an import declaration only when the string is on the keyword's line and no . comes before
     // it (a variable named from, a property named import, are not declarations). Anything else is read as an expression, and
     // a / right after it could be a regular expression or a division: not static.
