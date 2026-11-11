@@ -1345,3 +1345,88 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} stays static (computed chain)`, () => expect(widensDocs(pre)).toBe(false));
 }
+
+// A this in sloppy code, the module wrapper's arguments and CallSite objects hand out the global object or require.
+// The use of the object is a plain call: only this rule, not the computed-key or process rules, can make these files not static.
+const ENVW = (g: string) => `${g}.run()`;
+const SLOPPY_THIS = "(function () { return this })()";
+for (const [label, pre] of [
+  ["a sloppy function returning this, indexed with a built key", `exports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a sloppy function returning this.process", `function f() { return this.process }\nexports.main = () => { f().run() }\n`],
+  ["a sloppy function binding this to a name", `function f() { const g = this; return g }\nexports.main = () => { ${ENVW("f()")} }\n`],
+  ["this from call() with no argument", `exports.main = () => { const t = (function () { return this }).call(); ${ENVW("t")} }\n`],
+  ["a string that only starts with the directive", `"use strict" + "ignored"; exports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} };\n`],
+  ["a line that starts with the word import", `imported = 1;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a line that starts with the word importer", `importer = 1;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a directive continued on a far-indented line", `"use strict"\n${" ".repeat(12)}+ 0;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a directive continued by instanceof on the next line", `"use strict"\ninstanceof Object;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a directive continued by in on the next line", `"use strict"\nin {};\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a member named import before a line that starts with a name", `const o = {}; o.\nimport\nx = 1;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a member named export before a line that starts with const", `const o = {}; o.\nexport\nconst k = 1;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a directive continued by !=", `"use strict"\n!= 0;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a directive continued by !==", `"use strict"\n!== 0;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a template directive with a comment that quotes the directive", `// "use strict"\n\`use strict\`;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a template directive with a quoted directive inside a function", `\`use strict\`;\nfunction f() { "use strict"; }\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a template directive followed by a function that returns this", "`use strict`;\nfunction f(){ return this } const g = f(); console.log(typeof g)"],
+  ["a template directive without a semicolon", "`use strict`\nfunction f(){ return this } const g = f(); console.log(typeof g)"],
+  ["a template and then a real directive", "`x`;\n\"use strict\";\nfunction f(){ return this } const g = f(); console.log(typeof g)"],
+  ["a template directive written with escapes", "`use\\x20strict`;\nfunction f(){ return this } const g = f(); console.log(typeof g)"],
+  ["a template directive after a block comment", "/* c */ `use strict`;\nfunction f(){ return this } const g = f(); console.log(typeof g)"],
+  ["a template directive after a line comment", "// c\n`use strict`;\nfunction f(){ return this } const g = f(); console.log(typeof g)"],
+  ["a template literal that spells the directive", `\`use strict\`;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a directive that a continuing line turns into an expression", `"use strict"\n+ "x";\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a spread of this", `const o = { ...this }; ${ENVW("o")};\nexports.main = () => 1\n`],
+  ["a spread of arguments", `const o = [...arguments]; ${ENVW("o")};\nexports.main = () => 1\n`],
+  ["the top-level this of a strict file", `"use strict";\nconst t = this; ${ENVW("t")};\nexports.main = () => 1\n`],
+  ["typeof on a call chain through this", `var r = typeof this[0][1](1);\nexports.main = () => r\n`],
+  ["in on a call chain through this", `var r = "x" in this[0][1](1);\nexports.main = () => r\n`],
+] as const) {
+  test(`${label} is not static`, () => expect(held(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
+  ["arguments bound to a name", 'const a = arguments; exports.main = () => a[1]("child_"+"pro"+"cess")\n'],
+  ["arguments[2] at the top level", 'exports.main = () => arguments[2]["req"+"uire"]("child_"+"pro"+"cess")\n'],
+  ["an arrow body reading the wrapper's arguments", 'exports.main = () => { return arguments[1]("fs") }\n'],
+  ["a prepareStackTrace that reads the call site's this", 'Error.prepareStackTrace = (e, s) => s[0].getThis();\nexports.main = () => new Error().stack\n'],
+  ["getFunction on a call site", 'exports.main = (s) => s[0].getFunction()\n'],
+] as const) {
+  test(`${label} widens the closure (round 23)`, () => expect(widensAll(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["this.x = 1 in a class method", 'class A { m() { this.x = 1 } }\nexports.main = () => new A()\n'],
+  ["this.name and this.method() in a function", 'exports.main = function () { this.a = 1; return this.run(2) }\n'],
+  ["arguments.length", 'exports.main = function () { return arguments.length }\n'],
+  ["arguments inside a function of its own", 'exports.main = function () { return arguments[0] }\n'],
+  ["return this inside a class", 'class A { m() { return this } }\nexports.main = () => new A()\n'],
+  ["this handed on in a strict file", '"use strict";\nexports.main = function () { return this }\n'],
+  ["(this && this.x) at the top of a file", 'var h = (this && this.h) || 1;\nexports.main = () => h\n'],
+] as const) {
+  test(`${label} stays static (round 23)`, () => expect(held(pre)).toBe(false));
+}
+for (const [label, pre] of [
+  ["a read of process.title", "exports.main = () => process.title\n"],
+  ["an assignment to process.title", "process.title = 'x'\nexports.main = () => 1\n"],
+] as const) {
+  test(`${label} stays static`, () => expect(held(pre)).toBe(false));
+}
+for (const [label, pre] of [
+  ["a directive after another directive", '"a directive"; "use strict";\nexports.main = function () { return this }\n'],
+  ["a directive ended by a line that starts with !", '"use strict"\n!true;\nexports.main = function () { return this }\n'],
+  ["a real directive and then a template", '"use strict";\n`x`;\nfunction f(){ return this } const g = f(); console.log(typeof g)'],
+  ["a directive ended by a line that starts with --", '"use strict"\n--n;\nexports.main = function () { return this }\n'],
+  ["a directive ended by a line that starts with ~", '"use strict"\n~1;\nexports.main = function () { return this }\n'],
+  ["a directive ended by a line that starts with ++", '"use strict"\n++n;\nexports.main = function () { return this }\n'],
+  ["a member named this", 'exports.main = (x) => x.this\n'],
+] as const) {
+  test(`${label} stays static`, () => expect(held(pre)).toBe(false));
+}
+test("an object key named class does not make the next function a class body", () => {
+  expect(widensDocs(`const o = { class: 1, f() { return (function () { return this })() } };\nexports.main = () => { const g = o.f(); ${ENVW("g")} }\n`)).toBe(true);
+});
+test("this.execve is not a plain member of this", () => {
+  expect(widensDocs('exports.main = function () { this.execve("x") }\n')).toBe(true);
+});
+test("this.loadEnvFile is not a plain member of this", () => {
+  expect(widensDocs('exports.main = function () { this.loadEnvFile("./docs/payload.txt") }\n')).toBe(true);
+});

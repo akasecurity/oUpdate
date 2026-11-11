@@ -863,8 +863,8 @@ const LOADS_CHILD_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*
 // The plain reads of the process object, or of a name for the process module, a static file may make. Any other use (an
 // alias, a computed member, binding, getBuiltinModule, mainModule, an argument to a call) can reach a loader or a native
 // module, so it is not static; the loader words and a bare or computed use also widen the closure to the whole package.
-const PROCESS_LOADER_WORDS = /\b(?:getBuiltinModule|mainModule|_?linkedBinding)\b|\.\s*binding\b/;
-const PROCESS_READ = "(?:env\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|(?:version\\b|versions\\b(?:\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*)?)|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
+const PROCESS_LOADER_WORDS = /\b(?:getBuiltinModule|mainModule|_?linkedBinding|prepareStackTrace|getThis|getFunction)\b|\.\s*binding\b/;
+const PROCESS_READ = "(?:env\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|(?:version\\b|versions\\b(?:\\s*(?:\\?\\.|\\.)\\s*[A-Za-z_$][\\w$]*)?)|argv\\b|title\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
 // `const p = require("process")` or `import p from "node:process"`: the only loads of the process module that stay static.
 const PROCESS_ALIAS = new RegExp(
   String.raw`\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(?:node:)?process\2\s*\)|import(?:${GAP}+|(?=\*))(?:\*${GAP}*as${GAP}+)?([A-Za-z_$][\w$]*)${GAP}+from${GAP}*(['"])(?:node:)?process\4)\s*;?`,
@@ -1477,7 +1477,7 @@ function readEnds(code: string, start: number, lenient = false, target?: string)
 // computed member, a spread, a template or call argument, a returned or assigned value, a read followed by a chained
 // call, or the bare global object. A property named like the name (x.process()), an object key (process: 1) and a method
 // definition are not the object. A parameter or variable of that name is not told apart from the global: it counts.
-function processValueUse(code: string, names: string[], lenient = false): boolean {
+function processValueUse(code: string, names: string[], lenient = false, strict = false): boolean {
   const alt = names.map((n) => n.replace(/\$/g, "\\$")).join("|");
   const L = "(?<![\\w$])(?<![^\\x00-\\x7f\\s])";
   const R = "(?![\\w$])(?![^\\x00-\\x7f\\s])";
@@ -1604,12 +1604,8 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
   // The global object handed on (bound, passed, returned, put in an array, a default value, new f(globalThis)) can be read for
   // process later. Only a member read of it (globalThis.name) and typeof / in are not a hand-over. At the top level of a
   // CommonJS file this is the exports object, so a bare top-level this counts the same.
-  let depth = 0;
-  for (const m of rest.matchAll(/(?<![\w$])(?<![^\x00-\x7f\s])(?:globalThis|global|this)(?![\w$])(?![^\x00-\x7f\s])|[{}]/g)) {
+  for (const m of rest.matchAll(/(?<![\w$])(?<![^\x00-\x7f\s])(?:globalThis|global)(?![\w$])(?![^\x00-\x7f\s])/g)) {
     const at = m.index ?? 0;
-    if (m[0] === "{") { depth++; continue; }
-    if (m[0] === "}") { depth = Math.max(0, depth - 1); continue; }
-    if (m[0] === "this" && depth > 0) continue;
     // An object key (global: true) is a name, not the global object.
     const nextText = rest.slice(at + m[0].length, at + m[0].length + 8);
     let pj = at;
@@ -1619,8 +1615,6 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
     if (m[0] !== "this" && /(?:^|[^\w$.])(?:break|continue)\s*$/.test(rest.slice(Math.max(0, at - 12), at))) continue;
     // A class field (global = 1) is a name too.
     if (m[0] !== "this" && /^\s*=(?!=)/.test(nextText) && (before === "" || /[{;}]/.test(before))) continue;
-    // (this && this.__x) is a test: its value is the right side. A comparison does not hand it on either.
-    if (m[0] === "this" && /^\s*(?:&&|[!=]==?)/.test(rest.slice(at + 4, at + 20))) continue;
     let j = at;
     while (j > 0 && /\s/.test(rest[j - 1]!)) j--;
     if (rest[j - 1] === "." && !rest.slice(0, j).endsWith("...")) continue;
@@ -1631,7 +1625,75 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
       if (m[0] !== "this" && /(?:^|[^\w$.])typeof$/.test(rest.slice(Math.max(0, j - 11), j)) && prop && readEnds(rest, at + m[0].length + prop[0].length)) continue;
     }
     if (m[0] !== "this" && HARMLESS_GLOBAL.test(rest.slice(at + m[0].length, at + m[0].length + 40))) continue;
-    if (m[0] === "this" && /^\s*(?:\?\.|\.)\s*[A-Za-z_$]/.test(rest.slice(at + 4, at + 44))) continue;
+    return true;
+  }
+  return thisOrArgumentsLeaks(rest, strict);
+}
+
+// Where a { opens: a function body ("fn"), an arrow body, a class body or a plain block.
+function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block" {
+  let j = at;
+  while (j > 0 && /\s/.test(code[j - 1]!)) j--;
+  if (code.slice(Math.max(0, j - 2), j) === "=>") return "arrow";
+  // The word class opens a class body, not an object key (class: function () {}) or a member (x.class).
+  if (/(?<![\w$.])class(?![\w$])(?!\s*:)[^{};]*$/.test(code.slice(Math.max(0, j - 200), j))) return "class";
+  if (code[j - 1] === ")") {
+    let depth = 0;
+    let k = j - 1;
+    for (; k >= 0; k--) {
+      if (code[k] === ")") depth++;
+      else if (code[k] === "(" && --depth === 0) break;
+    }
+    const word = /([A-Za-z_$][\w$]*)\s*$/.exec(code.slice(Math.max(0, k - 40), Math.max(0, k)))?.[1] ?? "";
+    return /^(?:if|for|while|switch|catch|with)$/.test(word) ? "block" : "fn";
+  }
+  return "block";
+}
+
+// A this in sloppy code is the global object inside a plain function call, and this at the top of a CommonJS file or
+// arguments there are the module wrapper's (exports, require, module). So this that is handed on or read through a
+// computed or process-like member, and arguments outside a function of its own, are not provably harmless. this.name and
+// this.method() stay. Strict code (a class body, "use strict", import/export) has no global this.
+function thisOrArgumentsLeaks(code: string, strictFile: boolean): boolean {
+  const stack: ("fn" | "arrow" | "class" | "block")[] = [];
+  for (const m of code.matchAll(/[{}]|(?<![\w$])(?:this|arguments)(?![\w$])/g)) {
+    const at = m.index ?? 0;
+    if (m[0] === "{") {
+      stack.push(braceKind(code, at));
+      continue;
+    }
+    if (m[0] === "}") {
+      stack.pop();
+      continue;
+    }
+    // A member named this or arguments (x.this) is a name; the dots of a spread (...this) are not a member access.
+    let pj = at;
+    while (pj > 0 && /\s/.test(code[pj - 1]!)) pj--;
+    if (code[pj - 1] === "." && !code.slice(0, pj).endsWith("...")) continue;
+    const after = code.slice(at + m[0].length, at + m[0].length + 60);
+    if (m[0] === "arguments") {
+      if (/^\s*\.\s*length\b/.test(after)) continue;
+      let own = false;
+      for (let i = stack.length - 1; i >= 0; i--) {
+        if (stack[i] === "fn") {
+          own = true;
+          break;
+        }
+      }
+      if (own) continue;
+      return true;
+    }
+    // Inside a class body, or inside a function of a strict file, a plain call has no global this. The top level of a file
+    // (and an arrow there) is still the exports object or the module's this, so it counts in strict files too.
+    if (stack.includes("class") || (strictFile && stack.includes("fn"))) continue;
+    // (this && this.__x) is a test: its value is the right side. A comparison does not hand it on either.
+    if (/^\s*(?:&&|[!=]==?)/.test(after)) continue;
+    let j = at;
+    while (j > 0 && /\s/.test(code[j - 1]!)) j--;
+    // typeof / in / instanceof is not a hand-over only when the operand ends there (typeof this[k][g](...) is a call).
+    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(code.slice(Math.max(0, j - 11), j)) && readEnds(code, at + m[0].length)) continue;
+    const member = /^\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)/.exec(after);
+    if (member && !/^(?:process|globalThis|global|constructor|__proto__|execve|loadEnvFile|dlopen|reallyExit|_debugProcess)$/.test(member[1]!)) continue;
     return true;
   }
   return false;
@@ -1705,6 +1767,72 @@ function computedCallChain(code: string): boolean {
   return false;
 }
 
+// "use strict" as a complete directive statement in the prologue, or import / export declarations (whole words): strict code.
+// A directive is a string alone on its statement: ended by ; or by a line end after which the next token does not continue the
+// expression (a binary operator, member dot, call, index, ?, comma, template tag or the words in / instanceof; ! ~ and ++ --
+// start a new statement). A template literal is not a directive.
+const DIRECTIVE = /\s*(['"])([^'"\\\n]*)\1[ \t]*/y;
+const CONTINUES = /^(?:[*\/%<>=&|^?,.(\[`]|!==?|\+(?!\+)|-(?!-)|(?:in|instanceof)(?![\w$]))/;
+const DECLARATION = /(?:^|\n)([ \t\r\n]*)(?:import(?![\w$])\s*(?:[\w$*{]|"")|export(?![\w$])\s*(?:default\b|const\b|let\b|var\b|function\b|class\b|async\b|[{*]))/g;
+// The leading quoted strings of the source, comments between them skipped. The kept text writes a plain template as a quoted
+// string, so a directive is real only when the source spells the same string with ' or " at the same place in the prologue.
+function rawPrologue(raw: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  for (;;) {
+    for (;;) {
+      while (i < raw.length && /\s/.test(raw[i]!)) i++;
+      if (raw.startsWith("//", i)) {
+        while (i < raw.length && raw[i] !== "\n") i++;
+      } else if (raw.startsWith("/*", i)) {
+        const e = raw.indexOf("*/", i + 2);
+        if (e < 0) return out;
+        i = e + 2;
+      } else break;
+    }
+    const q = raw[i];
+    if (q !== '"' && q !== "'") return out;
+    let j = i + 1;
+    while (j < raw.length && raw[j] !== q && raw[j] !== "\n" && raw[j] !== "\\") j++;
+    if (raw[j] !== q) return out;
+    out.push(raw.slice(i + 1, j));
+    i = j + 1;
+    // Skip to the end of the statement: only a directive keeps the prologue going.
+    while (i < raw.length && /[ \t]/.test(raw[i]!)) i++;
+    if (raw[i] === ";") i++;
+  }
+}
+
+function strictFileOf(keep: string, code: string, raw: string): boolean {
+  let pos = 0;
+  let nth = 0;
+  const lits = rawPrologue(raw);
+  for (;;) {
+    DIRECTIVE.lastIndex = pos;
+    const m = DIRECTIVE.exec(keep);
+    if (!m) break;
+    let end = DIRECTIVE.lastIndex;
+    if (end < keep.length && keep[end] !== ";" && keep[end] !== "\n" && keep[end] !== "\r") break;
+    if (keep[end] === ";") end++;
+    else if (end < keep.length) {
+      let k = end;
+      while (k < keep.length && /\s/.test(keep[k]!)) k++;
+      if (CONTINUES.test(keep.slice(k, k + 12))) break;
+    }
+    if (m[2] === "use strict" && lits[nth] === "use strict") return true;
+    nth++;
+    pos = end;
+  }
+  for (const d of code.matchAll(DECLARATION)) {
+    // o.\nimport\nx is a member named import, not a declaration.
+    let k = (d.index ?? 0) - 1;
+    while (k >= 0 && /\s/.test(code[k]!)) k--;
+    if (k >= 0 && code[k] === ".") continue;
+    return true;
+  }
+  return false;
+}
+
 // A scanner that throws must not make a file look safe: a fault reads as "not static" and "widen everything".
 let scannerFaults = 0;
 export function scannerFaultCount(): number {
@@ -1751,7 +1879,7 @@ function provablyStaticScan(source: string): boolean {
   if (PROCESS_LOADER_WORDS.test(code) || UNSAFE_JS.test(code) || timerGetsCode(code) || steeringKey(code) || computedCallChain(code)) return false;
   // Brackets that do not pair up (a file Bun rejects) are read by nothing below: not static.
   if (bracketIndex(code).mismatch) return false;
-  return !processValueUse(code, aliases);
+  return !processValueUse(code, aliases, false, strictFileOf(text, code, source));
 }
 
 // exec/eval/compile, a dynamic import, or a loader that runs another file.
@@ -2232,7 +2360,7 @@ function processHazardScan(source: string): boolean {
       if (!prefixed && !manifest && !selector && !joined) return true;
     }
   }
-  return processValueUse(code, names, true);
+  return processValueUse(code, names, true, strictFileOf(keep, code, source));
 }
 
 // setTimeout or setInterval whose first argument is a string or built from one: that string is run as code.
