@@ -128,7 +128,9 @@ function words(cmd: string): string[] {
   for (let ci = 0; ci < cmd.length; ci++) {
     const c = cmd[ci]!;
     if (quote) {
-      if (c === quote) quote = undefined;
+      // In double quotes a backslash before a quote, a backslash, a dollar or a backtick leaves that character (`\"` is `"`).
+      if (c === "\\" && quote === '"' && /["\\$`]/.test(cmd[ci + 1] ?? "")) cur += cmd[++ci]!;
+      else if (c === quote) quote = undefined;
       else cur += c;
       continue;
     }
@@ -438,7 +440,9 @@ function splitCommands(ctx: Ctx, body: string): string[] | null {
     const c = body[i]!;
     if (quote) {
       cur += c;
-      if (c === quote) quote = undefined;
+      // In double quotes a backslash escapes the next character: `\"` does not close the quote.
+      if (c === "\\" && quote === '"' && i + 1 < body.length) cur += body[++i]!;
+      else if (c === quote) quote = undefined;
       continue;
     }
     if (c === "'" || c === '"') {
@@ -4476,7 +4480,15 @@ function markHookFile(ctx: Ctx, token: string): void {
 // A file named by a command, resolved from the directory an earlier cd moved to as well as from the package root.
 function noteHookArgCwd(ctx: Ctx, token: string): void {
   // A file named by an expansion the scan could not resolve (`sh tools/$N.sh`) may be any file of the package.
-  if (token.includes(UNRESOLVED)) widenAll(ctx);
+  if (token.includes(UNRESOLVED)) {
+    // An unresolved part may name a file anywhere, docs and tests included: a bare word (`node -r $(cat n)`), a path word
+    // in the package root (`node ./$(cat n)`) or with an unresolved directory. A path word whose directory is known
+    // (`node docs/$(cat b)`) reads every file under that directory, inert ones included, and no others.
+    const dir = token.includes("/") ? normalize(token.slice(0, token.lastIndexOf("/"))) : "";
+    if (!dir || dir.includes(UNRESOLVED) || badPath(dir)) ctx.widenInert = true;
+    else addUnder(ctx, dir);
+    widenAll(ctx);
+  }
   noteHookArg(ctx, token);
   if (ctx.cwd && token && !token.startsWith("-") && !token.startsWith("/")) {
     const j = joinDir(ctx.cwd, token);
@@ -4558,7 +4570,8 @@ function evalCode(ctx: Ctx, code: string): void {
   });
   for (const spec of specs) addRef(ctx, spec);
   for (const dir of dynamicRequireDirs(code)) addUnder(ctx, dir);
-  if (/[+`$]/.test(code) || code.includes("process.env") || !specs.length || !/^[\s;]*$/.test(rest)) {
+  // A spec that holds an unresolved expansion (`require('./lib/$(cat n)')`) is matched above as a plain path: it names nothing.
+  if (code.includes(UNRESOLVED) || /[+`$]/.test(code) || code.includes("process.env") || !specs.length || !/^[\s;]*$/.test(rest)) {
     fail(ctx, "unresolved: eval");
     // The inline code runs like a file named "-e" in the package root: the same JS hardening applies to it.
     if (code.includes(UNRESOLVED)) {
@@ -4948,7 +4961,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
         i++;
         continue;
       }
-      if (name === "-e" || name === "--eval" || name === "-p" || name === "--print") {
+      if (name === "-e" || name === "--eval" || name === "-p" || name === "--print" || name === "-pe" || name === "-ep") {
         const code = take();
         if (code === undefined) return;
         evalCode(ctx, code);
@@ -6573,6 +6586,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
   }
   if (argv.some((a) => RUNNERS.has(runnerName(a)))) ctx.sawRunner = true;
   const bin = binName(argv[i]!);
+  // An unresolved command word may be any runner: every file is read, docs and tests included.
+  if (bin.includes(UNRESOLVED) && !argv[i]!.includes("/")) {
+    ctx.widenInert = true;
+    widenAll(ctx);
+  }
   i++;
   // A wrapper (env, nohup, time, sudo, nice, timeout, ...) runs the command after its own options: that command is
   // dispatched too (`env bash -c 'node test/x.js'`, `/usr/bin/env sh -c ...`), and the wrapper's own reading goes on.
@@ -6716,6 +6734,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
       restart(ctx);
       return;
     }
+    if (sub.word.includes(UNRESOLVED)) ctx.widenInert = true;
     widenAll(ctx);
     fail(ctx, "unresolved: runner");
     return;
@@ -6770,6 +6789,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
       return;
     }
     if (!name.word) {
+      if (argv.slice(sub.i + 1).some((a) => a.includes(UNRESOLVED))) ctx.widenInert = true;
       widenAll(ctx);
       if (!ctx.hold) fail(ctx, "unresolved: script");
       return;
