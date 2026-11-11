@@ -198,3 +198,24 @@ for (const [label, pre] of [
 test("a keyword that opens a regex after a dot-free position stays a regex (round 6)", () => {
   expect(held(`${A}const n = p.cwd().length; function f() { return /a/.test("x") }\nexports.main = () => f() + n\n`)).toBe(false);
 });
+
+// Round 7: words that are identifiers in sloppy scripts, spread and number dots, private names.
+for (const [label, pre] of [
+  ["yield used as an identifier before a division", `${A}var yield = 1; yield / ${Y} / 1;\n`],
+  ["await used as an identifier before a division", `${A}var await = 1; await / ${Y} / 1;\n`],
+  ["of used as an identifier before a division", `${A}var of = 1; of / ${Y} / 1;\n`],
+  ["let used as an identifier before a division", `${A}var let = 1; let / ${Y} / 1;\n`],
+  ["async used as an identifier before a division", `${A}var async = 1; async / ${Y} / 1;\n`],
+  ["a keyword after a spread with a space reads a regex that holds a quote", `${A}f(... typeof /'/); ${Y} // '\n`],
+  ["a keyword after a number literal dot reads a regex that holds a quote", `${A}1. in /'/; ${Y} // '\n`],
+  ["a private name that is a keyword before a division", `${A}class K { #return = 1; m() { return this.#return / ${Y} / 1 } }\n`],
+  ["a line comment between the dot and the keyword", `${A}const obj = {return: 1}; obj.// c\nreturn / ${Y} / 1;\n`],
+] as const) {
+  test(`${label} is not static (round 7)`, () => expect(held(pre)).toBe(true));
+}
+test("a regex body after return holds a quote and is blanked, so the file stays static (round 7)", () => {
+  expect(held(`${A}function f(s) { return /'/.test(s) }\nfunction g(s) { return /\`/.test(s) }\nexports.main = () => f("a") + g("b") + p.cwd()\n`)).toBe(false);
+});
+test("a decrement before a comparison mid-line stays static (round 7)", () => {
+  expect(held(`${A}let n = 3; while (n --> 0) { p.cwd() }\nexports.main = () => n\n`)).toBe(false);
+});

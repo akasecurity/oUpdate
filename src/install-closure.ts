@@ -746,6 +746,8 @@ function stripProcessAliases(text: string, aliases: string[]): string {
  * undefined when the scan ends inside one of them (the file is not read as code then). Positions are not kept.
  */
 /** Words a span read as a regular expression could hide from the checks; with the process names they are what decides. */
+const KEYWORD_REGEX = new Set(["return", "typeof", "case", "delete", "void", "throw", "new", "else", "do", "instanceof", "in"]);
+const KEYWORD_MAYBE = new Set(["yield", "await", "of", "let", "static", "async", "get", "set"]);
 const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "Worker", "process", "globalThis", "global", "Reflect", "Proxy", "constructor", "child_process", "dlopen", "exports"];
 
 function codeOnly(text: string, watch: string[] = []): string | undefined {
@@ -760,11 +762,20 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
     `['"\`\\\\\\u0080-\\uffff(){}\\[\\]]|(?<![\\w$])(?:${[...DANGER_WORDS, ...watch].map((w) => w.replace(/\$/g, "\\$&")).join("|")})(?![\\w$])`,
   );
   const eol = (c: string | undefined) => c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029";
-  // A keyword opens a regular expression, unless a . or ?. (with any space or comment between) makes it a property name.
-  const regexWord = (code: string): boolean => {
+  // The word before a /: "regex" for a keyword that is never a name, "maybe" for one that is also an identifier in sloppy
+  // scripts (read as a division with the span check), "no" for anything else. A property name after . or ?. or # is not a
+  // keyword; a . that is part of ... or ends a number literal is not a property dot.
+  const wordKind = (code: string): "regex" | "maybe" | "no" => {
     const t = code.trimEnd();
-    const m = /(?:^|[^\w$])(return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await|instanceof)$/.exec(t);
-    return m !== null && !t.slice(0, t.length - m[1]!.length).trimEnd().endsWith(".");
+    const m = /(?:^|[^\w$])([A-Za-z_$][\w$]*)$/.exec(t);
+    if (!m) return "no";
+    const w = m[1]!;
+    const kind = KEYWORD_REGEX.has(w) ? "regex" : KEYWORD_MAYBE.has(w) ? "maybe" : "no";
+    if (kind === "no") return "no";
+    const before = t.slice(0, t.length - w.length).trimEnd();
+    if (before.endsWith("#")) return "no";
+    if (before.endsWith(".") && !before.endsWith("...") && !/(?:^|[^\w$.])\d[\w]*\.$/.test(before)) return "no";
+    return kind;
   };
   const template = (): boolean => {
     for (; i < n; i++) {
@@ -788,7 +799,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
   // the file is not read as code at all.
   let ambiguous = false;
   const ambiguousRegex = (at: number, before: string): boolean => {
-    if (before !== ")" && before !== "}" && !/(?:\+\+|--)$/.test(out.trimEnd())) return false;
+    if (before !== ")" && before !== "}" && !/(?:\+\+|--)$/.test(out.trimEnd()) && wordKind(out) !== "maybe") return false;
     let cls = false;
     for (let j = at + 1; j < n && !eol(text[j]); j++) {
       const d = text[j]!;
@@ -824,7 +835,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       if (e < 0) return undefined;
       out += /[\n\r\u2028\u2029]/.test(text.slice(i, e)) ? "\n" : " ";
       i = e + 2;
-    } else if (c === "/" && ((regexAfter.has(prev) && !/(?:\+\+|--)$/.test(out.trimEnd())) || regexWord(out) || ambiguousRegex(i, prev))) {
+    } else if (c === "/" && ((regexAfter.has(prev) && !/(?:\+\+|--)$/.test(out.trimEnd())) || wordKind(out) === "regex" || ambiguousRegex(i, prev))) {
       let cls = false;
       i++;
       for (; i < n && !eol(text[i]); i++) {
