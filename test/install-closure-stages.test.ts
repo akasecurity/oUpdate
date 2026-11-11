@@ -172,7 +172,7 @@ const lifeQuiet: [string, string, Record<string, string>][] = [
   ["pack with --ignore-scripts in an if", "if npm pack --ignore-scripts; then echo ok; fi", { prepack: "node DIR/evil.js" }],
   ["pack with --ignore-scripts, piped", "npm pack --ignore-scripts | cat", { prepack: "node DIR/evil.js", postpack: "node DIR/evil.js" }],
   ["pack with the env spelling, piped", "npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
-  ["it with --ignore-scripts, piped", "npm it --ignore-scripts | cat", { test: "node DIR/evil.js" }],
+  ["it with --ignore-scripts and only a pre script changed", "npm it --ignore-scripts | cat", { test: "echo hi", pretest: "node DIR/evil.js" }],
   ["a pre script of a named script with --ignore-scripts", "npm run evil --ignore-scripts | cat", { evil: "echo hi", preevil: "node DIR/evil.js" }],
   ["a post script of test with --ignore-scripts", "npm test --ignore-scripts | cat", { test: "echo hi", posttest: "node DIR/evil.js" }],
 ];
@@ -244,6 +244,49 @@ const ignoreQuiet: [string, string, Record<string, string>][] = [
 ];
 
 for (const [label, hook, scripts] of ignoreQuiet) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} stays quiet: a changed ${dir}/evil.js is not an install change`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc))).toEqual([]);
+    });
+  }
+}
+
+// A bare --ignore-scripts takes a following true/false/1/0 as its value, install-test still runs `test`, and the env is read in
+// order across launcher words.
+const moreHolds: [string, string, Record<string, string>][] = [
+  ["a separate false after the flag", "npm pack --ignore-scripts false | cat", { prepack: "node DIR/evil.js" }],
+  ["a separate 0 after the flag", "npm pack --ignore-scripts 0 | cat", { prepack: "node DIR/evil.js" }],
+  ["a separate false before the subcommand", "npm --ignore-scripts false pack | cat", { prepack: "node DIR/evil.js" }],
+  ["it with the flag still runs test", "npm it --ignore-scripts | cat", { test: "node DIR/evil.js" }],
+  ["cit with the flag still runs test", "npm cit --ignore-scripts | cat", { test: "node DIR/evil.js" }],
+  ["install-test with the flag still runs test", "npm install-test --ignore-scripts | cat", { test: "node DIR/evil.js" }],
+  ["an inner env that turns it off across nice", "npm_config_ignore_scripts=true nice -n 5 env npm_config_ignore_scripts=false npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an inner env that turns it off across sudo -u", "npm_config_ignore_scripts=true sudo -u x env npm_config_ignore_scripts=false npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an inner env that turns it off across timeout", "npm_config_ignore_scripts=true timeout 5 env npm_config_ignore_scripts=false npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an upper-case variable name", "NPM_CONFIG_IGNORE_SCRIPTS=true npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an upper-case value", "npm_config_ignore_scripts=TRUE npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an upper-case false after a lower-case true", "npm_config_ignore_scripts=true NPM_CONFIG_IGNORE_SCRIPTS=false npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an assignment after nice, which is a command word", "nice -n 5 npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an assignment after nice, no pipe", "nice -n 5 npm_config_ignore_scripts=true npm pack", { prepack: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of moreHolds) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} leaves the script on: a changed ${dir}/evil.js holds`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const moreQuiet: [string, string, Record<string, string>][] = [
+  ["a separate true after the flag", "npm pack --ignore-scripts true | cat", { prepack: "node DIR/evil.js" }],
+  ["an inner env that turns it on across nice", "npm_config_ignore_scripts=false nice -n 5 env npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an inner env that turns it on across timeout", "npm_config_ignore_scripts=false timeout 5 env npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of moreQuiet) {
   for (const dir of ["docs", "test"] as const) {
     test(`${label} stays quiet: a changed ${dir}/evil.js is not an install change`, () => {
       const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
