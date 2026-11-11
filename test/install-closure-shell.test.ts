@@ -538,6 +538,10 @@ const dateLines: [string, string][] = [
   ["date with a format that starts with a separator", "cmake -DFOO=$(date +-%Y) | cat"],
   ["date with a slash in the format", "cmake -DFOO=$(date +%Y/%m) | cat"],
   ["date with a letter in the format", "cmake -DFOO=$(date +%Y-x) | cat"],
+  ["date with a quoted format starting with a letter", "cmake -DFOO=$(date '+Release') | cat"],
+  ["date with a quoted format starting with a dash", "cmake -DFOO=$(date +\"-%Y\") | cat"],
+  ["date with a quoted format holding a slash", "cmake -DFOO=$(date '+%Y/%m') | cat"],
+  ["date with a quoted padded format", "cmake -DFOO=$(date '+%_d') | cat"],
   ["date with a substituted format", `cmake -DCMAKE_BUILD_TYPE=$(date +$(cat name.txt)) | cat`],
   ["a flag from an unquoted variable set by printf -v", `printf -v X '%s' "${U}"; cmake -DCMAKE_BUILD_TYPE=$X | cat`],
   ["let on a variable set from a substitution", `printf -v X '%s' "${U}"; let X | cat`],
@@ -553,6 +557,31 @@ for (const [label, hook] of dateLines) {
       expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, changed)).length).toBeGreaterThan(0);
     });
   }
+}
+
+// The _ flag pads with a space, so a one-digit day prints " 1" and cmake reads the package's own 1/CMakeLists.txt.
+const padLines: [string, string][] = [
+  ["date +%_d", "cmake -DFOO_VERSION=$(date +%_d) | cat"],
+  ["date +%z", "cmake -DFOO_VERSION=$(date +%z) | cat"],
+  ["date +%_z", "cmake -DFOO_VERSION=$(date +%_z) | cat"],
+  ["date +%-z", "cmake -DFOO_VERSION=$(date +%-z) | cat"],
+  ["date +%0z", "cmake -DFOO_VERSION=$(date +%0z) | cat"],
+  ["date +%^z", "cmake -DFOO_VERSION=$(date +%^z) | cat"],
+  ["date +%Y%z", "cmake -DFOO_VERSION=$(date +%Y%z) | cat"],
+  ["date +%_m", "cmake -DFOO_VERSION=$(date +%_m) | cat"],
+  ["date +%_H", "cmake -DFOO_VERSION=$(date +%_H) | cat"],
+  ["date '+%_d'", "cmake -DFOO_VERSION=$(date '+%_d') | cat"],
+];
+const padRelease = (v: string, hook: string, changed: boolean) =>
+  files({
+    "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: hook } }),
+    "lib/a.js": "1\n",
+    "1/CMakeLists.txt": changed ? `message(${v})\n` : "message(0)\n",
+  });
+for (const [label, hook] of padLines) {
+  test(`${label} holds: a changed 1/CMakeLists.txt is an install change`, () => {
+    expect(holds(padRelease("1.0.0", hook, false), padRelease("1.0.1", hook, true)).length).toBeGreaterThan(0);
+  });
 }
 
 const dateQuiet: [string, string][] = [
@@ -611,8 +640,10 @@ const pathQuiet: [string, string][] = [
   ["date +%s", "cmake -DFOO_VERSION=$(date +%s) | cat"],
   ["date +%0d", "cmake -DFOO_VERSION=$(date +%0d) | cat"],
   ["date +%-d", "cmake -DFOO_VERSION=$(date +%-d) | cat"],
-  ["date +%_d", "cmake -DFOO_VERSION=$(date +%_d) | cat"],
   ["date +%N", "cmake -DFOO_VERSION=$(date +%N) | cat"],
+  ["date +%Y quoted by the format", "cmake -DFOO_VERSION=$(date +\"%Y\") | cat"],
+  ["date +%Y quoted with the plus", "cmake -DFOO_VERSION=$(date '+%Y') | cat"],
+  ["date +%Y single quoted by the format", "cmake -DFOO_VERSION=$(date +'%Y-%m') | cat"],
 ];
 
 for (const [label, hook] of pathQuiet) {

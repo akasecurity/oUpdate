@@ -5166,7 +5166,11 @@ function runnerFlags(name: string): { code: RegExp; value: RegExp } {
 // Commands whose output is a number, a version or a platform name: unquoted, it cannot split into a second flag. A path or a
 // host name can hold spaces (pwd, npm root|prefix, hostname, whoami, uname -n -a -v), and a bare date prints the time zone name,
 // so those are quiet only quoted; sysctl and getconf only for numeric keys.
-const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[smrpio])?|date \+%[-0_^]?[YmdHMSyjuwUVWFTDRszN%](?:[:._-]|%[-0_^]?[YmdHMSyjuwUVWFTDRszN%])*|arch|getconf (?:_?NPROCESSORS_[A-Z]+|PAGE_?SIZE|ARG_MAX|LONG_BIT)|sysctl -n (?:hw\.(?:ncpu|logicalcpu|physicalcpu|activecpu|availcpu|memsize|pagesize|cpufrequency|l[123]dcachesize|cachelinesize))|node (?:-v|--version))$/;
+// A date format starts with a conversion and holds only conversions and the separators : . _ -; %z is out (west of UTC it prints -0700) and so is the _ flag
+// (it pads with a space). The format may be quoted.
+const DATE_FMT = "%[-0^]?[YmdHMSyjuwUVWFTDRsN%](?:[:._-]|%[-0^]?[YmdHMSyjuwUVWFTDRsN%])*";
+const DATE_SUB = new RegExp(`^date (?:\\+${DATE_FMT}|'\\+${DATE_FMT}'|"\\+${DATE_FMT}"|\\+'${DATE_FMT}'|\\+"${DATE_FMT}")$`);
+const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[smrpio])?|arch|getconf (?:_?NPROCESSORS_[A-Z]+|PAGE_?SIZE|ARG_MAX|LONG_BIT)|sysctl -n (?:hw\.(?:ncpu|logicalcpu|physicalcpu|activecpu|availcpu|memsize|pagesize|cpufrequency|l[123]dcachesize|cachelinesize))|node (?:-v|--version))$/;
 // Flags whose substituted value is a number or a target, not a program.
 const SAFE_FLAG_SUB: Record<string, RegExp> = {
   make: /^-j/,
@@ -5193,7 +5197,7 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
   };
   const taints = (w: StageWord): boolean => w.sub || (w.v && w.n.some((x) => tainted.has(x)));
   // An unquoted substitution or tainted variable splits into words: a second flag can come out of it.
-  const splits = (w: StageWord): boolean => w.uq.some((b) => !BENIGN_SUB.test(b.trim())) || w.un.some((x) => tainted.has(x));
+  const splits = (w: StageWord): boolean => w.uq.some((b) => !(BENIGN_SUB.test(b.trim()) || DATE_SUB.test(b.trim()))) || w.un.some((x) => tainted.has(x));
   const holdsUnresolved = (st: StageWord[]): boolean => st.some((w) => w.sub || w.v);
   stages.forEach((words, at) => {
     let h = 0;
