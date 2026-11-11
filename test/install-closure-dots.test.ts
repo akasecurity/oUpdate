@@ -64,3 +64,27 @@ for (const d of ["x", "docs", "test"]) {
 }
 test("cd lib && node ../../evil.js leaves the package: a changed docs/evil.js holds", () =>
   expect(held("cd lib && node ../../evil.js", "docs/evil.js")).toBe(true));
+
+// A path that resolves to the package root runs its `main`, or index.js.
+const rootPkg = (v: string, hook: string, main: string | undefined, extra: Record<string, string>) =>
+  files({
+    "package.json": JSON.stringify({ name: "p", version: v, ...(main ? { main } : {}), scripts: { postinstall: hook } }),
+    "lib/ok.js": "console.log('ok')\n",
+    ...Object.fromEntries(Object.entries(extra).map(([k, s]) => [k, s.replace("V", v)])),
+  });
+const rootHeld = (hook: string, main: string | undefined, extra: Record<string, string>) =>
+  holds(rootPkg("1.0.0", hook, main, extra), rootPkg("1.0.1", hook, main, extra)).length > 0;
+for (const d of ["lib", "docs", "test"]) {
+  for (const hook of ["node .", "node lib/..", "node ./lib/../.", "node ./", "cd lib && node .."]) {
+    test(`${hook}: the package main ${d}/evil.js changed holds`, () =>
+      expect(rootHeld(hook, `${d}/evil.js`, { [`${d}/evil.js`]: "console.log('evil V')\n" })).toBe(true));
+  }
+}
+test("node . without a main runs index.js: a changed index.js holds", () =>
+  expect(rootHeld("node .", undefined, { "index.js": "console.log('evil V')\n" })).toBe(true));
+test("node . with neither a main nor an index.js stays quiet: node runs nothing", () =>
+  expect(rootHeld("node .", undefined, { "docs/evil.js": "console.log('evil V')\n" })).toBe(false));
+test("node . with an unchanged main stays quiet when another file changes", () =>
+  expect(rootHeld("node .", "lib/ok.js", { "docs/evil.js": "console.log('evil V')\n" })).toBe(false));
+test("node lib/../lib with a manifest main in lib holds when that main changes", () =>
+  expect(rootHeld("node lib/../lib", undefined, { "lib/package.json": '{"main":"m.js"}', "lib/m.js": "console.log('evil V')\n" })).toBe(true));

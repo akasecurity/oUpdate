@@ -4497,8 +4497,25 @@ function noteHookArgCwd(ctx: Ctx, token: string): void {
       // A path that leaves the package: every file is read, and later checks are not switched off first.
       ctx.widenInert = true;
       widenAll(ctx);
-    } else noteHookArg(ctx, j);
+    } else if (j === "") noteRootMain(ctx);
+    else noteHookArg(ctx, j);
   }
+}
+
+// `node .` and `node lib/..` run the package root as a directory: its manifest `main`, or index.js. A root with neither
+// runs nothing (and `tsc -p .` names the root without running it), so it is not a hold.
+function noteRootMain(ctx: Ctx): void {
+  if (ctx.hold) return;
+  const manifest = ctx.logical.get("package.json");
+  const pj = manifest ? parseJson(ctx.bytes.get(manifest)) : undefined;
+  const rel = normalize(pj && typeof pj.main === "string" ? pj.main : "index.js");
+  if (!rel || badPath(rel) || /[*?[]/.test(rel)) {
+    fail(ctx, "unresolved: path");
+    return;
+  }
+  if (!findKey(ctx, rel)) return;
+  markHookFile(ctx, rel);
+  addRef(ctx, rel);
 }
 
 function noteHookArg(ctx: Ctx, token: string, afterCd = false): void {
@@ -4506,6 +4523,10 @@ function noteHookArg(ctx: Ctx, token: string, afterCd = false): void {
   // A glob still reaches addRef, so the glob and pattern-length caps stay holds.
   if (!token || token.startsWith("-")) return;
   const logical = normalize(token);
+  if (!afterCd && /^(?:\.\/*)+$/.test(token)) {
+    noteRootMain(ctx);
+    return;
+  }
   if (!afterCd && logical && /(^|\/)\.{1,2}(\/|$)/.test(logical) && !logical.startsWith("/") && !/^[A-Za-z]:/.test(logical) && !/[\u0005$~*?[]/.test(logical)) {
     // A path with a `.` or `..` segment names the file it resolves to (`lib/../x/evil.js` is x/evil.js). One that leaves the
     // package reads every file, as a path joined to an earlier `cd` does.
@@ -4513,7 +4534,8 @@ function noteHookArg(ctx: Ctx, token: string, afterCd = false): void {
     if (j === undefined) {
       ctx.widenInert = true;
       widenAll(ctx);
-    } else if (j && !badPath(j)) {
+    } else if (j === "") noteRootMain(ctx);
+    else if (!badPath(j)) {
       markHookFile(ctx, j);
       addRef(ctx, j);
     }
