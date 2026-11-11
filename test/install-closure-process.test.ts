@@ -1430,3 +1430,20 @@ test("this.execve is not a plain member of this", () => {
 test("this.loadEnvFile is not a plain member of this", () => {
   expect(widensDocs('exports.main = function () { this.loadEnvFile("./docs/payload.txt") }\n')).toBe(true);
 });
+// A builtin import that can run or load code makes the file not static, as require of it already does.
+const bi = (stmt: string) => `${stmt}\nexports.main = () => 1\n`;
+for (const mod of ["cluster", "inspector", "node:test", "repl", "v8", "http", "https", "http2", "net", "tls", "dgram", "dns", "node:sqlite", "worker_threads", "child_process", "vm", "module", "wasi", "async_hooks", "diagnostics_channel", "trace_events", "node:foo", "perf_hooks", "readline"]) {
+  test(`an import of ${mod} is not static, with the comment and spacing variants (builtins)`, () => {
+    for (const stmt of [`import c from "${mod}";`, `import * as c from "${mod}"`, `import "${mod}"`, `import{x}from"${mod}";`, `import /* c */ x from /* d */ "${mod}"`, `export * from "${mod}"`, `export {a} from"${mod}"`, `import("${mod}")`])
+      expect(held(bi(stmt))).toBe(true);
+  });
+}
+for (const mod of ["fs", "node:fs", "fs/promises", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer", "node:path", "lodash", "./helper.js"]) {
+  test(`an import of ${mod} stays static (builtins)`, () => {
+    for (const stmt of [`import c from "${mod}";`, `import{x}from"${mod}"`, `export * from "${mod}"`]) expect(held(bi(stmt))).toBe(false);
+  });
+}
+test("a builtin that can run code, then a regex that holds the use on the next line, is not static (builtins)", () => {
+  expect(held(`${A}import h from "http"\n${QX}\n`)).toBe(true);
+  expect(held(`${A}import c from "cluster"; c.setupPrimary({ exec: "./payload.cjs" }); c.fork();\n`)).toBe(true);
+});

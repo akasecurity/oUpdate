@@ -911,6 +911,8 @@ function stripLiteralLoad(raw: string): boolean {
   const root = builtinRoot(spec);
   if (!root) return true;
   if (STATIC_BUILTINS.has(root)) return true;
+  // A node: name that is not on the allowlist is a builtin too, including one this list does not know yet.
+  if (spec.startsWith("node:")) return false;
   return !NODE_BUILTINS.has(root);
 }
 
@@ -1122,7 +1124,7 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
           out += text.slice(i, end + 1);
         }
         i = end + 1;
-        if (!keep) out += "/r/";
+        if (!keep) out += "/0/"; // a body no identifier can match: a regex literal is never a name
         push("regex", "");
       } else {
         out += "/";
@@ -1865,7 +1867,12 @@ function provablyStaticScan(source: string): boolean {
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3, at: number, whole: string) => {
     const spec = String(spec1 || spec2 || spec3 || "");
     if (builtinRoot(loadedSpec(spec) ?? "") === "process") viaOther = true;
-    if (!stripLiteralLoad(spec)) return full;
+    if (!stripLiteralLoad(spec)) {
+      // A require call stays in the text and UNSAFE_JS sees it; an import declaration or export-from has no such word, so a
+      // builtin that can run or load code (cluster, inspector, v8, sqlite, http, ...) makes the file not static here.
+      if (spec1 === undefined) viaOther = true;
+      return full;
+    }
     // from "x" and import "x" end an import declaration only when the string is on the keyword's line and no . comes before
     // it (a variable named from, a property named import, are not declarations). Anything else is read as an expression, and
     // a / right after it could be a regular expression or a division: not static.
@@ -2259,12 +2266,16 @@ function widenJs(ctx: Ctx, key: string, text: string): void {
     widenEvery(ctx);
   }
 }
+function addSameDirIf(ctx: Ctx, key: string, tier: JsTier): void {
+  if (tier.pkg || tier.dirs.length === 0 || tier.same) addSameDir(ctx, key);
+}
 function widenJsScan(ctx: Ctx, key: string, text: string): void {
   const tier = classifyJs(key, text);
   if (tier.all) widenEvery(ctx);
-  else if (tier.pkg) widenPackage(ctx, tier.tests, tier.flows);
   else {
-    if (tier.dirs.length === 0 || tier.same) addSameDir(ctx, key);
+    if (tier.pkg) widenPackage(ctx, tier.tests, tier.flows);
+    // The package tier leaves docs out; a directory a literal-headed load names, and the hook's own folder, stay in whole.
+    if (!tier.pkg || tier.same) addSameDirIf(ctx, key, tier);
     for (const dir of tier.dirs) addPrefixDir(ctx, dir);
   }
   for (const path of tier.lits) addLogical(ctx, path);
@@ -2471,12 +2482,11 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
   const text = codeOnly(source, [], true) ?? source;
   if (hasUnbounded(text, source)) tier.all = true;
-  const re = /(?:^|[^\w$])(?:require|import|fork|execFile|execFileSync)\s*\(/g;
-  for (const m of text.matchAll(re)) {
-    const paren = (m.index ?? 0) + m[0].lastIndexOf("(");
-    const args = argsOf(text, paren);
-    if (args === undefined) continue;
-    mergeEffect(tier, effectOf(fromKey, firstArg(args)));
+  cls = { text, ...pathNames(text), bind: new Map(), memo: new Map(), visiting: new Set(), steps: 0, defSteps: 0 };
+  try {
+    classifyLoads(tier, fromKey, text);
+  } finally {
+    cls = undefined;
   }
   // A hit we do not classify can name any non-doc file, including tests and workflows.
   if (!tier.all && unclassifiedUnsafe(text)) {
@@ -2485,6 +2495,294 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
     tier.flows = true;
   }
   return tier;
+}
+// require without a call: not `require(`, `require.resolve(`, `typeof require`, `require.main/cache/extensions`, not a member name, not a parameter of the
+// module wrapper. module.require and createRequire(...) results count when they are not called on the spot.
+// `r = `, `const r = `, `export const r = `, `const a = 1, r = ` before a createRequire call (optionally through a member chain).
+const BOUND_STMT = /^\s*(?:export\s+)?(?:(?:const|let|var)\s+(?:[A-Za-z_$][\w$]*\s*(?:=\s*[^,;()[\]{}]*)?,\s*)*)?[A-Za-z_$][\w$]*\s*=\s*(?:[\w$]+\s*\.\s*)*$/;
+function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
+  const names = new Set(["require", ...aliases]);
+  for (const m of text.matchAll(/(?<![\w$.])[A-Za-z_$][\w$]*(?![\w$])/g)) {
+    const name = m[0];
+    if (!names.has(name)) continue;
+    const at = m.index ?? 0;
+    const after = text.slice(at + name.length, at + name.length + 60);
+    const before = text.slice(Math.max(0, at - 40), at);
+    if (/^\s*\(/.test(after)) continue; // a direct call
+    if (/^\s*\.\s*(?:resolve\s*\(|main\b|cache\b|extensions\b|paths\b)/.test(after)) continue;
+    if (/\btypeof\s+$/.test(before)) continue;
+    if (/\b(?:const|let|var|function)\s+$/.test(before)) continue;
+    if (/^\s*=(?!=)/.test(after)) continue; // its own binding
+    if (/[{,]\s*$/.test(before) && /^\s*:/.test(after) && !keyBindsLoader(text, at + name.length)) continue; // a property name ({ require: true }), not a key that binds a name ({ require: r } = module, a parameter, a catch or for-of binding)
+    if (inParamList(text, at, name.length)) continue; // a parameter named like the loader
+    if (name === "require" && /(?:^|[;\n}])\s*module\s*\.\s*exports\s*=\s*$/.test(before) && /^[ \t]*(?:;|\r?\n|$)/.test(after) && !exportsUsed(text)) continue; // module.exports = require; and nothing reads the export
+
+    return true;
+  }
+  // A computed member key (module["require"], module[`require`]) is a name, not text.
+  if (computedRequire(keptKeys)) return true;
+  // Reflect.get(module, "require"), Object.getOwnPropertyDescriptor(module, "require"): the loader read by a string key through a call.
+  for (const m of keptKeys.matchAll(/(?<![\w$.])(?:Reflect|Object)\s*\.\s*\w+\s*\(/g)) {
+    const args = argsOf(keptKeys, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined) return true;
+    const list = splitTop(args, ",");
+    if (list.slice(1).some((a) => /^\s*(["'`])require\1\s*$/.test(a))) return true;
+  }
+  // A read by a key the file builds (a name, an expression) from module, require.main, module.parent or a name bound to one. The code is read
+  // with strings, template text and regular-expression bodies blanked by the scan, so a quote inside a regex starts no string.
+  // The scan leaves a lone backtick where a template opens a substitution; read as a space the brackets balance.
+  const flat = text.replace(/`/g, " ");
+  for (const m of flat.matchAll(/(?<![\w$.])(?:Reflect|Object)\s*\.\s*(get|getOwnPropertyDescriptors?|entries|values|assign|fromEntries|getOwnPropertyNames|ownKeys)\s*\(/g)) {
+    const args = argsOf(flat, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined || splitTop(args, ",").some((a) => mentionsModule(a, flat))) return true;
+  }
+  // module.require handed on (a bare mention, .bind(...)).
+  for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
+  // A createRequire(...) result that is neither called on the spot nor bound to a plain name (a member, an argument, a ternary).
+  for (const m of text.matchAll(/(?<![\w$])createRequire\s*\(/g)) {
+    const inner = argsOf(text, (m.index ?? 0) + m[0].length - 1);
+    if (inner === undefined) return true;
+    const end = (m.index ?? 0) + m[0].length + inner.length + 1;
+    if (/^\s*\(/.test(text.slice(end, end + 6))) continue;
+    const { from } = statementStart(text, m.index ?? 0);
+    const stmt = text.slice(from, m.index ?? 0);
+    if (BOUND_STMT.test(stmt)) continue;
+    if (/\bconst\s*\{[^}]*\}\s*=\s*require\s*\(\s*["']module["']\s*\)\s*$/.test(stmt)) continue;
+    return true;
+  }
+  return false;
+}
+
+// A `require:` key ending at `end` binds a name when it sits in a destructuring left side or its value is a plain name (a parameter, a
+// catch or for-of binding, a pattern of any depth). It is data only when its value is true, false, null, a number or a string.
+function keyBindsLoader(text: string, end: number): boolean {
+  if (keyInPattern(text, end)) return true;
+  const value = /^\s*:\s*([A-Za-z_$][\w$]*)/.exec(text.slice(end, end + 80));
+  return value !== null && !/^(?:true|false|null|function|async|class|new|typeof|void|this|await|delete)$/.test(value[1]!);
+}
+// The { that holds the key ending at `end` is the left side of a destructuring ({ require: r } = module, nested too), not an object literal.
+function keyInPattern(text: string, end: number): boolean {
+  let d = 0;
+  for (let j = end; j < text.length && j - end < 400; j++) {
+    const c = text[j];
+    if (c === ";") return false;
+    if (c === "{" || c === "[" || c === "(") d++;
+    else if (c === ")" || c === "]") {
+      d--;
+      if (d < 0) return false;
+    } else if (c === "}") {
+      d--;
+      if (d < 0) {
+        const nx = nextNonSpace(text, j + 1);
+        const n1 = text[nx];
+        const n2 = text[nx + 1];
+        if (n1 === "=" && n2 !== "=" && n2 !== ">") return true;
+        if (n1 !== "}" && n1 !== ",") return false;
+        d = 0; // inside an enclosing brace of the same left side
+      }
+    }
+  }
+  return false;
+}
+// The expression names module, require, require.main, module.parent or a name assigned from one of them (module.exports, require.cache and
+// the like are not the loader).
+function mentionsModule(expr: string, text: string): boolean {
+  const names = new Set(["module", "require"]);
+  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:module|require)(?![\w$])(?!\s*\()(?!\s*\.\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\b)/g)) names.add(m[1]!);
+  // The text is already blanked by the scan: strings are text and a key before a colon is a name of data, not a reference.
+  const code = expr;
+  for (const name of names) {
+    const n = name.replace(/\$/g, "\\$");
+    for (const m of code.matchAll(new RegExp(`(?<![\\w$.])${n}(?![\\w$])(?!\\s*\\()(?!\\s*\\.\\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\\b)`, "g"))) {
+      const k = m.index ?? 0;
+      let b = k - 1;
+      while (b >= 0 && /\s/.test(code[b]!)) b--;
+      if (code[nextNonSpace(code, k + name.length)] === ":" && (code[b] === "{" || code[b] === ",")) continue; // { module: 1 }, whatever the white space
+      return true; // a parameter of the same name proves nothing about what the call passes: it may hold the real module
+    }
+  }
+  return false;
+}
+// A computed ["require"] member holds whatever the receiver is (module, an alias, a flow, a call result, a data object): no receiver is provably
+// not a module object, so none is excused.
+function computedRequire(text: string): boolean {
+  return /\[\s*(["'`])require\1\s*\]/.test(text);
+}
+// The next character after white space of any length, and where it is.
+function nextNonSpace(text: string, from: number): number {
+  let i = from;
+  while (i < text.length && /\s/.test(text[i]!)) i++;
+  return i;
+}
+// The ) at `close` is followed by a function body on the same line. A line break before the { is never accepted: the { may open a block
+// (a label, a case, an if body), so a loader name before it is a call, not a method head.
+function bodyFollows(text: string, close: number): boolean {
+  const i = nextNonSpace(text, close + 1);
+  return text[i] === "{" && !/[\n\r\u2028\u2029]/.test(text.slice(close + 1, i));
+}
+// module.exports = require is read through only when nothing else reads module.exports: a call or an alias of it runs the loader.
+function exportsUsed(text: string): boolean {
+  for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*exports\b/g)) {
+    const rest = text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 40);
+    if (/^\s*=(?!=)/.test(rest) || /^\s*\.\s*[\w$]+\s*=(?!=)/.test(rest)) continue;
+    return true;
+  }
+  return false;
+}
+// The text before a ( ends in a method head: a name (after { , ; } or a modifier) in an object literal or a class body, a getter, a setter, an
+// async or generator method, or a catch clause. Keywords that take a ( and a block (if, while, for, switch, with) are not methods.
+function methodHead(head: string): boolean {
+  if (/(?:^|[{,;}])\s*(?:(?:static|async|get|set)\s+)*\*?\s*(?:(?:""|'')|\[[^\]]*\])\s*$/.test(head)) return true; // a quoted or computed method name
+  const m = /(?:^|[{,;}]|\b(?:static|async|get|set)\b|\*|\bcatch\b)\s*(?:\*\s*)?([A-Za-z_$][\w$]*)?\s*$/.exec(head);
+  if (!m) return false;
+  if (/\bcatch\s*$/.test(head)) return true;
+  return m[1] !== undefined && !/^(?:if|while|for|switch|with|return|typeof|else|do|catch|function|static|async|get|set)$/.test(m[1]);
+}
+// The name at `at` sits in a parameter list: (require, exports, module) before a body or an arrow.
+function inParamList(text: string, at: number, len: number): boolean {
+  // Only a bare name in a declaration slot is a parameter: right after the ( or a top-level comma, followed by , ) or a default.
+  // A loader inside a default (cb = require, a = [require], a = x || require) is a value.
+  if (!/[(,]\s*$/.test(text.slice(Math.max(0, at - 40), at)) || !/^\s*(?:[,)]|=(?![=>]))/.test(text.slice(at + len, at + len + 12))) return false;
+  let depth = 0;
+  let sq = 0;
+  let k = at - 1;
+  for (; k >= 0 && at - k < 300; k--) {
+    const c = text[k];
+    if (c === ")") depth++;
+    else if (c === "]") sq++;
+    else if (c === "[") {
+      if (sq === 0) return false;
+      sq--;
+    } else if (c === "(") {
+      if (depth === 0) break;
+      depth--;
+    } else if (c === "{" || c === ";") return false;
+  }
+  if (k < 0 || text[k] !== "(") return false;
+  let d = 0;
+  let j = at + len;
+  for (; j < text.length && j - at < 300; j++) {
+    const c = text[j];
+    if (c === "(") d++;
+    else if (c === ")") {
+      if (d === 0) break;
+      d--;
+    }
+  }
+  if (text[j] !== ")") return false;
+  const head = text.slice(Math.max(0, k - 60), k);
+  return /(?<![\w$.])function\s*\*?\s*[\w$]*\s*$/.test(head) || text.startsWith("=>", nextNonSpace(text, j + 1)) || (methodHead(head) && bodyFollows(text, j));
+}
+const FUNCTION_START = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/;
+function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
+  loaderOverflow = false;
+  const callers = new Set(["require", "import", "fork", "execFile", "execFileSync", ...loaderNames(text)]);
+  if (loaderOverflow) {
+    // A createRequire statement too long to read: any call may be a load.
+    tier.pkg = true;
+    tier.tests = true;
+    tier.flows = true;
+  }
+  // The files a spawn names are read from the package root (the working directory) and from this file's folder (a cwd option,
+  // __dirname): both bases, merged.
+  const rootBases = fromKey === "package.json" || !fromKey.includes("/") ? [fromKey] : [fromKey, "package.json"];
+  // One pass over every call, whatever it is called through, keeps a file with thousands of aliases linear.
+  for (const m of text.matchAll(/(?<![\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const callee = m[1]!;
+    if (!callers.has(callee)) continue;
+    // After a dot a require( is a member call (module.require, require.main.require, module.parent.require, m.require, an object
+    // holding require) and is read as a load; process calls (child_process.fork) too. Other names after a dot are not loads.
+    const dotted = /\.\s*$/.test(text.slice(Math.max(0, (m.index ?? 0) - 3), m.index ?? 0));
+    if (dotted && !/^(?:require|import|fork|execFile|execFileSync)$/.test(callee)) continue;
+    const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined) continue;
+    // A method definition (`{ require(x) { ... } }`, `class C { load(x) { } }`) is no call: `) {` on the same line can only open a body; after a line break only inside an object literal or class.
+    if (!dotted && /(?:^|[{,])\s*(?:(?:static|async|get|set)\s+)*\*?\s*$/.test(text.slice(Math.max(0, (m.index ?? 0) - 40), m.index ?? 0)) && bodyFollows(text, (m.index ?? 0) + m[0].length + args.length)) continue;
+    const arg = firstArg(args);
+    const spawns = /^(?:fork|execFile|execFileSync)$/.test(callee);
+    // An alias, a member call and a name held string leave the hook's own folder in the set: only a direct literal-headed argument restricts.
+    const direct = !dotted && /^(?:require|import|fork|execFile|execFileSync)$/.test(callee);
+    const floor = !direct || /^[A-Za-z_$][\w$]*$/.test(arg.trim());
+    if (spawns) for (const base of rootBases) loadEffect(tier, base, arg, text, floor);
+    else loadEffect(tier, fromKey, arg, text, floor);
+  }
+  for (const m of text.matchAll(/(?<![\w$.])require\s*\.\s*resolve\s*\(/g)) {
+    const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
+    if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text, true);
+  }
+  // createRequire(...)(x) loads x like require does.
+  for (const m of text.matchAll(new RegExp(`\\b(?:${createRequireNames(text).join("|")})\\s*\\(`, "g"))) {
+    const open = (m.index ?? 0) + m[0].length - 1;
+    const inner = argsOf(text, open);
+    if (inner === undefined) continue;
+    const after = open + inner.length + 2;
+    const call = /^\s*\(/.exec(text.slice(after));
+    if (!call) continue;
+    const args = argsOf(text, after + call[0].length - 1);
+    if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text, true);
+  }
+  // A code-running builtin that loads a file by name (cluster.setupPrimary({ exec }), module.register(...), Module._load(...)).
+  if ((/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["'`](?:node:)?(?:cluster|module)["'`]/.test(text) && /\b(?:setupPrimary|setupMaster)\s*\(|\bsettings\s*\.\s*exec\b|\bregister\s*\(|\b_load\s*\(/.test(text)) || /\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(text)) {
+    tier.pkg = true;
+    tier.tests = true;
+    tier.flows = true;
+  }
+  // Any other mention of require, module.require or a createRequire result that is not itself an immediate call is a loader handed on as a value.
+  const blank = codeOnly(text, [], false) ?? text;
+  if (handedOn(blank, [...callers].filter((n) => !/^(?:require|import|fork|execFile|execFileSync)$/.test(n)), text)) {
+    tier.pkg = true;
+    tier.tests = true;
+    tier.flows = true;
+  }
+  // require or import handed on as a value (`list.map(require)`, `[require]`) loads whatever it is called with later.
+  for (const m of blank.matchAll(/(?:[(,[:?]|\breturn|=>)\s*(?:require|import)(?![\w$])(?!\s*[(.])/g)) {
+    const at = (m.index ?? 0) + m[0].search(/(?:require|import)$/);
+    const name = m[0].endsWith("require") ? "require" : "import";
+    // A parameter or a property name is a name, not the loader: function (require, exports, module), { a: 1, require: x }.
+    if (inParamList(blank, at, name.length)) continue;
+    if (m[0].startsWith(",") && /^\s*:/.test(blank.slice(at + name.length, at + name.length + 6)) && !keyBindsLoader(blank, at + name.length)) continue;
+    tier.pkg = true;
+    tier.tests = true;
+    tier.flows = true;
+    break;
+  }
+  // A process call whose argument vector holds an element that is not a plain string names a file the same way. The vector may
+  // be a literal, a name bound to one (through other names), a parameter, or an expression such as process.argv.slice(2).
+  const vectorOf = (t: string, depth: number): string[] => {
+    if (!/^[A-Za-z_$][\w$]*$/.test(t) || depth > 3) return [t];
+    const inits = bindingsOf(t);
+    return inits.length ? inits.flatMap((init) => vectorOf(init.trim(), depth + 1)) : [t];
+  };
+  for (const m of text.matchAll(/(?<![\w$])(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\(/g)) {
+    const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined) continue;
+    const list = splitTop(args, ",");
+    // An options object that sets cwd moves every relative file of the call (the package), when the program is node or a path;
+    // a named tool (node-gyp, git) runs its own files.
+    if (/\bcwd\s*:/.test(args)) {
+      const program = list[0]?.trim() ?? "";
+      const lit = strLit(program);
+      const named = lit !== undefined && /^[\w.-]+$/.test(lit) && !/^(?:node|nodejs|bun|deno)$/.test(lit) && !lit.startsWith(".");
+      if (/^fork\b/.test(m[0]) || !named) {
+        tier.pkg = true;
+        tier.tests = true;
+        tier.flows = true;
+      }
+    }
+    for (let k = 1; k < list.length; k++) {
+      const t = list[k]!.trim();
+      if (!t || t.startsWith("{") || strLit(t) !== undefined || FUNCTION_START.test(t)) continue;
+      for (const v of vectorOf(t, 0)) {
+        if (FUNCTION_START.test(v)) continue; // a callback held by a name
+        if (v.startsWith("[") && v.endsWith("]")) {
+          for (const el of splitTop(v.slice(1, -1), ",")) {
+            const e = el.trim();
+            if (e && strLit(e) === undefined && !/^-/.test(e)) for (const base of rootBases) loadEffect(tier, base, e, text, true);
+          }
+        } else if (!v.startsWith("{") && strLit(v) === undefined) for (const base of rootBases) loadEffect(tier, base, v, text, true);
+      }
+    }
+  }
 }
 
 // npm sets npm_package_json to this package's manifest. dirname of it is the package root.
@@ -4030,6 +4328,15 @@ function applyNonJs(ctx: Ctx, text: string, lang: NonJsLang): boolean {
   return true;
 }
 
+// The effect of one load argument. An argument that names nothing (a parameter, an unresolved name) can still be any file of
+// this directory or above, so it keeps that fallback even when another call restricts to a directory.
+function loadEffect(tier: JsTier, fromKey: string, arg: string, text: string, floor = false): void {
+  const eff = effectOf(fromKey, arg, text);
+  mergeEffect(tier, eff);
+  if (eff.t === "none" && strLit(arg.trim()) === undefined) tier.same = true;
+  // A shape main did not classify at all kept the hook's own folder: a restriction to one directory keeps it too.
+  if (floor && (eff.t === "prefix" || eff.t === "lit")) tier.same = true;
+}
 function mergeEffect(tier: JsTier, eff: JsEffect): void {
   if (eff.t === "none") return;
   if (eff.t === "same") {
@@ -4055,15 +4362,385 @@ function mergeEffect(tier: JsTier, eff: JsEffect): void {
 }
 
 // A plain identifier is a package name (require(name)), not a file path.
-function effectOf(fromKey: string, expr: string): JsEffect {
+// The names a file binds to require, or to the result of createRequire(...): a call through one loads like require.
+// An assignment anywhere counts (`let r; r = require`), so do aliases of aliases (up to three deep) and require.bind(...).
+// Back from a call to the start of its statement: a ; ends it, a newline does too unless the line before ends with an operator or the
+// line after starts with one (the usual wrap of a long statement). Past this many characters the statement is unreadable.
+function statementStart(text: string, at: number): { from: number; overflow: boolean } {
+  let from = at;
+  const floor = Math.max(0, at - 3000);
+  while (from > floor && text[from - 1] !== ";") {
+    // The { of a block (after ), =>, try, else, do, finally) opens a new statement: the head before it is not part of this one.
+    if (text[from - 1] === "{" && /(?:\)|=>|\b(?:try|else|do|finally))\s*$/.test(text.slice(Math.max(0, from - 40), from - 1))) break;
+    if (text[from - 1] === "\n") {
+      const prev = text.slice(Math.max(0, from - 200), from - 1).trimEnd();
+      const next = text.slice(from, from + 40).trimStart()[0] ?? "";
+      if (!/[=(,+\-*/?:&|{[]$/.test(prev) && !/[.?:&|+]/.test(next)) break;
+    }
+    from--;
+  }
+  return { from, overflow: from === floor && floor > 0 };
+}
+
+function loaderNames(text: string): string[] {
+  const id = "[A-Za-z_$][\\w$]*";
+  const names = new Set<string>();
+  for (const m of text.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*(?:module\\s*\\.\\s*)?require\\b(?!\\s*\\()(?!\\s*\\.\\s*(?!bind\\b))`, "g"))) names.add(m[1]!);
+  // name = ...createRequire(...): walk back from each call to the start of its statement, whatever the length of what lies between.
+  for (const maker of createRequireNames(text)) {
+    for (const m of text.matchAll(new RegExp(`(?<![\\w$])${maker.replace(/\$/g, "\\$")}\\s*\\(`, "g"))) {
+      const { from, overflow } = statementStart(text, m.index ?? 0);
+      const stmt = text.slice(from, m.index ?? 0);
+      // Every identifier assigned in the statement may be the loader (`const r = (other = 1, make(f))`).
+      for (const b of stmt.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=(?!=)`, "g"))) names.add(b[1]!);
+      if (overflow) loaderOverflow = true; // a statement too long to read: the file widens, whatever was found in it
+    }
+  }
+  // name = other: one scan builds the edges, then three rounds walk them, so a thousand aliases cost one pass.
+  const edges = new Map<string, string[]>();
+  for (const m of text.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*(${id})(?![\\w$])(?!\\s*[(.])`, "g"))) {
+    const list = edges.get(m[2]!);
+    if (list) list.push(m[1]!);
+    else edges.set(m[2]!, [m[1]!]);
+  }
+  let frontier = [...names];
+  for (let round = 0; round < 3 && frontier.length; round++) {
+    const next: string[] = [];
+    for (const n of frontier) for (const to of edges.get(n) ?? []) if (!names.has(to)) { names.add(to); next.push(to); }
+    frontier = next;
+  }
+  return [...names];
+}
+let loaderOverflow = false;
+
+// createRequire and its renamed destructured binding (const { createRequire: cr } = require("module")).
+function createRequireNames(text: string): string[] {
+  const out = new Set<string>(["createRequire"]);
+  for (const m of text.matchAll(/\bcreateRequire\s*:\s*([A-Za-z_$][\w$]*)/g)) out.add(m[1]!);
+  return [...out];
+}
+
+// What a name is bound to: its initializers and later assignments, up to the end of the statement. A line that continues the
+// expression (a leading + . ? : & |, or a trailing operator) belongs to it; `+=` also reads the unknown left side.
+function bindingsOf(name: string): string[] {
+  const c = cls;
+  if (!c) return [];
+  const hit = c.bind.get(name);
+  if (hit) return hit;
+  const text = c.text;
+  const out: string[] = [];
+  const re = new RegExp(`(?:\\b(?:const|let|var)\\s+|(?<![\\w$.]))${name.replace(/\$/g, "\\$")}\\s*(\\+|\\|\\||\\?\\?|&&)?=(?![=>])`, "g");
+  for (const m of text.matchAll(re)) {
+    let start = (m.index ?? 0) + m[0].length;
+    while (start < text.length && /\s/.test(text[start]!)) start++;
+    let depth = 0;
+    let quote: string | null = null;
+    let i = start;
+    for (; i < text.length; i++) {
+      const ch = text[i]!;
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === "`") quote = ch;
+      else if (ch === "(" || ch === "[" || ch === "{") depth++;
+      else if (ch === ")" || ch === "]" || ch === "}") {
+        if (depth === 0) break;
+        depth--;
+      } else if (depth === 0 && (ch === ";" || ch === ",")) break;
+      else if (depth === 0 && ch === "\n") {
+        const before = /[+\-*/?:&|.,=(]\s*$/.test(text.slice(start, i));
+        const after = /^\s*[+.?:&|]/.test(text.slice(i + 1, i + 40));
+        if (!before && !after) break;
+      }
+    }
+    const init = text.slice(start, i).trim();
+    if (init) out.push(m[1] === "+" ? `__prev + ${init}` : init);
+  }
+  c.bind.set(name, out);
+  return out;
+}
+
+// One classify call's view of the file: the path-module names, and the bindings it has already read. A name is read once,
+// a name met again while it is being read counts for nothing more, and past this many names the answer is the package.
+type FnDef = { fname?: string; alias?: string; params: string[]; kind: "named" | "export" | "anon" | "method"; destructured: string };
+type ClsCtx = { text: string; mods: Set<string>; fns: Set<string>; bind: Map<string, string[]>; memo: Map<string, JsEffect>; visiting: Set<string>; steps: number; defs?: FnDef[]; refs?: Map<string, { calls: string[]; other: boolean; exported: boolean }>; defSteps: number };
+let cls: ClsCtx | undefined;
+const BIND_STEPS = 200;
+const WIDE: JsEffect = { t: "pkg", tests: true, flows: true };
+
+function combineEffects(effects: JsEffect[]): JsEffect {
+  if (effects.length === 0 || effects.every((e) => e.t === "none")) return { t: "none" };
+  if (effects.some((e) => e.t === "all")) return { t: "all" };
+  const wide = effects.filter((e): e is Extract<JsEffect, { t: "pkg" }> => e.t === "pkg");
+  if (wide.length) return { t: "pkg", tests: wide.some((e) => e.tests), flows: wide.some((e) => e.flows) };
+  // A restriction to a directory stands only when every one restricts the same way; one that names nothing or a different
+  // directory leaves the whole package possible.
+  const first = JSON.stringify(effects[0]);
+  if (effects.every((e) => JSON.stringify(e) === first)) return effects[0]!;
+  return { t: "all" };
+}
+
+function nameEffect(fromKey: string, name: string, depth: number): JsEffect {
+  const c = cls;
+  if (!c) return { t: "none" };
+  const key = `${fromKey}\0${name}`; // the same name read from another base is another answer
+  const hit = c.memo.get(key);
+  if (hit) return hit;
+  if (c.visiting.has(key)) return { t: "none" };
+  if (++c.steps > BIND_STEPS || depth >= 8) return WIDE;
+  c.visiting.add(key);
+  let eff: JsEffect;
+  try {
+    eff = nameEffectScan(fromKey, name, depth);
+  } finally {
+    c.visiting.delete(key);
+  }
+  c.memo.set(key, eff);
+  return eff;
+}
+
+function nameEffectScan(fromKey: string, name: string, depth: number): JsEffect {
+  const c = cls!;
+  const n = name.replace(/\$/g, "\\$");
+  // A name taken out of a structure or a loop (`const { p } = o`, `for (const p of list)`, `catch (p)`) is data the scan cannot follow.
+  if (new RegExp(`\\b(?:const|let|var)\\s*[{\\[][^;=]*?(?<![\\w$.])${n}(?![\\w$])[^;=]*?[}\\]]\\s*=|\\bfor\\s*\\(\\s*(?:const|let|var)\\s+${n}\\s+(?:of|in)\\b|\\bcatch\\s*\\(\\s*${n}\\s*\\)`).test(c.text)) return WIDE;
+  const effects = bindingsOf(name).map((init) => effectOf(fromKey, init, "", depth + 1));
+  // A parameter that is also assigned still gets the arguments of its function's calls.
+  const param = paramEffect(fromKey, name, depth);
+  if (param.t !== "none" || effects.length === 0) effects.push(param);
+  return combineEffects(effects);
+}
+
+// Every function-like construct of the file with its parameter names, found once: declarations, function expressions, arrows,
+// and method shorthand. `kind` says how the function can be reached: by its own name, as an export, or not by a name at all.
+function fnDefs(): FnDef[] {
+  const c = cls!;
+  if (c.defs) return c.defs;
+  const text = c.text;
+  const defs: FnDef[] = [];
+  const parse = (list: string): { params: string[]; destructured: string } => {
+    const params: string[] = [];
+    let destructured = "";
+    for (const raw of splitTop(list, ",")) {
+      const x = raw.trim().replace(/^\.\.\./, "");
+      if (/^[{[]/.test(x)) {
+        destructured += ` ${x}`;
+        params.push("");
+      } else params.push(x.replace(/\s*=.*$/s, "").trim());
+    }
+    return { params, destructured };
+  };
+  const heads = (at: number) => text.slice(Math.max(0, at - 80), at);
+  const stored = (at: number): { fname?: string; kind: FnDef["kind"] } => {
+    const before = heads(at);
+    const bound = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?$/.exec(before);
+    if (bound) return { fname: bound[1]!, kind: "named" };
+    if (/(?:\bexports|\bmodule\s*\.\s*exports)(?:\s*\.\s*[\w$]+)?\s*=\s*(?:async\s*)?$/.test(before)) return { kind: "export" };
+    return { kind: "anon" };
+  };
+  // function name?(params): the list is read balanced, so a default such as y = String(1) does not end it.
+  for (const m of text.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(/g)) {
+    const list = argsOf(text, (m.index ?? 0) + m[0].length - 1);
+    if (list === undefined) continue;
+    const { params, destructured } = parse(list);
+    const own = stored(m.index ?? 0);
+    // `const go = function inner(x) {}` is reached as go; a bare `function go(x) {}` as go.
+    // The inner name is a second way in: its recursive calls are calls of this function too.
+    if (m[1] && own.kind === "named") defs.push({ fname: own.fname, alias: m[1], params, kind: "named", destructured });
+    else if (m[1]) defs.push({ fname: m[1], params, kind: "named", destructured }); // export function go: its own direct calls are read
+    else defs.push({ ...own, params, destructured });
+  }
+  // (params) => and name =>: for the parenthesized form the list is found by matching the ) backwards.
+  for (const m of text.matchAll(/=>/g)) {
+    const at = m.index ?? 0;
+    let j = at;
+    while (j > 0 && /\s/.test(text[j - 1]!)) j--;
+    let list = "";
+    let start = j;
+    if (text[j - 1] === ")") {
+      let depth = 0;
+      let k = j - 1;
+      for (; k >= 0 && j - k < 1500; k--) {
+        if (text[k] === ")") depth++;
+        else if (text[k] === "(" && --depth === 0) break;
+      }
+      if (k < 0 || depth !== 0) continue;
+      list = text.slice(k + 1, j - 1);
+      start = k;
+    } else {
+      const idm = /([A-Za-z_$][\w$]*)$/.exec(text.slice(Math.max(0, j - 80), j));
+      if (!idm || /[\w$.]$/.test(text.slice(Math.max(0, j - 80), j - idm[0].length))) continue;
+      list = idm[1]!;
+      start = j - idm[1]!.length;
+    }
+    const { params, destructured } = parse(list);
+    defs.push({ ...stored(/\basync\s+$/.test(text.slice(Math.max(0, start - 8), start)) ? start - 6 : start), params, destructured });
+  }
+  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    if (/^(?:if|for|while|switch|catch|with|function|return|else|do)$/.test(m[1]!)) continue;
+    if (/\bfunction\s*\*?\s*$/.test(heads(m.index ?? 0))) continue;
+    // A method definition starts a member: after { } , ; a newline, or static/async/get/set. A call nested in other calls does not.
+    if (!/(?:^|[{},;\n]|\b(?:static|async|get|set))\s*$/.test(heads(m.index ?? 0).slice(-30))) continue;
+    const list = argsOf(text, (m.index ?? 0) + m[0].length - 1);
+    if (list === undefined || list.length > 2000) continue;
+    const after = text.slice((m.index ?? 0) + m[0].length + list.length + 1, (m.index ?? 0) + m[0].length + list.length + 20);
+    if (!/^\s*\{/.test(after)) continue;
+    const { params, destructured } = parse(list);
+    defs.push({ params, kind: "method", destructured });
+  }
+  c.defs = defs;
+  return defs;
+}
+
+// The references to every function name that has a definition: its direct calls (with their argument lists) and whether anything
+// else mentions it (an alias, a member call, call/apply). A reference that only exports it (`exports.go = go`) is its own flag.
+// One pass over the file reads them all.
+function refsOf(fname: string): { calls: string[]; other: boolean; exported: boolean } {
+  const c = cls!;
+  if (!c.refs) {
+    const names = new Set<string>();
+    for (const d of fnDefs()) {
+      if (d.fname) names.add(d.fname);
+      if (d.alias) names.add(d.alias);
+    }
+    const refs = new Map<string, { calls: string[]; other: boolean; exported: boolean }>();
+    for (const n of names) refs.set(n, { calls: [], other: false, exported: false });
+    const text = c.text;
+    for (const m of text.matchAll(/(?<![\w$])[A-Za-z_$][\w$]*(?![\w$])/g)) {
+      const out = refs.get(m[0]);
+      if (!out || out.other) continue;
+      const at = m.index ?? 0;
+      const before = text.slice(Math.max(0, at - 40), at);
+      if (/\bfunction\s*\*?\s*$/.test(before)) continue; // its own declaration
+      if (/\b(?:const|let|var)\s+$/.test(before)) continue; // its own binding
+      if (/\.\s*$/.test(before)) {
+        // exports.go = ... names an export, not a use; any other member (o.go(x)) can reach the function.
+        if (/(?:\bexports|\bmodule\s*\.\s*exports)\s*\.\s*$/.test(before) && /^\s*=(?!=)/.test(text.slice(at + m[0].length, at + m[0].length + 4))) out.exported = true;
+        else out.other = true;
+        continue;
+      }
+      const call = /^\s*\(/.exec(text.slice(at + m[0].length, at + m[0].length + 8));
+      if (!call) {
+        if (/(?:\bexports|\bmodule\s*\.\s*exports)(?:\s*\.\s*[\w$]+)?\s*=\s*$/.test(before) || /\bexport\s*\{[^}]*$/.test(before)) out.exported = true;
+        else out.other = true;
+        continue;
+      }
+      const args = argsOf(text, at + m[0].length + call[0].length - 1);
+      if (args === undefined || out.calls.length >= 50) out.other = true;
+      else out.calls.push(args);
+    }
+    c.refs = refs;
+  }
+  return c.refs.get(fname) ?? { calls: [], other: false, exported: false };
+}
+
+// An export the file also calls (exports.go(x), module.exports(x), require(__filename).go(x)) is called from here with whatever it is given.
+function callsOwnExport(): boolean {
+  return /(?:\bexports|\bmodule\s*\.\s*exports)(?:\s*\.\s*[\w$]+)?\s*\(|\brequire\s*\(\s*__filename\s*\)/.test(cls!.text);
+}
+
+// A parameter names nothing until its function is called. A function reached only by direct calls takes the arguments of those
+// calls; one reached any other way (an alias, a member, call/apply, an IIFE, a callback, a method, a destructured parameter) can be
+// handed anything, so the load widens to the package. An exported function nobody calls here names nothing; one the file calls
+// through its export is read as a call from anywhere.
+function paramEffect(fromKey: string, name: string, depth: number): JsEffect {
+  const c = cls!;
+  const effects: JsEffect[] = [];
+  const done = new Set<string>();
+  for (const def of fnDefs()) {
+    const at = def.params.indexOf(name);
+    const hidden = def.destructured !== "" && new RegExp(`(?<![\\w$.])${name.replace(/\$/g, "\\$")}(?![\\w$])`).test(def.destructured);
+    if (at < 0 && !hidden) continue;
+    // One name can match thousands of definitions (a minified bundle): past this many the answer is the package.
+    if (++c.defSteps > BIND_STEPS) return WIDE;
+    if (hidden || def.kind === "method") {
+      effects.push(WIDE);
+      continue;
+    }
+    if (def.kind === "export") {
+      if (callsOwnExport()) effects.push(WIDE);
+      continue;
+    }
+    if (def.kind === "anon" || !def.fname) {
+      effects.push(WIDE);
+      continue;
+    }
+    const key = `${def.fname}:${at}`;
+    if (done.has(key)) continue;
+    done.add(key);
+    const refs = refsOf(def.fname);
+    const inner = def.alias ? refsOf(def.alias) : { calls: [] as string[], other: false, exported: false };
+    if (refs.other || inner.other) {
+      effects.push(WIDE);
+      continue;
+    }
+    if ((refs.exported || inner.exported) && callsOwnExport()) effects.push(WIDE);
+    for (const args of [...refs.calls, ...inner.calls]) {
+      const arg = splitTop(args, ",")[at];
+      if (arg !== undefined && arg.trim()) effects.push(effectOf(fromKey, arg, "", depth + 1));
+    }
+  }
+  return combineEffects(effects);
+}
+
+function effectOf(fromKey: string, expr: string, _text = "", depth = 0): JsEffect {
   const t = expr.trim();
-  if (!t || /^[A-Za-z_$][\w$]*$/.test(t) || strLit(t) !== undefined) return { t: "none" };
+  if (/^[A-Za-z_$][\w$]*$/.test(t)) return nameEffect(fromKey, t, depth);
+  // A property of a name (`o.p`) is what the name holds: a parameter's call-site arguments, a bound object.
+  if (/^[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)+$/.test(t)) {
+    const root = /^[A-Za-z_$][\w$]*/.exec(t)![0];
+    if (root !== "process" && root !== "__dirname" && root !== "__filename" && root !== "module" && root !== "exports") return nameEffect(fromKey, root, depth);
+  }
+  if (!t || strLit(t) !== undefined) return { t: "none" };
   if (/Buffer\.from\s*\(|\bbase64\b|\batob\s*\(/.test(t)) return { t: "pkg", tests: true, flows: true };
   const call = matchCall(t);
-  if (call && isJoinCallee(call.callee)) return effectOfJoin(fromKey, call.args, isResolveCallee(call.callee));
+  // A join or resolve is a path call when its receiver is the path module (`path`, `path?.join`, `(path).join`,
+  // require("path/win32").join, a destructured join). Any other join is a string built by joining pieces: when every piece is a
+  // literal it is that string, otherwise it can name any file, docs included.
+  if (call && isJoinCallee(call.callee)) {
+    const callee = call.callee.replace(/\s+/g, "").replace(/\?\./g, ".").replace(/\(([A-Za-z_$][\w$]*)\)/g, "$1");
+    if (isPathCallee(callee)) return effectOfJoin(fromKey, call.args, isResolveCallee(callee));
+    const exact = literalJoin(callee, call.args);
+    if (exact !== undefined) {
+      const walked = applySegs(parentParts(fromKey), exact);
+      const path = walked.escape ? "" : walked.parts.join("/");
+      return path ? { t: "lit", path } : { t: "none" };
+    }
+    return { t: "all" };
+  }
   if (t.includes("+") || t.startsWith("`")) return effectOfPlus(fromKey, t);
   if (/[([`]/.test(t)) return { t: "pkg", tests: true, flows: true };
   return { t: "none" };
+}
+
+// The callee of a join or resolve call is the path module: a name bound to it, a destructured join or resolve, or a require of it.
+function isPathCallee(callee: string): boolean {
+  const c = cls;
+  const rm = /^require\((["'`])(?:node:)?path(?:\/(?:posix|win32))?\1\)\.(?:(?:posix|win32)\.)?(?:join|resolve)$/.test(callee);
+  if (rm) return true;
+  if (!c) return false;
+  const bare = /^([A-Za-z_$][\w$]*)$/.exec(callee);
+  if (bare) return c.fns.has(bare[1]!);
+  const member = /^([A-Za-z_$][\w$]*)\.(?:(?:posix|win32)\.)?(?:join|resolve)$/.exec(callee);
+  return !!member && (c.mods.has(member[1]!) || c.fns.has(member[1]!));
+}
+
+// `["./do", "cs/x.js"].join("")`: the string a join of literals makes, when every piece is a literal.
+function literalJoin(callee: string, argsSrc: string): string | undefined {
+  if (!callee.endsWith(".join")) return undefined;
+  const recv = callee.slice(0, -5);
+  if (!recv.startsWith("[") || !recv.endsWith("]")) return undefined;
+  const parts: string[] = [];
+  for (const el of splitTop(recv.slice(1, -1), ",")) {
+    if (!el.trim()) continue;
+    const lit = strLit(el.trim());
+    if (lit === undefined) return undefined;
+    parts.push(lit);
+  }
+  const sep = argsSrc.trim() ? strLit(firstArg(argsSrc).trim()) : ",";
+  return sep === undefined ? undefined : parts.join(sep);
 }
 
 function isJoinCallee(callee: string): boolean {
