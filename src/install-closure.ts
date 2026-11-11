@@ -2527,8 +2527,14 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
     if (args === undefined) return true;
     const list = splitTop(args, ",");
     if (list.slice(1).some((a) => /^\s*(["'`])require\1\s*$/.test(a))) return true;
-    // A read by a key the file builds (a name, an expression) from module, require.main, module.parent or a name bound to one.
-    if (/^(?:get|getOwnPropertyDescriptors?|entries|values|assign|fromEntries|getOwnPropertyNames|ownKeys)$/.test(/\.\s*(\w+)\s*\($/.exec(m[0])?.[1] ?? "") && list.some((a) => mentionsModule(a, keptKeys))) return true;
+  }
+  // A read by a key the file builds (a name, an expression) from module, require.main, module.parent or a name bound to one. The code is read
+  // with strings, template text and regular-expression bodies blanked by the scan, so a quote inside a regex starts no string.
+  // The scan leaves a lone backtick where a template opens a substitution; read as a space the brackets balance.
+  const flat = text.replace(/`/g, " ");
+  for (const m of flat.matchAll(/(?<![\w$.])(?:Reflect|Object)\s*\.\s*(get|getOwnPropertyDescriptors?|entries|values|assign|fromEntries|getOwnPropertyNames|ownKeys)\s*\(/g)) {
+    const args = argsOf(flat, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined || splitTop(args, ",").some((a) => mentionsModule(a, flat))) return true;
   }
   // module.require handed on (a bare mention, .bind(...)).
   for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
@@ -2583,13 +2589,15 @@ function keyInPattern(text: string, end: number): boolean {
 function mentionsModule(expr: string, text: string): boolean {
   const names = new Set(["module", "require"]);
   for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:module|require)(?![\w$])(?!\s*\()(?!\s*\.\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\b)/g)) names.add(m[1]!);
-  // Strings are text and a key before a colon is a name of data, not a reference: only code mentions count.
-  const code = expr.replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, '""');
+  // The text is already blanked by the scan: strings are text and a key before a colon is a name of data, not a reference.
+  const code = expr;
   for (const name of names) {
     const n = name.replace(/\$/g, "\\$");
     for (const m of code.matchAll(new RegExp(`(?<![\\w$.])${n}(?![\\w$])(?!\\s*\\()(?!\\s*\\.\\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\\b)`, "g"))) {
       const k = m.index ?? 0;
-      if (/^\s*:/.test(code.slice(k + name.length, k + name.length + 12)) && /[{,]\s*$/.test(code.slice(Math.max(0, k - 12), k))) continue; // { module: 1 }
+      let b = k - 1;
+      while (b >= 0 && /\s/.test(code[b]!)) b--;
+      if (code[nextNonSpace(code, k + name.length)] === ":" && (code[b] === "{" || code[b] === ",")) continue; // { module: 1 }, whatever the white space
       return true; // a parameter of the same name proves nothing about what the call passes: it may hold the real module
     }
   }

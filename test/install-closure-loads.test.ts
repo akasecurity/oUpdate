@@ -574,3 +574,25 @@ for (const [label, hook] of [
 ] as [string, string][]) {
   test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
 }
+
+// Sixteenth review batch: quotes in regex literals and tagged templates hide no mention; a data key is found whatever the white space.
+for (const [label, hook] of [
+  ["a Reflect.get receiver chosen between two regexes holding a quote", `const k = "require";\nReflect.get((/"/ ? module : /"/), k).call(module, ${BX});`],
+  ["a Reflect.get receiver chosen between two regexes holding an apostrophe", `const k = "require";\nReflect.get((/'/ ? module : /'/), k).call(module, ${BX});`],
+  ["a Reflect.get receiver returned by a tagged template that holds module", "const k = \"require\";\nReflect.get(((s, m) => m)`\"${module}\"`, k).call(module, " + BX + ");"],
+  ["a Reflect.get receiver in a template substitution", "const k = \"require\";\nReflect.get(`${module}` && module, k).call(module, " + BX + ");"],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
+}
+
+for (const [label, hook] of [
+  ["a data key named module with 16 spaces before it", `Object.entries({\n${" ".repeat(16)}module: 1\n});`],
+  ["a data key named module with a long run of white space before the colon", `Object.entries({ module${" ".repeat(40)}: 1 });`],
+  ["a data key named module after a comma and many lines", `Object.assign({}, { a: 1,\n\n\n${" ".repeat(30)}module: 2 });`],
+  ["Object.assign onto an Error built from a template with a substitution", "const e = Object.assign(new Error(`bad ${1 + 1} thing`), { code: 'E' });"],
+  ["a string holding module in a Reflect.get key", `Reflect.get({ a: 1 }, "module", "x\\"module");`],
+] as [string, string][]) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
+  });
+}
