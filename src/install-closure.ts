@@ -2522,7 +2522,11 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   // A computed member key (module["require"], module[`require`]) is a name, not text.
   if (computedRequire(keptKeys)) return true;
   // Reflect.get(module, "require"), Object.getOwnPropertyDescriptor(module, "require"): the loader read by a string key through a call.
-  if (/\b(?:Reflect|Object)\s*\.\s*\w+\s*\(\s*[^,()]+,\s*(["'`])require\1/.test(keptKeys)) return true;
+  for (const m of keptKeys.matchAll(/(?<![\w$.])(?:Reflect|Object)\s*\.\s*\w+\s*\(/g)) {
+    const args = argsOf(keptKeys, (m.index ?? 0) + m[0].length - 1);
+    if (args === undefined) return true;
+    if (splitTop(args, ",").slice(1).some((a) => /^\s*(["'`])require\1\s*$/.test(a))) return true;
+  }
   // module.require handed on (a bare mention, .bind(...)).
   for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
   // A createRequire(...) result that is neither called on the spot nor bound to a plain name (a member, an argument, a ternary).
@@ -2582,29 +2586,11 @@ function nextNonSpace(text: string, from: number): number {
   while (i < text.length && /\s/.test(text[i]!)) i++;
   return i;
 }
-// The ) at `close` is followed by a function body. On the same line only a body can follow a ) that ends a parameter list; after a line
-// break a { may open a block, so it counts only inside an object literal or a class body.
+// The ) at `close` is followed by a function body on the same line. A line break before the { is never accepted: the { may open a block
+// (a label, a case, an if body), so a loader name before it is a call, not a method head.
 function bodyFollows(text: string, close: number): boolean {
   const i = nextNonSpace(text, close + 1);
-  if (text[i] !== "{") return false;
-  if (!/[\n\r\u2028\u2029]/.test(text.slice(close + 1, i))) return true;
-  let depth = 0;
-  for (let k = close; k >= 0 && close - k < 3000; k--) {
-    const c = text[k]!;
-    if (c === ")" || c === "]" || c === "}") depth++;
-    else if (c === "(" || c === "[") {
-      if (depth === 0) return false;
-      depth--;
-    } else if (c === "{") {
-      if (depth > 0) {
-        depth--;
-        continue;
-      }
-      const before = text.slice(Math.max(0, k - 200), k).trimEnd();
-      return /[=(,:[?&|+*%!~^]$/.test(before) || /(?<![\w$.])(?:return|typeof|case|void|in|of|delete|throw|new|yield|await|default)$/.test(before) || /(?<![\w$.])class\b[^;{}]*$/.test(before);
-    }
-  }
-  return false;
+  return text[i] === "{" && !/[\n\r\u2028\u2029]/.test(text.slice(close + 1, i));
 }
 // module.exports = require is read through only when nothing else reads module.exports: a call or an alias of it runs the loader.
 function exportsUsed(text: string): boolean {

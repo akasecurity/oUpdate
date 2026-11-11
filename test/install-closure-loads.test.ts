@@ -475,9 +475,7 @@ for (const [label, hook] of [
 }
 
 for (const [label, hook] of [
-  ["a method whose body brace is on the next line", `const o = {\n  require(x)\n  { return x; }\n};\no.require(1);`],
   ["a method whose body brace follows many spaces", `const o = { require(x)${" ".repeat(20)}{ return x; } };\no.require(1);`],
-  ["a method that takes require with the brace on the next line", `const o = {\n  f(require)\n  { return 1; }\n};\no.f(1);`],
   ["a class method that takes require with many spaces before the brace", `class C { m(require)${" ".repeat(30)}{ return 1; } }\nnew C().m(1);`],
   ["an arrow that takes require with many spaces before the arrow", `const f = (require)${" ".repeat(30)}=> 1;\nf(1);`],
   ["a require key with a number, a string and null values", `const a = { require: 1, b: { require: "x" }, c: { require: null }, d: { require: false } };\nconsole.log(a);`],
@@ -491,3 +489,22 @@ test("a block after a call on the next line is not a method body", () => {
   expect(nestHolds(SEVENTH + `{\n  require(${BX})\n  { }\n}`, "x/evil.js")).toBe(true);
   expect(nestHolds(SEVENTH + `if (1) {\n  require(${BX})\n  { }\n}`, "x/evil.js")).toBe(true);
 });
+
+// Eleventh review batch: a loader name before a line-broken brace is a call; Reflect and Object reads by the string key hold on any receiver.
+for (const [label, hook] of [
+  ["a method head whose brace is on the next line (accepted false hold)", `const o = {\n  require(x)\n  { return x; }\n};\no.require(1);`],
+  ["a method taking require whose brace is on the next line (accepted false hold)", `const o = {\n  f(require)\n  { return 1; }\n};\no.f(1);`],
+  ["a call and a block inside a label block", `L: {\n  require(${BX})\n  {}\n}`],
+  ["a call and a block inside a case block", `switch (1) { case 1: {\n  require(${BX})\n  {}\n} }`],
+  ["a call and a block inside a default block", `switch (1) { default: {\n  require(${BX})\n  {}\n} }`],
+  ["a call and a block inside an if label block", `if (1) L: {\n  require(${BX})\n  {}\n}`],
+  ["a call and a block inside a do label block", `do L: {\n  require(${BX})\n  {}\n} while (0);`],
+  ["a call and a block inside a catch label block", `try { throw 0 } catch (e) { L: {\n  require(${BX})\n  {}\n} }`],
+  ["a call and a block inside an arrow label block", `(() => { L: {\n  require(${BX})\n  {}\n} })();`],
+  ["a call split across lines before a block inside a label block", `L: {\n  require\n  (${BX})\n  {}\n}`],
+  ["Reflect.get with a parenthesized receiver", `Reflect.get((module), "require").call(module, ${BX});`],
+  ["a descriptor read through the prototype of module", `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(module), "require").value.call(module, ${BX});`],
+  ["a Reflect.get receiver on several lines", `Reflect.get(\n  (\n    module\n  ),\n  "require"\n).call(module, ${BX});`],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
+}
