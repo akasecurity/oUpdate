@@ -4786,6 +4786,7 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
   let v = false;
   let skip = false; // the next word is a redirection operand
   let unsure = false;
+  const pend: { delim: string; strip: boolean }[] = []; // heredocs whose text starts after the line break
   const endWord = (): void => {
     if (!inWord) return;
     if (skip) skip = false;
@@ -4908,6 +4909,16 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
       i = e;
       continue;
     }
+    if (c === "<" && line[i + 1] === "<" && line[i + 2] !== "<") {
+      // a heredoc: its text is not commands, and an apostrophe in it is not a quote
+      const h = heredocWord(line, i + 2);
+      if (h.delim && !/^\d+$|^=/.test(h.delim)) {
+        endWord();
+        pend.push(h);
+        i = h.end;
+        continue;
+      }
+    }
     if (c === "<" || c === ">" || (c === "&" && line[i + 1] === ">")) {
       if (inWord && /^\d+$/.test(cur) && !sub && !v) {
         cur = "";
@@ -4917,6 +4928,12 @@ function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; u
       while (j < line.length && /[<>&|]/.test(line[j]!)) j++;
       skip = true; // the operand: a file, a descriptor or a here-string
       i = j;
+      continue;
+    }
+    if (c === "\n" && pend.length) {
+      endStage();
+      i = skipHeredocs(line, i + 1, pend);
+      pend.length = 0;
       continue;
     }
     if (c === "|" || c === ";" || c === "\n" || c === "(" || c === ")" || (c === "&" && line[i + 1] !== ">")) {
