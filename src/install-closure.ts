@@ -2478,12 +2478,24 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
   const text = codeOnly(source, [], true) ?? source;
   if (hasUnbounded(text, source)) tier.all = true;
-  const re = /(?:^|[^\w$])(?:require|import|fork|execFile|execFileSync)\s*\(/g;
+  const callers = loaderNames(text);
+  const re = new RegExp(`(?:^|[^\\w$])(?:require(?:\\s*\\.\\s*resolve)?|import|fork|execFile|execFileSync${callers.map((n) => `|${n.replace(/\$/g, "\\$")}`).join("")})\\s*\\(`, "g");
   for (const m of text.matchAll(re)) {
     const paren = (m.index ?? 0) + m[0].lastIndexOf("(");
     const args = argsOf(text, paren);
     if (args === undefined) continue;
-    mergeEffect(tier, effectOf(fromKey, firstArg(args)));
+    mergeEffect(tier, effectOf(fromKey, firstArg(args), text));
+  }
+  // createRequire(...)(x) loads x like require does.
+  for (const m of text.matchAll(/\bcreateRequire\s*\(/g)) {
+    const open = (m.index ?? 0) + m[0].length - 1;
+    const inner = argsOf(text, open);
+    if (inner === undefined) continue;
+    const after = open + inner.length + 2;
+    const call = /^\s*\(/.exec(text.slice(after));
+    if (!call) continue;
+    const args = argsOf(text, after + call[0].length - 1);
+    if (args !== undefined) mergeEffect(tier, effectOf(fromKey, firstArg(args), text));
   }
   // A hit we do not classify can name any non-doc file, including tests and workflows.
   if (!tier.all && unclassifiedUnsafe(text)) {
@@ -4062,12 +4074,60 @@ function mergeEffect(tier: JsTier, eff: JsEffect): void {
 }
 
 // A plain identifier is a package name (require(name)), not a file path.
-function effectOf(fromKey: string, expr: string): JsEffect {
+// The names a file binds to require, or to the result of createRequire(...): a call through one loads like require.
+function loaderNames(text: string): string[] {
+  const names = new Set<string>();
+  for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:require\b(?!\s*[(.])|(?:[A-Za-z_$][\w$]*\s*\.\s*)?createRequire\s*\()/g)) names.add(m[1]!);
+  return [...names];
+}
+
+// What a name is bound to: its initializers and later assignments, up to the end of the statement.
+function bindingsOf(text: string, name: string): string[] {
+  const out: string[] = [];
+  const re = new RegExp(`(?:\\b(?:const|let|var)\\s+|(?<![\\w$.]))${name.replace(/\$/g, "\\$")}\\s*(?:\\+|\\|\\||\\?\\?)?=(?![=>])`, "g");
+  for (const m of text.matchAll(re)) {
+    const start = (m.index ?? 0) + m[0].length;
+    let depth = 0;
+    let quote: string | null = null;
+    let i = start;
+    for (; i < text.length; i++) {
+      const c = text[i]!;
+      if (quote) {
+        if (c === "\\") i++;
+        else if (c === quote) quote = null;
+        continue;
+      }
+      if (c === "'" || c === '"' || c === "`") quote = c;
+      else if (c === "(" || c === "[" || c === "{") depth++;
+      else if (c === ")" || c === "]" || c === "}") {
+        if (depth === 0) break;
+        depth--;
+      } else if (depth === 0 && (c === ";" || c === "\n" || c === ",")) break;
+    }
+    const init = text.slice(start, i).trim();
+    if (init) out.push(init);
+  }
+  return out;
+}
+
+function effectOf(fromKey: string, expr: string, text = "", depth = 0): JsEffect {
   const t = expr.trim();
-  if (!t || /^[A-Za-z_$][\w$]*$/.test(t) || strLit(t) !== undefined) return { t: "none" };
+  if (/^[A-Za-z_$][\w$]*$/.test(t)) {
+    // A name held string: read what it was built from. A parameter or an import has no binding here and names nothing.
+    if (depth >= 3 || !text) return { t: "none" };
+    for (const init of bindingsOf(text, t)) {
+      const e = effectOf(fromKey, init, text, depth + 1);
+      if (e.t !== "none") return e;
+    }
+    return { t: "none" };
+  }
+  if (!t || strLit(t) !== undefined) return { t: "none" };
   if (/Buffer\.from\s*\(|\bbase64\b|\batob\s*\(/.test(t)) return { t: "pkg", tests: true, flows: true };
   const call = matchCall(t);
-  if (call && isJoinCallee(call.callee)) return effectOfJoin(fromKey, call.args, isResolveCallee(call.callee));
+  // A join or resolve is a path call when its receiver is a name; an array literal or a call result is a string built by
+  // joining pieces, which can name any file.
+  if (call && isJoinCallee(call.callee) && /^(?:(?:[A-Za-z_$][\w$]*|require\((['"])(?:node:)?path(?:\/posix)?\1\))\.)*(?:join|resolve)$/.test(call.callee.replace(/\s+/g, ""))) return effectOfJoin(fromKey, call.args, isResolveCallee(call.callee));
+  if (call && isJoinCallee(call.callee)) return { t: "pkg", tests: true, flows: true };
   if (t.includes("+") || t.startsWith("`")) return effectOfPlus(fromKey, t);
   if (/[([`]/.test(t)) return { t: "pkg", tests: true, flows: true };
   return { t: "none" };
