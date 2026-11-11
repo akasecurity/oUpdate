@@ -992,11 +992,6 @@ const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "
  * regular expression is decided from the previous token this scan emitted, never from the source text before it: text
  * inside a string, template or regular expression is not a token.
  */
-// What a file the scan could not read is a hazard for: a name for the process object, an escape that can spell one, the module wrapper's
-// top-level arguments or this (a load handed on through them), and an HTML-like comment (<!-- anywhere, --> at the start of a line or after
-// a block comment), which a script reads as a comment and a module reads as code. Tested on the raw text, apart from the scan: where the scan
-// gives up (an ambiguous slash, a bracket it cannot match) the check still runs, and a match inside a string only makes it more cautious.
-const UNREADABLE_HAZARD = /process|global|\\|<!--|(?:^|[\n\r\u2028\u2029]|\*\/)\s*-->|(?<![\w$.])(?:arguments|this)(?![\w$])/;
 const TEMPLATE_LITERAL = /(?:[^`\\$\n]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*`/y;
 
 // A span of the kept text: a string (raw is its text) or text to blank when brackets are matched (a regular expression, template text).
@@ -1102,14 +1097,9 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
     } else if (c === "'" || c === '"') {
       const st = i;
       i++;
-      // A string ends at a line feed or a carriage return only: a line or paragraph separator is legal inside one (ES2019), and a
-      // backslash before a CRLF continues the string over both characters.
-      for (; i < n && text[i] !== c && text[i] !== "\n" && text[i] !== "\r"; i++) {
-        if (text[i] === "\\") {
-          if (text[i + 1] === "\r" && text[i + 2] === "\n") i++;
-          i++;
-        }
-      }
+      // A string the line ends is not read, so a string with a line or paragraph separator in it, or a backslash before a CRLF, makes the file
+      // unreadable: processHazardScan treats an unreadable file as a hazard.
+      for (; i < n && text[i] !== c && !eol(text[i]); i++) if (text[i] === "\\") i++;
       if (text[i] !== c) return undefined;
       i++;
       strings?.push({ raw: text.slice(st + 1, i - 1), at: out.length, len: i - st });
@@ -2377,13 +2367,14 @@ function processHazardScan(source: string): boolean {
   // Comments out first (strings kept) so the alias statements can be read, then strings out so no word inside a message counts.
   const names = ["process"];
   const keep = codeOnly(source, [], true);
-  // A file the scan cannot read is a hazard only when it holds a word or marker that can name the process object or hide a load.
-  const unreadable = () => UNREADABLE_HAZARD.test(source);
-  if (keep === undefined) return unreadable();
+  // A file the scan cannot read is a hazard: it stopped at something it could not settle (an ambiguous slash, a bracket it cannot match, an
+  // HTML-like comment that a script reads as a comment and a module as code, a string with a line separator in it), and whatever it hides
+  // would have been caught if it had read. No test on the raw text can say what the rest of the file holds, so none is tried.
+  if (keep === undefined) return true;
   const code = codeOnly(stripProcessAliases(keep, names), names);
-  if (code === undefined) return unreadable();
+  if (code === undefined) return true;
   if (PROCESS_LOADER_WORDS.test(code) || steeringKey(code)) return true;
-  if (bracketIndex(code).mismatch) return unreadable();
+  if (bracketIndex(code).mismatch) return true;
   // A computed member of the global object can be the process object.
   if (/(?<![\w$.])(?:globalThis|global)\s*(?:\?\.)?\s*\[/.test(code)) return true;
   // An escape in code can spell process or a loader word.

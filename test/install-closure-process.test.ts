@@ -634,8 +634,10 @@ test("a non-ASCII identifier is not static but does not widen to the whole packa
   expect(held(pre)).toBe(true);
   expect(widensAll(pre)).toBe(false);
 });
-test("a file the scan cannot read that never names process does not widen to the whole package (round 19)", () => {
-  expect(widensAll('exports.main = () => a / b / c\nexports.k = (x) => x\n) /\n')).toBe(false);
+// An unreadable file hides whatever the readable path would catch (a route to process through Function behind a line the scan gives up on), so it
+// widens whether or not its text names process. Round 19 once held the opposite; the hole it left is in install-closure-htmlcomment.test.ts.
+test("a file the scan cannot read widens to the whole package even when it never names process (round 19, reversed)", () => {
+  expect(widensAll('exports.main = () => a / b / c\nexports.k = (x) => x\n) /\n')).toBe(true);
 });
 test("a destructuring of a member that is not on the allowlist widens (round 19)", () => {
   expect(widensAll('const { x } = process; exports.main = () => x["y"]\n')).toBe(true);
@@ -1302,7 +1304,8 @@ test("a pattern nested deeper than the chain cap reads cautiously, a shallow one
 test("mismatched brackets are not static and widen (round 28m)", () => {
   expect(provablyStatic("exports.main = () => [ ( process.platform ]\n")).toBe(false);
   expect(processHazard("exports.main = () => [ ( process.platform ]\n")).toBe(true);
-  expect(processHazard("exports.main = () => [ ( ]\n")).toBe(false);
+  // Brackets the scan cannot match hide what the readable path would catch: a hazard even when the text names no process (reversed, see round 19).
+  expect(processHazard("exports.main = () => [ ( ]\n")).toBe(true);
 });
 for (const [label, pre] of [
   ["env destructured out of process", 'const { env } = process;\nexports.main = () => { env[["NODE_", "OPTIONS"].join("")] = "--require ./docs/payload.txt" }\n'],

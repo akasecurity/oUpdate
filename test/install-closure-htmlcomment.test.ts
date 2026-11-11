@@ -8,6 +8,11 @@ const RUN = `.execSync("echo REACHED",{stdio:"inherit"})`;
 const JC = `["child_","pro","cess"].join("")`;
 const LOAD = `arguments[1](${JC})${RUN}`;
 const M = "const m = () => 0;";
+const LOADER = `module.constructor._load(["./do","cs/pa","yload.md"].join(""),module)`;
+const REFL = `Reflect.get(module,"require").call(module,["./do","cs/pa","yload.md"].join(""))`;
+// The scan reads this / as a regular expression, meets the unclosed quote and gives up; node reads a division and a string.
+const UNREADABLE = `const x = {}\n/ "a /";\n`;
+const ROUTE = `Function("return th"+"is")()[["pro","cess"].join("")].getBuiltinModule(${JC})${RUN}`;
 const BLOCK = `{ m(1)\n{ ${LOAD} } }`;
 const all = (src: string, key = "pkg/lib/x.js") => classifyJs(key, src).all;
 
@@ -64,6 +69,14 @@ const reaches: [string, string][] = [
   ["--> after a non-ASCII name and a line separator, a backtick on the comment line", "var é\u2028--> `\n" + LOAD + "\n--> `"],
   ["--> after a non-ASCII name and a paragraph separator, a backtick on the comment line", "var é\u2029--> `\n" + LOAD + "\n--> `"],
   ["--> after a non-ASCII name and a no-break space, then a line feed", "var é\u00a0\n--> `\n" + LOAD + "\n--> `"],
+  // A file the scan cannot read hides whatever the readable path would catch: it is a hazard whatever the text holds.
+  ["a route to process through Function behind a line the scan cannot read", UNREADABLE + ROUTE],
+  ["the loader call behind a string continued over a CRLF", "const s=\"a\\\r\nb\";\n" + LOADER],
+  ["the reflected loader behind a string continued over a CRLF", "const s=\"a\\\r\nb\";\n" + REFL],
+  ["the loader call behind a string holding a line separator", "const s=\"a\u2028b\";\n" + LOADER],
+  ["the loader call behind a string holding a paragraph separator", "const s=\"a\u2029b\";\n" + LOADER],
+  ["the reflected loader behind a string holding a line separator", "const s=\"a\u2028b\";\n" + REFL],
+  ["a harmless-looking file that stops the scan, then the load", `var a=1;(0)/a/1;\n${LOAD}`],
 ];
 
 for (const [name, src] of reaches) {
@@ -96,6 +109,15 @@ test("the plain call without a comment widens, as before", () => {
   expect(all(LOAD)).toBe(true);
 });
 
+// A backslash before a line end continues a string. The scan reads these as one string, so the verdict is the one of the plain string.
+const continuations: [string, string][] = [
+  ["a backslash and a line feed", "const s=\"a\\\nb\";\n" + LOADER],
+  ["a backslash and a carriage return", "const s=\"a\\\rb\";\n" + LOADER],
+  ["a backslash and a line separator", "const s=\"a\\\u2028b\";\n" + LOADER],
+  ["a backslash and a paragraph separator", "const s=\"a\\\u2029b\";\n" + LOADER],
+  ["a plain string", "const s=\"ab\";\n" + LOADER],
+];
+
 // Controls: none of these holds a comment node reads, so each stays as it was.
 const quiet: [string, string][] = [
   ["a benign file", "module.exports = 1;"],
@@ -115,8 +137,6 @@ const quiet: [string, string][] = [
   ["a division by a parenthesis, no comment", "var a = 4, b = 2; (a) / b;\nmodule.exports = a;"],
   ["a string holding <!-- after a division", `var a = 4, b = 2; (a) / b; var s = "<!--";\nmodule.exports = s;`],
   ["a string holding --> at a line start after an if and a regular expression", `if (true) /a/.test("\\\n--> x");\nmodule.exports = 1;`],
-  ["a string holding a line separator", `const s = "a\u2028b";\nmodule.exports = s;`],
-  ["a string continued over a CRLF", `const s = "a\\\r\nb";\nmodule.exports = s;`],
   ["a non-ASCII name", `const é = 1; module.exports = é;`],
 ];
 
@@ -134,4 +154,42 @@ test("a <!-- inside a regular expression the scan cannot settle widens: the know
 test("a benign file with a real <!-- or line-start --> comment widens: the known cost", () => {
   expect(all("module.exports = 1; <!-- note")).toBe(true);
   expect(all("module.exports = 1;\n--> note")).toBe(true);
+});
+
+test("an unreadable file is a hazard whatever the raw text names", () => {
+  const unreadable = [
+    "var a=1;(0)/a/1;\nconst s=\"this\";",
+    "var a=1;(0)/a/1;\nconst s=\"arguments\";",
+    "var a=1;(0)/a/1;\n/* this */",
+    "var a=1;(0)/a/1;\nconst s=\"<!--\";",
+    "var a=1;(0)/a/1;\nconst s=`<!-- ${a}`;",
+    "var a=1;(0)/a/1;\n// <!-- x",
+    "const s=\"a\u2028b\";\nmodule.exports = s;",
+    "const s=\"a\\\r\nb\";\nmodule.exports = s;",
+    "var a=1;(0)/a/1;\nmodule.exports = a;",
+  ];
+  for (const src of unreadable) expect(all(src)).toBe(true);
+});
+
+test("a continuation after a backslash leaves the verdict of the plain string", () => {
+  const plain = JSON.stringify(classifyJs("pkg/lib/x.js", continuations.at(-1)![1]));
+  for (const [name, src] of continuations.slice(0, 4)) expect([name, JSON.stringify(classifyJs("pkg/lib/x.js", src))]).toEqual([name, plain]);
+});
+
+// The raw-text checks that once ran after the scan gave up were quadratic on blank lines; the verdict is now one return, so every shape is linear.
+test("big files that stop the scan, or hold nothing but whitespace, are classified in linear time", () => {
+  const n = 8 * 1024 * 1024;
+  const shapes: [string, string][] = [
+    ["blank lines", "var a=1;(0)/a/1;\n" + "\n".repeat(n)],
+    ["spaces", "var a=1;(0)/a/1;\n" + " ".repeat(n)],
+    ["tabs", "var a=1;(0)/a/1;\n" + "\t".repeat(n)],
+    ["CRLF", "var a=1;(0)/a/1;\n" + "\r\n".repeat(n / 2)],
+    ["block-comment closers", "var a=1;(0)/a/1;\n" + "*/ ".repeat(n / 3)],
+    ["html comment openers", "<!--".repeat(n / 4)],
+  ];
+  for (const [name, src] of shapes) {
+    const t0 = performance.now();
+    classifyJs("pkg/lib/x.js", src);
+    expect([name, performance.now() - t0 < 2000]).toEqual([name, true]);
+  }
 });
