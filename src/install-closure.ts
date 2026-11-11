@@ -2484,7 +2484,7 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
     const paren = (m.index ?? 0) + m[0].lastIndexOf("(");
     const args = argsOf(text, paren);
     if (args === undefined) continue;
-    mergeEffect(tier, effectOf(fromKey, firstArg(args), text));
+    loadEffect(tier, fromKey, firstArg(args), text);
   }
   // createRequire(...)(x) loads x like require does.
   for (const m of text.matchAll(/\bcreateRequire\s*\(/g)) {
@@ -2495,7 +2495,26 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
     const call = /^\s*\(/.exec(text.slice(after));
     if (!call) continue;
     const args = argsOf(text, after + call[0].length - 1);
-    if (args !== undefined) mergeEffect(tier, effectOf(fromKey, firstArg(args), text));
+    if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text);
+  }
+  // require or import handed on as a value (`list.map(require)`, `[require]`) loads whatever it is called with later.
+  if (/(?:[(,[:?]|\breturn|=>)\s*(?:require|import)(?![\w$])(?!\s*[(.])/.test(text)) {
+    tier.pkg = true;
+    tier.tests = true;
+    tier.flows = true;
+  }
+  // A process call whose argument vector holds an element that is not a plain string names a file the same way.
+  for (const m of text.matchAll(/(?:^|[^\w$])(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\(/g)) {
+    const args = argsOf(text, (m.index ?? 0) + m[0].lastIndexOf("("));
+    if (args === undefined) continue;
+    for (const a of splitTop(args, ",")) {
+      const t = a.trim();
+      if (!t.startsWith("[") || !t.endsWith("]")) continue;
+      for (const el of splitTop(t.slice(1, -1), ",")) {
+        const e = el.trim();
+        if (e && strLit(e) === undefined && !/^-/.test(e)) loadEffect(tier, fromKey, e, text);
+      }
+    }
   }
   // A hit we do not classify can name any non-doc file, including tests and workflows.
   if (!tier.all && unclassifiedUnsafe(text)) {
@@ -4049,6 +4068,13 @@ function applyNonJs(ctx: Ctx, text: string, lang: NonJsLang): boolean {
   return true;
 }
 
+// The effect of one load argument. An argument that names nothing (a parameter, an unresolved name) can still be any file of
+// this directory or above, so it keeps that fallback even when another call restricts to a directory.
+function loadEffect(tier: JsTier, fromKey: string, arg: string, text: string): void {
+  const eff = effectOf(fromKey, arg, text);
+  mergeEffect(tier, eff);
+  if (eff.t === "none" && strLit(arg.trim()) === undefined) tier.same = true;
+}
 function mergeEffect(tier: JsTier, eff: JsEffect): void {
   if (eff.t === "none") return;
   if (eff.t === "same") {
@@ -4115,11 +4141,16 @@ function effectOf(fromKey: string, expr: string, text = "", depth = 0): JsEffect
   if (/^[A-Za-z_$][\w$]*$/.test(t)) {
     // A name held string: read what it was built from. A parameter or an import has no binding here and names nothing.
     if (depth >= 3 || !text) return { t: "none" };
-    for (const init of bindingsOf(text, t)) {
-      const e = effectOf(fromKey, init, text, depth + 1);
-      if (e.t !== "none") return e;
-    }
-    return { t: "none" };
+    const effects = bindingsOf(text, t).map((init) => effectOf(fromKey, init, text, depth + 1));
+    if (effects.every((e) => e.t === "none")) return { t: "none" };
+    if (effects.some((e) => e.t === "all")) return { t: "all" };
+    const wide = effects.filter((e): e is Extract<JsEffect, { t: "pkg" }> => e.t === "pkg");
+    if (wide.length) return { t: "pkg", tests: wide.some((e) => e.tests), flows: wide.some((e) => e.flows) };
+    // A restriction to a directory stands only when every binding restricts the same way; a binding that names nothing
+    // (a parameter, a literal read elsewhere) or a different directory leaves the whole package possible.
+    const first = JSON.stringify(effects[0]);
+    if (effects.every((e) => JSON.stringify(e) === first)) return effects[0]!;
+    return { t: "pkg", tests: true, flows: true };
   }
   if (!t || strLit(t) !== undefined) return { t: "none" };
   if (/Buffer\.from\s*\(|\bbase64\b|\batob\s*\(/.test(t)) return { t: "pkg", tests: true, flows: true };

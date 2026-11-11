@@ -49,3 +49,32 @@ for (const [label, code] of controls) {
     expect(holds(release("1.0.0", code, "docs/payload.txt"), release("1.0.1", code, "docs/payload.txt"))).toEqual([]);
   });
 }
+
+// Several assignments, an alias next to an unresolved load, require handed on as a value, a process argument vector.
+// scripts/h.js is the hook; only the file named in `changed` differs between the releases.
+const nested = (v: string, hook: string, changed: string) =>
+  files({
+    "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: "node scripts/h.js" } }),
+    "scripts/h.js": hook,
+    "scripts/lib/a.js": "module.exports = 1\n",
+    "scripts/evil.js": changed === "scripts/evil.js" ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
+    "x/evil.js": changed === "x/evil.js" ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
+  });
+const PATH = `const path = require("path"); const name = "a"; `;
+const later: [string, string, string][] = [
+  ["a later assignment that loads another file", PATH + `let p = path.join(__dirname, "lib", name); p = atob("Li9ldmlsLmpz"); require(p);`, "scripts/evil.js"],
+  ["an earlier directory restriction and a later joined string", PATH + `let p = path.join(__dirname, "lib", name); p = ["./ev", "il.js"].join(""); require(p);`, "scripts/evil.js"],
+  ["an alias call that restricts and a load of an unresolved parameter", PATH + `const r = require; r(path.join(__dirname, "lib", name)); function go(x) { require(x); } go(atob("Li9ldmlsLmpz"));`, "scripts/evil.js"],
+  ["require handed on as a value", `["../x/evil"].map(require)`, "x/evil.js"],
+  ["import handed on as a value", `["../x/evil"].map((m) => import(m)); [import].length`, "x/evil.js"],
+  ["a process argument vector with a built element", `require("child_process").spawnSync("node", [["x/ev", "il.js"].join("")])`, "x/evil.js"],
+];
+for (const [label, code, changed] of later) {
+  test(`${label} holds the changed ${changed}`, () => {
+    expect(holds(nested("1.0.0", code, changed), nested("1.0.1", code, changed)).length).toBeGreaterThan(0);
+  });
+}
+test("one restricting assignment keeps its directory; the unrelated changed file does not hold", () => {
+  const code = PATH + `let p = path.join(__dirname, "lib", name); p = path.join(__dirname, "lib", name + "x"); require(p);`;
+  expect(holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"))).toEqual([]);
+});
