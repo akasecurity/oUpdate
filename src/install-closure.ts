@@ -4505,6 +4505,19 @@ function noteHookArg(ctx: Ctx, token: string): void {
   // A glob still reaches addRef, so the glob and pattern-length caps stay holds.
   if (!token || token.startsWith("-")) return;
   const logical = normalize(token);
+  if (logical && /(^|\/)\.{1,2}(\/|$)/.test(logical) && !logical.startsWith("/") && !/^[A-Za-z]:/.test(logical) && !/[\u0005$~*?[]/.test(logical)) {
+    // A path with a `.` or `..` segment names the file it resolves to (`lib/../x/evil.js` is x/evil.js). One that leaves the
+    // package reads every file, as a path joined to an earlier `cd` does.
+    const j = joinDir("", logical);
+    if (j === undefined) {
+      ctx.widenInert = true;
+      widenAll(ctx);
+    } else if (j && !badPath(j)) {
+      markHookFile(ctx, j);
+      addRef(ctx, j);
+    }
+    return;
+  }
   if (!logical || badPath(logical)) return;
   markHookFile(ctx, token);
   addRef(ctx, token);
