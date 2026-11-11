@@ -5015,17 +5015,21 @@ function runnerExecutable(argv: string[], i: number, depth = 0): string {
   return "";
 }
 
-// Node's own options that never take a value. Any other option may take the next word (`--title t`, `--localstorage-file f`,
-// `-C dev`), so that word is not counted as the script: a `.` after it still names the package root.
-const NODE_BOOL_OPTS =
-  /^(?:-[ciHv]|--(?:no-[a-z0-9-]+|warnings|deprecation|trace-(?:warnings|deprecation|uncaught|sigint|sync-io|tls|exit|atomics-wait|env[a-z-]*)|throw-deprecation|pending-deprecation|enable-source-maps|preserve-symlinks(?:-main)?|abort-on-uncaught-exception|expose-gc|expose-internals|frozen-intrinsics|use-strict|zero-fill-buffers|force-fips|enable-fips|insecure-http-parser|openssl-legacy-provider|openssl-shared-config|jitless|prof|interactive|check|watch|watch-preserve-output|test|test-only|test-update-snapshots|permission|inspect|inspect-brk|inspect-wait|report-on-signal|report-uncaught-exception|report-on-fatalerror|report-compact|report-exclude-network|report-exclude-env|track-heap-objects|veri[f]y-base-objects|v8-options|napi-modules|node-snapshot|global-search-paths|network-family-autoselection|tls-min-v1\.[0-3]|tls-max-v1\.[23]|use-bundled-ca|use-openssl-ca|use-system-ca|harmony[a-z-]*|help|version|bash-completion|completion-bash|build-snapshot|entry-url|experimental-(?:vm-modules|require-module|strip-types|transform-types|detect-module|wasm-modules|permission|test-coverage|test-module-mocks|websocket|eventsource|sqlite|webstorage|network-inspection|async-context-frame|addon-modules|import-meta-resolve|json-modules|global-customevent|global-webcrypto|global-navigator|fetch|repl-await|worker|shadow-realm|print-required-tla)))$/;
+// Node's own options that never take a value (from `node --help`), and the V8 flags that are plain switches. Any other option may
+// take the next word (`--title t`, `--localstorage-file f`, `-C dev`), so that word is not counted as the script: a `.` after it
+// still names the package root. The options node documents as taking a value are listed too: their value is never the root.
+const NODE_BOOL_NAMES = new Set(["--abort-on-uncaught-exception", "--allow-addons", "--allow-child-process", "--allow-ffi", "--allow-fs-vfs", "--allow-inspector", "--allow-net", "--allow-openssl-store", "--allow-wasi", "--allow-worker", "--bench", "--build-snapshot", "--check", "--completion-bash", "--cpu-prof", "--deprecation", "--disable-sigusr1", "--disable-wasm-trap-handler", "--disallow-code-generation-from-strings", "--enable-etw-stack-walking", "--enable-fips", "--enable-fips-indicator-events", "--enable-network-family-autoselection", "--enable-source-maps", "--entry-url", "--experimental-addon-modules", "--experimental-async-context-frame", "--experimental-bench", "--experimental-detect-module", "--experimental-eventsource", "--experimental-fetch", "--experimental-global-customevent", "--experimental-global-navigator", "--experimental-global-webcrypto", "--experimental-import-meta-resolve", "--experimental-import-text", "--experimental-inspector-network-resource", "--experimental-json-modules", "--experimental-network-inspection", "--experimental-permission", "--experimental-print-required-tla", "--experimental-repl-await", "--experimental-require-module", "--experimental-shadow-realm", "--experimental-sqlite", "--experimental-storage-inspection", "--experimental-stream-iter", "--experimental-strip-types", "--experimental-test-coverage", "--experimental-test-module-mocks", "--experimental-transform-types", "--experimental-vfs", "--experimental-vm-modules", "--experimental-wasm-modules", "--experimental-web-worker", "--experimental-websocket", "--experimental-webstorage", "--experimental-worker", "--experimental-worker-inspection", "--expose-gc", "--force-context-aware", "--force-fips", "--force-node-api-uncaught-exceptions-policy", "--frozen-intrinsics", "--heap-prof", "--help", "--insecure-http-parser", "--inspect", "--inspect-brk", "--inspect-wait", "--interactive", "--interpreted-frames-native-stack", "--jitless", "--no-addons", "--no-async-context-frame", "--no-deprecation", "--no-experimental-detect-module", "--no-experimental-ffi", "--no-experimental-global-navigator", "--no-experimental-repl-await", "--no-experimental-require-module", "--no-experimental-sqlite", "--no-experimental-websocket", "--no-experimental-webstorage", "--no-extra-info-on-fatal-exception", "--no-force-async-hooks-checks", "--no-global-search-paths", "--no-network-family-autoselection", "--no-require-module", "--no-strip-types", "--no-warnings", "--no-worker-snapshot", "--node-memory-debug", "--openssl-legacy-provider", "--openssl-shared-config", "--pending-deprecation", "--permission", "--permission-audit", "--preserve-symlinks", "--preserve-symlinks-main", "--prof", "--prof-process", "--report-compact", "--report-exclude-env", "--report-exclude-network", "--report-on-fatalerror", "--report-on-process-timeout", "--report-on-signal", "--report-uncaught-exception", "--test", "--test-coverage-include-all", "--test-force-exit", "--test-only", "--test-randomize", "--test-update-snapshots", "--throw-deprecation", "--tls-max-v1.2", "--tls-max-v1.3", "--tls-min-v1.0", "--tls-min-v1.1", "--tls-min-v1.2", "--tls-min-v1.3", "--trace-deprecation", "--trace-env", "--trace-env-js-stack", "--trace-env-native-stack", "--trace-exit", "--trace-promises", "--trace-sigint", "--trace-sync-io", "--trace-tls", "--trace-uncaught", "--trace-warnings", "--track-heap-objects", "--use-bundled-ca", "--use-env-proxy", "--use-openssl-ca", "--use-system-ca", "--v8-options", "--version", "--warnings", "--watch", "--watch-preserve-output", "--webstorage", "--zero-fill-buffers", "-c", "-h", "-i", "-v"]);
+const NODE_VALUE_NAMES = new Set(["--allow-fs-read", "--allow-fs-write", "--bench-isolation", "--bench-name-pattern", "--bench-reporter", "--bench-reporter-destination", "--bench-samples", "--bench-warmup", "--build-sea", "--build-snapshot-config", "--conditions", "--config-file", "--cpu-prof-dir", "--cpu-prof-interval", "--cpu-prof-name", "--debug-port", "--diagnostic-dir", "--disable-proto", "--disable-warning", "--dns-result-order", "--env-file", "--env-file-if-exists", "--eval", "--experimental-config-file", "--experimental-default-config-file", "--experimental-loader", "--experimental-package-map", "--experimental-sea-config", "--experimental-test-isolation", "--experimental-test-tag-filter", "--heap-prof-dir", "--heap-prof-interval", "--heap-prof-name", "--heapsnapshot-near-heap-limit", "--heapsnapshot-signal", "--icu-data-dir", "--import", "--input-type", "--inspect-port", "--inspect-publish-uid", "--loader", "--localstorage-file", "--max-http-header-size", "--max-old-space-size-percentage", "--network-family-autoselection-attempt-timeout", "--openssl-config", "--process-timeout", "--redirect-warnings", "--report-dir", "--report-directory", "--report-filename", "--report-signal", "--require", "--run", "--secure-heap", "--secure-heap-min", "--snapshot-blob", "--test-concurrency", "--test-coverage-branches", "--test-coverage-exclude", "--test-coverage-functions", "--test-coverage-include", "--test-coverage-lines", "--test-global-setup", "--test-isolation", "--test-name-pattern", "--test-random-seed", "--test-reporter", "--test-reporter-destination", "--test-rerun-failures", "--test-shard", "--test-skip-pattern", "--test-timeout", "--title", "--tls-cipher-list", "--tls-keylog", "--trace-event-categories", "--trace-event-file-pattern", "--trace-require-module", "--unhandled-rejections", "--use-largepages", "--v8-pool-size", "--vfs-load", "--watch-kill-signal", "--watch-path", "-C", "-e", "-r"]);
+const NODE_BOOL_RE =
+  /^--(?:no-[a-z0-9-]+|harmony[a-z-]*|expose-[a-z-]+|abort-on-[a-z-]+|disable-(?!warning|proto)[a-z-]+|trace-(?!event-|require-module)[a-z-]+|allow-natives-syntax|use-strict|max-lazy|veri[f]y-base-objects|track-heap-objects|zero-fill-buffers|perf-[a-z-]+)$/;
 
 function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
   // The first operand that names a file of the package is the script, and the words after it are its own arguments: a `.`
   // before that (after an option and its value, `--title t .`) is the directory node runs.
   const allow = ctx.rootRuns;
   let scriptSeen = false;
-  let optValue = false;
+  let optValue = false; // the next word is possibly an option's value: not the script
+  let knownValue = false; // ... and a documented value: not the root either
   while (i < argv.length) {
     ctx.rootRuns = false;
     if (ctx.hold) return;
@@ -5033,12 +5037,14 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
     if (a === "--") {
       // What follows is the script and its arguments.
       for (let q = i + 1; q < argv.length; q++) {
-        ctx.rootRuns = allow && q === i + 1;
+        ctx.rootRuns = allow && !scriptSeen && q === i + 1;
         noteHookArgCwd(ctx, argv[q]!);
       }
       return;
     }
     if (a.startsWith("-")) {
+      optValue = false;
+      knownValue = false;
       const eq = a.indexOf("=");
       const name = eq > 0 ? a.slice(0, eq) : a;
       const inline = eq > 0 ? a.slice(eq + 1) : undefined;
@@ -5086,7 +5092,10 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       // the next word as its value or load a file: widen, and keep reading the words that follow as files.
       widenAll(ctx);
       if (inline) noteHookArgCwd(ctx, inline);
-      else if (!NODE_BOOL_OPTS.test(name)) optValue = true;
+      else if (!NODE_BOOL_NAMES.has(name) && !NODE_BOOL_RE.test(name)) {
+        optValue = true;
+        knownValue = NODE_VALUE_NAMES.has(name);
+      }
       i++;
       continue;
     }
@@ -5096,7 +5105,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       ctx.widenInert = true;
       widenAll(ctx);
     }
-    ctx.rootRuns = allow && !scriptSeen;
+    ctx.rootRuns = allow && !scriptSeen && !knownValue;
     noteHookArgCwd(ctx, a);
     // The value of a value-taking option (`--title lib/ok.js`, `--env-file .env`) is not the script. A file, a dotfile or a
     // directory with an index or manifest that is not the root is the script; `.`, `./` and `lib/..` name the root.
@@ -5106,6 +5115,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
         Boolean(n) && !badPath(n) && (nodeFile(ctx, n) !== undefined || nodeFile(ctx, `${n}/index`) !== undefined || ctx.logical.has(`${n}/package.json`));
     }
     optValue = false;
+    knownValue = false;
     i++;
   }
 }

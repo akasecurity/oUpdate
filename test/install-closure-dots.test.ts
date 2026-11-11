@@ -240,3 +240,23 @@ for (const flag of ["--report-dir", "--report-directory", "--report-filename", "
   test(`node ${flag} lib/ok.js . : a report flag with a value leaves the dot as the root`, () =>
     expect(rootHeld(`node ${flag} lib/ok.js .`, "docs/runtime.js", withOk)).toBe(true));
 }
+
+// Options that take no value leave the script as the first operand, including V8 switches.
+for (const flag of ["--allow-natives-syntax", "--interpreted-frames-native-stack", "--force-context-aware", "--expose-gc", "--max-lazy", "--use-strict", "--abort-on-uncaught-exception", "--stack-trace-limit=50", "--jitless", "--harmony-shadow-realm", "--frozen-intrinsics"]) {
+  test(`node ${flag} lib/ok.js . : the dot is an argument of the script`, () =>
+    expect(rootHeld(`node ${flag} lib/ok.js .`, "docs/runtime.js", withOk)).toBe(false));
+}
+test("node --expose-gc . : the dot is the root", () => expect(rootHeld("node --expose-gc .", "docs/runtime.js", withOk)).toBe(true));
+
+// After a script everything is its argument, `--` included; with no script yet the word after `--` is the script or root.
+test("node scripts/build.js -- . : both later words are arguments of the script", () =>
+  expect(rootHeld("node scripts/build.js -- .", "docs/runtime.js", { ...rtMain, "scripts/build.js": 'console.log("ok")\n' })).toBe(false));
+test("node -- . : no script yet, the dot is the root", () => expect(rootHeld("node -- .", "docs/runtime.js", rtMain)).toBe(true));
+
+// The value of a documented value option is not the root.
+test("node --title . lib/ok.js : the dot is the title, not the root", () =>
+  expect(rootHeld("node --title . lib/ok.js", "docs/runtime.js", withOk)).toBe(false));
+test("node --title . . : the first dot is the title and the second is the root", () =>
+  expect(rootHeld("node --title . .", "docs/runtime.js", withOk)).toBe(true));
+test("node --env-file . lib/ok.js : the value is not the root", () =>
+  expect(rootHeld("node --env-file . lib/ok.js", "docs/runtime.js", withOk)).toBe(false));
