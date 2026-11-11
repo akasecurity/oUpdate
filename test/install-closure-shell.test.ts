@@ -25,6 +25,7 @@ const unresolved: [string, string][] = [
   ["a substituted file name with a redirect", "node $(cat name.txt) 2>&1 | cat"],
   ["a substituted file name in a subshell", "(node $(cat name.txt)) | cat"],
   ["a substituted file name in the middle of a long pipe", "node $(cat name.txt) | cat | wc"],
+  ["an assigned substitution that runs a package file", "x=$(node $(cat name.txt)) | cat"],
   ["an unresolved command word before a pipe", "$(echo node) lib/evil.js | cat"],
 ];
 

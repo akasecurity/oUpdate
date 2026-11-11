@@ -4769,7 +4769,7 @@ const HARMLESS_STAGE = new Set(["echo", "printf", "true", "false", ":", "cat", "
 // stages are cut apart here at every separator, and a stage that holds the placeholder and is not a plain reader (`node $(...)`,
 // `sh $(...)`, an unresolved command word) may run any file of the package, so every file is read.
 let inGypCommand = 0;
-function unreadableUnresolved(ctx: Ctx, loose: string): void {
+function unreadableUnresolved(ctx: Ctx, loose: string, orig: string): void {
   if (inGypCommand > 0 || !loose.includes(UNRESOLVED)) return;
   let quote: string | undefined;
   let cur = "";
@@ -4798,6 +4798,15 @@ function unreadableUnresolved(ctx: Ctx, loose: string): void {
     const words = stage.trim().split(/\s+/).filter((w) => w && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) && !/^\d*$/.test(w));
     const head = words[0] ?? "";
     if (head && !head.includes(UNRESOLVED) && HARMLESS_STAGE.has(binName(head))) continue;
+    // A stage that only assigns (`x=$(make -C sub) > log`) runs what its substitutions hold: `make` and `cd` keep their
+    // directory-scoped read (noteUnparsedMake), a plain reader needs nothing, any other command reads every file.
+    if (!head) {
+      const inner = substitutions(orig);
+      if (inner !== null && inner.every((b) => {
+        const w = b.trim().split(/\s+/).find((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) ?? "";
+        return /^(?:make|gmake|cd)$/.test(binName(w)) || HARMLESS_STAGE.has(binName(w));
+      })) continue;
+    }
     ctx.widenInert = true;
     widenAll(ctx);
     return;
@@ -4834,7 +4843,7 @@ function readParts(ctx: Ctx, body: string): void {
         } else dispatch(ctx, cmd);
       }
       ctx.depth--;
-    } else if (loose !== null) unreadableUnresolved(ctx, loose);
+    } else if (loose !== null) unreadableUnresolved(ctx, loose, line);
     if (ctx.hold) return;
     if (lines.length > 1) noteUnreadable(ctx, line); // a body of one line is noted whole by the caller
   }
