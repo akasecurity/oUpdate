@@ -4766,6 +4766,9 @@ const LAUNCHER_PREFIX = /^(?:env|command|builtin|exec|nohup|time|nice|sudo|stdbu
 const LOOKUP_ONLY = /^(?:type|which|hash)$/;
 // npm subcommands that run no script of this package.
 const NPM_READ_ONLY = new Set(["help", "view", "v", "show", "info", "config", "c", "get", "set", "ls", "list", "la", "ll", "outdated", "audit", "prefix", "root", "bin", "whoami", "search", "s", "find", "explain", "why", "doctor", "ping", "fund", "help-search", "docs", "repo", "bugs", "home"]);
+// npm flags that take a separate value, and long flags known to take none.
+const NPM_VALUE_FLAG = /^(?:--(?:cache|prefix|workspace|userconfig|globalconfig|registry|loglevel|tag|otp|scope|access|script-shell|include|omit|audit-level|install-strategy|before|logs-dir|tmp|cafile|cert|key|proxy|https-proxy|noproxy|node-options|call|package|message|logs-max|init-module|fetch-retries|fetch-timeout|location|lockfile-version)|-w|-C|-c)$/;
+const NPM_BOOL_FLAG = /^--(?:silent|quiet|verbose|json|global|force|yes|no|dry-run|production|ignore-scripts|if-present|workspaces|include-workspace-root|no-[a-z-]+|foreground-scripts|offline|prefer-offline|prefer-online|legacy-peer-deps|save|save-dev|no-save|audit|fund|help|version|parseable|long|all|link|unicode|color|progress|ws)$/;
 const SHELL_NAME = /^(?:sh|bash|dash|zsh|ksh)$/;
 
 // The command a stage runs, past assignments, keywords and launcher prefixes (`env -i A=1`, `nice -n 5`, `nohup`, `corepack`).
@@ -4779,7 +4782,11 @@ function stageCommand(words: string[]): string[] {
     else if (LAUNCHER_PREFIX.test(binName(w))) {
       const bin = binName(w);
       // `command -v npm` and `command -V npm` look the name up: nothing runs.
-      if (bin === "command" && words.slice(h + 1).some((x) => /^-[A-Za-z]*[vV][A-Za-z]*$/.test(x))) return [];
+      if (bin === "command") {
+        // Only a flag right after \`command\` (before the command word) is a lookup flag: \`command npm run x -- -v\` runs npm.
+        let q = h + 1;
+        while (q < words.length && words[q]!.startsWith("-")) if (/^-[A-Za-z]*[vV][A-Za-z]*$/.test(words[q++]!)) return [];
+      }
       h++;
       while (h < words.length && (words[h]!.startsWith("-") || ASSIGN.test(words[h]!) || (bin === "nice" && /^-n$/.test(words[h - 1]!)))) h++;
     } else break;
@@ -4835,9 +4842,34 @@ function dispatchRunner(ctx: Ctx, ws: string[]): void {
   const bin = binName(ws[0]!);
   const quoted = ws.map((w) => (/[\s'"\\]/.test(w) ? "'" + w.replace(/'/g, "'\\''") + "'" : w));
   if (bin !== "run-s" && bin !== "run-p" && bin !== "npm-run-all") {
-    const args = ws.slice(1).filter((w) => !w.startsWith("-"));
-    // Only the first operand is the subcommand: `npm view pack version` and `npm config get test` run no script.
-    if (bin === "npm" && (ws.some((w) => w === "-v" || w === "--version") || (args[0] !== undefined && NPM_READ_ONLY.has(args[0])))) return;
+    const dd = ws.indexOf("--");
+    const args = (dd < 0 ? ws : ws.slice(0, dd)).slice(1).filter((w) => !w.startsWith("-"));
+    // The subcommand is the first operand once the flags and the values of the flags that take one are skipped:
+    // `npm view pack version` and `npm config get test` run no script, `npm --cache view run evil` runs evil. A version flag
+    // before the subcommand prints the version; after it (`npm run evil -- --version`) it belongs to the script.
+    if (bin === "npm") {
+      let sub: string | undefined;
+      let version = false;
+      let unsure = false; // the word before the subcommand is a flag this does not know takes no value
+      for (let q = 1; q < (dd < 0 ? ws.length : dd); q++) {
+        const w = ws[q]!;
+        if (w === "-v" || w === "--version") version = true;
+        if (w.startsWith("-")) {
+          if (NPM_VALUE_FLAG.test(w) && !w.includes("=")) q++;
+          else if (w.startsWith("--") && !w.includes("=") && !NPM_BOOL_FLAG.test(w)) unsure = true;
+          continue;
+        }
+        sub = w;
+        break;
+      }
+      if (version && sub === undefined) return;
+      if (version) return;
+      if (sub !== undefined && NPM_READ_ONLY.has(sub)) {
+        // An unknown flag may have taken the read-only word as its value: a script runner after it still runs.
+        const k = args.indexOf(sub);
+        if (!(unsure && args.slice(k + 1, k + 2).some((w) => RUN_SUB.has(w) || STAGE_SCRIPT_WORDS.has(w)))) return;
+      }
+    }
     // Only a stage that names a script to run: `npm ls`, `yarn install` and the like run no script of this package.
     const life = bin === "npm" ? args.map((a) => NPM_LIFECYCLE[a]).find(Boolean) : undefined;
     if (life) {
@@ -7499,6 +7531,8 @@ function dispatch(ctx: Ctx, cmd: string): void {
       restart(ctx);
       return;
     }
+    // \`npm it\`, \`npm pack\` and the like run lifecycle scripts without naming them: those scripts are read as named ones.
+    for (const name of NPM_LIFECYCLE[sub.word] ?? []) runScript(ctx, name, true);
     if (sub.word.includes(UNRESOLVED)) ctx.widenInert = true;
     widenAll(ctx);
     fail(ctx, "unresolved: runner");

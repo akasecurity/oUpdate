@@ -123,3 +123,34 @@ for (const [label, hook] of lookups) {
     expect(holds(release("0", hook, scripts), release("1", hook, scripts))).toEqual([]);
   });
 }
+
+// Flag values are not subcommands, and a version flag after the subcommand belongs to the script.
+const dirRelease = (v: string, hook: string, dir: "lib" | "docs" | "test") =>
+  files({
+    "package.json": JSON.stringify({ name: "p", version: "1.0." + v, scripts: { postinstall: hook, evil: `node ${dir}/evil.js` } }),
+    [`${dir}/evil.js`]: `console.log("evil ${v}")\n`,
+    "lib/ok.js": "console.log('ok')\n",
+  });
+
+const flagValueRuns: [string, string][] = [
+  ["a cache flag value that looks like view", "npm --cache view run evil | cat"],
+  ["a prefix flag value that looks like ls", "npm --prefix ls run evil | cat"],
+  ["a workspace flag value that looks like config", "npm -w config run-script evil | cat"],
+  ["a registry flag value that looks like help, rum", "npm --registry help rum evil | cat"],
+  ["a version flag after the script word", "npm run evil -- --version | cat"],
+  ["a short version flag after the script word", "npm run evil --silent -- -v | cat"],
+  ["command before npm with a version flag after the script", "command npm run evil -- -v | cat"],
+  ["command before npm with a version flag after the runner", "command npm run evil --version | cat"],
+];
+
+for (const [label, hook] of flagValueRuns) {
+  for (const dir of ["lib", "docs", "test"] as const) {
+    test(`${label} runs the script: a changed ${dir}/evil.js holds`, () => {
+      expect(holds(dirRelease("0", hook, dir), dirRelease("1", hook, dir)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+test("a version flag before the subcommand prints the version and runs nothing", () => {
+  expect(holds(dirRelease("0", "npm -v run evil | cat", "docs"), dirRelease("1", "npm -v run evil | cat", "docs"))).toEqual([]);
+});
