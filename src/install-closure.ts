@@ -5164,8 +5164,8 @@ function runnerFlags(name: string): { code: RegExp; value: RegExp } {
   return { code: spec.code, value: key === "node" ? new RegExp(spec.value.source.replace(/\)\$$/, "|--title)$")) : spec.value };
 }
 // Commands whose output is a number, a version or a platform name: unquoted, it cannot split into a second flag. A path or a
-// host name can hold spaces (pwd, npm root|prefix, hostname, uname -n -a -v), so those are quiet only quoted.
-const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[smrpio])?|date(?: \+(?:[A-Za-z0-9._:/-]|%[YmdHMSyjuwUVWFTDRsz%])+)?|arch|whoami|getconf [A-Z_]+|sysctl -n [a-z.]+|node (?:-v|--version))$/;
+// host name can hold spaces (pwd, npm root|prefix, hostname, whoami, uname -n -a -v), so those are quiet only quoted.
+const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[smrpio])?|date(?: \+(?:[A-Za-z0-9._:/-]|%[YmdHMSyjuwUVWFTDRsz%])+)?|arch|getconf [A-Z_]+|sysctl -n [a-z.]+|node (?:-v|--version))$/;
 // Flags whose substituted value is a number or a target, not a program.
 const SAFE_FLAG_SUB: Record<string, RegExp> = {
   make: /^-j/,
