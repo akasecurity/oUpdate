@@ -212,3 +212,31 @@ test("npx npx npx npx npx npx node . : the root main changed holds", () =>
   expect(rootHeld("npx npx npx npx npx npx node .", "docs/runtime.js", rtMain)).toBe(true));
 test("npx npx npx npx npx npx tsc -p . : still holds past the limit (the program is not known)", () =>
   expect(rootHeld("npx npx npx npx npx npx tsc -p .", "docs/runtime.js", rtMain)).toBe(true));
+
+// An option node knows no value rule for may take the next word: the dot after it is still the root.
+for (const hook of [
+  "node --localstorage-file lib/ok.js .",
+  "node --test-reporter-destination lib/ok.js .",
+  "node --snapshot-blob lib/ok.js .",
+  "node --experimental-config-file lib/ok.js .",
+  "node --some-future-flag lib/ok.js .",
+  "node --title t --localstorage-file lib/ok.js .",
+]) {
+  test(`${hook}: the root main changed holds`, () => expect(rootHeld(hook, "docs/runtime.js", withOk)).toBe(true));
+}
+// Options that never take a value leave the script as the first operand.
+for (const hook of ["node --no-warnings scripts/build.js .", "node --enable-source-maps scripts/build.js .", "node --experimental-vm-modules scripts/build.js .", "node --title t scripts/build.js ."]) {
+  test(`${hook}: the dot is an argument of the script`, () =>
+    expect(rootHeld(hook, "docs/runtime.js", { ...rtMain, "scripts/build.js": 'console.log("ok")\n' })).toBe(false));
+}
+
+test("node --test-name-pattern lib/ok.js . : the root main changed holds", () =>
+  expect(rootHeld("node --test-name-pattern lib/ok.js .", "docs/runtime.js", withOk)).toBe(true));
+for (const flag of ["--report-on-fatalerror", "--report-compact", "--report-on-signal", "--report-uncaught-exception", "--report-exclude-network", "--report-exclude-env"]) {
+  test(`node ${flag} scripts/build.js . : a report flag takes no value, so the dot is an argument`, () =>
+    expect(rootHeld(`node ${flag} scripts/build.js .`, "docs/runtime.js", { ...rtMain, "scripts/build.js": 'console.log("ok")\n' })).toBe(false));
+}
+for (const flag of ["--report-dir", "--report-directory", "--report-filename", "--report-signal"]) {
+  test(`node ${flag} lib/ok.js . : a report flag with a value leaves the dot as the root`, () =>
+    expect(rootHeld(`node ${flag} lib/ok.js .`, "docs/runtime.js", withOk)).toBe(true));
+}

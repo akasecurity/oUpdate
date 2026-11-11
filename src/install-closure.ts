@@ -5015,9 +5015,10 @@ function runnerExecutable(argv: string[], i: number, depth = 0): string {
   return "";
 }
 
-// Node's own options that take the next word as a value (`--title t`, `-C dev`): that word is not the script.
-const NODE_VALUE_OPTS =
-  /^(?:-C|--(?:title|conditions|env-file|env-file-if-exists|inspect-port|debug-port|stack-size|max-old-space-size|input-type|loader|experimental-loader|disable-warning|redirect-warnings|report-[a-z-]+|icu-data-dir|openssl-config|watch-path|diagnostic-dir|dns-result-order|secure-heap|experimental-default-type|cpu-prof-[a-z-]+|heap-prof-[a-z-]+|trace-event-categories|trace-event-file-pattern|unhandled-rejections|stack-trace-limit|max-http-header-size|heapsnapshot-signal|heapsnapshot-near-heap-limit|tls-cipher-list|tls-keylog))$/;
+// Node's own options that never take a value. Any other option may take the next word (`--title t`, `--localstorage-file f`,
+// `-C dev`), so that word is not counted as the script: a `.` after it still names the package root.
+const NODE_BOOL_OPTS =
+  /^(?:-[ciHv]|--(?:no-[a-z0-9-]+|warnings|deprecation|trace-(?:warnings|deprecation|uncaught|sigint|sync-io|tls|exit|atomics-wait|env[a-z-]*)|throw-deprecation|pending-deprecation|enable-source-maps|preserve-symlinks(?:-main)?|abort-on-uncaught-exception|expose-gc|expose-internals|frozen-intrinsics|use-strict|zero-fill-buffers|force-fips|enable-fips|insecure-http-parser|openssl-legacy-provider|openssl-shared-config|jitless|prof|interactive|check|watch|watch-preserve-output|test|test-only|test-update-snapshots|permission|inspect|inspect-brk|inspect-wait|report-on-signal|report-uncaught-exception|report-on-fatalerror|report-compact|report-exclude-network|report-exclude-env|track-heap-objects|veri[f]y-base-objects|v8-options|napi-modules|node-snapshot|global-search-paths|network-family-autoselection|tls-min-v1\.[0-3]|tls-max-v1\.[23]|use-bundled-ca|use-openssl-ca|use-system-ca|harmony[a-z-]*|help|version|bash-completion|completion-bash|build-snapshot|entry-url|experimental-(?:vm-modules|require-module|strip-types|transform-types|detect-module|wasm-modules|permission|test-coverage|test-module-mocks|websocket|eventsource|sqlite|webstorage|network-inspection|async-context-frame|addon-modules|import-meta-resolve|json-modules|global-customevent|global-webcrypto|global-navigator|fetch|repl-await|worker|shadow-realm|print-required-tla)))$/;
 
 function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
   // The first operand that names a file of the package is the script, and the words after it are its own arguments: a `.`
@@ -5085,7 +5086,7 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       // the next word as its value or load a file: widen, and keep reading the words that follow as files.
       widenAll(ctx);
       if (inline) noteHookArgCwd(ctx, inline);
-      else if (NODE_VALUE_OPTS.test(name)) optValue = true;
+      else if (!NODE_BOOL_OPTS.test(name)) optValue = true;
       i++;
       continue;
     }
