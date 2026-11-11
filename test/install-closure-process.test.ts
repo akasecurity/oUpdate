@@ -310,3 +310,42 @@ test("a --> after tokens on the same line is not a comment and does not flag (ro
   expect(held(L2("let n = 2; if (n --> 0) { p.cwd() }"))).toBe(false);
   expect(held(L2("let n = 2;\n  -->  `\n" + Y + "\n// `"))).toBe(true);
 });
+
+// Round 11: a removed load or statement leaves a name, not a number, so a following property dot stays a dot.
+for (const [label, pre] of [
+  ["a property keyword after module.exports", `${A}module.exports.in /\n${Y} / 1;\n`],
+  ["a property keyword after a plain require", `${A}require("fs").in /\n${Y} / 1;\n`],
+  ["a property keyword after a relative require", `${A}require("./helper").in /\n${Y} / 1;\n`],
+  ["typeof after module.exports", `${A}module.exports.typeof / ${Y} / 1;\n`],
+  ["a computed member of a require", `${A}require("fs")["x"] / ${Y} / 1;\n`],
+  ["source that already holds the placeholder name", L2(`var __removed_text__ = 1; p.cwd()`)],
+] as const) {
+  test(`${label} is not static (round 11)`, () => expect(held(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a property keyword after module.exports on one line", `${A}module.exports.in / ${Y} / 1;\n`],
+  ["a property keyword after a plain require on one line", `${A}require("fs").in / ${Y} / 1;\n`],
+  ["a property keyword after a relative require on one line", `${A}require("./helper").in / ${Y} / 1;\n`],
+] as const) {
+  test(`${label} is not static (round 11)`, () => expect(held(pre)).toBe(true));
+}
+
+// Round 12: the span of an ambiguous / must end in an operand; ( x ) / 2 / 3 on one line is not static; real plain require.
+for (const [label, pre] of [
+  ["a span ending in an operator", L2(`const a = (1) / 1 + / ${Y}; // /`)],
+  ["a span ending in an operator and a regex that holds the use", L2(`const a = (b) / 1 * / (x) / ${Y} /`)],
+  ["a plain npm_package_config require followed by a property keyword", L2(`const x = require(process.env.npm_package_config_foo).in / ${Y} / 1;`)],
+  ["export default opening a regex that holds a quote", L2(`export default /'/.test(1); ${Y} // '`)],
+  ["extends opening a regex that holds a quote", L2(`class K extends /'/.source {} ${Y} // '`)],
+  ["an alias statement with no semicolon followed by a division holding the use", `const p = require("process")\n/ ${Y} / 1;\n`],
+] as const) {
+  test(`${label} is not static (round 12)`, () => expect(held(pre)).toBe(true));
+}
+test("two divisions after ) on one line are not static, one per line are (round 12)", () => {
+  expect(held(L2("const a = (p.cwd().length) / 2 / 3;"))).toBe(true);
+  expect(held(L2("const a = (p.cwd().length) / 2;\nconst b = (a) / 3;"))).toBe(false);
+});
+test("a division whose span ends in an operator and whose closing / opens a regex holding a quote is not static (round 12)", () => {
+  expect(held(L2(`const a = (1) / 1 + /;'/.test(1); ${Y} // '`))).toBe(true);
+  expect(held(L2(`const a = (1) / 1 - /,'/.test(1); ${Y} // '`))).toBe(true);
+});

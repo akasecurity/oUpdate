@@ -737,16 +737,25 @@ function stripProcessAliases(text: string, aliases: string[]): string {
     }
     if (i < whole.length && ".[(?`".includes(whole[i]!)) return m;
     aliases.push(String(a1 || a2));
-    // A neutral statement, not nothing: the token before what follows must stay the same for the second scan.
-    return "0;";
+    // A name (with its ; when the statement had one), not nothing. The token before what follows can still differ from the
+    // original (a statement without ; ended in ), which is ambiguous, and is now a name), so the second scan is safe only
+    // because the first scan, on the original text, has already refused every ambiguous span that could hide a use.
+    return m.trimEnd().endsWith(";") ? `${REMOVED};` : REMOVED;
   });
 }
 
 /** Keywords after which a / starts a regular expression; none of these can be a name. */
 const KEYWORD_REGEX = new Set(["return", "typeof", "case", "delete", "void", "throw", "new", "else", "do", "instanceof", "in", "default", "extends"]);
-/** Words that are keywords in some positions and names in others: a / after one is read once, with the span check. */
+/** Words after which a statement may end at a line break, so a / on the next line can start a regular expression. */
 const LINE_END_WORDS = new Set(["break", "continue", "debugger"]);
+/** Words that are keywords in some positions and names in others: a / after one is read once, with the span check. */
 const KEYWORD_MAYBE = new Set(["yield", "await", "of"]);
+// Sticky, so a token is matched in place and the text is never copied.
+const TOK_PRIVATE = /#[A-Za-z_$][\w$]*/y;
+const TOK_WORD = /(?:[A-Za-z_$][\w$]*|[^\x00-\x7f]+)/y;
+const TOK_NUMBER = /(?:0[xXbBoO][0-9a-fA-F_]*n?|\d[\d_]*(?:\.(?!\.)\d*)?(?:[eE][+-]?\d+)?n?)/y;
+const TOK_PUNCT = /(?:\.\.\.|\+\+|--|\?\.(?!\d))/y;
+
 /** Words a span read as a regular expression must not hold: with the process names they are what the checks look for. */
 const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "Worker", "process", "globalThis", "global", "Reflect", "Proxy", "constructor", "child_process", "dlopen", "exports"];
 
@@ -783,6 +792,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       if (c === "\\") i++;
       else if (c === "`") {
         i++;
+        // A closing backtick leaves "" so the tokens on either side of a template never join in the output.
         out += '""';
         return true;
       } else if (c === "$" && text[i + 1] === "{") {
@@ -871,7 +881,12 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       if (kind === "regex" && end < 0) return undefined;
       // Both readings must see the same names: the span holds none, and what follows the closing / is not a name,
       // a flag or another / that could start a comment.
-      if (kind === "amb" && end >= 0 && (danger.test(text.slice(i + 1, end)) || !closesCleanly(end + 1))) return undefined;
+      // Read as a division, the closing / must also divide: the span has to end in an operand (a name, a number, ) or ]),
+      // or the two readings would fall out of step. Read as a regex, what follows must end an expression.
+      if (kind === "amb" && end >= 0) {
+        const span = text.slice(i + 1, end);
+        if (danger.test(span) || !/[\w$)\]]\s*$/.test(span) || !closesCleanly(end + 1)) return undefined;
+      }
       if (end >= 0) {
         i = end + 1;
         out += "/r/";
@@ -894,22 +909,25 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
         }
       }
       if (c === "{") braces.push(false);
-      const rest = text.slice(i);
       let tok: string;
       let m: RegExpExecArray | null;
-      if ((m = /^#[A-Za-z_$][\w$]*/.exec(rest))) {
+      const at = (re: RegExp): RegExpExecArray | null => {
+        re.lastIndex = i;
+        return re.exec(text);
+      };
+      if ((m = at(TOK_PRIVATE))) {
         tok = m[0];
         push("priv", tok);
-      } else if ((m = /^(?:[A-Za-z_$][\w$]*|[^\x00-\x7f]+)/.exec(rest))) {
+      } else if ((m = at(TOK_WORD))) {
         tok = m[0];
         push("word", tok);
-      } else if ((m = /^(?:0[xXbBoO][0-9a-fA-F_]*n?|\d[\d_]*(?:\.(?!\.)\d*)?(?:[eE][+-]?\d+)?n?)/.exec(rest))) {
+      } else if ((m = at(TOK_NUMBER))) {
         // A dot ends a number literal only after plain decimal digits (1. in x); after 0x10, 1e3, 1n or 07 it is a property dot.
         tok = m[0];
         // 0[0-7]+ is a legacy octal literal (the dot after it is a property dot); a leading-zero literal with an 8 or 9 is decimal.
         if (/^0[0-7]+\./.test(tok)) tok = tok.slice(0, tok.indexOf("."));
         push("num", tok);
-      } else if ((m = /^(?:\.\.\.|\+\+|--|\?\.(?!\d))/.exec(rest))) {
+      } else if ((m = at(TOK_PUNCT))) {
         tok = m[0];
         push("punct", tok);
       } else {
@@ -929,19 +947,24 @@ function hidesNames(code: string | undefined): boolean {
   return code === undefined || /[^\x00-\x7f\\]|\\/.test(code);
 }
 
+// Stands in for text the second scan removed: a plain identifier, so a . after it stays a property dot and the token
+// before what follows is a name, never a number or a keyword.
+const REMOVED = "__removed_text__";
+
 function provablyStatic(text: string): boolean {
+  if (text.includes(REMOVED)) return false;
   const aliases: string[] = [];
   let viaOther = false;
   let rest = stripProcessAliases(text, aliases);
   if (hidesNames(codeOnly(text, aliases))) return false;
-  rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "0");
+  rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), REMOVED);
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3) => {
     const spec = String(spec1 || spec2 || spec3 || "");
     if (builtinRoot(loadedSpec(spec) ?? "") === "process") viaOther = true;
-    return stripLiteralLoad(spec) ? "0" : full;
+    return stripLiteralLoad(spec) ? REMOVED : full;
   });
   if (viaOther) return false;
-  rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, "0");
+  rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
   if (/(?:\brequire\s*\(|\bfrom\s+|\bimport\s+)\s*['"](?:node:)?process\b/.test(rest)) return false;
   if (UNSAFE_JS.test(rest)) return false;
