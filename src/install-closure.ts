@@ -4341,11 +4341,8 @@ function markHookFile(ctx: Ctx, token: string): void {
 
 // A file named by a command, resolved from the directory an earlier cd moved to as well as from the package root.
 function noteHookArgCwd(ctx: Ctx, token: string): void {
-  // A file named by an expansion the scan could not resolve (`node $(cat name.txt)`) may be any file of the package.
-  if (token.includes(UNRESOLVED)) {
-    ctx.widenInert = true;
-    widenAll(ctx);
-  }
+  // A file named by an expansion the scan could not resolve (`sh tools/$N.sh`) may be any file of the package.
+  if (token.includes(UNRESOLVED)) widenAll(ctx);
   noteHookArg(ctx, token);
   if (ctx.cwd && token && !token.startsWith("-") && !token.startsWith("/")) {
     const j = joinDir(ctx.cwd, token);
@@ -4640,7 +4637,10 @@ function readParts(ctx: Ctx, body: string): void {
       for (const cmd of cmds) {
         // An unresolved command word may be any runner: every file is read. An unresolved argument is dispatched as an argument.
         if (headUnresolved(cmd)) {
-          ctx.widenInert = true;
+          // A bare unresolved command word (`$npm_execpath run x`) may run anything: tests and docs are read too. A path word
+          // (`./tools/$N.sh`) keeps the directory-scoped read.
+          const head = cmd.split(/\s+/).find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) ?? "";
+          if (!head.includes("/")) ctx.widenInert = true;
           widenAll(ctx);
         } else dispatch(ctx, cmd);
       }
@@ -4834,6 +4834,12 @@ function dispatchNode(ctx: Ctx, argv: string[], i: number): void {
       if (inline) noteHookArgCwd(ctx, inline);
       i++;
       continue;
+    }
+    // A file named by an expansion the scan could not resolve (`node $(cat name.txt)`) may be any file of the package.
+    // A path word (`node tools/$N.js`) keeps the directory-scoped read.
+    if (a.includes(UNRESOLVED) && !a.includes("/")) {
+      ctx.widenInert = true;
+      widenAll(ctx);
     }
     noteHookArgCwd(ctx, a);
     i++;

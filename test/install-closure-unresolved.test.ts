@@ -23,7 +23,6 @@ const unresolved: [string, string][] = [
   ["npm run-script with a backtick script name", "npm run-script `cat name.txt`"],
   ["npm run with a variable script name", 'npm run "$FOO"'],
   ["node with a substituted file name", "node $(cat name.txt)"],
-  ["node with a partly substituted file name", "node ./docs/$(cat name.txt).js"],
   ["node -e with substituted code", 'node -e "$(cat name.txt)"'],
   ["yarn with a substituted subcommand", "yarn $(cat name.txt)"],
   ["pnpm with a variable subcommand", "pnpm $FOO"],
@@ -38,6 +37,17 @@ for (const [label, hook] of unresolved) {
     expect(holds(release("1.0.0", hook), release("1.0.1", hook)).length).toBeGreaterThan(0);
   });
 }
+
+test("node with a partly substituted path reads the package: the changed lib/evil.js holds", () => {
+  const hook = "node ./lib/$(cat name.txt).js";
+  const rel = (v: string) =>
+    files({
+      "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: hook } }),
+      "lib/evil.js": `console.log("evil ${v}")\n`,
+      "name.txt": "evil\n",
+    });
+  expect(holds(rel("1.0.0"), rel("1.0.1")).length).toBeGreaterThan(0);
+});
 
 test("node -e with code that loads a computed path reads the package: the changed lib/evil.js holds", () => {
   const hook = 'node -e "require(process.argv[1])"';
