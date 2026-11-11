@@ -329,6 +329,7 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} is not static (round 11)`, () => expect(held(pre)).toBe(true));
 
+}
 // The global process is checked like a name for the module. Loader words and a bare or computed use widen the
 // closure to the whole package (the changed build files hold); other uses only make the hook not static.
 const widensAll = (pre: string) => holds(release("1.0.0", pre), release("1.0.1", pre)).length > 0;
@@ -360,7 +361,7 @@ test("a word like process in a comment or a message is not a process use", () =>
   expect(widensAll(pre)).toBe(false);
 });
 
-// OUP-208 with round 3: the global process under an escaped name, and a loader load that continues past the statement.
+// The global process under an escaped name, and a loader load that continues past the statement.
 for (const [label, pre] of [
   ["an escaped global process calling binding", 'exports.main = () => \\u0070rocess.binding("spawn_sync")\n'],
   ["a braced escape of the global process calling getBuiltinModule", 'exports.main = () => \\u{70}rocess.getBuiltinModule("child_"+"process")\n'],
@@ -571,4 +572,23 @@ test("a comment between the dot and from does not hide the dot (round 18)", () =
 });
 test("balanced nested templates stay static (round 18)", () => {
   expect(held(`${A}exports.main = () => \`a\${\`b\${p.cwd()}\`}\`\n`)).toBe(false);
+});
+
+// Shapes of the bare global process that reach a loader: each must widen the closure to the whole package.
+for (const [label, pre] of [
+  ["process.getBuiltinModule with a computed builtin name", 'process.getBuiltinModule("child_"+"process").execSync("echo RAN", { stdio: "inherit" });\n'],
+  ["process with a computed mainModule member", 'const r = process["main"+"Module"]; console.log(typeof r);\n'],
+  ["globalThis.process kept in a name", 'const q = globalThis.process; console.log(typeof q.getBuiltinModule);\n'],
+  ["globalThis.process passed to a call", 'run(globalThis.process);\n'],
+  ["a destructured getBuiltinModule from process", 'const { getBuiltinModule: g } = process; console.log(typeof g);\n'],
+  ["a destructured computed key from process", 'const { ["get"+"BuiltinModule"]: g } = process; g("vm");\n'],
+  ["a descriptor read of process", 'console.log(typeof Object.getOwnPropertyDescriptor(process, "getBuiltinModule").value);\n'],
+  ["process in a comma expression", 'const z = (0, process); z.dlopen();\n'],
+  ["process returned from a function", 'function f() { return process } f().dlopen();\n'],
+] as const) {
+  test(`${label} widens the closure to the whole package (global process)`, () => expect(widensAll(pre)).toBe(true));
+}
+test("a computed member of globalThis widens the closure to the whole package (global process)", () => {
+  expect(widensAll('const q = globalThis["pro"+"cess"]; q.dlopen();\n')).toBe(true);
+  expect(widensAll('const n = globalThis.process.env.X; exports.main = () => n\n')).toBe(false);
 });

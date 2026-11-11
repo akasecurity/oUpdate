@@ -1425,7 +1425,9 @@ function processHazard(source: string): boolean {
   const text = codeOnly(source, [], true) ?? source;
   if (PROCESS_LOADER_WORDS.test(text)) return true;
   const names = ["process"];
-  const rest = stripProcessAliases(text, names);
+  // globalThis.process is the process object under another spelling; a computed member of the global object can be it.
+  if (/\b(?:globalThis|global)\s*\[/.test(text)) return true;
+  const rest = stripProcessAliases(text, names).replace(/\b(?:globalThis|global)\s*\.\s*process\b/g, "process");
   // An escaped or non-ASCII name in code can spell process or a loader word: it is read as a hazard.
   if (hidesNames(codeOnly(text))) return true;
   const alt = names.map((n) => n.replace(/\$/g, "\\$")).join("|");
