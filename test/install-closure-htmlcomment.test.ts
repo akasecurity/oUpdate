@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { classifyJs, hasUnbounded, processHazard } from "../src/install-closure.ts";
+import { classifyJs, hasUnbounded, processHazard, provablyStatic } from "../src/install-closure.ts";
 
 // A CommonJS file is a sloppy script: node reads `<!--` as a comment to the end of the line anywhere, and `-->` as one at the start of a
 // line (after only whitespace or comments). An ES module reads both as operators. The scanner cannot tell the two apart from the text,
@@ -31,6 +31,39 @@ const reaches: [string, string][] = [
   ["<!-- after a string", `"a"; <!-- x\n${LOAD}`],
   ["<!-- after a regular expression", `/a/g; <!-- x\n${LOAD}`],
   ["<!-- after a template", "`a`; <!-- x\n" + LOAD],
+  // A / the scan cannot settle as a regular expression or a division must not end the check for the comment.
+  ["<!-- after a regular expression that follows an if", `if (true) /a/ <!-- x\n${LOAD}`],
+  ["--> after a regular expression that follows an if", `if (true) /a/\n--> x\n${LOAD}`],
+  ["<!-- after a regular expression that follows a while", `while (false) /a/ <!-- x\n${LOAD}`],
+  ["<!-- after a regular expression that follows a for", `for (;false;) /a/ <!-- x\n${LOAD}`],
+  ["<!-- after a regular expression that follows a block", `{ }\n/a/ <!-- x\n${LOAD}`],
+  ["<!-- after a regular expression with a bracketed slash", `var r = /[/]/ <!-- x\n${LOAD}`],
+  ["<!-- after a division by a parenthesis", `var a = 4, b = 2; (a) / b <!-- x\n${LOAD}`],
+  ["--> after a division by a parenthesis", `var a = 4, b = 2; (a) / b\n--> x\n${LOAD}`],
+  ["<!-- after a division of a bracket", `var a = [4], b = 2; a[0] / b <!-- x\n${LOAD}`],
+  ["--> after a division of a bracket", `var a = [4], b = 2; a[0] / b\n--> x\n${LOAD}`],
+  ["<!-- after a division of a braced expression", `({}) / 2 <!-- x\n${LOAD}`],
+  ["<!-- after a division of an increment", `var a = 4; a++ / 2 <!-- x\n${LOAD}`],
+  ["<!-- after a plain division", `var a = 4, b = 2; a / b <!-- x\n${LOAD}`],
+  ["--> after a plain division", `var a = 4, b = 2; a / b\n--> x\n${LOAD}`],
+  // The scan reads a / as a regular expression where node reads a division: a <!-- inside the scan's "regular expression" is a comment
+  // opener, and the template the line then closes with a backtick would hide the load.
+  ["<!-- after a function expression and a division, a backtick on the comment line", "const x = function(){}\n/ 1 <!-- / + `\n" + LOAD + "\n--> `"],
+  ["<!-- after a class expression and a division, a backtick on the comment line", "const x = class {}\n/ 1 <!-- / + `\n" + LOAD + "\n--> `"],
+  ["<!-- after an object and a division, a backtick on the comment line", "const x = {}\n/ 1 <!-- / + `\n" + LOAD + "\n--> `"],
+  ["<!-- after an increment and a division, a backtick on the comment line", "var a = 1; a++ / 1 <!-- / + `\n" + LOAD + "\n--> `"],
+  ["<!-- after a parenthesis and a division, a backtick on the comment line", "(1) / 1 <!-- / + `\n" + LOAD + "\n--> `"],
+  // A string may hold a line or paragraph separator (ES2019) and may continue over a CRLF.
+  ["<!-- after a string holding a line separator, a backtick on the comment line", "const s = \"a\u2028\"; <!-- `\n" + LOAD + "\n--> `"],
+  ["<!-- after a string holding a paragraph separator, a backtick on the comment line", "const s = \"a\u2029\"; <!-- `\n" + LOAD + "\n--> `"],
+  ["<!-- after a string continued over a CRLF, a backtick on the comment line", "const s = \"a\\\r\nb\"; <!-- `\n" + LOAD + "\n--> `"],
+  ["the load after a string holding a line separator, no comment", `const s = "a\u2028";\n${LOAD}`],
+  ["the load after a division the scan cannot settle, no comment", `var a = 1; (0)/a/1\n${LOAD}`],
+  ["<!-- after a division the scan cannot settle, a backtick on the comment line", "var a = 1; (0)/a/1\n<!-- `\n" + LOAD + "\n--> `"],
+  // A non-ASCII name ends at a line separator: the --> that starts the next line is a comment and its backtick opens nothing.
+  ["--> after a non-ASCII name and a line separator, a backtick on the comment line", "var é\u2028--> `\n" + LOAD + "\n--> `"],
+  ["--> after a non-ASCII name and a paragraph separator, a backtick on the comment line", "var é\u2029--> `\n" + LOAD + "\n--> `"],
+  ["--> after a non-ASCII name and a no-break space, then a line feed", "var é\u00a0\n--> `\n" + LOAD + "\n--> `"],
 ];
 
 for (const [name, src] of reaches) {
@@ -49,6 +82,14 @@ test("processHazard and hasUnbounded read the same file as a hazard", () => {
   const src = `0; <!-- x\n${LOAD}`;
   expect(processHazard(src)).toBe(true);
   expect(hasUnbounded(src, src)).toBe(true);
+});
+
+test("a file and inline node -e code take the same path: not provably static, then classifyJs decides", () => {
+  for (const src of [`0; <!-- x\n${LOAD}`, `if (true) /a/ <!-- x\n${LOAD}`, `var a = 1; (0)/a/1\n${LOAD}`]) {
+    expect(provablyStatic(src)).toBe(false);
+    expect(all(src, "-e")).toBe(true);
+    expect(all(src, "pkg/scripts/x.js")).toBe(true);
+  }
 });
 
 test("the plain call without a comment widens, as before", () => {
@@ -70,6 +111,13 @@ const quiet: [string, string][] = [
   ["--> inside a block comment", "/*\n--> x\n*/ module.exports = 1;"],
   ["--> inside a line comment", "// x\n// --> y\nmodule.exports = 1;"],
   ["a hashbang line", "#!/usr/bin/env node\nmodule.exports = 1;"],
+  ["a regular expression after an if, no comment", `if (true) /a/.test("a");\nmodule.exports = 1;`],
+  ["a division by a parenthesis, no comment", "var a = 4, b = 2; (a) / b;\nmodule.exports = a;"],
+  ["a string holding <!-- after a division", `var a = 4, b = 2; (a) / b; var s = "<!--";\nmodule.exports = s;`],
+  ["a string holding --> at a line start after an if and a regular expression", `if (true) /a/.test("\\\n--> x");\nmodule.exports = 1;`],
+  ["a string holding a line separator", `const s = "a\u2028b";\nmodule.exports = s;`],
+  ["a string continued over a CRLF", `const s = "a\\\r\nb";\nmodule.exports = s;`],
+  ["a non-ASCII name", `const é = 1; module.exports = é;`],
 ];
 
 for (const [name, src] of quiet) {
@@ -78,6 +126,10 @@ for (const [name, src] of quiet) {
     expect(all(src, "pkg/lib/x.mjs")).toBe(false);
   });
 }
+
+test("a <!-- inside a regular expression the scan cannot settle widens: the known cost of testing the raw text", () => {
+  expect(all(`if (true) /<!--/.test("a");\nmodule.exports = 1;`)).toBe(true);
+});
 
 test("a benign file with a real <!-- or line-start --> comment widens: the known cost", () => {
   expect(all("module.exports = 1; <!-- note")).toBe(true);

@@ -979,7 +979,7 @@ const LINE_END_WORDS = new Set(["break", "continue", "debugger"]);
 const KEYWORD_MAYBE = new Set(["yield", "await", "of"]);
 // Sticky, so a token is matched in place and the text is never copied.
 const TOK_PRIVATE = /#[A-Za-z_$][\w$]*/y;
-const TOK_WORD = /(?:[A-Za-z_$][\w$]*|[^\x00-\x7f]+)/y;
+const TOK_WORD = /(?:[A-Za-z_$][\w$]*|[^\x00-\x7f\s]+)/y;
 const TOK_NUMBER = /(?:0[xXbBoO][0-9a-fA-F_]*n?|\d[\d_]*(?:\.(?!\.)\d*)?(?:[eE][+-]?\d+)?n?)/y;
 const TOK_PUNCT = /(?:\.\.\.|\+\+|--|\?\.(?!\d))/y;
 
@@ -992,15 +992,16 @@ const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "
  * regular expression is decided from the previous token this scan emitted, never from the source text before it: text
  * inside a string, template or regular expression is not a token.
  */
-// Set by a codeOnly call that stopped at an HTML-like comment (<!-- anywhere, --> at the start of a line). A script reads the rest of the
-// line as a comment and a module reads it as code, and the text does not say which, so the file is a hazard whichever way it is read.
-let stoppedAtHtmlComment = false;
+// What a file the scan could not read is a hazard for: a name for the process object, an escape that can spell one, the module wrapper's
+// top-level arguments or this (a load handed on through them), and an HTML-like comment (<!-- anywhere, --> at the start of a line or after
+// a block comment), which a script reads as a comment and a module reads as code. Tested on the raw text, apart from the scan: where the scan
+// gives up (an ambiguous slash, a bracket it cannot match) the check still runs, and a match inside a string only makes it more cautious.
+const UNREADABLE_HAZARD = /process|global|\\|<!--|(?:^|[\n\r\u2028\u2029]|\*\/)\s*-->|(?<![\w$.])(?:arguments|this)(?![\w$])/;
 const TEMPLATE_LITERAL = /(?:[^`\\$\n]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*`/y;
 
 // A span of the kept text: a string (raw is its text) or text to blank when brackets are matched (a regular expression, template text).
 type SpanNote = { raw: string; at: number; len: number; mask?: boolean };
 function codeOnly(text: string, watch: string[] = [], keep = false, strings?: SpanNote[]): string | undefined {
-  stoppedAtHtmlComment = false;
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
   let t1: Tok | undefined;
@@ -1101,7 +1102,14 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
     } else if (c === "'" || c === '"') {
       const st = i;
       i++;
-      for (; i < n && text[i] !== c && !eol(text[i]); i++) if (text[i] === "\\") i++;
+      // A string ends at a line feed or a carriage return only: a line or paragraph separator is legal inside one (ES2019), and a
+      // backslash before a CRLF continues the string over both characters.
+      for (; i < n && text[i] !== c && text[i] !== "\n" && text[i] !== "\r"; i++) {
+        if (text[i] === "\\") {
+          if (text[i + 1] === "\r" && text[i + 2] === "\n") i++;
+          i++;
+        }
+      }
       if (text[i] !== c) return undefined;
       i++;
       strings?.push({ raw: text.slice(st + 1, i - 1), at: out.length, len: i - st });
@@ -1162,10 +1170,8 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
         push("punct", "/");
       }
     } else {
-      if ((c === "<" && text.startsWith("<!--", i)) || (c === "-" && atLineStart && text.startsWith("-->", i))) {
-        stoppedAtHtmlComment = true;
-        return undefined;
-      }
+      if (c === "<" && text.startsWith("<!--", i)) return undefined;
+      if (c === "-" && atLineStart && text.startsWith("-->", i)) return undefined;
       if (c === "}") {
         const tpl = braces.pop();
         if (tpl) {
@@ -2371,9 +2377,9 @@ function processHazardScan(source: string): boolean {
   // Comments out first (strings kept) so the alias statements can be read, then strings out so no word inside a message counts.
   const names = ["process"];
   const keep = codeOnly(source, [], true);
-  // A file the scan cannot read is a hazard only when it can name the process object or spell a name with an escape.
-  const unreadable = () => /process|global|\\/.test(source);
-  if (keep === undefined) return stoppedAtHtmlComment || unreadable();
+  // A file the scan cannot read is a hazard only when it holds a word or marker that can name the process object or hide a load.
+  const unreadable = () => UNREADABLE_HAZARD.test(source);
+  if (keep === undefined) return unreadable();
   const code = codeOnly(stripProcessAliases(keep, names), names);
   if (code === undefined) return unreadable();
   if (PROCESS_LOADER_WORDS.test(code) || steeringKey(code)) return true;
