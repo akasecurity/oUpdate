@@ -1129,6 +1129,17 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
       return true;
     }
     if (/(?:^|[^\w$.])(?:typeof|in)$/.test(rest.slice(Math.max(0, j - 7), j)) && readEnds(rest, end)) continue;
+    // process.on("exit", cb) as a statement with a literal event name: the value is dropped and the callback is code of this file.
+    {
+      MEMBER_AFTER.lastIndex = end;
+      const ev = MEMBER_AFTER.exec(rest);
+      if (ev && /^\s*\.\s*(?:on|once|off|addListener|removeListener)$/.test(ev[0]) && (prev === "" || prev === ";" || prev === "{" || prev === "}" || (/[\n\r]/.test(rest.slice(j, at)) && /[\w$)\]"']/.test(prev)))) {
+        let p2 = end + ev[0].length;
+        while (p2 < rest.length && /\s/.test(rest[p2]!)) p2++;
+        const args = rest[p2] === "(" ? argsOf(rest, p2) : undefined;
+        if (args !== undefined && args.trimStart().startsWith('""') && /^[ \t]*(?:\r?\n|;|\}|$)/.test(rest.slice(p2 + args.length + 2))) continue;
+      }
+    }
     if (lenient) {
       // Any other plain member (nextTick, on, hrtime) is not static, but it does not reach a loader unless a chain follows it.
       MEMBER_AFTER.lastIndex = end;
@@ -1159,7 +1170,7 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
         }
         // on, once, off, emit, addListener and removeListener return the object: only as a statement whose value is dropped.
         if (/^\s*\.\s*(?:on|once|off|addListener|removeListener)\b/.test(mem[0])) {
-          const stmtStart = prev === "" || prev === ";" || prev === "{" || prev === "}";
+          const stmtStart = prev === "" || prev === ";" || prev === "{" || prev === "}" || (/[\n\r]/.test(rest.slice(j, at)) && /[\w$)\]"']/.test(prev));
           if (!stmtStart || !/^[ \t]*(?:\r?\n|;|\}|$)/.test(rest.slice(after))) return true;
         }
         if (readEnds(rest, after, true)) continue;
@@ -1659,7 +1670,9 @@ function processHazard(source: string): boolean {
       const manifest = /\.\s*npm_package_json$/.test(read[0]) && /dirname\s*\(\s*$/.test(args.slice(0, at));
       // platform and arch name one of a few fixed values: a file-name selector, not a path.
       const selector = /^\s*\.\s*(?:platform|arch)$/.test(read[0]);
-      if (!prefixed && !manifest && !selector) return true;
+      // path.join(process.cwd(), "x.js") and path.resolve(process.cwd(), ...): the root, then literal segments.
+      const joined = (/^\s*\.\s*cwd\s*\(\s*\)$/.test(read[0]) || /^\s*\.\s*env\s*\.\s*INIT_CWD$/.test(read[0])) && /(?:join|resolve)\s*\(\s*$/.test(args.slice(0, at)) && /^\s*,\s*""/.test(after);
+      if (!prefixed && !manifest && !selector && !joined) return true;
     }
   }
   return processValueUse(code, names, true);

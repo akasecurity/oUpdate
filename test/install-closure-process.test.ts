@@ -754,3 +754,24 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} does not widen the closure (round 24)`, () => expect(widensAll(pre)).toBe(false));
 }
+
+// Common hook idioms stay precise (round 25).
+for (const [label, pre] of [
+  ["process.on exit with an arrow callback", 'process.on("exit", () => console.log("bye"));\nexports.main = () => 1\n'],
+  ["process.on SIGINT with a function callback", 'process.on("SIGINT", function () { process.exit(1) });\nexports.main = () => 1\n'],
+  ["process.once uncaughtException as the last statement", 'exports.main = () => 1\nprocess.once("uncaughtException", (e) => { console.error(e) })\n'],
+] as const) {
+  test(`${label} is static (round 25)`, () => expect(held(pre)).toBe(false));
+}
+for (const [label, pre] of [
+  ["require of path.join(process.cwd(), ...)", 'const path = require("path");\nexports.main = () => require(path.join(process.cwd(), "x.js"))\n'],
+  ["require of path.resolve(process.cwd(), ...)", 'const path = require("path");\nexports.main = () => require(path.resolve(process.cwd(), "tools", "x.js"))\n'],
+] as const) {
+  test(`${label} does not widen the closure (round 25)`, () => expect(widensAll(pre)).toBe(false));
+}
+test("process.on with a non-literal event name is not static (round 25)", () => {
+  expect(held('const e = "exit";\nprocess.on(e, () => 1);\nexports.main = () => 1\n')).toBe(true);
+});
+test("process.on whose result is chained is not static (round 25)", () => {
+  expect(held('process.on("exit", () => 1).on("x", () => 2);\nexports.main = () => 1\n')).toBe(true);
+});
