@@ -737,13 +737,15 @@ function stripProcessAliases(text: string, aliases: string[]): string {
     }
     if (i < whole.length && ".[(?`".includes(whole[i]!)) return m;
     aliases.push(String(a1 || a2));
-    return "";
+    // A neutral statement, not nothing: the token before what follows must stay the same for the second scan.
+    return "0;";
   });
 }
 
 /** Keywords after which a / starts a regular expression; none of these can be a name. */
-const KEYWORD_REGEX = new Set(["return", "typeof", "case", "delete", "void", "throw", "new", "else", "do", "instanceof", "in"]);
+const KEYWORD_REGEX = new Set(["return", "typeof", "case", "delete", "void", "throw", "new", "else", "do", "instanceof", "in", "default", "extends"]);
 /** Words that are keywords in some positions and names in others: a / after one is read once, with the span check. */
+const LINE_END_WORDS = new Set(["break", "continue", "debugger"]);
 const KEYWORD_MAYBE = new Set(["yield", "await", "of"]);
 /** Words a span read as a regular expression must not hold: with the process names they are what the checks look for. */
 const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "Worker", "process", "globalThis", "global", "Reflect", "Proxy", "constructor", "child_process", "dlopen", "exports"];
@@ -759,15 +761,19 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
   let out = "";
   let t1: Tok | undefined;
   let t2: Tok | undefined;
+  let atLineStart = true; // only whitespace or comments since the last line break
+  let nlSince = false; // a line break since the last token
   const push = (k: Tok["k"], t: string) => {
     t2 = t1;
     t1 = { k, t };
+    atLineStart = false;
+    nlSince = false;
   };
   const braces: boolean[] = [];
   let i = 0;
   const n = text.length;
   const names = [...DANGER_WORDS, ...KEYWORD_REGEX, ...KEYWORD_MAYBE, ...watch].map((w) => w.replace(/\$/g, "\\$&"));
-  const danger = new RegExp(`['"\`\\\\\\u0080-\\uffff(){}\\[\\]]|(?<![\\w$])(?:${names.join("|")})(?![\\w$])`);
+  const danger = new RegExp(`['"\`\\\\\\u0080-\\uffff(){}\\[\\]]|(?<![\\w$])(?:${names.join("|")})(?![\\w$])|<!--|-->`);
   const eol = (c: string | undefined) => c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029";
   let opened = false;
   const template = (): boolean => {
@@ -777,6 +783,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       if (c === "\\") i++;
       else if (c === "`") {
         i++;
+        out += '""';
         return true;
       } else if (c === "$" && text[i + 1] === "{") {
         i += 2;
@@ -806,15 +813,23 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
     }
     return -1;
   };
+  // What follows a closing / must not be a name, a flag, a number or another / : only the end of an expression.
+  const closesCleanly = (at: number): boolean => {
+    let q = at;
+    while (q < n && /\s/.test(text[q]!)) q++;
+    return q >= n || ").;,]}".includes(text[q]!);
+  };
   // "regex" or "div" when the previous token settles it, "amb" when a / could be either.
   const slashKind = (): "regex" | "div" | "amb" => {
     if (!t1) return "regex";
     if (t1.k === "punct") {
       if (t1.t === ")" || t1.t === "}" || t1.t === "++" || t1.t === "--") return "amb";
-      return t1.t === "]" || t1.t === "/" ? "div" : "regex";
+      return t1.t === "]" ? "div" : "regex";
     }
     if (t1.k !== "word") return "div";
     if (t2 && t2.k === "punct" && (t2.t === "." || t2.t === "?.")) return "div";
+    // break, continue and debugger end a statement at a line break, so a / on the next line starts a regular expression.
+    if (nlSince && (LINE_END_WORDS.has(t1.t) || (t2 && t2.k === "word" && (t2.t === "break" || t2.t === "continue")))) return "amb";
     if (KEYWORD_REGEX.has(t1.t)) return "regex";
     return KEYWORD_MAYBE.has(t1.t) ? "amb" : "div";
   };
@@ -823,6 +838,10 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
     const c = text[i]!;
     if (/\s/.test(c)) {
       out += c;
+      if (eol(c)) {
+        atLineStart = true;
+        nlSince = true;
+      }
       i++;
     } else if (c === "'" || c === '"') {
       i++;
@@ -839,7 +858,12 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
     } else if (c === "/" && text[i + 1] === "*") {
       const e = text.indexOf("*/", i + 2);
       if (e < 0) return undefined;
-      out += /[\n\r\u2028\u2029]/.test(text.slice(i, e)) ? "\n" : " ";
+      const multi = /[\n\r\u2028\u2029]/.test(text.slice(i, e));
+      out += multi ? "\n" : " ";
+      if (multi) {
+        atLineStart = true;
+        nlSince = true;
+      }
       i = e + 2;
     } else if (c === "/") {
       const kind = slashKind();
@@ -847,7 +871,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       if (kind === "regex" && end < 0) return undefined;
       // Both readings must see the same names: the span holds none, and what follows the closing / is not a name,
       // a flag or another / that could start a comment.
-      if (kind === "amb" && end >= 0 && (danger.test(text.slice(i + 1, end)) || !(end + 1 >= n || /[\s).;,\]}]/.test(text[end + 1]!)))) return undefined;
+      if (kind === "amb" && end >= 0 && (danger.test(text.slice(i + 1, end)) || !closesCleanly(end + 1))) return undefined;
       if (end >= 0) {
         i = end + 1;
         out += "/r/";
@@ -859,7 +883,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       }
     } else {
       if (c === "<" && text.startsWith("<!--", i)) return undefined;
-      if (c === "-" && text.startsWith("-->", i) && /(?:^|[\n\r\u2028\u2029])[^\S\n\r\u2028\u2029]*$/.test(out)) return undefined;
+      if (c === "-" && atLineStart && text.startsWith("-->", i)) return undefined;
       if (c === "}") {
         const tpl = braces.pop();
         if (tpl) {
@@ -870,7 +894,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
         }
       }
       if (c === "{") braces.push(false);
-      const rest = text.slice(i, i + 64);
+      const rest = text.slice(i);
       let tok: string;
       let m: RegExpExecArray | null;
       if ((m = /^#[A-Za-z_$][\w$]*/.exec(rest))) {
@@ -882,8 +906,8 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       } else if ((m = /^(?:0[xXbBoO][0-9a-fA-F_]*n?|\d[\d_]*(?:\.(?!\.)\d*)?(?:[eE][+-]?\d+)?n?)/.exec(rest))) {
         // A dot ends a number literal only after plain decimal digits (1. in x); after 0x10, 1e3, 1n or 07 it is a property dot.
         tok = m[0];
-        if (/^0\d/.test(tok) && tok.includes(".")) tok = tok.slice(0, tok.indexOf("."));
-        if (/[nN]$/.test(tok) || /[eE][+-]?\d+$/.test(tok) || /^0[xXbBoO]/.test(tok)) tok = tok.replace(/\.$/, "");
+        // 0[0-7]+ is a legacy octal literal (the dot after it is a property dot); a leading-zero literal with an 8 or 9 is decimal.
+        if (/^0[0-7]+\./.test(tok)) tok = tok.slice(0, tok.indexOf("."));
         push("num", tok);
       } else if ((m = /^(?:\.\.\.|\+\+|--|\?\.(?!\d))/.exec(rest))) {
         tok = m[0];
@@ -910,14 +934,14 @@ function provablyStatic(text: string): boolean {
   let viaOther = false;
   let rest = stripProcessAliases(text, aliases);
   if (hidesNames(codeOnly(text, aliases))) return false;
-  rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "");
+  rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "0");
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3) => {
     const spec = String(spec1 || spec2 || spec3 || "");
     if (builtinRoot(loadedSpec(spec) ?? "") === "process") viaOther = true;
-    return stripLiteralLoad(spec) ? "" : full;
+    return stripLiteralLoad(spec) ? "0" : full;
   });
   if (viaOther) return false;
-  rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, "");
+  rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, "0");
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
   if (/(?:\brequire\s*\(|\bfrom\s+|\bimport\s+)\s*['"](?:node:)?process\b/.test(rest)) return false;
   if (UNSAFE_JS.test(rest)) return false;

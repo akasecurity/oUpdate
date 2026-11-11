@@ -157,7 +157,7 @@ for (const [label, pre] of [
   test(`${label} is not static (round 4)`, () => expect(held(pre)).toBe(true));
 }
 test("ordinary divisions and regexes after ) and } stay static", () => {
-  expect(held('const p = require("process"); const a = (p.cwd().length) / 2 / 3; const b = (4) / 2;\nfunction f() {}\nconst c = 6 / 2; exports.main = () => a + b + c\n')).toBe(false);
+  expect(held('const p = require("process"); const a = (p.cwd().length) / 2;\nconst b = (4) / 2;\nfunction f() {}\nconst c = 6 / 2; exports.main = () => a + b + c\n')).toBe(false);
 });
 
 // Round 5: comments the host reads as comments, and a / read as a regex or a division from the text before it.
@@ -249,4 +249,64 @@ test("a number literal ending in a dot before a keyword is a keyword (round 8)",
 });
 test("ordinary regexes and divisions stay static (round 8)", () => {
   expect(held(L2(`const re = /typeof /; const z = re.test("typeof ") ? 1 / 2 : 3; const w = x => x / 2 / 4; function f() { return /'/.test("a") } p.cwd()`))).toBe(false);
+});
+
+// Round 9: an identifier is read whole, and leading-zero literals keep or lose the dot as JavaScript does.
+for (const len of [63, 64, 65, 128, 200]) {
+  test(`an identifier with a ${len}-character prefix ending in a keyword is one name (round 9)`, () => {
+    const name = "a".repeat(len) + "return";
+    expect(held(L2(`var ${name} = 1; ${name} / ${Y} / 1;`))).toBe(true);
+    expect(held(L2(`var ${name} = 6; const q = ${name} / (2) / 3; p.cwd()`))).toBe(false);
+  });
+}
+for (const [label, lit, dotIsNumber] of [
+  ["08.", "08.", true],
+  ["09.", "09.", true],
+  ["0.5.", "0.5.", false],
+  ["1_0.", "1_0.", true],
+  ["07.", "07.", false],
+  ["00.", "00.", false],
+  ["0.", "0.", true],
+] as const) {
+  test(`${label} before a keyword is read as JavaScript reads it (round 9)`, () => {
+    // A number that keeps its dot leaves "in" a keyword that opens a regex holding a quote (the use after it is code);
+    // with a property dot "in" is a name, the / divides, and the quoted text is a string in JavaScript too.
+    if (dotIsNumber) {
+      expect(held(L2(`const b = ${lit} in /'/; ${Y} // '`))).toBe(true);
+      expect(held(L2(`const b = ${lit} in /'/; p.cwd()`))).toBe(false);
+    } else {
+      expect(held(L2(`const b = ${lit}delete / ${Y} / 1;`))).toBe(true);
+    }
+  });
+}
+for (const w of ["default", "extends"]) {
+  test(`${w} before a regex that holds a quote is a keyword (round 9)`, () => {
+    expect(held(L2(`switch (1) { ${w === "default" ? "default" : "case 1"}: /'/.test("a"); } ${Y} // '`))).toBe(true);
+  });
+}
+
+// Round 10: a / after a binary /, what follows a closing /, the second scan, HTML comments in a span, line-end words.
+for (const [label, pre] of [
+  ["a regex right after a binary division", L2(`const a = 1; const r = a / /'/.source; ${Y} // '`)],
+  ["a span closed and followed by a name", L2(`const a = (1); const b = a / 2 / ${Y}; const c = (2) / 3 / p.cwd();`)],
+  ["a span closed and followed by another /", L2(`const a = (1) / b / /'/.test(1); ${Y} // '`)],
+  ["a division after module.exports with the use between slashes", L2(`const x = module.exports / ${Y} / 1;`)],
+  ["a division after a plain require with the use between slashes", L2(`const x = require("fs") / ${Y} / 1;`)],
+  ["a division after an alias statement with the use between slashes", `const p = require("process");\nconst q = require("node:process")\n/ ${Y} / 1;\n`],
+  ["an HTML comment inside an ambiguous span", L2(`const a = (1) / <!-- \` / 2;\n${Y}\n// \``)],
+  ["a regex on the line after break", L2(`for (;;) { break\n/'/.test(1); ${Y} // '\n }`)],
+  ["a regex on the line after continue label", L2(`a: for (;;) { continue a\n/'/.test(1); ${Y} // '\n }`)],
+  ["a regex on the line after debugger", L2(`debugger\n/'/.test(1); ${Y} // '`)],
+  ["a division after a template expression opener", L2("const t = `${/}/.source + " + Y + "}`")],
+  ["a regex-looking slash after a closing template", L2("const t = `a` / `b` / " + Y + " / 1")],
+  ["a template without an expression joined to its neighbors", L2("const x = 1; const t = x`a`.in / " + Y + " / 1")],
+] as const) {
+  test(`${label} is not static (round 10)`, () => expect(held(pre)).toBe(true));
+}
+test("a regex after break on the same statement, a template, and a --> mid-line stay static (round 10)", () => {
+  expect(held(L2("let n = 3; const t = `a` / 2;\nwhile (n --> 0) { p.cwd() }\nfor (;;) { break }\nconst r = /x/.test(1)"))).toBe(false);
+});
+test("a --> after tokens on the same line is not a comment and does not flag (round 10)", () => {
+  expect(held(L2("let n = 2; if (n --> 0) { p.cwd() }"))).toBe(false);
+  expect(held(L2("let n = 2;\n  -->  `\n" + Y + "\n// `"))).toBe(true);
 });
