@@ -565,3 +565,12 @@ for (const [label, hook] of [
 ] as [string, string][]) {
   test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
 }
+
+// Fifteenth review batch: the declared-function forms of the brace-in-regex and brace-in-template cases, and a var module cost.
+for (const [label, hook] of [
+  ["a declared function with a module parameter and a brace in a regex, then the real module read", `function unused(module) { const re = /{/; }\nconst k = "require";\nReflect.get(module, k).call(module, ${BX});`],
+  ["a declared function with a module parameter and a brace in a template, then the real module read", "function unused(module) { const t = `{`; }\nconst k = \"require\";\nReflect.get(module, k).call(module, " + BX + ");"],
+  ["a var module object read with Object.entries (documented hold)", `var module = { a: 1 };\nObject.entries(module);`],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
+}
