@@ -549,7 +549,6 @@ for (const [label, hook] of dateLines) {
 
 const dateQuiet: [string, string][] = [
   ["date with a plain format", "cmake -DCMAKE_BUILD_TYPE=$(date +%Y-%m-%d) | cat"],
-  ["date bare", "cmake -DFOO_VERSION=$(date) | cat"],
   ["let with plain numbers", "let n=1+2 | cat"],
   ["a numeric test on a plain name", "[[ N -eq 0 ]] 2>/dev/null"],
 ];
@@ -605,6 +604,40 @@ const pathQuiet: [string, string][] = [
 ];
 
 for (const [label, hook] of pathQuiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
+  });
+}
+
+// Only numeric sysctl and getconf keys and a date with a +FORMAT are split-safe unquoted: a bare date prints the time zone name.
+const keyLines: [string, string][] = [
+  ["a bare date", "cmake -DCMAKE_BUILD_TYPE=$(date) | cat"],
+  ["sysctl of the host name", "cmake -DCMAKE_BUILD_TYPE=$(sysctl -n kern.hostname) | cat"],
+  ["sysctl of the OS version", "cmake -DCMAKE_BUILD_TYPE=$(sysctl -n kern.version) | cat"],
+  ["sysctl of the CPU brand", "cmake -DCMAKE_BUILD_TYPE=$(sysctl -n machdep.cpu.brand_string) | cat"],
+  ["getconf of a path name", "cmake -DCMAKE_BUILD_TYPE=$(getconf PATH) | cat"],
+  ["getconf of a variable set from a substitution", `X=${U}; cmake -DCMAKE_BUILD_TYPE=$(getconf $X) | cat`],
+];
+
+for (const [label, hook] of keyLines) {
+  for (const changed of ["lib/evil.js", "docs/evil.js"] as const) {
+    test(`${label} reads every file: a changed ${changed} holds`, () => {
+      expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, changed)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const keyQuiet: [string, string][] = [
+  ["sysctl of the CPU count", "cmake -DFOO_VERSION=$(sysctl -n hw.ncpu) | cat"],
+  ["sysctl of the memory size", "cmake -DFOO_VERSION=$(sysctl -n hw.memsize) | cat"],
+  ["getconf of the CPU count", "make -j$(getconf _NPROCESSORS_ONLN) | tee log"],
+  ["getconf of the page size", "cmake -DFOO_VERSION=$(getconf PAGESIZE) | cat"],
+  ["a date with a literal format", "cmake -DCMAKE_BUILD_TYPE=$(date +Release) | cat"],
+  ["a quoted bare date", 'cmake -DCMAKE_BUILD_TYPE="$(date)" | cat'],
+  ["a quoted sysctl of the host name", 'cmake -DCMAKE_BUILD_TYPE="$(sysctl -n kern.hostname)" | cat'],
+];
+
+for (const [label, hook] of keyQuiet) {
   test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
     expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
   });
