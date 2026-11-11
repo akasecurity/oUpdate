@@ -423,11 +423,11 @@ const sameEntry = (a: Uint8Array | undefined, b: Uint8Array | undefined) => (!a 
 
 const PAIR_CALLS = new WeakMap<FileMap, number>();
 
-/** The id of one merge call (an artifact instance, not its label): two artifacts with one label never share or dedupe notes. */
-function nextPair(into: FileMap, label: string): string {
+/** The id of one merge call (an artifact instance, never its label: two artifacts with one label never share or dedupe notes). */
+function nextPair(into: FileMap): string {
   const calls = (PAIR_CALLS.get(into) ?? 0) + 1;
   PAIR_CALLS.set(into, calls);
-  return `${label}\0${calls}`;
+  return String(calls);
 }
 
 /**
@@ -436,8 +436,8 @@ function nextPair(into: FileMap, label: string): string {
  * paths (what mergeArtifactPair returned), so a note points at the merged file it is about.
  */
 export function mergeUnpairedNotes(into: { old: FileMap; new: FileMap }, label: string, now: FileMap, placed?: ReadonlyMap<string, string>): void {
-  const pair = nextPair(into.new, label);
-  markTarNotes(into.new, tarNoteEntries(now).map((n) => ({ ...n, pair, ...(n.paths && placed ? { paths: n.paths.map((p) => placed.get(p) ?? `\0unplaced ${p}`) } : {}) })));
+  const pair = nextPair(into.new);
+  markTarNotes(into.new, tarNoteEntries(now).map((n) => ({ ...n, pair, from: label, ...(n.paths && placed ? { paths: n.paths.map((p) => placed.get(p) ?? `\0unplaced ${p}`) } : {}) })));
 }
 
 /**
@@ -477,9 +477,9 @@ export function mergeArtifactPair(into: { old: FileMap; new: FileMap }, label: s
   // Each side keeps its own notes, tagged with this pair, so the pre-pass compares a note only with its own pair's old
   // side. A path this pair did not place (folded or crowded out) is marked unplaced, so its link never reads another's file.
   // The pair is this call, not the label: two artifacts with one label (two sdists) never share or dedupe notes.
-  const pair = nextPair(into.new, label);
+  const pair = nextPair(into.new);
   const tag = (notes: readonly TarNote[], placed: Map<string, string>) =>
-    notes.map((n) => ({ ...n, pair, ...(n.paths ? { paths: n.paths.map((p) => placed.get(p) ?? `\0unplaced ${p}`) } : {}) }));
+    notes.map((n) => ({ ...n, pair, from: label, ...(n.paths ? { paths: n.paths.map((p) => placed.get(p) ?? `\0unplaced ${p}`) } : {}) }));
   markTarNotes(into.old, tag(tarNoteEntries(old), placedOld));
   markTarNotes(into.new, tag(tarNoteEntries(now), placedNew));
   return placedNew;

@@ -1304,11 +1304,42 @@ describe("pypi files pair with their own old file", () => {
     expect(tarHolds(r)).toEqual(["x-2.post1.tar.gz: symlink x-2/docs/link"]);
   });
 
-  test("an unrecognized sdist extension or a release that is no version pairs with nothing", async () => {
+  test("an unrecognized sdist extension pairs with nothing", async () => {
     const odd = await load([["x-1.tar.gz.sig", sdist("1", true)]], [["x-2.tar.gz.sig", sdist("2", true)]]);
     expect(tarHolds(odd)).toEqual(["x-2.tar.gz.sig: symlink x-2/docs/link"]);
-    const junk = await load([["x-one.tar.gz", sdist("1", true)]], [["x-two.tar.gz", sdist("2", true)]], "x", "one", "two");
-    expect(tarHolds(junk)).toEqual(["x-two.tar.gz: symlink x-2/docs/link"]);
+  });
+
+  test("another sdist of any project name keeps cross-format pairing off: x-1.zip, other-1.tar.gz and x-2.tar.gz", async () => {
+    const r = await load([["x-1.zip", sdist("1", true, "zip")], ["other-1.tar.gz", sdist("1", true, "other")]], [["x-2.tar.gz", sdist("2", true)]]);
+    expect(tarHolds(r)).toEqual(["x-2.tar.gz: symlink x-2/docs/link"]);
+  });
+
+  test("a NUL in a file name does not make a note name another file: both names are shown whole", async () => {
+    const other = tarBytes([{ name: "x-2/setup.py", type: "file", data: "setup()\n" }, { name: "x-2/a.txt", type: "file", data: "a" }, { name: "x-2/b.txt", type: "file", data: "b" }, { name: "x-2/docs/link", type: "sym", data: "../b.txt" }]);
+    const r = await load([["x-1.tar.gz", sdist("1", true)]], [["x-2.tar.gz", sdist("2", true)], ["x-2.tar.gz\u0000other-2.tar.gz", other]]);
+    expect(tarHolds(r)).toEqual(["x-2.tar.gz\\x00other-2.tar.gz: symlink x-2/docs/link"]);
+    expect(r.carriedTarNotes).toEqual(["x-2.tar.gz: symlink x-2/docs/link"]);
+  });
+
+  test("a long file name is cut in the detail, not the note's path", async () => {
+    const r = await load([["x-1.tar.gz", sdist("1", true)]], [["x-2.tar.gz", sdist("2", false)], [`x-2-${"a".repeat(300)}.tar.gz`, sdist("2", true, "long")]]);
+    const hold = r.hard.find((h) => h.kind === "tar-entry");
+    expect(hold?.detail.length).toBeLessThanOrEqual(200);
+    expect(hold?.detail).toEndWith(": symlink x-2/docs/link");
+  });
+
+  test("a version that is no PEP 440 version pairs by the same string: x-1.0-final with x-2.0-final", async () => {
+    const r = await load([["x-1.0-final.tar.gz", sdist("1", true)]], [["x-2.0-final.tar.gz", sdist("2", true)]], "x", "1.0-final", "2.0-final");
+    expect(tarHolds(r)).toEqual([]);
+    expect(r.carriedTarNotes?.length).toBe(1);
+    const w = await load([["x-1.0_final-py3-none-any.whl", sdist("1", true)]], [["x-2.0_final-py3-none-any.whl", sdist("2", true)]], "x", "1.0_final", "2.0_final");
+    expect(tarHolds(w)).toEqual([]);
+  });
+
+  test("a wheel with a raw - in its project name pairs: foo-bar-1.0-py3-none-any.whl", async () => {
+    const r = await load([["foo-bar-1.0-py3-none-any.whl", sdist("1", true)]], [["foo-bar-2.0-py3-none-any.whl", sdist("2", true)]], "foo-bar", "1.0", "2.0");
+    expect(tarHolds(r)).toEqual([]);
+    expect(r.carriedTarNotes?.length).toBe(1);
   });
 
   test("a note shows its own file's name: two sdists name the one whose link changed", async () => {

@@ -188,27 +188,34 @@ async function loadPypiRelease(a: ReviewArgs, registry: Registry, work: string, 
   // either side, has no old side: all its notes hold.
   const pep503 = (s: string) => s.toLowerCase().replace(/[-_.]+/g, "_");
   const SDIST_EXT = /\.(tar\.gz|tgz|tar\.bz2|tbz|tar\.xz|txz|tar\.z|tar|zip)$/i;
+  // The release version is the file's whole version: PEP 440-equal, or the same string when either does not normalize.
   const dist = (x: ArtifactFile, version: string): { kind: "sdist" | "wheel"; tail: string } | undefined => {
     const want = normalizeVersion(version);
-    if (want === undefined) return undefined;
+    const same = (v: string) => v === version || (want !== undefined && normalizeVersion(v) === want);
     const f = x.filename;
     if (x.packagetype === "sdist") {
       const ext = SDIST_EXT.exec(f);
       if (!ext) return undefined;
       const stem = f.slice(0, ext.index);
       for (let i = stem.indexOf("-"); i > 0; i = stem.indexOf("-", i + 1))
-        if (pep503(stem.slice(0, i)) === pep503(a.name) && normalizeVersion(stem.slice(i + 1)) === want) return { kind: "sdist", tail: ext[1]!.toLowerCase() };
+        if (pep503(stem.slice(0, i)) === pep503(a.name) && same(stem.slice(i + 1))) return { kind: "sdist", tail: ext[1]!.toLowerCase() };
       return undefined;
     }
     if (!f.endsWith(".whl")) return undefined;
-    const fields = f.slice(0, -4).split("-");
-    if (fields.length < 5 || pep503(fields[0]!) !== pep503(a.name) || normalizeVersion(fields[1]!) !== want) return undefined;
-    const tags = fields.slice(2);
-    if (tags.length === 4 && /^\d/.test(tags[0]!)) tags.shift();
-    return tags.length === 3 ? { kind: "wheel", tail: tags.join("-") } : undefined;
+    const body = f.slice(0, -4);
+    // A project name with a raw "-" is read the way an sdist's is: the first dash after which the name matches.
+    for (let i = body.indexOf("-"); i > 0; i = body.indexOf("-", i + 1)) {
+      if (pep503(body.slice(0, i)) !== pep503(a.name)) continue;
+      const fields = body.slice(i + 1).split("-");
+      if (fields.length < 4 || !same(fields[0]!)) continue;
+      const tags = fields.slice(1);
+      if (tags.length === 4 && /^\d/.test(tags[0]!)) tags.shift();
+      if (tags.length === 3) return { kind: "wheel", tail: tags.join("-") };
+    }
+    return undefined;
   };
-  const sdists = (files: ArtifactFile[], version: string) => files.filter((x) => dist(x, version)?.kind === "sdist").length;
-  const oneSdist = sdists(before, a.from ?? "") === 1 && sdists(now, a.to) === 1;
+  // Cross-format sdist pairing is unambiguous only when each release lists exactly one sdist of any name.
+  const oneSdist = before.filter((x) => x.packagetype === "sdist").length === 1 && now.filter((x) => x.packagetype === "sdist").length === 1;
   const counterpartKey = (x: ArtifactFile, version: string) => {
     const d = dist(x, version);
     return d === undefined ? undefined : d.kind === "sdist" && oneSdist ? "sdist" : `${d.kind}\0${d.tail}`;
