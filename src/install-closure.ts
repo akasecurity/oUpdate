@@ -635,8 +635,9 @@ function addBundled(ctx: Ctx, root: string): void {
 const LITERAL_LOAD = /(?:\brequire|\bimport)\(\s*(['"])([^'"]+)\1\s*\)|\bfrom\s+(['"])([^'"]+)\3|\bimport\s+(['"])([^'"]+)\5/g;
 // Anything still able to name a file. module.exports is removed first; it is the static CJS assignment.
 const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bchild_process\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
-// A static file may require these. Any other bare builtin is unsafe, so the load stays in the text.
-const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer"]);
+// A static file may require these. Any other bare builtin is unsafe, so the load stays in the text. "process" is the
+// global process object, which a static file already reaches without a load (its binding and dlopen stay unsafe words).
+const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer", "process"]);
 const NODE_BUILTINS = new Set([
   ...STATIC_BUILTINS,
   "async_hooks", "child_process", "cluster", "console", "constants", "dgram", "diagnostics_channel",

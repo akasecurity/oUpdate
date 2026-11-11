@@ -1121,6 +1121,33 @@ describe("newly reached files", () => {
     expect(lastResolveCalls()).toBe(mid);
   });
 
+  // sharp 0.35.5: its types entries are .d.ts/.d.cts/.d.mts with `export const x: T;`, which neither Bun loader reads as is.
+  // They are parsed because sharp ships src/binding.gyp with no install script: the implicit rebuild's `<!@(...)` shell
+  // expansion widens the gyp closure to every file, so each declaration is a direct entry.
+  const gyp = { "src/binding.gyp": "{ 'targets': [{ 'target_name': 'x', 'sources': ['x.cc'], 'libraries': ['<!@(pkg-config --libs vips | sed s/-l//g)'] }] }\n", "src/x.cc": "int x;\n" };
+  test("a declaration an entry names is read as TypeScript: uninitialized consts do not make it parser-rejected", async () => {
+    const decl = (v: string) => `/** v${v} */\nexport const format: FormatEnum;\nexport const versions: {\n  vips: string;\n  sharp?: string;\n  "zlib-ng"?: string | undefined;\n};\nexport declare function sharp(input?: string): Sharp;\nexport interface FormatEnum { jpeg: string }\n`;
+    const exp = { main: "./dist/index.cjs", types: "./dist/index.d.mts", exports: { ".": { import: { types: "./dist/index.d.mts", default: "./dist/index.mjs" }, require: { types: "./dist/index.d.cts", default: "./dist/index.cjs" } } } };
+    const rel = (v: string) => files({ "package.json": pj({ version: v, ...exp }), "dist/index.cjs": "module.exports = 1\n", "dist/index.mjs": "export default 1\n", "dist/index.d.mts": decl(v), "dist/index.d.cts": decl(v), ...gyp });
+    const r = await run(rel("1.0.0"), rel("1.0.1"));
+    expect(r.rev.detail).not.toMatch(/parser rejected/);
+    // The changed package.json is in the rebuild closure, so prepass holds the release; the reviewer layer itself passes.
+    expect(r.rev.verdict).toBe("pass");
+  });
+
+  test("a declaration with a real initializer keeps it: the load in it is still found, and a file neither loader reads is rejected", async () => {
+    const exp = (types: string) => ({ main: "index.js", types, exports: { ".": { import: { types: "./" + types, default: "./index.js" } } } });
+    const loads = await run(
+      files({ "package.json": pj(exp("index.d.mts")), "index.js": "a()\n", "index.d.mts": "export const x: number;\n", "evil.js": "steal_decl()\n" }),
+      files({ "package.json": pj({ version: "1.0.1", ...exp("index.d.mts") }), "index.js": "a()\n", "index.d.mts": "export const x: { a: string; } = require('./evil.js');\nexport const y: number;\n", "evil.js": "steal_decl()\n" }),
+    );
+    expect(loads.text).toContain("steal_decl()");
+    const sharpish = (v: string, d: string) => files({ "package.json": pj({ version: v, main: "./dist/index.cjs", types: "./dist/index.d.cts", exports: { ".": { require: { types: "./dist/index.d.cts", default: "./dist/index.cjs" } } } }), "dist/index.cjs": "module.exports = 1\n", "dist/index.d.cts": d, "dist/index.d.mts": `/** v${v} */\nexport const x: number;\n`, ...gyp });
+    const broken = await run(sharpish("1.0.0", "export const x: number;\n"), sharpish("1.0.1", "export const x: number;\n%%% not code\n"));
+    // Only the broken one: the changed dist/index.d.mts beside it is read as TypeScript.
+    expect(broken.rev.detail).toMatch(/not model-reviewable: parser rejected dist\/index\.d\.cts;/);
+  });
+
   // Codex read 2: Node runs a legacy HTML comment that Bun's parser rejects, so the quoted load produced no edge.
   test("a file the parser rejects still shows the file its quotes name, and the review holds", async () => {
     const code = "x=1\n--> c\nrequire('./evil')";
