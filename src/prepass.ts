@@ -1030,7 +1030,7 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
 // A bundled node_modules member: a dependency's contents, which a carried note would stop reviewing as one.
 // A path collision: two distinct paths of the release landed on one path after the npm strip or normalizePaths, so the
 // map holds one file for both (package/x and other/x, demo-1.data/x and demo-2.data/x), with or without another note.
-const ALWAYS_HOLD_NOTE = new Set(["duplicate path", "case-fold", "unreadable tar entry", "node_modules", "path collision", "unstored member"]);
+const ALWAYS_HOLD_NOTE = new Set(["duplicate path", "case-fold", "unreadable tar entry", "node_modules", "path collision", "unstored member", "zip member"]);
 
 const BUILD_INCLUDE_RE = /^\s*(data|data-files|data_files|include|force-include|shared-data|package-data|package_data)\s*=/;
 

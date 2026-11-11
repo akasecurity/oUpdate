@@ -6,6 +6,7 @@
 import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, lstatSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { hasZipEnd, tarMagic, zipNameNotes } from "./zip-names.ts";
 import { isLink, markLink, markLabeled, markTarNotes, noteKey, tarNoteEntries, type FileMap, type TarNote } from "./prepass.ts";
 
 const MAX_TOTAL_BYTES = 300_000_000;
@@ -45,7 +46,9 @@ function run(args: string[]): { text: string; localeLost: boolean } {
   const p = Bun.spawnSync(["bsdtar", ...args], { stdout: "pipe", stderr: "pipe", env: bsdtarEnv() });
   const err = new TextDecoder().decode(p.stderr);
   if (p.exitCode !== 0) throw new Error(`bsdtar ${args[0]} failed: ${err.trim()}`);
-  return { text: new TextDecoder().decode(p.stdout), localeLost: LOCALE_FAILED.test(err) };
+  // One char per byte: bsdtar can print a name's lead byte raw and escape the rest (a format character), so the text
+  // is decoded as UTF-8 only after unescapeMember has the bytes back.
+  return { text: Buffer.from(p.stdout).toString("latin1"), localeLost: LOCALE_FAILED.test(err) };
 }
 
 function normalize(name: string): string {
@@ -206,10 +209,10 @@ export function foldKey(name: string): string {
 // bsdtar prints a backslash in a member name as `\\`, a control character as a C escape (`\t`, `\n`) or `\ooo`, and an
 // invalid UTF-8 byte as `\ooo`, even under a UTF-8 locale. Read back, those are the name's own bytes; a byte that is not UTF-8 stays unmatched (U+FFFD).
 const C_ESCAPES: Record<string, number> = { "\\": 0x5c, a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
+// `listed` holds one char per byte as bsdtar printed it (latin1); the result is the name decoded as UTF-8.
 export function unescapeMember(listed: string): string {
-  if (!listed.includes("\\")) return listed;
+  if (!/[\\\u0080-\u00ff]/.test(listed)) return listed;
   const bytes: number[] = [];
-  const enc = new TextEncoder();
   for (let i = 0; i < listed.length; ) {
     const m = /^\\(\\|[0-7]{3}|[abfnrtv])/.exec(listed.slice(i, i + 4));
     if (m) {
@@ -218,9 +221,8 @@ export function unescapeMember(listed: string): string {
       else bytes.push(parseInt(m[1]!, 8) & 0xff);
       i += m[0].length;
     } else {
-      const ch = String.fromCodePoint(listed.codePointAt(i)!);
-      bytes.push(...enc.encode(ch));
-      i += ch.length;
+      bytes.push(listed.charCodeAt(i) & 0xff);
+      i += 1;
     }
   }
   return new TextDecoder().decode(new Uint8Array(bytes));
@@ -369,8 +371,22 @@ export async function readArtifact(path: string, opts: { passphrase?: string; ma
     // kept another form of the name): it was never read, so each note naming it is collided and holds.
     // With no UTF-8 locale the names are escapes: every name-based check would read the wrong name, so it holds.
     const lost: TarNote[] = listed.localeLost || names.localeLost ? [{ note: "unreadable tar entry names (bsdtar has no UTF-8 locale)", key: "unreadable tar entry names", kind: "unreadable tar entry" }] : [];
-    if (!isZip(path)) {
-      markTarNotes(out, [...lost, ...markUnstored(archiveNotes(listing, members, listedNames), unstoredMembers(listing, members, out))]);
+    // A zip is what zipfile opens: "PK" first, or an end record behind a prepended stub in a file named as a zip. A tar
+    // that also ends in a zip end record gets the zip checks too, so a polyglot holds.
+    const zipEnd = hasZipEnd(path);
+    // A tar (or a compressed stream) that also ends in a zip end record is a polyglot: bsdtar reads the tar, zipfile the
+    // zip. No real wheel or sdist is both, so it holds. A .tar.gz whose compressed tail happens to hold the 4-byte
+    // signature (about 1 in 100,000) holds too: that fails closed.
+    const head = new Uint8Array(512);
+    const fd = openSync(path, "r");
+    try {
+      readSync(fd, head, 0, 512, 0);
+    } finally {
+      closeSync(fd);
+    }
+    const polyglot: TarNote[] = zipEnd && tarMagic(head) ? [{ note: "a tar that is also a zip: bsdtar reads one, zipfile the other", key: "tar and zip polyglot", kind: "unreadable tar entry" }] : [];
+    if (polyglot.length || (!isZip(path) && !(zipEnd && /\.(whl|zip|egg)$/i.test(path)))) {
+      markTarNotes(out, [...lost, ...polyglot, ...markUnstored(archiveNotes(listing, members, listedNames), unstoredMembers(listing, members, out)), ...(zipEnd ? zipNameNotes(path, members, out) : [])]);
       NPM_MEMBERS.set(out, members);
     } else {
       // A zip (a wheel) gets the name checks only: twins by case or form, a repeated name (bsdtar on macOS lists both
@@ -378,7 +394,8 @@ export async function readArtifact(path: string, opts: { passphrase?: string; ma
       // non-ascii name) are what a wheel normally holds.
       const nameKinds = new Set(["case-fold", "duplicate path", "unreadable tar entry"]);
       const twins = archiveNotes(listing, members, listedNames).filter((n) => nameKinds.has(n.kind));
-      markTarNotes(out, [...lost, ...markUnstored(twins, unstoredMembers(listing, members, out))]);
+      // And every member Python's zipfile, so pip, reads otherwise than bsdtar did (src/zip-names.ts).
+      markTarNotes(out, [...lost, ...markUnstored(twins, unstoredMembers(listing, members, out)), ...zipNameNotes(path, members, out)]);
     }
     return out;
   } finally {

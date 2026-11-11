@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { foldKey, markUnstored, mergeArtifactPair, normalizePaths, readArtifact, unescapeMember, unstoredMembers } from "../src/artifact.ts";
-import { prepass, tarNoteEntries } from "../src/prepass.ts";
+import { zipNameNotes } from "../src/zip-names.ts";
+import { markLink, prepass, tarNoteEntries } from "../src/prepass.ts";
 import { carriedNote } from "../src/review.ts";
 import { loadArtifacts, type ReviewArgs } from "../src/cli.ts";
 
@@ -473,27 +474,64 @@ describe("carried tar notes after review (each lets a new or changed note pass i
   });
 
   // A stored (uncompressed) zip with UTF-8 names, members in the order given: two names a folding filesystem writes as one.
-  const zipBytes = (entries: { name: string; data: string }[]): Uint8Array => {
+  // `stored`: the data bytes as written (else `data`, stored); `method`/`localMethod`: the central and local method.
+  type ZipIn = { name: string; data: string; mode?: number; extra?: Uint8Array; flags?: number; stored?: Uint8Array; method?: number; localMethod?: number; crc?: number; usize?: number; madeBy?: number; needs?: number };
+  // `prefix`: bytes before the archive (a stub); `zip64`: a ZIP64 end record and locator before the ordinary end record.
+  // `count`: the end record's entry count, when it should not match the directory.
+  const zipBytes = (entries: ZipIn[], opts: { prefix?: string; zip64?: boolean; zip64Mode?: number; count?: number; prefixBytes?: Uint8Array } = {}): Uint8Array => {
     const enc = new TextEncoder();
     const parts: Uint8Array[] = [];
     const central: Uint8Array[] = [];
     let off = 0;
     for (const e of entries) {
       const name = enc.encode(e.name);
-      const data = enc.encode(e.data);
-      const crc = Bun.hash.crc32(data) >>> 0;
+      const data = e.stored ?? enc.encode(e.data);
+      const crc = e.crc ?? Bun.hash.crc32(data) >>> 0;
+      const usize = e.usize ?? data.length;
+      const extra = e.extra ?? new Uint8Array();
+      const flags = e.flags ?? 0x0800;
       const local = new DataView(new ArrayBuffer(30));
-      [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [8, 0, 2], [10, 0, 2], [12, 0x21, 2], [14, crc, 4], [18, data.length, 4], [22, data.length, 4], [26, name.length, 2], [28, 0, 2]].forEach(([o, v, w]) => (w === 4 ? local.setUint32(o!, v!, true) : local.setUint16(o!, v!, true)));
+      [[0, 0x04034b50, 4], [4, 20, 2], [6, flags, 2], [8, e.localMethod ?? e.method ?? 0, 2], [10, 0, 2], [12, 0x21, 2], [14, crc, 4], [18, data.length, 4], [22, usize, 4], [26, name.length, 2], [28, extra.length, 2]].forEach(([o, v, w]) => (w === 4 ? local.setUint32(o!, v!, true) : local.setUint16(o!, v!, true)));
       const cd = new DataView(new ArrayBuffer(46));
-      [[0, 0x02014b50, 4], [4, 0x0314, 2], [6, 20, 2], [8, 0x0800, 2], [10, 0, 2], [12, 0, 2], [14, 0x21, 2], [16, crc, 4], [20, data.length, 4], [24, data.length, 4], [28, name.length, 2], [30, 0, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2], [38, (0o100644 << 16) >>> 0, 4], [42, off, 4]].forEach(([o, v, w]) => (w === 4 ? cd.setUint32(o!, v!, true) : cd.setUint16(o!, v!, true)));
-      parts.push(new Uint8Array(local.buffer), name, data);
-      central.push(new Uint8Array(cd.buffer), name);
-      off += 30 + name.length + data.length;
+      [[0, 0x02014b50, 4], [4, e.madeBy ?? 0x0314, 2], [6, e.needs ?? 20, 2], [8, flags, 2], [10, e.method ?? 0, 2], [12, 0, 2], [14, 0x21, 2], [16, crc, 4], [20, data.length, 4], [24, usize, 4], [28, name.length, 2], [30, extra.length, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2], [38, ((e.mode ?? 0o100644) << 16) >>> 0, 4], [42, off, 4]].forEach(([o, v, w]) => (w === 4 ? cd.setUint32(o!, v!, true) : cd.setUint16(o!, v!, true)));
+      parts.push(new Uint8Array(local.buffer), name, extra, data);
+      central.push(new Uint8Array(cd.buffer), name, extra);
+      off += 30 + name.length + extra.length + data.length;
     }
     const cdSize = central.reduce((n, c) => n + c.length, 0);
     const end = new DataView(new ArrayBuffer(22));
-    [[0, 0x06054b50, 4], [4, 0, 2], [6, 0, 2], [8, entries.length, 2], [10, entries.length, 2], [12, cdSize, 4], [16, off, 4], [20, 0, 2]].forEach(([o, v, w]) => (w === 4 ? end.setUint32(o!, v!, true) : end.setUint16(o!, v!, true)));
-    const all = [...parts, ...central, new Uint8Array(end.buffer)];
+    [[0, 0x06054b50, 4], [4, 0, 2], [6, 0, 2], [8, opts.count ?? entries.length, 2], [10, opts.count ?? entries.length, 2], [12, cdSize, 4], [16, off, 4], [20, 0, 2]].forEach(([o, v, w]) => (w === 4 ? end.setUint32(o!, v!, true) : end.setUint16(o!, v!, true)));
+    const z64: Uint8Array[] = [];
+    // zip64Mode: the ZIP64 record names a second directory, the same entries with the last one in that mode; the
+    // ordinary end record names the first.
+    let z64Offset = off;
+    let z64Size = cdSize;
+    if (opts.zip64Mode !== undefined) {
+      const alt = central.map((c) => c.slice());
+      // The mode goes on the last member only: an empty member with a link mode is a link with no target, which Linux
+      // libarchive will not write.
+      new DataView(alt[alt.length - 3]!.buffer).setUint32(38, (opts.zip64Mode << 16) >>> 0, true);
+      z64.push(...alt);
+      z64Offset = off + cdSize;
+      z64Size = alt.reduce((n, c) => n + c.length, 0);
+    }
+    if (opts.zip64 || opts.zip64Mode !== undefined) {
+      const rec = new DataView(new ArrayBuffer(56));
+      rec.setUint32(0, 0x06064b50, true);
+      rec.setBigUint64(4, 44n, true);
+      rec.setUint16(12, 45, true);
+      rec.setUint16(14, 45, true);
+      rec.setBigUint64(24, BigInt(entries.length), true);
+      rec.setBigUint64(32, BigInt(entries.length), true);
+      rec.setBigUint64(40, BigInt(z64Size), true);
+      rec.setBigUint64(48, BigInt(z64Offset), true);
+      const loc = new DataView(new ArrayBuffer(20));
+      loc.setUint32(0, 0x07064b50, true);
+      loc.setBigUint64(8, BigInt(z64Offset + z64Size), true);
+      loc.setUint32(16, 1, true);
+      z64.push(new Uint8Array(rec.buffer), new Uint8Array(loc.buffer));
+    }
+    const all = [opts.prefixBytes ?? new TextEncoder().encode(opts.prefix ?? ""), ...parts, ...central, ...z64, new Uint8Array(end.buffer)];
     const out = new Uint8Array(all.reduce((n, c) => n + c.length, 0));
     let at = 0;
     for (const c of all) {
@@ -537,6 +575,361 @@ describe("carried tar notes after review (each lets a new or changed note pass i
     const r = prepass("pypi", await read(files()), await read(files()));
     expect(holds(r)).toEqual([]);
     expect(unescapeMember("pkg/a\\\\b\\011c\\303\\251\\td.py")).toBe("pkg/a\\b\tc\u00e9\td.py");
+  });
+
+  // pip reads a wheel with Python's zipfile, oUpdate with bsdtar: each member they read otherwise holds.
+  const unicodePath = (header: string, shown: string) => {
+    const name = new TextEncoder().encode(shown);
+    const x = new DataView(new ArrayBuffer(4 + 5 + name.length));
+    x.setUint16(0, 0x7075, true);
+    x.setUint16(2, 5 + name.length, true);
+    x.setUint8(4, 1);
+    x.setUint32(5, Bun.hash.crc32(new TextEncoder().encode(header)) >>> 0, true);
+    const out = new Uint8Array(x.buffer);
+    out.set(name, 9);
+    return out;
+  };
+  const distInfo = (files: string[]): ZipIn[] => [
+    { name: "x-1.0.dist-info/WHEEL", data: "Wheel-Version: 1.0\n" },
+    { name: "x-1.0.dist-info/METADATA", data: "Name: x\n" },
+    { name: "x-1.0.dist-info/RECORD", data: [...files, "x-1.0.dist-info/WHEEL", "x-1.0.dist-info/METADATA", "x-1.0.dist-info/RECORD"].map((p) => `${p},,\n`).join("") },
+  ];
+  const zipHolds = async (old: ZipIn[], now: ZipIn[], opts: { prefix?: string; zip64?: boolean; zip64Mode?: number } = {}) => holds(prepass("pypi", await readZip(zipBytes(old, opts)), await readZip(zipBytes(now, opts))));
+  const plain: ZipIn[] = [{ name: "pkg/__init__.py", data: "" }, { name: "pkg/\u00e9.py", data: "e" }, { name: "README.txt", data: "r" }];
+
+  test("a clean wheel whose RECORD matches its members has no zip member hold", async () => {
+    const wheel = [...plain, ...distInfo(plain.map((e) => e.name))];
+    expect(await zipHolds(wheel, wheel)).toEqual([]);
+  });
+
+  test("a Unicode Path extra that names a member otherwise to bsdtar holds, and RECORD's name for it is not in the tree", async () => {
+    const old = [...plain, ...distInfo(plain.map((e) => e.name))];
+    const evil = [{ name: "pkg/__init__.py", data: "" }, { name: "pkg/\u00e9.py", data: "e" }, { name: "evil.pth", data: payload, extra: unicodePath("evil.pth", "README.txt") }];
+    const h = await zipHolds(old, [...evil, ...distInfo(evil.map((e) => e.name))]);
+    expect(h).toContain("zip member evil.pth: a Unicode Path or Comment extra field names it otherwise to bsdtar");
+    expect(h).toContain("zip member evil.pth: the wheel RECORD names it, the unpacked archive has no such file");
+  });
+
+  test("a backslash in a zip member name holds: pip writes it as part of one top-level file name", async () => {
+    const old = [...plain, ...distInfo(plain.map((e) => e.name))];
+    const evil = [...plain, { name: "pkg\\evil.py", data: payload }];
+    expect(await zipHolds(old, [...evil, ...distInfo(evil.map((e) => e.name))])).toContain("zip member pkg\\evil.py: a backslash in the name (pip writes it as part of the file name)");
+  });
+
+  for (const [label, mode] of [["a directory", 0o040755], ["a symlink", 0o120777]] as const) {
+    test(`a zip file member whose mode says ${label} holds: pip writes a regular file with its data`, async () => {
+      const old = [...plain, { name: "pkg/evil.py", data: "BENIGN\n" }];
+      const now = [...plain, { name: "pkg/evil.py", data: payload, mode }];
+      expect(await zipHolds([...old, ...distInfo(old.map((e) => e.name))], [...now, ...distInfo(now.map((e) => e.name))])).toContain(`zip member pkg/evil.py: mode ${mode.toString(8)} is not a regular file, which pip writes`);
+    });
+  }
+
+  test("a zip behind a prepended stub gets every zip check: a directory mode on a file member holds", async () => {
+    const old = [...plain, { name: "victim.py", data: "BENIGN\n", mode: 0o040755 }];
+    const now = [...plain, { name: "victim.py", data: payload, mode: 0o040755 }];
+    const h = await zipHolds([...old, ...distInfo(old.map((e) => e.name))], [...now, ...distInfo(now.map((e) => e.name))], { prefix: "STUB" });
+    expect(h).toContain("zip member victim.py: mode 40755 is not a regular file, which pip writes");
+  });
+
+  test("a clean wheel behind a prepended stub has no hold", async () => {
+    const wheel = [...plain, ...distInfo(plain.map((e) => e.name))];
+    expect(await zipHolds(wheel, wheel, { prefix: "STUB" })).toEqual([]);
+  });
+
+  test("a small zip with a ZIP64 end record its ordinary fields do not need is read, not held as unreadable", async () => {
+    const one = [{ name: "pkg/__init__.py", data: "x" }];
+    expect(await zipHolds(one, one, { zip64: true })).toEqual([]);
+  });
+
+  test("a ZIP64 record is used whenever its locator is there: its directory's symlink mode holds", async () => {
+    const files = [{ name: "pkg/__init__.py", data: "" }, { name: "pkg/a.py", data: "x" }];
+    const h = await zipHolds(files, files, { zip64Mode: 0o120777 });
+    expect(h).toContain("zip member pkg/a.py: mode 120777 is not a regular file, which pip writes");
+    // A reader that takes the ordinary end record sees the first directory: the two records disagreeing holds too.
+    expect(h.some((d) => d.startsWith("zip member (archive): the end records and the directory disagree: the end record names"))).toBe(true);
+  });
+
+  test("a member whose local method differs from the central one holds, and so does content zipfile reads otherwise", () => {
+    // Local header says deflate, central says stored: bsdtar inflates, zipfile reads the deflate bytes as the file.
+    const benign = new TextEncoder().encode("VALUE = 'benign'\n");
+    const deflated = new Uint8Array(require("node:zlib").deflateRawSync(benign));
+    const p = join(dir, `${n++}-method.zip`);
+    writeFileSync(p, zipBytes([{ name: "x/__init__.py", data: "", stored: deflated, method: 0, localMethod: 8 }]));
+    const notes = zipNameNotes(p, ["x/__init__.py"], new Map([["x/__init__.py", benign]])).map((t) => t.note);
+    expect(notes).toContain("zip member x/__init__.py: local and central headers differ: local method 8, central 0");
+    expect(notes).toContain("zip member x/__init__.py: content zipfile reads differs from the extracted file");
+  });
+
+  test("a deflated member zipfile and bsdtar read alike adds no note", () => {
+    const body = new TextEncoder().encode("VALUE = 'same'\n".repeat(20));
+    const deflated = new Uint8Array(require("node:zlib").deflateRawSync(body));
+    const p = join(dir, `${n++}-deflate.zip`);
+    writeFileSync(p, zipBytes([{ name: "x/__init__.py", data: "", stored: deflated, method: 8, crc: Bun.hash.crc32(body) >>> 0, usize: body.length }]));
+    expect(zipNameNotes(p, ["x/__init__.py"], new Map([["x/__init__.py", body]]))).toEqual([]);
+  });
+
+  // A ustar tar with ./pkg/mod.py benign, then a zip with ./pkg/mod.py as the payload. bsdtar reads
+  // the tar, pip the zip.
+  test("a tar that is also a zip holds, and the zip's ./ member is compared at the path it is written to", async () => {
+    const meta = (v: string): E[] => [{ name: "pkg/__init__.py", type: "file", data: "" }, { name: `x-${v}.dist-info/METADATA`, type: "file", data: "Name: x\n" }];
+    const tarHalf = tarBytes([{ name: "./pkg/mod.py", type: "file", data: "VALUE = 0\n" }, ...meta("1.0")]);
+    const zipped = (body: string, prefixBytes?: Uint8Array) => zipBytes([{ name: "./pkg/mod.py", data: body }, { name: "pkg/__init__.py", data: "" }, { name: "x-1.0.dist-info/METADATA", data: "Name: x\n" }], { prefixBytes });
+    const p = join(dir, `${n++}-poly.whl`);
+    writeFileSync(p, zipped(payload, tarHalf));
+    const notes = tarNoteEntries(await readArtifact(p)).map((t) => t.note);
+    expect(notes).toContain("a tar that is also a zip: bsdtar reads one, zipfile the other");
+    expect(notes).toContain("zip member ./pkg/mod.py: content zipfile reads differs from the extracted file");
+  });
+
+  test("a tar behind a stub, then a zip, holds: the bytes before the zip hold a tar header", async () => {
+    const tarHalf = tarBytes([{ name: "./pkg/mod.py", type: "file", data: "VALUE = 0\n" }]);
+    const stub = new TextEncoder().encode("#!/bin/sh\nexit 0\n");
+    const pre = new Uint8Array(stub.length + tarHalf.length);
+    pre.set(stub);
+    pre.set(tarHalf, stub.length);
+    const p = join(dir, `${n++}-stubpoly.whl`);
+    writeFileSync(p, zipBytes([{ name: "./pkg/mod.py", data: payload }, { name: "pkg/__init__.py", data: "" }], { prefixBytes: pre }));
+    expect(tarNoteEntries(await readArtifact(p)).map((t) => t.note)).toContain("zip member (archive): a tar header sits before the zip: bsdtar can read the tar, zipfile reads the zip");
+  });
+
+  for (const scheme of ["purelib", "platlib"]) {
+    test(`a .data/${scheme} member and a root member at one path hold: pip writes the .data copy over the root one`, () => {
+      const p = join(dir, `${n++}-datawins-${scheme}.zip`);
+      const names = ["pkg/a.py", `x-1.0.data/${scheme}/pkg/a.py`, "pkg/__init__.py"];
+      writeFileSync(p, zipBytes([{ name: names[0]!, data: "GOOD\n" }, { name: names[1]!, data: payload }, { name: names[2]!, data: "" }]));
+      const body = (m: string) => (m === "pkg/__init__.py" ? "" : m === "pkg/a.py" ? "GOOD\n" : payload);
+      const tree = new Map<string, Uint8Array>(names.map((m) => [m, new TextEncoder().encode(body(m))] as const));
+      const notes = zipNameNotes(p, names, tree).map((t) => t.note);
+      expect(notes.some((m) => m.startsWith(`zip member x-1.0.data/${scheme}/pkg/a.py: two members zipfile reads are written at pkg/a.py (pip installs a .data`))).toBe(true);
+    });
+  }
+
+  test("a .data scripts member beside a root member of the same subpath is two files, not one", () => {
+    const p = join(dir, `${n++}-datascripts.zip`);
+    writeFileSync(p, zipBytes([{ name: "pkg/a.py", data: "A" }, { name: "x-1.0.data/scripts/pkg/a.py", data: "B" }]));
+    const names = ["pkg/a.py", "x-1.0.data/scripts/pkg/a.py"];
+    const tree = new Map<string, Uint8Array>([["pkg/a.py", new TextEncoder().encode("A")], ["x-1.0.data/scripts/pkg/a.py", new TextEncoder().encode("B")]]);
+    expect(zipNameNotes(p, names, tree).map((t) => t.note).filter((m) => m.includes("two members"))).toEqual([]);
+  });
+
+  // The "two members ... written at" notes for a wheel of these members (each holding its own name as data).
+  // `purelib`: the wheel's Root-Is-Purelib value, in a WHEEL file added to the member list (pip's root is platlib unless true).
+  const writerNotes = (label: string, members: string[], purelib = "true", wheelBody?: string) => {
+    const names = members.includes("x-1.0.dist-info/WHEEL") ? members : [...members, "x-1.0.dist-info/WHEEL"];
+    const body = (name: string) => (name === "x-1.0.dist-info/WHEEL" ? wheelBody ?? `Wheel-Version: 1.0\nRoot-Is-Purelib: ${purelib}\n` : name);
+    const p = join(dir, `${n++}-${label}.whl`);
+    writeFileSync(p, zipBytes(names.map((name) => ({ name, data: body(name) }))));
+    const tree = new Map<string, Uint8Array>(names.map((name) => [name.split("/").filter((x) => x !== "" && x !== ".").join("/"), new TextEncoder().encode(body(name))] as const));
+    return zipNameNotes(p, names, tree).map((t) => t.note).filter((m) => m.includes("two members zipfile reads are written at") || m.includes("pip --target replaces"));
+  };
+  const collide = (label: string, names: string[], atLeast = 2, purelib = "true") => test(`${label}: two members pip writes to one file hold`, () => expect(writerNotes("collide", names, purelib).length).toBeGreaterThanOrEqual(atLeast));
+  const cleanBody = (label: string, names: string[], wheelBody: string) => test(`${label}: not held`, () => expect(writerNotes("cleanbody", names, "true", wheelBody)).toEqual([]));
+  const collideBody = (label: string, names: string[], wheelBody: string) => test(`${label}: held`, () => expect(writerNotes("collidebody", names, "true", wheelBody).length).toBeGreaterThanOrEqual(1));
+  const clean = (label: string, names: string[], purelib = "true") => test(`${label}: not held`, () => expect(writerNotes("clean", names, purelib)).toEqual([]));
+
+  collide("a .data/purelib copy in another case than the root member", ["pkg/a.py", "x-1.0.data/purelib/PKG/a.py"]);
+  collide("a .data/platlib copy with a case-twin file name", ["pkg/a.py", "x-1.0.data/platlib/pkg/A.py"]);
+  collide("a .data/data member through lib/python3.9/site-packages", ["pkg/a.py", "x-1.0.data/data/lib/python3.9/site-packages/pkg/a.py"]);
+  collide("a .data/data member through lib64/python3.12/dist-packages", ["pkg/a.py", "x-1.0.data/data/lib64/python3.12/dist-packages/pkg/a.py"]);
+  collide("a .data/data member through Lib/site-packages", ["pkg/a.py", "x-1.0.data/data/Lib/site-packages/pkg/a.py"]);
+  collide("a .data/data member through lib/python/ (the --target layout)", ["pkg/a.py", "x-1.0.data/data/lib/python/pkg/a.py"]);
+  collide("a .data/scripts member whose path goes through site-packages", ["pkg/a.py", "x-1.0.data/scripts/site-packages/pkg/a.py"]);
+  collide("a .data/data/bin member and a .data/scripts member", ["x-1.0.data/scripts/foo", "x-1.0.data/data/bin/foo"]);
+  collide("a .data/data/include/site member and a .data/headers member", ["x-1.0.data/headers/h.h", "x-1.0.data/data/include/site/python3.9/x/h.h"]);
+  collide("a .data/data/Include/Site/Python3.9 member (other case) and a .data/headers member", ["x-1.0.data/headers/h.h", "x-1.0.data/data/Include/Site/Python3.9/x/h.h"]);
+  collide("a .data/data/BIN member and a .data/scripts member", ["x-1.0.data/scripts/run", "x-1.0.data/data/BIN/run"]);
+  collide("a .data/data/Lib/Python/ member (other case) and a root member", ["pkg/a.py", "x-1.0.data/data/LIB/PYTHON/pkg/a.py"]);
+  collide("a .data/data/include/python3.9/<dist> member (--prefix, --user) and a .data/headers member", ["x-1.0.data/headers/h.h", "x-1.0.data/data/include/python3.9/demo/h.h"]);
+  collide("a .data/data/include/python/<dist> member (--home) and a .data/headers member", ["x-1.0.data/headers/h.h", "x-1.0.data/data/include/python/demo/h.h"]);
+  collide("a .data/data/Include/<dist> member (Windows) and a .data/headers member", ["x-1.0.data/headers/h.h", "x-1.0.data/data/Include/demo/h.h"]);
+  collide("a .data/data/Python39/Scripts member (the Windows user layout) and a .data/scripts member", ["x-1.0.data/scripts/run", "x-1.0.data/data/Python39/Scripts/run"]);
+  collide("a .data/data/Python39/Include/<dist> member (the Windows user layout) and a .data/headers member", ["x-1.0.data/headers/h.h", "x-1.0.data/data/Python39/Include/x/h.h"]);
+  collide("a .data/data/Scripts member (Windows) and a .data/scripts member", ["x-1.0.data/scripts/tool", "x-1.0.data/data/Scripts/tool"]);
+  collide("a .data/data member and a root member at one path (--target merges them, the .data copy wins)", ["pkg/a.py", "x-1.0.data/data/pkg/a.py"], 1);
+  collide("a .data/data directory that replaces the root directory of the same name on a --target upgrade", ["pkg/__init__.py", "x-1.0.data/data/pkg/c.py"], 1);
+  collide("a .data/scripts member that replaces the root bin/ on a --target upgrade", ["bin/tool", "x-1.0.data/scripts/tool"], 1);
+  collide("a .data/headers member that replaces the root include/ on a --target upgrade", ["include/h.h", "x-1.0.data/headers/other.h"], 1);
+  collide("a .data/data/scripts member and a root scripts/ directory (--target upgrade leaves the payload)", ["scripts/x.py", "x-1.0.data/data/scripts/__init__.py"], 1);
+  collide("a .data/data/python39/Scripts member and a root python39/ directory", ["python39/x.py", "x-1.0.data/data/python39/Scripts/run"], 1);
+  collide("a .data/scripts member and a root Scripts/ directory (Windows --target)", ["Scripts/tool", "x-1.0.data/scripts/tool"], 1);
+  collide("a .data/scripts member under lib/python/ and a .data/data/bin member at the same path", ["x-1.0.data/scripts/lib/python/pkg/a.py", "x-1.0.data/data/bin/lib/python/pkg/a.py"]);
+  collide("a Python313-32 user directory (32-bit) before Scripts", ["x-1.0.data/scripts/run", "x-1.0.data/data/Python313-32/Scripts/run"]);
+  collide("a Python313t user directory (free-threaded) before Include", ["x-1.0.data/headers/h.h", "x-1.0.data/data/Python313t/Include/x/h.h"]);
+
+  test("a path component that ends in a period or a space holds: Windows reads it as the name without it", () => {
+    const p = join(dir, `${n++}-winname.zip`);
+    const names = ["pkg/a.py", "x-1.0.data/purelib/pkg/a.py.", "pkg /b.py", "./pkg/ok.py"];
+    writeFileSync(p, zipBytes(names.map((name) => ({ name, data: name }))));
+    const tree = new Map<string, Uint8Array>(names.map((name) => [name.split("/").filter((x) => x !== "" && x !== ".").join("/"), new TextEncoder().encode(name)] as const));
+    const notes = zipNameNotes(p, names, tree).map((x) => x.note);
+    expect(notes).toContain('zip member x-1.0.data/purelib/pkg/a.py.: a path component ends in a period or space ("a.py."), which Windows reads as the name without it');
+    expect(notes).toContain('zip member pkg /b.py: a path component ends in a period or space ("pkg "), which Windows reads as the name without it');
+    expect(notes.filter((m) => m.includes("pkg/ok.py") && m.includes("period or space"))).toEqual([]);
+  });
+
+  collide("a .data/data path through site-packages and the same path kept as a data path under a root directory", ["pkg/site-packages/zzz.py", "x-1.0.data/data/pkg/site-packages/zzz.py"], 1);
+  collide("a .data/data Python39/Scripts member and a root Python39/ directory", ["Python39/t.py", "x-1.0.data/data/Python39/Scripts/t.py"], 1);
+  collide("a .data/platlib member beside a root member of the same directory (--target drops one)", ["pkg/__init__.py", "x-1.0.data/platlib/pkg/_impl.py"], 1);
+  collide("a .data/purelib member beside a root member when the root is platlib (Root-Is-Purelib false)", ["pkg/__init__.py", "x-1.0.data/purelib/pkg/_impl.py"], 1, "false");
+  // pip reads WHEEL as email headers and needs the first Root-Is-Purelib value to be "true"; any other shape is an unknown root home.
+  const rootAndData = ["pkg/a.py", "x-1.0.data/purelib/pkg/b.py"];
+  collideBody("Root-Is-Purelib: true with a trailing space", rootAndData, "Wheel-Version: 1.0\nRoot-Is-Purelib: true \n");
+  collideBody("Root-Is-Purelib false then true (pip takes the first)", rootAndData, "Wheel-Version: 1.0\nRoot-Is-Purelib: false\nRoot-Is-Purelib: true\n");
+  collideBody("Root-Is-Purelib true after a blank line (body text to pip)", rootAndData, "Wheel-Version: 1.0\n\nRoot-Is-Purelib: true\n");
+  collideBody("Root-Is-Purelib folded onto a continuation line", rootAndData, "Wheel-Version: 1.0\nRoot-Is-Purelib:\n true\n");
+  collideBody("no Root-Is-Purelib header", rootAndData, "Wheel-Version: 1.0\n");
+  collideBody("a header name with a space before Root-Is-Purelib (pip ends the headers there)", rootAndData, "Wheel-Version: 1.0\nBad Name: x\nRoot-Is-Purelib: true\n");
+  collideBody("a NUL in a header name before Root-Is-Purelib", rootAndData, "Wheel-Version: 1.0\nG\u0000: x\nRoot-Is-Purelib: true\n");
+  collideBody("a BOM before the first header", rootAndData, "\uFEFFWheel-Version: 1.0\nRoot-Is-Purelib: true\n");
+  collideBody("a control character inside a header value", rootAndData, "Wheel-Version: 1.\u00010\nRoot-Is-Purelib: true\n");
+  collideBody("a tab inside a header value is not printable ASCII", rootAndData, "Wheel-Version: 1\t0\nRoot-Is-Purelib: true\n");
+  // pip reads the WHEEL of the one raw top-level .dist-info directory; a second WHEEL reached through ./ is not the one it reads.
+  test("a WHEEL behind ./ in another dist-info does not decide the root home: pip reads the raw top-level one", () => {
+    const names = ["pkg/a.py", "x-1.0.data/purelib/pkg/b.py", "x-1.0.dist-info/WHEEL", "./y-1.0.dist-info/WHEEL"];
+    const body = (name: string) => (name === "x-1.0.dist-info/WHEEL" ? "Wheel-Version: 1.0\nRoot-Is-Purelib: false\n" : name.endsWith("WHEEL") ? "Wheel-Version: 1.0\nRoot-Is-Purelib: true\n" : name);
+    const p = join(dir, `${n++}-wheelpick.whl`);
+    writeFileSync(p, zipBytes(names.map((name) => ({ name, data: body(name) }))));
+    const tree = new Map<string, Uint8Array>(names.map((name) => [name.split("/").filter((x) => x !== "" && x !== ".").join("/"), new TextEncoder().encode(body(name))] as const));
+    expect(zipNameNotes(p, names, tree).map((x) => x.note).filter((m) => m.includes("pip --target replaces")).length).toBeGreaterThanOrEqual(1);
+  });
+  collideBody("a From line inside the header block (pip's parser skips it)", rootAndData, "Wheel-Version: 1.0\nFrom x\nRoot-Is-Purelib: true\n");
+  collideBody("a header name with a space (Built By) before Root-Is-Purelib", rootAndData, "Wheel-Version: 1.0\nBuilt By: t\nRoot-Is-Purelib: true\n");
+  collideBody("a non-ASCII header name before Root-Is-Purelib", rootAndData, "Wheel-Version: 1.0\nG\u00e9n\u00e9rateur: t\nRoot-Is-Purelib: true\n");
+  cleanBody("a plain Root-Is-Purelib: true with CRLF line ends and the same members: merged", rootAndData, "Wheel-Version: 1.0\r\nRoot-Is-Purelib: true\r\n");
+  cleanBody("Root-Is-Purelib: True (any case after the colon) with the same members: merged", rootAndData, "Wheel-Version: 1.0\nRoot-Is-Purelib: True\n");
+  cleanBody("a plain Root-Is-Purelib: true with the same members: merged", rootAndData, "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n");
+  clean("a .data/purelib member beside a root member when the root is purelib: one staging directory", ["pkg/__init__.py", "x-1.0.data/purelib/pkg/_impl.py"]);
+  clean("a .data/platlib member beside a root member when the root is platlib: one staging directory", ["pkg/__init__.py", "x-1.0.data/platlib/pkg/_impl.py"], "false");
+  collide("three data members: lib/python/qq twice and lib64/python/qq once (a fresh --target install skips run.py)", ["x-1.0.data/data/lib/python/qq/__init__.py", "x-1.0.data/data/lib/python/qq/guard.py", "x-1.0.data/data/lib64/python/qq/run.py"], 1);
+  collide("lib/pypy beside lib64/pypy with one directory name", ["x-1.0.data/data/lib/pypy/qq/a.py", "x-1.0.data/data/lib64/pypy/qq/b.py"], 1);
+  collide("lib/python3.9/site-packages beside lib64/python3.9/site-packages with one directory name", ["x-1.0.data/data/lib/python3.9/site-packages/pkg/a.py", "x-1.0.data/data/lib64/python3.9/site-packages/pkg/b.py"], 1);
+  collide("Lib/site-packages beside DLLs/python with one directory name (Windows)", ["x-1.0.data/data/Lib/site-packages/pkg/a.py", "x-1.0.data/data/DLLs/python/pkg/b.py"], 1);
+  collide("data lib and data lib64 homes with one directory name: two homes", ["x-1.0.data/data/lib/python/pkg/a.py", "x-1.0.data/data/lib64/python/pkg/b.py"], 1);
+  clean("a .data/headers member and a .data/data/include member: one data home in the --target layout", ["x-1.0.data/headers/demo.h", "x-1.0.data/data/include/other.h"]);
+  clean("a .data/scripts member under a site-packages directory: only the data scheme has lib homes", ["pkg/__init__.py", "x-1.0.data/scripts/tools/site-packages/pkg/b.py"]);
+  collide("a .data/platlib directory beside a .data/purelib directory of the same name", ["x-1.0.data/purelib/pkg/a.py", "x-1.0.data/platlib/pkg/b.py"], 1);
+  collide("a .data/data/lib-64/python member (platlibdir can be any name) and a root member", ["pkg/a.py", "x-1.0.data/data/lib-64/python/pkg/a.py"]);
+  test("two data members in one lib directory, with no root member of that name, are not held", () => {
+    expect(writerNotes("onehome", ["x-1.0.data/data/lib/python/pkg/a.py", "x-1.0.data/data/lib/python/pkg/b.py", "pkg2/ok.py"])).toEqual([]);
+  });
+  collide("a .data/data/lib64/python member (platlibdir lib64, distutils unix_home) and a root member", ["pkg/a.py", "x-1.0.data/data/lib64/python/pkg/a.py"]);
+  collide("a .data/data/lib64/python directory that would replace the root pkg/ on a --target upgrade", ["pkg/__init__.py", "x-1.0.data/data/lib64/python/pkg/c.py"], 1);
+  collide("a .data/data/libx32/python3.9/site-packages directory that would replace the root pkg/", ["pkg/__init__.py", "x-1.0.data/data/libx32/python3.9/site-packages/pkg/c.py"], 1);
+  collide("a .data/data/lib32/pypy member and a root member", ["x/mod.py", "x-1.0.data/data/lib32/pypy/x/mod.py"]);
+  collide("PyPy's purelib lib/pypy and a root member", ["x/mod.py", "x-1.0.data/data/lib/pypy/x/mod.py"]);
+  collide("PyPy headers under include/pypy3.10/<dist> (--prefix) and a .data/headers member", ["x-1.0.data/headers/h.h", "x-1.0.data/data/include/pypy3.10/d/h.h"]);
+  collide("PyPy headers under include/pypy/<dist> (--target) and a .data/headers member", ["x-1.0.data/headers/h.h", "x-1.0.data/data/include/pypy/d/h.h"]);
+  collide("a Python313-arm64 user directory before Scripts", ["x-1.0.data/scripts/run", "x-1.0.data/data/Python313-arm64/Scripts/run"]);
+  collide("a PyPy310 user directory before Scripts", ["x-1.0.data/scripts/run", "x-1.0.data/data/PyPy310/Scripts/run"]);
+  collide("a dist directory named python-x: the headers path reads two ways and both are kept", ["x-1.0.data/headers/sub/h.h", "x-1.0.data/data/Include/python-x/sub/h.h"]);
+  // A member whose path has a Windows alias or invalid name holds; the second list is clean.
+  const winHold = (label: string, names: string[], expected: string) =>
+    test(`${label}: holds as a Windows name alias or invalid name`, () => {
+      const p = join(dir, `${n++}-winalias.zip`);
+      writeFileSync(p, zipBytes(names.map((name) => ({ name, data: name }))));
+      const tree = new Map<string, Uint8Array>(names.map((name) => [name.split("/").filter((x) => x !== "" && x !== ".").join("/"), new TextEncoder().encode(name)] as const));
+      expect(zipNameNotes(p, names, tree).map((x) => x.note).some((m) => m.includes("which Windows reads as") && m.includes(expected))).toBe(true);
+    });
+  winHold("an NTFS stream suffix", ["pkg/a.py", "pkg/a.py::$DATA"], "colon");
+  winHold("an NTFS stream suffix behind a .data/purelib prefix", ["pkg/a.py", "x-1.0.data/purelib/pkg/a.py::$data"], "colon");
+  winHold("a drive-relative first segment", ["pkg/a.py", "C:pkg/a.py"], "colon");
+  winHold("an NTFS directory stream", ["pkg/a.py", "pkg::$INDEX_ALLOCATION/a.py"], "colon");
+  winHold("an 8.3 name made of an earlier tilde", ["foo~barbaz/a.py", "FOO~BA~1/a.py"], "8.3 short name");
+  winHold("a device name with a space before the dot", ["pkg/CON .py"], "reserved device name");
+  winHold("a device name with a space before another extension", ["pkg/NUL .txt"], "reserved device name");
+  winHold("a superscript-digit device name", ["pkg/COM\u00b9.py"], "reserved device name");
+  winHold("a second superscript-digit device name", ["pkg/LPT\u00b2"], "reserved device name");
+  winHold("CONIN$", ["pkg/CONIN$"], "reserved device name");
+  winHold("CONOUT$ with an extension", ["pkg/CONOUT$.txt"], "reserved device name");
+  winHold("an 8.3 short name", ["mypackage/__init__.py", "MYPACK~1/__init__.py"], "8.3 short name");
+  winHold("an invalid character", ["pkg/a<b>.py"], "character Windows refuses");
+  winHold("a control character", ["pkg/a\u0001.py"], "character Windows refuses");
+  winHold("a reserved device name", ["pkg/con.txt"], "reserved device name");
+  winHold("a numbered device name", ["pkg/COM1"], "reserved device name");
+
+  test("names with a tilde that are not 8.3, or that only contain a device name, are not held", () => {
+    const names = ["pkg/foo~bar.py", "pkg/console.py", "pkg/auxiliary.py", "pkg/nullable.py", "pkg/comma.py", "pkg/aux_py.py", "pkg/nulltype.py", "pkg/nullsafe.py", "pkg/con_duct.py", "pkg/auxlib.py", "pkg/comtypes/__init__.py", "pkg/long~1234567.py"];
+    const p = join(dir, `${n++}-winclean.zip`);
+    writeFileSync(p, zipBytes(names.map((name) => ({ name, data: name }))));
+    const tree = new Map<string, Uint8Array>(names.map((name) => [name, new TextEncoder().encode(name)] as const));
+    expect(zipNameNotes(p, names, tree).map((x) => x.note).filter((m) => m.includes("Windows"))).toEqual([]);
+  });
+
+  collide("scripts in two .data directories", ["a-1.0.data/scripts/run", "b-1.0.data/scripts/run"]);
+  collide("purelib and platlib in two .data directories", ["a-1.0.data/purelib/p.py", "b-1.0.data/platlib/p.py"]);
+  collide("headers in two .data directories", ["a-1.0.data/headers/h.h", "b-1.0.data/headers/h.h"]);
+
+  test("a wheel that uses purelib, platlib, scripts, headers and data with no overlap has no writer note", () => {
+    expect(writerNotes("nooverlap", [
+      "pkg/a.py",
+      "x-1.0.dist-info/WHEEL",
+      "x-1.0.data/purelib/pure.py",
+      "x-1.0.data/platlib/plat.so",
+      "x-1.0.data/scripts/run",
+      "x-1.0.data/headers/h.h",
+      "x-1.0.data/data/share/doc/x/README",
+      "x-1.0.data/data/etc/x.conf",
+      "x-1.0.data/data/lib/python3.9/site-packages/other/b.py",
+      "x-1.0.data/data/include/site/python3.9/x/other.h",
+      "x-1.0.data/data/Scripts/other.exe",
+      "x-1.0.data/data/Include/y/third.h",
+      "x-1.0.data/headers/fourth.h",
+      "x-1.0.data/scripts/fifth",
+    ])).toEqual([]);
+  });
+
+  test("zipfile's content is compared at the written path: no file there, a link there, or two members there hold", () => {
+    const p = join(dir, `${n++}-paths.zip`);
+    writeFileSync(p, zipBytes([{ name: "./pkg/a.py", data: "A" }, { name: "pkg/b.py", data: "B" }, { name: "pkg/c.py", data: "C" }, { name: "pkg/./c.py", data: "C2" }]));
+    const tree = new Map<string, Uint8Array>([["pkg/b.py", markLink(new TextEncoder().encode("a.py"))], ["pkg/c.py", new TextEncoder().encode("C")]]);
+    const notes = zipNameNotes(p, ["./pkg/a.py", "pkg/b.py", "pkg/c.py", "pkg/./c.py"], tree).map((t) => t.note);
+    expect(notes).toContain("zip member ./pkg/a.py: zipfile writes it, the unpacked archive has no file at pkg/a.py");
+    expect(notes).toContain("zip member pkg/b.py: zipfile writes a file, the unpacked archive has a link at pkg/b.py");
+    expect(notes).toContain("zip member pkg/./c.py: two members zipfile reads are written at pkg/c.py");
+  });
+
+  for (const [label, entry, why] of [
+    ["patched data", { flags: 0x0800 | 0x20 }, "compressed patched data (flag bit 5)"],
+    ["strong encryption", { flags: 0x0800 | 0x40 }, "strong encryption (flag bit 6)"],
+    ["zip version 9.9", { needs: 99 }, "it needs zip version 9.9"],
+  ] as const) {
+    test(`a member zipfile refuses (${label}) holds although bsdtar reads it`, () => {
+      const p = join(dir, `${n++}-refused.zip`);
+      writeFileSync(p, zipBytes([{ name: "pkg/a.py", data: "A", ...entry }]));
+      expect(zipNameNotes(p, ["pkg/a.py"], new Map([["pkg/a.py", new TextEncoder().encode("A")]])).map((t) => t.note)).toContain(`zip member pkg/a.py: zipfile cannot read it: ${why}`);
+    });
+  }
+
+  test("the directory is walked by its byte size: an end record count of 1 over two members holds as a count mismatch", () => {
+    const p = join(dir, `${n++}-count.zip`);
+    writeFileSync(p, zipBytes([{ name: "pkg/a.py", data: "A" }, { name: "pkg/b.py", data: "B" }], { count: 1 }));
+    const tree = new Map([["pkg/a.py", new TextEncoder().encode("A")], ["pkg/b.py", new TextEncoder().encode("B")]]);
+    expect(zipNameNotes(p, ["pkg/a.py", "pkg/b.py"], tree).map((t) => t.note)).toEqual(["zip member (archive): the end records and the directory disagree: the end record counts 1 entries, the directory holds 2"]);
+  });
+
+  test("a member whose name holds a newline holds as a name Windows refuses, whatever RECORD says", async () => {
+    const files = [{ name: "pkg/__init__.py", data: "" }, { name: "pkg/a\nb.py", data: "x" }];
+    const wheel = [...files, ...distInfo([])];
+    const rec = wheel.find((e) => e.name.endsWith("/RECORD"))!;
+    rec.data = `pkg/__init__.py,,\n"pkg/a\nb.py",,\n` + rec.data;
+    expect((await zipHolds(wheel, wheel)).some((d) => d.includes("holding a character Windows refuses"))).toBe(true);
+  });
+
+  test("a mode is read whatever the host byte says, as zipfile and pip read it", async () => {
+    const old = [...plain, { name: "pkg/evil.py", data: "BENIGN\n" }];
+    const now = [...plain, { name: "pkg/evil.py", data: payload, mode: 0o040755, madeBy: 45 }];
+    expect(await zipHolds(old, now)).toContain("zip member pkg/evil.py: mode 40755 is not a regular file, which pip writes");
+  });
+
+  test("a zip directory entry with data holds", async () => {
+    const now = [...plain, { name: "pkg/data/", data: payload, mode: 0o040755 }];
+    expect(await zipHolds(plain, now)).toContain(`zip member pkg/data/: a directory entry with ${payload.length} bytes of data`);
+  });
+
+  test("a member name with a format character is read back to its own name: bsdtar prints its lead byte raw", async () => {
+    const files = () => rel("1.0.0", [{ name: "pkg/a\u200b.py", type: "file", data: "x" }, { name: "pkg/b\u200e.py", type: "file", data: "y" }]);
+    const r = prepass("pypi", await read(files()), await read(files()));
+    expect(holds(r)).toEqual([]);
   });
 
   test("an unchanged non-ascii file that folds into the same copy in a second artifact still carries", async () => {
