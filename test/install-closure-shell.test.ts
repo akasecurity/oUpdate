@@ -415,3 +415,45 @@ for (const [label, hook] of pipedForms) {
     expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js")).length).toBeGreaterThan(0);
   });
 }
+
+// Build-tool flags that name CMake code or a program run it; only plain values are exempt.
+const toolFlagLines: [string, string][] = [
+  ["a cmake toolchain file", `cmake -DCMAKE_TOOLCHAIN_FILE=${U} | cat`],
+  ["a cmake project include", `cmake -DCMAKE_PROJECT_INCLUDE=${U} | cat`],
+  ["a cmake language project include", `cmake -DCMAKE_PROJECT_cxx_INCLUDE=${U} > log`],
+  ["a cmake C compiler", `cmake -DCMAKE_C_COMPILER=${U} | cat`],
+  ["a cmake compiler launcher", `cmake -DCMAKE_C_COMPILER_LAUNCHER=${U} | cat`],
+  ["a cmake linker", `cmake -DCMAKE_LINKER=${U} | cat`],
+  ["a cmake make program", `cmake -DCMAKE_MAKE_PROGRAM=${U} | cat`],
+  ["a cmake initial cache", `cmake -C ${U} | cat`],
+  ["a node-gyp python", `node-gyp rebuild --python=${U} | cat`],
+  ["a node-gyp make", `node-gyp rebuild --make=${U} | cat`],
+];
+
+for (const [label, hook] of toolFlagLines) {
+  for (const changed of ["lib/evil.js", "docs/evil.js"] as const) {
+    test(`${label} reads every file: a changed ${changed} holds`, () => {
+      expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, changed)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const toolQuiet: [string, string][] = [
+  ["a cmake build type", "cmake -DCMAKE_BUILD_TYPE=$(echo Release) | cat"],
+  ["a cmake version value", "cmake -DFOO_VERSION=$(node -v) > log"],
+  ["a node-gyp arch", "node-gyp rebuild --arch=$(uname -m) | cat"],
+  ["printf -v with a substituted data argument", "printf -v answer '%s' \"$(date)\" | cat"],
+  ["read of a literal name", "read answer | cat"],
+  ["a flat run of arithmetic commands before a substitution", `${"((1)); ".repeat(17)}echo $(date) | cat`],
+];
+
+for (const [label, hook] of toolQuiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
+  });
+}
+
+test("read of a substituted name reads every file", () => {
+  const hook = "read $(echo answer) | cat";
+  expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js")).length).toBeGreaterThan(0);
+});

@@ -4889,7 +4889,7 @@ function shellStages(line: string): StageFeed {
   let nowFedUnres = false;
   let nowFed = false;
   let names: string[] = [];
-  let arithBudget = 16; // scans for the end of a `((` are bounded: a long run of them is not read one by one
+  let arithBudget = 16; // scans for the end of a `((` that consume nothing (unclosed or nested runs) are bounded
   let arSub = false; // the word holds arithmetic with a substitution in it: the substituted value is evaluated
   let arNames: string[] = []; // and the names the arithmetic reads
   const bodies: string[] = [];
@@ -5087,8 +5087,8 @@ function shellStages(line: string): StageFeed {
       i += line[i + 1] === "&" ? 2 : 1;
       continue;
     }
-    if (c === "(" && line[i + 1] === "(" && !inWord && arithBudget-- <= 0) unsure = true; // a very long run of ((: read every file
-    if (c === "(" && line[i + 1] === "(" && !inWord && arithBudget >= 0) {
+    if (c === "(" && line[i + 1] === "(" && !inWord && arithBudget <= 0) unsure = true; // a very long nested run of ((: read every file
+    else if (c === "(" && line[i + 1] === "(" && !inWord) {
       // `(( ... ))` as a command evaluates its text as arithmetic: a substituted value in it runs as code
       const e = endParen(line, i + 1);
       const inner0 = e > 0 ? line.slice(i + 2, e - 2) : "";
@@ -5104,6 +5104,7 @@ function shellStages(line: string): StageFeed {
         i = e;
         continue;
       }
+      arithBudget--; // a scan that did not consume its text (an unclosed or nested run) counts toward the bound
     }
     if (c === "(") {
       endStage();
@@ -5155,8 +5156,8 @@ const SAFE_FLAG_SUB: Record<string, RegExp> = {
   make: /^-j/,
   gmake: /^-j/,
   ninja: /^-j/,
-  cmake: /^-D/,
-  "node-gyp": /^--(?:target|arch|jobs|devdir|nodedir|dist-url|runtime|python)(?:=|$)/,
+  cmake: /^-D(?:CMAKE_BUILD_TYPE|CMAKE_INSTALL_PREFIX|CMAKE_OSX_ARCHITECTURES|CMAKE_OSX_DEPLOYMENT_TARGET|BUILD_TESTING|BUILD_SHARED_LIBS|[A-Z0-9_]*_VERSION)(?::[A-Z]+)?=/,
+  "node-gyp": /^--(?:target|arch|jobs|dist-url|runtime)(?:=|$)/,
   "prebuild-install": /^--(?:target|arch|runtime|platform)(?:=|$)/,
 };
 
@@ -5223,7 +5224,11 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
       const named = rest.some((w) => !ASSIGN.test(w.t) && !w.t.startsWith("-") && taints(w));
       if (/^(?:read|unset|declare|typeset|local|readonly|export)$/.test(name) && named) widen(true);
       if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && rest.some(taints)) widen(true);
-      if (name === "printf" && rest.some((w) => w.t === "-v") && rest.some(taints)) widen(true);
+      // Only the name after -v is evaluated: the data arguments of printf are data.
+      if (name === "printf") {
+        const v = rest.findIndex((w) => w.t === "-v");
+        if (v >= 0 && rest[v + 1] !== undefined && taints(rest[v + 1]!)) widen(true);
+      }
       if (/^(?:\[|\[\[|test)$/.test(name) && rest.some(taints) && rest.some((w) => w.t === "-v" || /^-(?:eq|ne|lt|le|gt|ge)$/.test(w.t))) widen(true);
       return;
     }
