@@ -384,7 +384,10 @@ const invHolds: [string, string, Record<string, string>][] = [
   ["a substituted directory", "npm pack $(pwd) --dry-run", { prepack: "node DIR/evil.js" }],
   ["a quoted variable directory", 'npm pack "$PWD" --dry-run', { prepack: "node DIR/evil.js" }],
   ["a directory with a trailing slash", "npm pack D/ --dry-run", { prepack: "node DIR/evil.js" }],
-  ["a git spec", "npm pack user/repo --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a relative path that exists in the package", "npm pack lib/ok.js --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a bumped version with a v prefix", "npm version v1.2.3 | cat", { preversion: "node DIR/evil.js" }],
+  ["a bump word after the prefix flag", "npm version --tag-version-prefix v patch | cat", { preversion: "node DIR/evil.js" }],
+  ["a quoted variable version", 'V=minor; npm version "$V"', { preversion: "node DIR/evil.js" }],
   ["a registry spec beside a directory", "npm pack ms@2.1.3 . --dry-run", { prepack: "node DIR/evil.js" }],
   ["a version with an equals sign", "npm version =1.0.2", { preversion: "node DIR/evil.js" }],
   ["a computed version", "V=minor; npm version $V", { preversion: "node DIR/evil.js" }],
@@ -405,6 +408,13 @@ const invQuiet: [string, string, Record<string, string>][] = [
   ["a scoped registry spec with a tag", "npm pack @scope/x@latest | cat", { prepack: "node DIR/evil.js" }],
   ["two registry specs", "npm pack ms@^2 chalk | cat", { prepack: "node DIR/evil.js" }],
   ["a tarball path", "npm pack ./x.tgz --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a GitHub shorthand", "npm pack foo/bar | cat", { prepack: "node DIR/evil.js" }],
+  ["a GitHub shorthand with a ref", "npm pack foo/bar#main | cat", { prepack: "node DIR/evil.js" }],
+  ["a registry alias", "npm pack foo@npm:ms@2 | cat", { prepack: "node DIR/evil.js" }],
+  ["version with the tag prefix flag", "npm version --tag-version-prefix v | cat", { preversion: "node DIR/evil.js" }],
+  ["version with the preid flag", "npm version --preid rc | cat", { preversion: "node DIR/evil.js" }],
+  ["version with the message flag", "npm version -m release | cat", { preversion: "node DIR/evil.js" }],
+  ["version with an invalid word", "npm version nonsense | cat", { preversion: "node DIR/evil.js" }],
 ];
 
 for (const [label, hook, scripts] of invQuiet) {

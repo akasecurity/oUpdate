@@ -4772,6 +4772,21 @@ const NPM_RUNS_NAMED: Record<string, string[]> = { it: ["test"], cit: ["test"], 
 function isRegistrySpec(o: string): boolean {
   return /^(?:@[a-z0-9~._-]+\/)?[a-z0-9~._-]+(?:@(?:[A-Za-z0-9^<>=*]|~[0-9])[A-Za-z0-9^~<>=*.+|_-]*)?$/.test(o) && !/^[.]/.test(o);
 }
+// owner/repo is a GitHub shorthand and name@npm:spec an alias for a registry package: npm fetches both from a remote, so no hook of
+// this package runs. A path that exists in the package tree is a directory spec, so it is not a shorthand.
+function isRemoteSpec(o: string, files: Set<string>): boolean {
+  if (/^(?:@[a-z0-9~._-]+\/)?[a-z0-9~._-]+@npm:(?:@[a-z0-9~._-]+\/)?[a-z0-9~._-]+(?:@[A-Za-z0-9^<>=*~.+|_-]+)?$/.test(o)) return true;
+  if (!/^(?![.~])[A-Za-z0-9._-]+\/(?![.])[A-Za-z0-9._-]+(?:#[A-Za-z0-9._\/-]+)?$/.test(o)) return false;
+  const dir = o.replace(/#.*$/, "");
+  for (const f of files) if (f === dir || f.startsWith(dir + "/")) return false;
+  return true;
+}
+// A bump word or a valid semver: npm rejects any other plain word before it runs a hook. A word with an expansion or a glob
+// may become one at run time, so it counts as an operand that runs.
+function versionOperandRuns(o: string): boolean {
+  if (!/^[A-Za-z0-9._+=-]+$/.test(o)) return true;
+  return /^(?:major|minor|patch|premajor|preminor|prepatch|prerelease|from-git)$/.test(o) || /^[=v]?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(o);
+}
 // A tarball path with a literal name: it is a file, so no hook of this package runs for it.
 function isTarballPath(o: string): boolean {
   return /^(?:file:)?[A-Za-z0-9._/@+-]+\.(?:tgz|tar\.gz|tar)$/.test(o);
@@ -4779,7 +4794,7 @@ function isTarballPath(o: string): boolean {
 // `npm pack` and `npm version` run this package's lifecycle scripts for a directory spec (pack) or a version operand (version):
 // `npm pack ms@2.1.3` packs a registry package and a bare `npm version` only lists versions. Pack is quiet only when every
 // operand is a literal registry spec or tarball path; a computed or local operand keeps the lifecycle.
-function npmLifecycleApplies(sub: string, rest: string[]): boolean {
+function npmLifecycleApplies(sub: string, rest: string[], files: Set<string>): boolean {
   if (sub !== "pack" && sub !== "version") return true;
   const ops: string[] = [];
   let unsure = false; // a flag this does not know may take the next word as its value
@@ -4797,8 +4812,8 @@ function npmLifecycleApplies(sub: string, rest: string[]): boolean {
     }
     ops.push(w);
   }
-  if (sub === "pack") return unsure || ops.length === 0 || !ops.every((o) => isRegistrySpec(o) || isTarballPath(o));
-  return ops.length > 0;
+  if (sub === "pack") return unsure || ops.length === 0 || !ops.every((o) => isRegistrySpec(o) || isTarballPath(o) || isRemoteSpec(o, files));
+  return unsure ? ops.length > 0 : ops.some(versionOperandRuns);
 }
 // `env -i`, `env -` and `env -u npm_config_ignore_scripts` clear the variable.
 function envClears(words: string[]): boolean {
@@ -4817,7 +4832,7 @@ const LOOKUP_ONLY = /^(?:type|which|hash)$/;
 // npm subcommands that run no script of this package.
 const NPM_READ_ONLY = new Set(["help", "view", "v", "show", "info", "config", "c", "get", "set", "ls", "list", "la", "ll", "outdated", "audit", "prefix", "root", "bin", "whoami", "search", "s", "find", "explain", "why", "doctor", "ping", "fund", "help-search", "docs", "repo", "bugs", "home"]);
 // npm flags that take a separate value, and long flags known to take none.
-const NPM_VALUE_FLAG = /^(?:--(?:cache|prefix|workspace|userconfig|globalconfig|registry|loglevel|tag|otp|scope|access|script-shell|include|omit|audit-level|install-strategy|before|logs-dir|tmp|cafile|cert|key|proxy|https-proxy|noproxy|node-options|call|package|message|logs-max|init-module|fetch-retries|fetch-timeout|location|lockfile-version|pack-destination|preid)|-w|-C|-c|-m)$/;
+const NPM_VALUE_FLAG = /^(?:--(?:cache|prefix|workspace|userconfig|globalconfig|registry|loglevel|tag|otp|scope|access|script-shell|include|omit|audit-level|install-strategy|before|logs-dir|tmp|cafile|cert|key|proxy|https-proxy|noproxy|node-options|call|package|message|tag-version-prefix|logs-max|init-module|fetch-retries|fetch-timeout|location|lockfile-version|pack-destination|preid)|-w|-C|-c|-m)$/;
 const NPM_BOOL_FLAG = /^--(?:silent|quiet|verbose|json|global|force|yes|no|dry-run|production|ignore-scripts|if-present|workspaces|include-workspace-root|no-[a-z-]+|foreground-scripts|offline|prefer-offline|prefer-online|legacy-peer-deps|save|save-dev|no-save|audit|fund|help|version|parseable|long|all|link|unicode|color|progress|ws)$/;
 // `--ignore-scripts` (and its env spelling) switch every pre/post and lifecycle script off, not the named one.
 const IGNORE_FLAG_ON = /^--ignore-scripts(?:=(?:true|1))?$/;
@@ -4974,7 +4989,7 @@ function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
     // Only the parsed subcommand names lifecycle scripts (`npm run build pack` runs build): and --ignore-scripts switches them off.
     const life = bin === "npm" && npmSub !== undefined ? NPM_LIFECYCLE[npmSub] : undefined;
     if (life) {
-      if (!npmLifecycleApplies(npmSub!, npmRest)) return;
+      if (!npmLifecycleApplies(npmSub!, npmRest, ctx.files)) return;
       ctx.depth++;
       if (ignore) for (const name of NPM_RUNS_NAMED[npmSub!] ?? []) runNamed(ctx, name, true);
       else for (const name of life) runScript(ctx, name, true);
@@ -7681,7 +7696,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     }
     // `npm it`, `npm pack` and the like run lifecycle scripts without naming them: those scripts are read as named ones, unless
     // --ignore-scripts switches them off.
-    if (!ignoreNow && npmLifecycleApplies(sub.word, argv.slice(sub.i + 1))) for (const name of NPM_LIFECYCLE[sub.word] ?? []) runScript(ctx, name, true);
+    if (!ignoreNow && npmLifecycleApplies(sub.word, argv.slice(sub.i + 1), ctx.files)) for (const name of NPM_LIFECYCLE[sub.word] ?? []) runScript(ctx, name, true);
     else for (const name of NPM_RUNS_NAMED[sub.word] ?? []) runNamed(ctx, name, true);
     if (sub.word.includes(UNRESOLVED)) ctx.widenInert = true;
     widenAll(ctx);
