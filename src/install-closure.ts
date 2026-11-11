@@ -5164,7 +5164,7 @@ function runnerFlags(name: string): { code: RegExp; value: RegExp } {
   return { code: spec.code, value: key === "node" ? new RegExp(spec.value.source.replace(/\)\$$/, "|--title)$")) : spec.value };
 }
 // Commands whose output is a number, a version or a platform name: unquoted, it cannot split into a second flag.
-const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[a-z]+)?|date(?: \+\S*)?|pwd|hostname|whoami|arch|getconf [A-Z_]+|sysctl -n [a-z.]+|node (?:-v|--version)|npm (?:root|prefix))$/;
+const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[a-z]+)?|date(?: \+(?:[A-Za-z0-9._:/-]|%[aAbBCdeFgGhHIjklmMpsSuUVwWyYzZ%])+)?|pwd|hostname|whoami|arch|getconf [A-Z_]+|sysctl -n [a-z.]+|node (?:-v|--version)|npm (?:root|prefix))$/;
 // Flags whose substituted value is a number or a target, not a program.
 const SAFE_FLAG_SUB: Record<string, RegExp> = {
   make: /^-j/,
@@ -5270,7 +5270,7 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
           else if (rest.slice(v + 2).some(taints)) tainted.add(rest[v + 1]!.t);
         }
       }
-      if (/^(?:\[|\[\[|test)$/.test(name) && rest.some(taints) && rest.some((w) => w.t === "-v" || /^-(?:eq|ne|lt|le|gt|ge)$/.test(w.t))) widen(true);
+      if (/^(?:\[|\[\[|test)$/.test(name) && (rest.some(taints) || rest.some((w) => tainted.has(w.t))) && rest.some((w) => w.t === "-v" || /^-(?:eq|ne|lt|le|gt|ge)$/.test(w.t))) widen(true);
       return;
     }
     if (path) {
@@ -5343,6 +5343,8 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
     }
     // Any other command may run what a substitution in its arguments names; a flag value of a build tool that only sets a
     // number or a target (`make -j$(nproc)`, `node-gyp rebuild --target=$(node -v)`) does not.
+    // `let X` evaluates the value of a variable set from a substitution as arithmetic.
+    if (name === "let" && rest.some((w) => taints(w) || (w.t.match(/[A-Za-z_]\w*/g) ?? []).some((x) => tainted.has(x)))) widen(true);
     // The value is exempt only as a literal or a quoted substitution: an unquoted one splits into words, and a word can be a flag.
     const safe = SAFE_FLAG_SUB[name];
     const exempt = (w: StageWord, p: StageWord | undefined): boolean => {

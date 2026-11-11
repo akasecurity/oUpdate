@@ -524,3 +524,38 @@ for (const [label, hook] of setLines) {
     });
   }
 }
+
+// date is a benign producer only bare or with a plain +FORMAT: a format from a variable or with %n puts text and newlines out.
+const dateLines: [string, string][] = [
+  ["date with a format from a variable", `X=${U}; cmake -DCMAKE_BUILD_TYPE=$(date +"$X") -B b . | cat`],
+  ["date with %n in the format", "cmake -DCMAKE_BUILD_TYPE=$(date +Release%n-P%ndocs/evil.js) | cat"],
+  ["date with %t in the format", "cmake -DCMAKE_BUILD_TYPE=$(date +a%t-P) | cat"],
+  ["date with a substituted format", `cmake -DCMAKE_BUILD_TYPE=$(date +$(cat name.txt)) | cat`],
+  ["a flag from an unquoted variable set by printf -v", `printf -v X '%s' "${U}"; cmake -DCMAKE_BUILD_TYPE=$X | cat`],
+  ["let on a variable set from a substitution", `printf -v X '%s' "${U}"; let X | cat`],
+  ["let on an expression naming such a variable", `printf -v X '%s' "${U}"; let "X + 1" | cat`],
+  ["a bare name in a numeric test", `printf -v X '%s' "${U}"; [[ X -eq 0 ]] | cat`],
+  ["a bare name in a numeric test with -lt", `printf -v X '%s' "${U}"; [ X -lt 1 ] 2>/dev/null`],
+  ["an increment of such a variable", `printf -v X '%s' "${U}"; ((X++)) | cat`],
+];
+
+for (const [label, hook] of dateLines) {
+  for (const changed of ["lib/evil.js", "docs/evil.js"] as const) {
+    test(`${label} reads every file: a changed ${changed} holds`, () => {
+      expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, changed)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const dateQuiet: [string, string][] = [
+  ["date with a plain format", "cmake -DCMAKE_BUILD_TYPE=$(date +%Y-%m-%d) | cat"],
+  ["date bare", "cmake -DFOO_VERSION=$(date) | cat"],
+  ["let with plain numbers", "let n=1+2 | cat"],
+  ["a numeric test on a plain name", "[[ N -eq 0 ]] 2>/dev/null"],
+];
+
+for (const [label, hook] of dateQuiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
+  });
+}
