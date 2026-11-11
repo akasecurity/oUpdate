@@ -4762,6 +4762,48 @@ function headUnresolved(cmd: string): boolean {
   return false;
 }
 
+// Commands that read or print and cannot run a package file named by an argument.
+const HARMLESS_STAGE = new Set(["echo", "printf", "true", "false", ":", "cat", "ls", "pwd", "date", "sleep", "wc", "grep", "head", "tail", "sort", "uniq", "tee", "cut", "tr"]);
+
+// A line the shell reader could not split (a pipe, a redirect, a subshell) that holds an expansion it could not resolve: the
+// stages are cut apart here at every separator, and a stage that holds the placeholder and is not a plain reader (`node $(...)`,
+// `sh $(...)`, an unresolved command word) may run any file of the package, so every file is read.
+let inGypCommand = 0;
+function unreadableUnresolved(ctx: Ctx, loose: string): void {
+  if (inGypCommand > 0 || !loose.includes(UNRESOLVED)) return;
+  let quote: string | undefined;
+  let cur = "";
+  const stages: string[] = [];
+  for (const c of loose) {
+    if (quote) {
+      cur += c;
+      if (c === quote) quote = undefined;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      cur += c;
+      continue;
+    }
+    if (/[|&;()<>\n`]/.test(c)) {
+      stages.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += c;
+  }
+  stages.push(cur);
+  for (const stage of stages) {
+    if (!stage.includes(UNRESOLVED)) continue;
+    const words = stage.trim().split(/\s+/).filter((w) => w && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) && !/^\d*$/.test(w));
+    const head = words[0] ?? "";
+    if (head && !head.includes(UNRESOLVED) && HARMLESS_STAGE.has(binName(head))) continue;
+    ctx.widenInert = true;
+    widenAll(ctx);
+    return;
+  }
+}
+
 function readParts(ctx: Ctx, body: string): void {
   if (body.includes(UNRESOLVED)) {
     // The placeholder is a character the body itself holds: a command could not be told from an unresolved one. Read every file.
@@ -4792,7 +4834,7 @@ function readParts(ctx: Ctx, body: string): void {
         } else dispatch(ctx, cmd);
       }
       ctx.depth--;
-    }
+    } else if (loose !== null) unreadableUnresolved(ctx, loose);
     if (ctx.hold) return;
     if (lines.length > 1) noteUnreadable(ctx, line); // a body of one line is noted whole by the caller
   }
@@ -7063,7 +7105,13 @@ function scanGyp(ctx: Ctx, logical: string, seen: Set<string>): void {
   const saved = ctx.fromGyp;
   ctx.fromGyp = true;
   const gypVars = gypStringVars(text);
-  for (const cmd of gypCommands(text)) runBody(ctx, substGypVars(cmd, gypVars));
+  // A gyp `<!(...)` command runs at build time, with its own `$1`-style words: the unresolved-stage rule below is for hooks.
+  inGypCommand++;
+  try {
+    for (const cmd of gypCommands(text)) runBody(ctx, substGypVars(cmd, gypVars));
+  } finally {
+    inGypCommand--;
+  }
   const includes = takeList(text, "includes");
   if (includes === null) fail(ctx, "unresolved: gyp");
   else if (includes) {
