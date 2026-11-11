@@ -6788,8 +6788,10 @@ function closePatches(ctx: Ctx, argv: string[], i: number): void {
       rel = next;
     } else if (a.startsWith("--patch-dir=")) rel = a.slice("--patch-dir=".length);
     else {
-      // A package name creates a patch (nothing that runs); a flag this does not model, or an unresolved word, may run any file.
-      if (a.startsWith("-") || a.includes(UNRESOLVED)) {
+      // A package name creates a patch (nothing that runs); a flag this does not model, or an unresolved word, anywhere among the
+      // arguments may run any file.
+      const rest = argv.slice(j).filter((w) => !PATCH_BOOL.has(w));
+      if (rest.some((w) => w.startsWith("-") || w.includes(UNRESOLVED))) {
         ctx.widenInert = true;
         widenAll(ctx);
       }

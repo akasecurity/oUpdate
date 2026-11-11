@@ -107,3 +107,15 @@ test("a fault in the walk of a static file over 1 MB is counted and holds, even 
   expect(scannerFaultCount()).toBeGreaterThan(before);
   expect(found.length).toBeGreaterThan(0);
 });
+
+// patch-package <pkg> alone creates a patch, but an unresolved word or an unmodeled flag after the package name still counts.
+for (const hook of ["patch-package some-pkg $N", "patch-package some-pkg --unknown"]) {
+  test(`${hook} reads the package: the changed lib/payload.js holds`, () => {
+    const rel = (v: string) =>
+      files({
+        "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: hook } }),
+        "lib/payload.js": `console.log("payload ${v}")\n`,
+      });
+    expect(holds(rel("1.0.0"), rel("1.0.1")).length).toBeGreaterThan(0);
+  });
+}
