@@ -2521,6 +2521,8 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   }
   // A computed member key (module["require"], module[`require`]) is a name, not text.
   if (computedRequire(keptKeys)) return true;
+  // Reflect.get(module, "require"), Object.getOwnPropertyDescriptor(module, "require"): the loader read by a string key through a call.
+  if (/\b(?:Reflect|Object)\s*\.\s*\w+\s*\(\s*[^,()]+,\s*(["'`])require\1/.test(keptKeys)) return true;
   // module.require handed on (a bare mention, .bind(...)).
   for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
   // A createRequire(...) result that is neither called on the spot nor bound to a plain name (a member, an argument, a ternary).
@@ -2544,7 +2546,7 @@ function keyBindsLoader(text: string, end: number): boolean {
   const kind = keyInPattern(text, end);
   if (kind !== "none") return kind === "hold";
   const value = /^\s*:\s*([A-Za-z_$][\w$]*)/.exec(text.slice(end, end + 80));
-  return value !== null && !/^(?:true|false|null|undefined|NaN|Infinity|function|async|class|new|typeof|void|this|await|delete)$/.test(value[1]!);
+  return value !== null && !/^(?:true|false|null|undefined|NaN|Infinity|function|async|class|new|typeof|void|this|await|delete)$/.test(value[1]!) && !literalOnly(text, value[1]!);
 }
 // The { that holds the key ending at `end` is the left side of a destructuring ({ require: r } = module, nested too), not an object literal.
 function keyInPattern(text: string, end: number): "hold" | "quiet" | "none" {
@@ -2572,12 +2574,62 @@ function keyInPattern(text: string, end: number): "hold" | "quiet" | "none" {
   }
   return "none";
 }
-// module["require"] on module, require.main, module.parent or a name bound to one of them: the loader by a computed key.
+// A computed ["require"] member holds, whatever the receiver is (module, an alias, a flow, a call result), unless the receiver is a plain
+// name provably bound only to literals: const options = { require: true }; options["require"].
 function computedRequire(text: string): boolean {
-  if (!/\[\s*(["'`])require\1\s*\]/.test(text)) return false;
-  const recv = ["module", "require\\s*\\.\\s*main"];
-  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:module|require\s*\.\s*main)(?:\s*\.\s*parent)*\s*(?![\w$.(\[])/g)) recv.push(m[1]!.replace(/\$/g, "\\$"));
-  return new RegExp(`(?<![\\w$.])(?:${recv.join("|")})(?:\\s*\\.\\s*parent)*\\s*\\[\\s*(["'\`])require\\1\\s*\\]`).test(text);
+  for (const m of text.matchAll(/(["'`])require\1\s*\]/g)) {
+    const at = m.index ?? 0;
+    const open = /\[\s*$/.exec(text.slice(Math.max(0, at - 20), at));
+    if (!open) continue;
+    const before = text.slice(0, at - open[0].length).replace(/\?\.\s*$/, "").replace(/\s+$/, "");
+    const recv = /(?<![\w$.])([A-Za-z_$][\w$]*)$/.exec(before);
+    // A name ending a chain (a.b["require"]) or an expression (f()["require"]) is not provable.
+    if (recv && !/[\w$]\s*\.\s*$/.test(before.slice(0, before.length - recv[1]!.length)) && literalOnly(text, recv[1]!, true)) continue;
+    return true;
+  }
+  return false;
+}
+// The name is declared once, with a literal (a string, a number, true, false, null, or an object or array of those), assigned nowhere
+// else, bound by no parameter, catch, loop or pattern. With `members`, every other mention is a member access (name.x, name["x"]).
+function literalOnly(text: string, name: string, members = false): boolean {
+  const n = name.replace(/\$/g, "\\$");
+  const word = new RegExp(`(?<![\\w$.])${n}(?![\\w$])`, "g");
+  let decl = 0;
+  for (const m of text.matchAll(word)) {
+    const at = m.index ?? 0;
+    const after = text.slice(at + name.length, at + name.length + 200);
+    const before = text.slice(Math.max(0, at - 12), at);
+    const assign = /^\s*=(?![=>])/.exec(after);
+    if (assign) {
+      if (!/\b(?:const|let|var)\s+$/.test(before)) return false;
+      if (++decl > 1) return false;
+      if (!literalValue(text, at + name.length + assign[0].length)) return false;
+    } else if (/\b(?:const|let|var)\s+$/.test(before) || inParamList(text, at, name.length)) return false;
+    else if (members ? !/^\s*(?:\?\.\s*)?(?:\[|\.\s*[A-Za-z_$])/.test(after) : /^\s*[,}]/.test(after) && /[{,]\s*$/.test(before)) return false;
+  }
+  return decl === 1;
+}
+// The expression at `from` is a literal that holds no name: tokens, strings, keys, nested objects and arrays.
+function literalValue(text: string, from: number): boolean {
+  let i = from;
+  while (/\s/.test(text[i] ?? "")) i++;
+  const c = text[i];
+  if (c === "{" || c === "[") {
+    let d = 0;
+    let j = i;
+    for (; j < text.length && j - i < 2000; j++) {
+      if ("{[(".includes(text[j]!)) d++;
+      else if ("}])".includes(text[j]!) && --d === 0) break;
+    }
+    if (d !== 0) return false;
+    const body = text.slice(i, j + 1).replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, '""');
+    if (/\.\.\.|\$\{|`|\(|=>/.test(body)) return false;
+    // Names may only be keys or true, false, null, undefined.
+    for (const w of body.matchAll(/(?<![\w$.])[A-Za-z_$][\w$]*(?![\w$])(?!\s*:)/g)) if (!/^(?:true|false|null|undefined)$/.test(w[0])) return false;
+    return true;
+  }
+  const lit = /^(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|-?\d[\w.]*|true\b|false\b|null\b)\s*(?:;|\r?\n|$|\))/.exec(text.slice(i, i + 300));
+  return lit !== null;
 }
 // module.exports = require is read through only when nothing else reads module.exports: a call or an alias of it runs the loader.
 function exportsUsed(text: string): boolean {
@@ -2591,6 +2643,7 @@ function exportsUsed(text: string): boolean {
 // The text before a ( ends in a method head: a name (after { , ; } or a modifier) in an object literal or a class body, a getter, a setter, an
 // async or generator method, or a catch clause. Keywords that take a ( and a block (if, while, for, switch, with) are not methods.
 function methodHead(head: string): boolean {
+  if (/(?:^|[{,;}])\s*(?:(?:static|async|get|set)\s+)*\*?\s*(?:(?:""|'')|\[[^\]]*\])\s*$/.test(head)) return true; // a quoted or computed method name
   const m = /(?:^|[{,;}]|\b(?:static|async|get|set)\b|\*|\bcatch\b)\s*(?:\*\s*)?([A-Za-z_$][\w$]*)?\s*$/.exec(head);
   if (!m) return false;
   if (/\bcatch\s*$/.test(head)) return true;
@@ -2654,6 +2707,8 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     if (dotted && !/^(?:require|import|fork|execFile|execFileSync)$/.test(callee)) continue;
     const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) continue;
+    // A method definition (`{ require(x) { ... } }`, `class C { load(x) { } }`) is no call: `) {` on the same line can only open a body.
+    if (!dotted && /^\s*\)[ \t]*\{/.test(text.slice((m.index ?? 0) + m[0].length + args.length, (m.index ?? 0) + m[0].length + args.length + 12)) && /(?:^|[{,])\s*(?:(?:static|async|get|set)\s+)*\*?\s*$/.test(text.slice(Math.max(0, (m.index ?? 0) - 40), m.index ?? 0))) continue;
     const arg = firstArg(args);
     const spawns = /^(?:fork|execFile|execFileSync)$/.test(callee);
     // An alias, a member call and a name held string leave the hook's own folder in the set: only a direct literal-headed argument restricts.

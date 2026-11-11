@@ -427,3 +427,38 @@ for (const [label, hook] of [
     expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
   });
 }
+
+// Ninth review batch: every computed require key holds unless its receiver is provably a literal; quoted and computed method names; a method called require.
+for (const [label, hook] of [
+  ["a computed key on a name from an object destructure", `const { m } = { m: module };\nm["require"](${BX});`],
+  ["a computed key on a name from an array destructure", `const [m] = [module];\nm["require"](${BX});`],
+  ["a computed key on a comma expression", `(0, module)["require"](${BX});`],
+  ["a computed key on a ternary", `(1 ? module : null)["require"](${BX});`],
+  ["a computed key on a nullish choice", `(module.parent ?? module)["require"](${BX});`],
+  ["a computed key on a function result", `function g() { return module; }\ng()["require"](${BX});`],
+  ["a computed key on an arrow result", `const g = () => module;\ng()["require"](${BX});`],
+  ["a computed key on a parameter", `(function (m) { m["require"](${BX}); })(module);`],
+  ["a computed key on a catch binding", `try { throw module; } catch (m) { m["require"](${BX}); }`],
+  ["a computed key on a for-of binding", `for (const m of [module]) { m["require"](${BX}); }`],
+  ["a computed key on a cache entry", `require.cache[__filename]["require"](${BX});`],
+  ["a computed key on a member of an object holding module", `const m = module;\nconst w = { m };\nw.m["require"](${BX});`],
+  ["a computed key through an optional chain", `module?.["require"]?.(${BX});`],
+  ["a computed key on a parenthesized module", `(module)["require"](${BX});`],
+  ["a computed key on a copy of an alias", `const m = module;\nconst n = m;\nn["require"](${BX});`],
+  ["Reflect.get of require from module", `Reflect.get(module, "require")(${BX});`],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
+}
+
+for (const [label, hook] of [
+  ["a computed require key on a literal object", `const options = { require: true };\nconsole.log(options["require"]);`],
+  ["a literal declared name as the value of a require key", `const enabled = true;\nconst options = { require: enabled };\nconsole.log(options);`],
+  ["a method with a quoted name that takes require", `const o = { "f"(require) { return 1; } };\no.f(1);`],
+  ["a method with a computed name that takes require", `const o = { ["f"](require) { return 1; } };\no.f(1);`],
+  ["a method named require", `const o = { require(x) { return x; } };\no.require(1);`],
+  ["a class method named require", `class C { require(x) { return x; } }\nnew C().require(1);`],
+] as [string, string][]) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
+  });
+}
