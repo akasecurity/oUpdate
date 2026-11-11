@@ -2525,7 +2525,10 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   for (const m of keptKeys.matchAll(/(?<![\w$.])(?:Reflect|Object)\s*\.\s*\w+\s*\(/g)) {
     const args = argsOf(keptKeys, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) return true;
-    if (splitTop(args, ",").slice(1).some((a) => /^\s*(["'`])require\1\s*$/.test(a))) return true;
+    const list = splitTop(args, ",");
+    if (list.slice(1).some((a) => /^\s*(["'`])require\1\s*$/.test(a))) return true;
+    // A read by a key the file builds (a name, an expression) from module, require.main, module.parent or a name bound to one.
+    if (/^(?:get|getOwnPropertyDescriptors?|entries|values|assign|fromEntries|getOwnPropertyNames|ownKeys)$/.test(/\.\s*(\w+)\s*\($/.exec(m[0])?.[1] ?? "") && list.some((a) => mentionsModule(a, keptKeys))) return true;
   }
   // module.require handed on (a bare mention, .bind(...)).
   for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
@@ -2574,6 +2577,13 @@ function keyInPattern(text: string, end: number): boolean {
     }
   }
   return false;
+}
+// The expression names module, require, require.main, module.parent or a name assigned from one of them (module.exports, require.cache and
+// the like are not the loader).
+function mentionsModule(expr: string, text: string): boolean {
+  const names = ["module", "require"];
+  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:module|require)(?![\w$])(?!\s*\()(?!\s*\.\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\b)/g)) names.push(m[1]!.replace(/\$/g, "\\$"));
+  return new RegExp(`(?<![\\w$.])(?:${names.join("|")})(?![\\w$])(?!\\s*\\()(?!\\s*\\.\\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\\b)`).test(expr);
 }
 // A computed ["require"] member holds whatever the receiver is (module, an alias, a flow, a call result, a data object): no receiver is provably
 // not a module object, so none is excused.

@@ -508,3 +508,27 @@ for (const [label, hook] of [
 ] as [string, string][]) {
   test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
 }
+
+// Twelfth review batch: a read of the loader by a key the file builds, through Reflect or Object.
+for (const [label, hook] of [
+  ["Reflect.get of module by a name holding require", `const k = "require";\nReflect.get(module, k).call(module, ${BX});`],
+  ["Reflect.get of module by a joined key", `Reflect.get(module, ["req", "uire"].join("")).call(module, ${BX});`],
+  ["a descriptor of the prototype of module by a name", `const k = "require";\nObject.getOwnPropertyDescriptor(Object.getPrototypeOf(module), k).value.call(module, ${BX});`],
+  ["Reflect.getOwnPropertyDescriptor of require.main by a name", `const k = "require";\nReflect.getOwnPropertyDescriptor(Object.getPrototypeOf(require.main), k).value.call(module, ${BX});`],
+  ["Object.entries of module", `const e = Object.entries(Object.getPrototypeOf(module));\nconst r = e.find(([n]) => n === "req" + "uire")[1];\nr.call(module, ${BX});`],
+  ["Object.assign from module", `const t = Object.assign({}, Object.getPrototypeOf(module));\nt["re" + "quire"].call(module, ${BX});`],
+  ["Reflect.get of a name bound to module by a name", `const m = module;\nconst k = "require";\nReflect.get(m, k).call(module, ${BX});`],
+  ["Reflect.get of module.parent by a name", `const k = "require";\nReflect.get(module.parent, k).call(module, ${BX});`],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
+}
+
+for (const [label, hook] of [
+  ["Object.assign into module.exports", `Object.assign(module.exports, { a: 1 });`],
+  ["Object.entries of require.cache", `const n = Object.entries(require.cache).length;`],
+  ["Reflect.get on an unrelated object by a name", `const o = { a: 1 };\nconst k = "a";\nReflect.get(o, k);`],
+] as [string, string][]) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
+  });
+}
