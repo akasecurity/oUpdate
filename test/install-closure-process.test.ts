@@ -592,3 +592,49 @@ test("a computed member of globalThis widens the closure to the whole package (g
   expect(widensAll('const q = globalThis["pro"+"cess"]; q.dlopen();\n')).toBe(true);
   expect(widensAll('const n = globalThis.process.env.X; exports.main = () => n\n')).toBe(false);
 });
+
+// Round 4 of the global process: every use that is not a complete allowlisted read widens the closure to the whole package.
+// None of these lines holds a loader word, so only the use itself can widen them.
+for (const [label, pre] of [
+  ["a concise arrow body that is the process object", 'exports.main = () => process\n'],
+  ["process in an array", 'const a = [process]; exports.main = () => a[0]["x"]\n'],
+  ["a spread of process", 'const a = {...process}; exports.main = () => a["x"]\n'],
+  ["process in a template placeholder", 'exports.main = () => `${process}`\n'],
+  ["an optional computed member of process", 'exports.main = () => process?.["x"]\n'],
+  ["globalThis?.process as a value", 'const p = globalThis?.process; exports.main = () => p["x"]\n'],
+  ["process taken from globalThis by a pattern", 'const { process: p } = globalThis; exports.main = () => p["x"]\n'],
+  ["process handed to a tagged template", 'exports.main = () => ((s, p) => p["x"])`${process}`\n'],
+  ["a chained computed call after process.cwd()", 'exports.main = () => process.cwd()["con"+"structor"]["con"+"structor"]("return process")()\n'],
+  ["a chained call after process.env.PATH", 'exports.main = () => process.env.PATH.constructor.constructor("return process")()\n'],
+  ["a computed member of a process.argv entry", 'exports.main = () => process.argv[0]["con"+"structor"]\n'],
+  ["a member of process.version", 'exports.main = () => process.version.constructor\n'],
+  ["a chain after process.stdout.write", 'exports.main = () => process.stdout.write("x").constructor.constructor("return 1")()\n'],
+  ["the bare global object handed on", 'const g = globalThis; exports.main = () => g["x"]\n'],
+] as const) {
+  test(`${label} widens the closure (round 19)`, () => expect(widensAll(pre)).toBe(true));
+}
+
+// These stay static: nothing here is a use of the process object that could reach a loader.
+for (const [label, pre] of [
+  ["a property named process", 'exports.main = (x) => x.process(1)\n'],
+  ["an object key named process", 'exports.main = () => ({ a: 1, process: 2 })\n'],
+  ["a parameter named process that is only declared", 'exports.main = function (process) { return 1 }\n'],
+  ["an arrow parameter named process", 'exports.main = (a, process) => 1\n'],
+  ["the words process and binding inside a message", 'exports.main = () => console.log("error: process failed", "build/Release/binding.node", "binding.gyp")\n'],
+  ["destructuring allowlisted members of process", 'const { env, platform: plat, argv } = process; exports.main = () => env.X + plat + argv[2]\n'],
+  ["complete reads", 'exports.main = () => [process.env.NODE_ENV === "production", process.platform === "win32", process.cwd() + "/x", process.argv.slice(2), process.env.HOME.split("/").length]\n'],
+  ["process.exit and stdout.write", 'exports.main = () => { process.stdout.write("ok"); process.exit(1) }\n'],
+] as const) {
+  test(`${label} stays static (round 19)`, () => expect(held(pre)).toBe(false));
+}
+test("a non-ASCII identifier is not static but does not widen to the whole package (round 19)", () => {
+  const pre = 'const café = 1; exports.main = () => café\n';
+  expect(held(pre)).toBe(true);
+  expect(widensAll(pre)).toBe(false);
+});
+test("a file the scan cannot read that never names process does not widen to the whole package (round 19)", () => {
+  expect(widensAll('exports.main = () => a / b / c\nexports.k = (x) => x\n) /\n')).toBe(false);
+});
+test("a destructuring of a member that is not on the allowlist widens (round 19)", () => {
+  expect(widensAll('const { x } = process; exports.main = () => x["y"]\n')).toBe(true);
+});

@@ -683,7 +683,7 @@ const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWo
 // alias, a computed member, binding, getBuiltinModule, mainModule, an argument to a call) can reach a loader or a native
 // module, so it is not static; the loader words and a bare or computed use also widen the closure to the whole package.
 const PROCESS_LOADER_WORDS = /\b(?:getBuiltinModule|mainModule|_?linkedBinding|binding)\b/;
-const PROCESS_READ = "(?:env\\s*\\.\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|versions?\\b(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)?|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
+const PROCESS_READ = "(?:env\\s*\\.\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|(?:version\\b|versions\\b(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)?)|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
 // `const p = require("process")` or `import p from "node:process"`: the only loads of the process module that stay static.
 const PROCESS_ALIAS = new RegExp(
   String.raw`\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(?:node:)?process\2\s*\)|import(?:${GAP}+|(?=\*))(?:\*${GAP}*as${GAP}+)?([A-Za-z_$][\w$]*)${GAP}+from${GAP}*(['"])(?:node:)?process\4)\s*;?`,
@@ -993,6 +993,158 @@ function dotBefore(text: string, at: number): boolean {
   return j > 0 && text[j - 1] === ".";
 }
 
+const READ_AFTER = new RegExp(`\\s*(?:\\?\\.|\\.)\\s*${PROCESS_READ}`, "y");
+const MEMBER_AFTER = /\s*\.\s*[A-Za-z_$][\w$]*/y;
+const SAFE_SUFFIX = /\.\s*(?:length\b|(?:slice|split|includes|startsWith|endsWith|indexOf|toString|toLowerCase|toUpperCase|trim|join|forEach|map|filter|some|every|find|replace)\s*\()/y;
+const DESTRUCTURE_OK = "(?:env|platform|arch|versions?|argv|cwd|exit|exitCode)(?![\\w$])";
+
+// True when the expression that starts at "i" (right after an allowlisted read) ends there: the next token is not a member,
+// a call, a template or an optional chain. A few string and array methods and a numeric index are read through.
+function readEnds(code: string, start: number, lenient = false): boolean {
+  let i = start;
+  for (let guard = 0; guard < 64; guard++) {
+    while (i < code.length && /\s/.test(code[i]!)) i++;
+    const c = code[i];
+    if (c === undefined) return true;
+    if (c === "." && lenient) {
+      // Widening only: a plain member or call chain is fine unless it reaches a constructor.
+      const m = /^\.\s*([A-Za-z_$][\w$]*)/.exec(code.slice(i, i + 80));
+      if (!m || m[1] === "constructor" || m[1] === "__proto__") return false;
+      i += m[0].length;
+      while (i < code.length && /\s/.test(code[i]!)) i++;
+      if (code[i] === "(") {
+        const args = argsOf(code, i);
+        if (args === undefined) return false;
+        i += args.length + 2;
+      }
+      continue;
+    }
+    if (c === "?" && code[i + 1] === "." && lenient && code[i + 2] === "(") {
+      const args = argsOf(code, i + 2);
+      if (args === undefined) return false;
+      i += args.length + 4;
+      continue;
+    }
+    if (c === "?" && code[i + 1] === "." && lenient && /[A-Za-z_$]/.test(code[i + 2] ?? "")) {
+      i += 2;
+      const m = /^[A-Za-z_$][\w$]*/.exec(code.slice(i, i + 80));
+      if (!m || m[0] === "constructor" || m[0] === "__proto__") return false;
+      i += m[0].length;
+      continue;
+    }
+    if (c === ".") {
+      SAFE_SUFFIX.lastIndex = i;
+      const m = SAFE_SUFFIX.exec(code);
+      if (!m) return false;
+      i += m[0].length;
+      if (m[0].endsWith("(")) {
+        const args = argsOf(code, i - 1);
+        if (args === undefined) return false;
+        i += args.length + 1;
+      }
+      continue;
+    }
+    if (c === "[") {
+      const m = /^\[\s*\d+\s*\]/.exec(code.slice(i, i + 24));
+      if (!m) return false;
+      i += m[0].length;
+      continue;
+    }
+    if (c === "(" || c === "`") return false;
+    if (c === "?" && code[i + 1] === "." && !/[0-9]/.test(code[i + 2] ?? "")) return false;
+    return true;
+  }
+  return false;
+}
+
+// Decides on the identifier, never on text near it. "code" has no strings or comments. True when any name in "names" (the
+// process object, or a name for the process module) is used as anything but a complete allowlisted read: an alias, a
+// computed member, a spread, a template or call argument, a returned or assigned value, a read followed by a chained
+// call, or the bare global object. A property named like the name (x.process()), an object key (process: 1) and a method
+// definition are not the object. A parameter or variable of that name is not told apart from the global: it counts.
+function processValueUse(code: string, names: string[], lenient = false): boolean {
+  const alt = names.map((n) => n.replace(/\$/g, "\\$")).join("|");
+  const L = "(?<![\\w$\\u0080-\\uffff])";
+  const R = "(?![\\w$\\u0080-\\uffff])";
+  // The scan writes a template as a lone backtick and ${; argsOf would read the backtick as an open quote.
+  let rest = code.replace(/`/g, " ");
+  // A parameter list that only declares plain names binds them: the declaration is not a use (a use of it in the body still is).
+  const id = "[A-Za-z_$][\\w$]*";
+  const params = `\\(\\s*${id}(?:\\s*,\\s*${id})*\\s*\\)`;
+  const declared = (list: string) => list.replace(new RegExp(`${L}(?:${alt})${R}`, "g"), "_");
+  rest = rest.replace(new RegExp(`\\bfunction\\b[^(){}]*(${params})`, "g"), (m, p: string) => m.slice(0, m.length - p.length) + declared(p));
+  rest = rest.replace(new RegExp(`(${params})(?=\\s*=>)`, "g"), (p: string) => declared(p));
+  rest = rest.replace(/(?<![\w$.\u0080-\uffff])(?:globalThis|global)\s*(?:\?\.|\.)\s*process(?![\w$\u0080-\uffff])/g, "process");
+  // process taken out of the global object by a pattern or a spread.
+  if (/\{[^{}]*(?<![\w$.])process(?![\w$])[^{}]*\}\s*=\s*(?:globalThis|global)(?![\w$])/.test(rest)) return true;
+  // Destructuring of allowlisted members only.
+  const member = `${DESTRUCTURE_OK}(?:\\s*:\\s*[A-Za-z_$][\\w$]*)?`;
+  rest = rest.replace(
+    new RegExp(`\\b(?:const|let|var)\\s*\\{\\s*${member}(?:\\s*,\\s*${member})*\\s*,?\\s*\\}\\s*=\\s*(?:${alt})${R}(?!\\s*[.\\[(?\`])`, "g"),
+    " ",
+  );
+  const re = new RegExp(`${L}(?:${alt})${R}`, "g");
+  for (const m of rest.matchAll(re)) {
+    const at = m.index ?? 0;
+    const end = at + m[0].length;
+    let j = at;
+    while (j > 0 && /\s/.test(rest[j - 1]!)) j--;
+    const prev = j > 0 ? rest[j - 1]! : "";
+    if (prev === "." && !rest.slice(0, j).endsWith("...")) continue;
+    READ_AFTER.lastIndex = end;
+    const read = READ_AFTER.exec(rest);
+    if (read) {
+      let after = end + read[0].length;
+      if (read[0].endsWith("(") && !/\(\s*\)$/.test(read[0])) {
+        const args = argsOf(rest, after - 1);
+        if (args === undefined) return true;
+        after += args.length + 1;
+      }
+      if (readEnds(rest, after, lenient)) continue;
+      return true;
+    }
+    if (/(?:^|[^\w$.])(?:typeof|in)$/.test(rest.slice(Math.max(0, j - 7), j))) continue;
+    if (lenient) {
+      // Any other plain member (nextTick, on, hrtime) is not static, but it does not reach a loader unless a chain follows it.
+      MEMBER_AFTER.lastIndex = end;
+      const mem = MEMBER_AFTER.exec(rest);
+      if (mem) {
+        let after = end + mem[0].length;
+        // process.env[name] reads one value from the environment.
+        if (/^\s*\.\s*env$/.test(mem[0])) {
+          let k = after;
+          while (k < rest.length && /\s/.test(rest[k]!)) k++;
+          if (rest[k] === "[") {
+            let depth = 0;
+            let e2 = k;
+            for (; e2 < rest.length; e2++) {
+              if (rest[e2] === "[") depth++;
+              else if (rest[e2] === "]" && --depth === 0) break;
+            }
+            if (e2 < rest.length) after = e2 + 1;
+          }
+        }
+        let j2 = after;
+        while (j2 < rest.length && /\s/.test(rest[j2]!)) j2++;
+        if (rest[j2] === "(") {
+          const args = argsOf(rest, j2);
+          if (args === undefined) return true;
+          after = j2 + args.length + 2;
+        }
+        if (readEnds(rest, after, true)) continue;
+        return true;
+      }
+    }
+    const tail = rest.slice(end, end + 200);
+    if ((prev === "{" || prev === ",") && /^\s*:/.test(tail)) continue;
+    if ((prev === "{" || prev === "}" || prev === "," || prev === ";" || prev === "") && /^\s*\([^()]*\)\s*\{/.test(tail)) continue;
+    return true;
+  }
+  // The global object bound to a name can be read for process later.
+  if (/(?:\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=|(?<![=!<>])=(?!=))\s*globalThis(?![\w$.])/.test(rest)) return true;
+  return false;
+}
+
 function provablyStatic(source: string): boolean {
   if (source.includes(REMOVED)) return false;
   // Comments out first, strings kept: the patterns below read code, and a comment can neither hide nor fake a load.
@@ -1002,7 +1154,6 @@ function provablyStatic(source: string): boolean {
   let viaOther = false;
   let rest = stripProcessAliases(text, aliases);
   if (hidesNames(codeOnly(text, aliases))) return false;
-  if (PROCESS_LOADER_WORDS.test(text)) return false;
   rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), removedText(false));
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3, at: number, whole: string) => {
     const spec = String(spec1 || spec2 || spec3 || "");
@@ -1023,13 +1174,9 @@ function provablyStatic(source: string): boolean {
   if (UNSAFE_JS.test(rest)) return false;
   const code = codeOnly(rest, aliases);
   if (code === undefined) return false;
-  rest = code;
-  // Identifier edges: $, _, digits and non-ASCII characters continue a name, so \b is not an edge.
-  const names = aliases.map((n) => n.replace(/\$/g, "\\$"));
-  const L = "(?<![\\w$\\u0080-\\uffff])";
-  const R = "(?![\\w$\\u0080-\\uffff])";
-  for (const n of names) rest = rest.replace(new RegExp(`${L}${n}\\s*\\.\\s*${PROCESS_READ}`, "g"), "");
-  return !new RegExp(`${L}(?:${names.join("|")})${R}`).test(rest);
+  // Strings are gone from this text: a loader word or the word process inside a message is not a use.
+  if (PROCESS_LOADER_WORDS.test(code)) return false;
+  return !processValueUse(code, aliases);
 }
 
 // exec/eval/compile, a dynamic import, or a loader that runs another file.
@@ -1421,29 +1568,29 @@ type JsTier = { all: boolean; pkg: boolean; tests: boolean; flows: boolean; same
 // eval/Function/vm of a value we cannot see can load any file, docs included.
 // A string literal or a read of a literal path is not that shape.
 function processHazard(source: string): boolean {
-  // Comments out first (strings kept), as in provablyStatic; a file the scan cannot read is checked as written.
-  const text = codeOnly(source, [], true) ?? source;
-  if (PROCESS_LOADER_WORDS.test(text)) return true;
+  // Comments out first (strings kept) so the alias statements can be read, then strings out so no word inside a message counts.
   const names = ["process"];
-  // globalThis.process is the process object under another spelling; a computed member of the global object can be it.
-  if (/\b(?:globalThis|global)\s*\[/.test(text)) return true;
-  const rest = stripProcessAliases(text, names).replace(/\b(?:globalThis|global)\s*\.\s*process\b/g, "process");
-  // An escaped or non-ASCII name in code can spell process or a loader word: it is read as a hazard.
-  if (hidesNames(codeOnly(text))) return true;
-  const alt = names.map((n) => n.replace(/\$/g, "\\$")).join("|");
-  const L = "(?<![\\w$\\u0080-\\uffff])";
-  const R = "(?![\\w$\\u0080-\\uffff])";
-  // The object itself used as a value (assigned, passed, returned, indexed): not a plain read of one member.
-  if (new RegExp(`(?:[=(,:?&|!]\\s*|\\breturn\\s+|\\bnew\\s+)${L}(?:${alt})${R}(?!\\s*\\.\\s*[A-Za-z_$])|${L}(?:${alt})\\s*\\[`).test(rest)) return true;
-  // A require, import() or require.resolve whose argument is not a string literal and reads process (env-derived).
-  const word = new RegExp(`${L}(?:${alt})${R}`);
-  for (const m of rest.matchAll(/(?:\brequire(?:\s*\.\s*resolve)?|\bimport)\s*\(/g)) {
-    const args = argsOf(rest, (m.index ?? 0) + m[0].length - 1);
+  const keep = codeOnly(source, [], true);
+  // A file the scan cannot read is a hazard only when it can name the process object or spell a name with an escape.
+  const unreadable = () => /process|global|\\/.test(source);
+  if (keep === undefined) return unreadable();
+  const code = codeOnly(stripProcessAliases(keep, names), names);
+  if (code === undefined) return unreadable();
+  if (PROCESS_LOADER_WORDS.test(code)) return true;
+  // A computed member of the global object can be the process object.
+  if (/(?<![\w$.])(?:globalThis|global)\s*(?:\?\.)?\s*\[/.test(code)) return true;
+  // An escape in code can spell process or a loader word.
+  if (code.includes("\\")) return true;
+  // A require, import() or require.resolve whose argument reads process and has no string part cannot be classified.
+  const word = new RegExp(`(?<![\\w$\\u0080-\\uffff])(?:${names.join("|").replace(/\$/g, "\\$")})(?![\\w$\\u0080-\\uffff])`);
+  // The scan writes a template as a lone backtick and ${; argsOf would read it as an open quote.
+  const flat = code.replace(/`/g, " ");
+  for (const m of flat.matchAll(/(?:\brequire(?:\s*\.\s*resolve)?|\bimport)\s*\(/g)) {
+    const args = argsOf(flat, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) return true;
-    const arg = firstArg(args).trim();
-    if (!/^(['"`])[^'"`\\\${]*\1$/.test(arg) && word.test(arg)) return true;
+    if (!args.includes('""') && word.test(args)) return true;
   }
-  return false;
+  return processValueUse(code, names, true);
 }
 
 function hasUnbounded(text: string): boolean {
