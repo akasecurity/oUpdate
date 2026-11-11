@@ -902,13 +902,14 @@ const PROCESS_ALIAS = new RegExp(
 );
 
 // A static file may require these. Any other bare builtin is unsafe, so the load stays in the text.
-const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer"]);
+const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer", "_stream_duplex", "_stream_passthrough", "_stream_readable", "_stream_transform", "_stream_wrap", "_stream_writable"]);
 const NODE_BUILTINS = new Set([
   ...STATIC_BUILTINS,
   "async_hooks", "child_process", "cluster", "console", "constants", "dgram", "diagnostics_channel",
   "dns", "domain", "http", "http2", "https", "inspector", "module", "net", "perf_hooks", "process",
   "punycode", "querystring", "readline", "repl", "sqlite", "string_decoder", "sys", "test", "timers",
   "tls", "trace_events", "tty", "v8", "vm", "wasi", "worker_threads",
+  "_http_agent", "_http_client", "_http_common", "_http_incoming", "_http_outgoing", "_http_server", "_tls_common", "_tls_wrap",
 ]);
 
 function builtinRoot(spec: string): string | undefined {
@@ -2926,8 +2927,10 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     const args = argsOf(text, after + call[0].length - 1);
     if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text, true);
   }
-  // A code-running builtin that loads a file by name (cluster.setupPrimary({ exec }), module.register(...), Module._load(...)).
-  if ((/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["'`](?:node:)?(?:cluster|module)["'`]/.test(text) && /\b(?:setupPrimary|setupMaster)\s*\(|\bsettings\s*\.\s*exec\b|\bregister\s*\(|\b_load\s*\(/.test(text)) || /\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(text)) {
+  // A code-running builtin that loads a file by name (cluster.setupPrimary({ exec }), cluster.settings, module.register(...), Module._load(...), the run of node:test).
+  // The builtin counts as named when its name is a string anywhere in the file, so a name held by a variable does not hide it, and the
+  // member counts as used by its bare word, so a bracket access or an alias does not hide it.
+  if ((/["'`](?:node:)?(?:cluster|module)["'`]/.test(text) && /\b(?:setupPrimary|setupMaster|settings|register|_load)\b/.test(text)) || (/["'`]node:test["'`]/.test(text) && /\brun\b/.test(text)) || /\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(text) || /\b(?:module|constructor)\s*(?:\.\s*constructor\s*)?\[\s*["'`]_load["'`]\s*\]/.test(text)) {
     tier.pkg = true;
     tier.tests = true;
     tier.flows = true;
