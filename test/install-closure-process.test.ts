@@ -144,3 +144,40 @@ test("an unchanged helper.cjs beside a changed helper/index.js: the directory in
   const rel = (v: string, idx: string) => release(v, pre).set("preinstall/helper.cjs", enc("module.exports = 1\n")).set("preinstall/helper/index.js", enc(idx));
   expect(holds(rel("1.0.0", "module.exports = 1\n"), rel("1.0.1", "module.exports = 2\n"))).toContain("file preinstall/helper/index.js");
 });
+
+// Round 4: a / after } or ) read both ways, and every line terminator ends a line comment.
+for (const [label, pre] of [
+  ["a division after } that would read as a regex body hiding the use", 'const p = require("process"); const n = {} / p.binding("spawn_sync") / 1;\nexports.main = () => n\n'],
+  ["a division after ) that would read as a regex body hiding the use", 'const p = require("process"); const n = (1) / p.binding("spawn_sync") / 1;\nexports.main = () => n\n'],
+  ["a line comment ended by a carriage return", 'const p = require("process"); // comment\rp.binding("spawn_sync");\nexports.main = () => 1\n'],
+  ["a line comment ended by U+2028", 'const p = require("process"); // comment\u2028p.binding("spawn_sync");\nexports.main = () => 1\n'],
+  ["a line comment ended by U+2029", 'const p = require("process"); // comment\u2029p.binding("spawn_sync");\nexports.main = () => 1\n'],
+  ["a regex after a keyword that holds a quote", 'const p = require("process"); exports.main = () => { return /\'/.test(1) + p.binding("spawn_sync") + \'\' }\n'],
+] as const) {
+  test(`${label} is not static (round 4)`, () => expect(held(pre)).toBe(true));
+}
+test("ordinary divisions and regexes after ) and } stay static", () => {
+  expect(held('const p = require("process"); const a = (p.cwd().length) / 2 / 3; const b = (4) / 2;\nfunction f() {}\nconst c = 6 / 2; exports.main = () => a + b + c\n')).toBe(false);
+});
+
+// Round 5: comments the host reads as comments, and a / read as a regex or a division from the text before it.
+const X = 'p.getBuiltinModule("v"+"m").runInThisContext(' + "require('fs').readFileSync(__dirname + '/../build/payload.js', 'utf8'))";
+const A = 'const p = require("process");\n';
+for (const [label, pre] of [
+  ["a CR ends a line comment before the use", `${A}// c\r${X}\n`],
+  ["a CR ends a line comment after an alias load", `const p = require("process") // c\r.getBuiltinModule("v"+"m")\n`],
+  ["an HTML open comment holds a backtick that would open a template", `${A}<!-- \`\n${X}\n// \`\n`],
+  ["an HTML close comment at line start holds a backtick", `${A}--> \`\n${X}\n// \`\n`],
+  ["a hashbang holds a backtick", `#! \`\n${A}${X}\n// \`\n`],
+  ["an alias load followed by an HTML comment and a member on the next line", `const p = require("process") <!-- c\n.getBuiltinModule("v"+"m")\n`],
+  ["a postfix increment before a division that would read as a regex", `${A}let a = 1; a++ / ${X} / 1\n`],
+  ["a regex after an if header that holds a quote", `${A}if (1) /'/.test(""); ${X} // '\n`],
+  ["a regex after typeof that holds a quote", `${A}typeof /'/; ${X} // '\n`],
+  ["a regex-looking span inside a template expression", "const p = require(\"process\"); const t = `${/}/.source + " + X + "}`\n"],
+] as const) {
+  test(`${label} is not static (round 5)`, () => expect(held(pre)).toBe(true));
+}
+test("benign regexes, divisions and comments stay static (round 5)", () => {
+  expect(held(`${A}if (1) /a/.test("");\n{} /a/.test("");\nconst n = p.cwd().length++ / 2;\nconst t = \`\${1 / 2}\`;\nlet x = 3; x-- / 2;\n// <!-- -->\nexports.main = () => n + t\n`)).toBe(false);
+  expect(held(`#!/usr/bin/env node\n${A}exports.main = () => p.cwd()\n`)).toBe(false);
+});

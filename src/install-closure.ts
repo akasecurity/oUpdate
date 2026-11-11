@@ -727,9 +727,9 @@ function stripProcessAliases(text: string, aliases: string[]): string {
     let i = at + m.length;
     for (;;) {
       while (i < whole.length && /\s/.test(whole[i]!)) i++;
+      if (whole.startsWith("<!--", i) || whole.startsWith("-->", i)) return m;
       if (whole.startsWith("//", i)) {
-        const nl = whole.indexOf("\n", i);
-        i = nl < 0 ? whole.length : nl;
+        while (i < whole.length && !/[\n\r\u2028\u2029]/.test(whole[i]!)) i++;
       } else if (whole.startsWith("/*", i)) {
         const end = whole.indexOf("*/", i + 2);
         i = end < 0 ? whole.length : end + 2;
@@ -745,13 +745,22 @@ function stripProcessAliases(text: string, aliases: string[]): string {
  * The code of a JavaScript file with string and template text, regular-expression bodies and comments blanked, or
  * undefined when the scan ends inside one of them (the file is not read as code then). Positions are not kept.
  */
-function codeOnly(text: string): string | undefined {
+/** Words a span read as a regular expression could hide from the checks; with the process names they are what decides. */
+const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "Worker", "process", "globalThis", "global", "Reflect", "Proxy", "constructor", "child_process", "dlopen", "exports"];
+
+function codeOnly(text: string, watch: string[] = []): string | undefined {
   let out = "";
   let prev = "";
+  let opened = false;
   const braces: boolean[] = [];
-  const regexAfter = new Set(["", "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "<", ">", "~", "^"]);
+  const regexAfter = new Set(["", "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", ";", "+", "-", "*", "%", "<", ">", "~", "^"]);
   let i = 0;
   const n = text.length;
+  const danger = new RegExp(
+    `['"\`\\\\\\u0080-\\uffff(){}\\[\\]]|(?<![\\w$])(?:${[...DANGER_WORDS, ...watch].map((w) => w.replace(/\$/g, "\\$&")).join("|")})(?![\\w$])`,
+  );
+  const eol = (c: string | undefined) => c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029";
+  const regexWord = /(?:^|[^\w$.])(?:return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await|instanceof)$/;
   const template = (): boolean => {
     for (; i < n; i++) {
       const c = text[i]!;
@@ -763,36 +772,57 @@ function codeOnly(text: string): string | undefined {
         i += 2;
         braces.push(true);
         out += " `${";
+        opened = true;
         return true;
       }
     }
     return false;
   };
+  // After a ) or a } a / is a division or the start of a regular expression, and the two readings hide different text.
+  // It is read as a division, unless the rest of the line holds a closing / around anything that could name a thing: then
+  // the file is not read as code at all.
+  let ambiguous = false;
+  const ambiguousRegex = (at: number, before: string): boolean => {
+    if (before !== ")" && before !== "}" && !/(?:\+\+|--)$/.test(out.trimEnd())) return false;
+    let cls = false;
+    for (let j = at + 1; j < n && !eol(text[j]); j++) {
+      const d = text[j]!;
+      if (d === "\\") j++;
+      else if (d === "[") cls = true;
+      else if (d === "]") cls = false;
+      else if (d === "/" && !cls) {
+        if (danger.test(text.slice(at + 1, j))) ambiguous = true;
+        return false;
+      }
+    }
+    return false;
+  };
+  if (text.startsWith("#!")) while (i < n && !eol(text[i])) i++;
   while (i < n) {
     const c = text[i]!;
     if (c === "'" || c === '"') {
       i++;
-      for (; i < n && text[i] !== c && text[i] !== "\n"; i++) if (text[i] === "\\") i++;
+      for (; i < n && text[i] !== c && !eol(text[i]); i++) if (text[i] === "\\") i++;
       if (text[i] !== c) return undefined;
       i++;
       out += '""';
       prev = '"';
     } else if (c === "`") {
       i++;
+      opened = false;
       if (!template()) return undefined;
-      prev = "`";
+      prev = opened ? "{" : "`";
     } else if (c === "/" && text[i + 1] === "/") {
-      const nl = text.indexOf("\n", i);
-      i = nl < 0 ? n : nl;
+      while (i < n && !eol(text[i])) i++;
     } else if (c === "/" && text[i + 1] === "*") {
       const e = text.indexOf("*/", i + 2);
       if (e < 0) return undefined;
+      out += /[\n\r\u2028\u2029]/.test(text.slice(i, e)) ? "\n" : " ";
       i = e + 2;
-      out += " ";
-    } else if (c === "/" && regexAfter.has(prev)) {
+    } else if (c === "/" && ((regexAfter.has(prev) && !/(?:\+\+|--)$/.test(out.trimEnd())) || regexWord.test(out.trimEnd()) || ambiguousRegex(i, prev))) {
       let cls = false;
       i++;
-      for (; i < n && text[i] !== "\n"; i++) {
+      for (; i < n && !eol(text[i]); i++) {
         const d = text[i]!;
         if (d === "\\") i++;
         else if (d === "[") cls = true;
@@ -804,14 +834,17 @@ function codeOnly(text: string): string | undefined {
       out += "/r/";
       prev = "r";
     } else {
+      if (c === "<" && text.startsWith("<!--", i)) return undefined;
+      if (c === "-" && text.startsWith("-->", i) && /(?:^|[\n\r\u2028\u2029])[ \t]*$/.test(out)) return undefined;
       if (c === "{") braces.push(false);
       if (c === "}") {
         const tpl = braces.pop();
         if (tpl) {
           i++;
           out += "}";
+          opened = false;
           if (!template()) return undefined;
-          prev = "`";
+          prev = opened ? "{" : "`";
           continue;
         }
       }
@@ -820,7 +853,7 @@ function codeOnly(text: string): string | undefined {
       i++;
     }
   }
-  return out;
+  return ambiguous ? undefined : out;
 }
 
 // A backslash or a non-ASCII character in code can spell or hide a name (an escaped identifier, a no-break space), and no
@@ -832,8 +865,8 @@ function hidesNames(code: string | undefined): boolean {
 function provablyStatic(text: string): boolean {
   const aliases: string[] = [];
   let viaOther = false;
-  if (hidesNames(codeOnly(text))) return false;
   let rest = stripProcessAliases(text, aliases);
+  if (hidesNames(codeOnly(text, aliases))) return false;
   rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "");
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3) => {
     const spec = String(spec1 || spec2 || spec3 || "");
@@ -846,7 +879,7 @@ function provablyStatic(text: string): boolean {
   if (/(?:\brequire\s*\(|\bfrom\s+|\bimport\s+)\s*['"](?:node:)?process\b/.test(rest)) return false;
   if (UNSAFE_JS.test(rest)) return false;
   if (aliases.length === 0) return true;
-  const code = codeOnly(rest);
+  const code = codeOnly(rest, aliases);
   if (code === undefined) return false;
   rest = code;
   // Identifier edges: $, _, digits and non-ASCII characters continue a name, so \b is not an edge.
