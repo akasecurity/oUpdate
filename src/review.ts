@@ -605,8 +605,9 @@ const EMPTY_PARSED: ParsedCode = { specs: [], requireSpecs: [], importSpecs: [],
 // A top-level `const x: T;` with no initializer, which a declaration file holds and Bun's ts loader rejects, written as
 // `declare const x: T;`. A statement with any `=` (other than `=>` in a type) is left as is, so an initializer is
 // never turned into a declaration that the transform would drop.
-function ambientDeclarations(text: string): string {
-  return text.replace(/^([ \t]*)((?:export[ \t]+)?)(const|let|var)\b/gm, (full, ws: string, exp: string, kw: string, at: number) => {
+function ambientDeclarations(text: string): string | undefined {
+  let ambiguous = false;
+  const out = text.replace(/^([ \t]*)((?:export[ \t]+)?)(const|let|var)\b/gm, (full, ws: string, exp: string, kw: string, at: number) => {
     let depth = 0;
     for (let i = at + full.length; i < text.length; i++) {
       const c = text[i]!;
@@ -617,13 +618,21 @@ function ambientDeclarations(text: string): string {
         // A quoted key in a type ("zlib-ng"?: string) is skipped whole; an unclosed quote on the line leaves it as is.
         let j = i + 1;
         while (j < text.length && text[j] !== c && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
-        if (text[j] !== c) return full;
+        if (text[j] !== c) {
+          ambiguous = true;
+          return full;
+        }
         i = j;
-      } else if (c === "`") return full;
+      } else if (c === "`" || (c === "/" && (text[i + 1] === "*" || text[i + 1] === "/"))) {
+        // A template or a comment can hold the terminator or hide the initializer: the statement's end is not known.
+        ambiguous = true;
+        return full;
+      }
       else if (c === ";" && depth <= 0) return `${ws}${exp}declare ${kw}`;
     }
     return full;
   });
+  return ambiguous ? undefined : out;
 }
 
 function parseCode(path: string, bytes: Uint8Array, forceJs = false): ParsedCode {
@@ -673,6 +682,7 @@ function parseCode(path: string, bytes: Uint8Array, forceJs = false): ParsedCode
     const ts = transpiler("ts");
     const src = ambientDeclarations(text);
     try {
+      if (src === undefined) throw new Error("ambiguous declaration");
       folded = ts.transformSync(src);
       foldOk = true;
       for (const im of ts.scanImports(src)) {

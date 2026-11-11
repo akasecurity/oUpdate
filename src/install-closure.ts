@@ -571,11 +571,50 @@ function isManifest(logical: string): boolean {
 
 // A literal require/import is followed exactly. A bare name that resolves inside a
 // bundled node_modules package closes that package. Anything else is not a path.
+/** A string literal's text as JavaScript reads it: \x41, \u0041, \u{41} and the one-character escapes; undefined when unsure. */
+function decodeJsString(raw: string): string | undefined {
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]!;
+    if (c !== "\\") {
+      out += c;
+      continue;
+    }
+    const n = raw[++i];
+    if (n === undefined) return undefined;
+    const simple: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v", "'": "'", '"': '"', "\\": "\\", "/": "/" };
+    if (n in simple) out += simple[n]!;
+    else if (n === "x") {
+      const h = raw.slice(i + 1, i + 3);
+      if (!/^[0-9a-fA-F]{2}$/.test(h)) return undefined;
+      out += String.fromCharCode(parseInt(h, 16));
+      i += 2;
+    } else if (n === "u") {
+      const m = /^(?:\{([0-9a-fA-F]{1,6})\}|([0-9a-fA-F]{4}))/.exec(raw.slice(i + 1));
+      if (!m) return undefined;
+      const cp = parseInt((m[1] ?? m[2])!, 16);
+      if (cp > 0x10ffff) return undefined;
+      out += String.fromCodePoint(cp);
+      i += m[0].length;
+    } else if (/[0-9\r\n\u2028\u2029]/.test(n)) return undefined;
+    else out += n;
+  }
+  return out;
+}
+
 function followLoads(ctx: Ctx, key: string, text: string): void {
   const re = /(?:\brequire|\bimport)\(\s*(['"])([^'"]+)\1\s*\)|\bfrom\s+(['"])([^'"]+)\3|\bimport\s+(['"])([^'"]+)\5/g;
   for (const m of text.matchAll(re)) {
     if (ctx.hold) return;
-    const spec = m[2] || m[4] || m[6] || "";
+    let spec = m[2] || m[4] || m[6] || "";
+    if (spec.includes("\\")) {
+      const decoded = decodeJsString(spec);
+      if (decoded === undefined) {
+        fail(ctx, "unresolved: path");
+        return;
+      }
+      spec = decoded;
+    }
     if (spec.startsWith(".")) {
       const logical = relFrom(key, spec);
       if (logical) addLogical(ctx, logical);
@@ -635,9 +674,14 @@ function addBundled(ctx: Ctx, root: string): void {
 const LITERAL_LOAD = /(?:\brequire|\bimport)\(\s*(['"])([^'"]+)\1\s*\)|\bfrom\s+(['"])([^'"]+)\3|\bimport\s+(['"])([^'"]+)\5/g;
 // Anything still able to name a file. module.exports is removed first; it is the static CJS assignment.
 const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bchild_process\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
-// A static file may require these. Any other bare builtin is unsafe, so the load stays in the text. "process" is the
-// global process object, which a static file already reaches without a load (its binding and dlopen stay unsafe words).
-const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer", "process"]);
+// The plain reads of the process object a name for the process module may make. Any other use of such a name (a computed
+// member, binding, getBuiltinModule, an argument to a call) can reach a loader or a native module, so it is not static.
+const PROCESS_READ = "(?:env\\s*\\.\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|versions?\\b(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)?|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
+// `const p = require("process")` or `import p from "node:process"`: the only loads of the process module that stay static.
+const PROCESS_ALIAS = /\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(?:node:)?process\2\s*\)|import\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s+(['"])(?:node:)?process\4)\s*;?/g;
+
+// A static file may require these. Any other bare builtin is unsafe, so the load stays in the text.
+const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer"]);
 const NODE_BUILTINS = new Set([
   ...STATIC_BUILTINS,
   "async_hooks", "child_process", "cluster", "console", "constants", "dgram", "diagnostics_channel",
@@ -666,13 +710,24 @@ function stripLiteralLoad(spec: string): boolean {
 
 // One predicate for JS. A file that fails it widens by the shape of its computed loads.
 function provablyStatic(text: string): boolean {
-  let rest = text.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "");
+  const aliases: string[] = [];
+  let rest = text.replace(PROCESS_ALIAS, (_m, a1, _q, a2) => {
+    aliases.push(String(a1 || a2));
+    return "";
+  });
+  rest = rest.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "");
   rest = rest.replace(new RegExp(LITERAL_LOAD.source, "g"), (full, _a, spec1, _b, spec2, _c, spec3) => {
     const spec = String(spec1 || spec2 || spec3 || "");
     return stripLiteralLoad(spec) ? "" : full;
   });
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, "");
-  return !UNSAFE_JS.test(rest);
+  // Any other load of the process module (a bare require, a named import) is not a plain name for it.
+  if (/(?:\brequire\s*\(|\bfrom\s+|\bimport\s+)\s*['"](?:node:)?process\b/.test(rest)) return false;
+  if (UNSAFE_JS.test(rest)) return false;
+  if (aliases.length === 0) return true;
+  const names = aliases.map((n) => n.replace(/\$/g, "\\$"));
+  for (const n of names) rest = rest.replace(new RegExp(`\\b${n}\\s*\\.\\s*${PROCESS_READ}`, "g"), "");
+  return !new RegExp(`\\b(?:${names.join("|")})\\b`).test(rest);
 }
 
 // exec/eval/compile, a dynamic import, or a loader that runs another file.
@@ -728,18 +783,24 @@ function addLogical(ctx: Ctx, logical: string): void {
     return;
   }
   const key = findKey(ctx, logical);
-  if (!key) {
+  // Node tries the file (logical, logical.js, ...) before the directory, and findKey reads a directory manifest first:
+  // a path that reads both ways has both in the closure.
+  const fileKey = ctx.hold ? undefined : findFile(ctx, logical);
+  if (!key && !fileKey) {
     ctx.missing.add(logical);
     return;
   }
-  // The manifest is not a surface file. Hook text and bin are compared on their own,
-  // and a version bump always changes these bytes.
-  if (isManifest(key)) return;
-  // A file the walk reached by name stays, including docs, markdown, and workflows.
-  // Inert exclusion applies only inside widenAll, addBundled, and the same-directory widen.
-  ctx.files.add(key);
-  if (ctx.fromGyp) ctx.gypFiles.add(key);
-  scanAdded(ctx, key);
+  for (const k of new Set([key, fileKey])) {
+    if (!k) continue;
+    // The manifest is not a surface file. Hook text and bin are compared on their own,
+    // and a version bump always changes these bytes.
+    if (isManifest(k)) continue;
+    // A file the walk reached by name stays, including docs, markdown, and workflows.
+    // Inert exclusion applies only inside widenAll, addBundled, and the same-directory widen.
+    ctx.files.add(k);
+    if (ctx.fromGyp) ctx.gypFiles.add(k);
+    scanAdded(ctx, k);
+  }
 }
 
 function addRef(ctx: Ctx, token: string): void {

@@ -1148,6 +1148,14 @@ describe("newly reached files", () => {
     expect(broken.rev.detail).toMatch(/not model-reviewable: parser rejected dist\/index\.d\.cts;/);
   });
 
+  test("a declaration whose terminator sits in a comment before its initializer is rejected, not rewritten", async () => {
+    const sharpish = (v: string, d: string) => files({ "package.json": pj({ version: v, main: "./dist/index.cjs", types: "./dist/index.d.cts", exports: { ".": { require: { types: "./dist/index.d.cts", default: "./dist/index.cjs" } } } }), "dist/index.cjs": "module.exports = 1\n", "dist/index.d.cts": d, ...gyp });
+    for (const d of ['export const x: number // ;\n  = require("./ev" + "il.js");\nexport const y: number;\n', 'let x: number /* ; */ = eval(globalThis.process.env.P);\n']) {
+      const out = await run(sharpish("1.0.0", "export const x: number;\n"), sharpish("1.0.1", d));
+      expect(out.rev.detail).toMatch(/parser rejected dist\/index\.d\.cts/);
+    }
+  });
+
   // Codex read 2: Node runs a legacy HTML comment that Bun's parser rejects, so the quoted load produced no edge.
   test("a file the parser rejects still shows the file its quotes name, and the review holds", async () => {
     const code = "x=1\n--> c\nrequire('./evil')";
