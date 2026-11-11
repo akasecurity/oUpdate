@@ -1657,7 +1657,9 @@ function processHazard(source: string): boolean {
       const after = args.slice(at + w[0].length + read[0].length);
       const prefixed = /^\s*\+\s*""/.test(after) && (/^\s*\.\s*cwd\s*\(\s*\)$/.test(read[0]) || /^\s*\.\s*env\s*\.\s*INIT_CWD$/.test(read[0]));
       const manifest = /\.\s*npm_package_json$/.test(read[0]) && /dirname\s*\(\s*$/.test(args.slice(0, at));
-      if (!prefixed && !manifest) return true;
+      // platform and arch name one of a few fixed values: a file-name selector, not a path.
+      const selector = /^\s*\.\s*(?:platform|arch)$/.test(read[0]);
+      if (!prefixed && !manifest && !selector) return true;
     }
   }
   return processValueUse(code, names, true);
