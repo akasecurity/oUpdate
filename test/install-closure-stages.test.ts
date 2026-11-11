@@ -204,3 +204,50 @@ for (const [label, hook, scripts] of lifeRuns) {
     });
   }
 }
+
+// The last setting wins, a flag beats the env, an empty or false value leaves scripts on, and only leading assignments and flags
+// before `--` count.
+const ignoreHolds: [string, string, Record<string, string>][] = [
+  ["a later --ignore-scripts=false", "npm pack --ignore-scripts --ignore-scripts=false | cat", { prepack: "node DIR/evil.js" }],
+  ["a later --no-ignore-scripts", "npm pack --ignore-scripts --no-ignore-scripts | cat", { prepack: "node DIR/evil.js" }],
+  ["a flag that turns the env off", "npm_config_ignore_scripts=true npm pack --ignore-scripts=false | cat", { prepack: "node DIR/evil.js" }],
+  ["an empty env value", "npm_config_ignore_scripts= npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an empty env value on a named script", "npm_config_ignore_scripts= npm run build | cat", { prebuild: "node DIR/evil.js" }],
+  ["a false env value", "npm_config_ignore_scripts=false npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["a zero env value after env", "env npm_config_ignore_scripts=0 npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an empty env value after env", "env npm_config_ignore_scripts= npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an env-looking argument after --", "npm run build -- npm_config_ignore_scripts=true | cat", { prebuild: "node DIR/evil.js" }],
+  ["the flag after --", "npm run build -- --ignore-scripts | cat", { prebuild: "node DIR/evil.js" }],
+  ["bun run with the flag after the script", "bun run build --ignore-scripts | cat", { prebuild: "node DIR/evil.js" }],
+  ["bun run with the flag before the script", "bun --ignore-scripts run build | cat", { prebuild: "node DIR/evil.js" }],
+  ["yarn run with the flag", "yarn run build --ignore-scripts | cat", { prebuild: "node DIR/evil.js" }],
+  ["pnpm run with the flag", "pnpm run build --ignore-scripts | cat", { prebuild: "node DIR/evil.js" }],
+  ["the env on yarn", "npm_config_ignore_scripts=true yarn run build | cat", { prebuild: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of ignoreHolds) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} leaves the scripts on: a changed ${dir}/evil.js holds`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const ignoreQuiet: [string, string, Record<string, string>][] = [
+  ["a later --ignore-scripts", "npm pack --ignore-scripts=false --ignore-scripts | cat", { prepack: "node DIR/evil.js" }],
+  ["the env on pack", "npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["the env after env", "env npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["a flag that turns the env on", "npm_config_ignore_scripts=false npm pack --ignore-scripts | cat", { prepack: "node DIR/evil.js" }],
+  ["a pre script of a named script", "npm run build --ignore-scripts | cat", { prebuild: "node DIR/evil.js" }],
+  ["pack with the flag, redirected", "npm pack --ignore-scripts > log", { prepack: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of ignoreQuiet) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} stays quiet: a changed ${dir}/evil.js is not an install change`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc))).toEqual([]);
+    });
+  }
+}

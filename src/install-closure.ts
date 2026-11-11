@@ -4771,8 +4771,27 @@ const NPM_READ_ONLY = new Set(["help", "view", "v", "show", "info", "config", "c
 const NPM_VALUE_FLAG = /^(?:--(?:cache|prefix|workspace|userconfig|globalconfig|registry|loglevel|tag|otp|scope|access|script-shell|include|omit|audit-level|install-strategy|before|logs-dir|tmp|cafile|cert|key|proxy|https-proxy|noproxy|node-options|call|package|message|logs-max|init-module|fetch-retries|fetch-timeout|location|lockfile-version)|-w|-C|-c)$/;
 const NPM_BOOL_FLAG = /^--(?:silent|quiet|verbose|json|global|force|yes|no|dry-run|production|ignore-scripts|if-present|workspaces|include-workspace-root|no-[a-z-]+|foreground-scripts|offline|prefer-offline|prefer-online|legacy-peer-deps|save|save-dev|no-save|audit|fund|help|version|parseable|long|all|link|unicode|color|progress|ws)$/;
 // `--ignore-scripts` (and its env spelling) switch every pre/post and lifecycle script off, not the named one.
-const IGNORE_FLAG = /^--ignore-scripts(?:=(?:true|1))?$/;
-const IGNORE_ENV = /^npm_config_ignore_scripts=(?:true|1)?$/i;
+const IGNORE_FLAG_ON = /^--ignore-scripts(?:=(?:true|1))?$/;
+const IGNORE_FLAG_OFF = /^(?:--no-ignore-scripts|--ignore-scripts=(?:false|0|))$/;
+const IGNORE_ENV_ON = /^npm_config_ignore_scripts=(?:true|1)$/i;
+const IGNORE_ENV_OFF = /^npm_config_ignore_scripts=/i; // any other value, an empty one included, leaves scripts on
+// The last setting wins: the value the flags give (undefined when none names it), or the env assignments give.
+function flagIgnore(words: string[]): boolean | undefined {
+  let r: boolean | undefined;
+  for (const w of words) {
+    if (IGNORE_FLAG_ON.test(w)) r = true;
+    else if (IGNORE_FLAG_OFF.test(w)) r = false;
+  }
+  return r;
+}
+function envIgnore(words: string[]): boolean | undefined {
+  let r: boolean | undefined;
+  for (const w of words) {
+    if (IGNORE_ENV_ON.test(w)) r = true;
+    else if (IGNORE_ENV_OFF.test(w)) r = false;
+  }
+  return r;
+}
 const SHELL_NAME = /^(?:sh|bash|dash|zsh|ksh)$/;
 
 // The command a stage runs, past assignments, keywords and launcher prefixes (`env -i A=1`, `nice -n 5`, `nohup`, `corepack`).
@@ -4810,7 +4829,13 @@ function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
     if (stage.some((w) => w.sub || w.v)) continue;
     const ws = stageCommand(stage.map((w) => w.t));
     if (!ws.length) continue;
-    const ignoring = stage.some((w) => IGNORE_ENV.test(w.t));
+    // Only the assignments before the command (and an env word's) set the environment: an argument that looks like one does not.
+    const lead: string[] = [];
+    for (const w of stage.map((x) => x.t)) {
+      if (ASSIGN.test(w) || w.startsWith("-") || STAGE_KEYWORD.test(w) || LAUNCHER_PREFIX.test(binName(w))) lead.push(w);
+      else break;
+    }
+    const ignoring = envIgnore(lead);
     const bin = binName(ws[0]!);
     // A shell given a script text runs its commands like a line.
     if (SHELL_NAME.test(bin)) {
@@ -4843,11 +4868,13 @@ function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
   }
 }
 
-function dispatchRunner(ctx: Ctx, ws: string[], ignoring = false): void {
+function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
   const bin = binName(ws[0]!);
   const quoted = ws.map((w) => (/[\s'"\\]/.test(w) ? "'" + w.replace(/'/g, "'\\''") + "'" : w));
   let npmSub: string | undefined;
-  const ignore = ignoring || ws.slice(0, ws.includes("--") ? ws.indexOf("--") : ws.length).some((w) => IGNORE_FLAG.test(w));
+  // Only npm has this flag; a flag beats the env, and the last of either wins.
+  const setIg = bin === "npm" ? flagIgnore(ws.slice(0, ws.includes("--") ? ws.indexOf("--") : ws.length)) ?? envIg : undefined;
+  const ignore = setIg === true;
   if (bin !== "run-s" && bin !== "run-p" && bin !== "npm-run-all") {
     const dd = ws.indexOf("--");
     const args = (dd < 0 ? ws : ws.slice(0, dd)).slice(1).filter((w) => !w.startsWith("-"));
@@ -4892,7 +4919,7 @@ function dispatchRunner(ctx: Ctx, ws: string[], ignoring = false): void {
   }
   ctx.depth++;
   const savedIgnore = ctx.ignoreHooks;
-  if (ignore) ctx.ignoreHooks = true;
+  if (setIg !== undefined) ctx.ignoreHooks = setIg;
   dispatch(ctx, quoted.join(" "));
   ctx.ignoreHooks = savedIgnore;
   ctx.depth--;
@@ -7324,7 +7351,7 @@ function scriptArgsMoveCore(ctx: Ctx, argv: string[]): boolean {
 // A named script runs; with --ignore-scripts its pre and post scripts do not.
 function runNamed(ctx: Ctx, name: string, ignoring: boolean): void {
   const saved = ctx.ignoreHooks;
-  if (ignoring) ctx.ignoreHooks = true;
+  ctx.ignoreHooks = ignoring;
   runScript(ctx, name, false);
   ctx.ignoreHooks = saved;
 }
@@ -7337,9 +7364,10 @@ function dispatch(ctx: Ctx, cmd: string): void {
     // An assignment such as npm_config_workspace=sub or npm_config_prefix=sub moves the run to another package.
     // Every leading assignment is checked, not only the first.
     let j = 0;
-    let ignoring = false;
+    let ignoring: boolean | undefined;
     while (j < argv.length && ASSIGN.test(argv[j]!)) {
-      if (IGNORE_ENV.test(argv[j]!)) ignoring = true;
+      if (IGNORE_ENV_ON.test(argv[j]!)) ignoring = true;
+      else if (IGNORE_ENV_OFF.test(argv[j]!)) ignoring = false;
       // CDPATH changes where a later cd lands: read every file.
       if (UNSAFE_ENV.test(argv[j]!)) {
         ctx.widenInert = true;
@@ -7352,7 +7380,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     // The command after the assignments is read exactly as without them (cd, workspace flags, runners).
     if (j < argv.length) {
       const savedIgnore = ctx.ignoreHooks;
-      if (ignoring) ctx.ignoreHooks = true;
+      if (ignoring !== undefined && binName(argv[j]!) === "npm") ctx.ignoreHooks = ignoring;
       dispatch(ctx, argv.slice(j).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
       ctx.ignoreHooks = savedIgnore;
     }
@@ -7508,14 +7536,14 @@ function dispatch(ctx: Ctx, cmd: string): void {
       const dropNext = strip(true);
       ctx.depth++;
       const savedIgnore = ctx.ignoreHooks;
-      if (argv.slice(i, end).some((a) => IGNORE_FLAG.test(a))) ctx.ignoreHooks = true; // the flag is dropped from the line, not its meaning
+      ctx.ignoreHooks = flagIgnore(argv.slice(i, end)) ?? savedIgnore; // the flag is dropped from the line, not its meaning
       for (const rest of [keepNext, dropNext]) dispatch(ctx, ["npm", ...rest].map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
       ctx.ignoreHooks = savedIgnore;
       ctx.depth--;
       return;
     }
     const ddIgnore = argv.indexOf("--");
-    const ignoreNow = !!ctx.ignoreHooks || argv.slice(i, ddIgnore < 0 ? argv.length : ddIgnore).some((a) => IGNORE_FLAG.test(a));
+    const ignoreNow = flagIgnore(argv.slice(i, ddIgnore < 0 ? argv.length : ddIgnore)) ?? !!ctx.ignoreHooks;
     const sub = readWord(ctx, argv, i);
     if (!sub) {
       // A flag no form here models may move the run to another package or take the next word as its value.
