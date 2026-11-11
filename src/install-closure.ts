@@ -1767,19 +1767,39 @@ function computedCallChain(code: string): boolean {
   return false;
 }
 
-// "use strict" as a complete directive statement in the prologue (the string alone, then ; or a line end that does not continue
-// the expression), or import / export declarations (whole words): strict code.
-function strictFileOf(keep: string, code: string): boolean {
+// "use strict" as a complete directive statement in the prologue, or import / export declarations (whole words): strict code.
+// A directive is a string alone on its statement: ended by ; or by a line end after which the next token does not continue the
+// expression (a binary operator, member dot, call, index, ?, comma, template tag or the words in / instanceof; ! ~ and ++ --
+// start a new statement). A template literal is not a directive.
+const DIRECTIVE = /\s*(['"])([^'"\\\n]*)\1[ \t]*/y;
+const CONTINUES = /^(?:[*\/%<>=&|^?,.(\[`]|\+(?!\+)|-(?!-)|(?:in|instanceof)(?![\w$]))/;
+const DECLARATION = /(?:^|\n)([ \t\r\n]*)(?:import(?![\w$])\s*(?:[\w$*{]|"")|export(?![\w$])\s*(?:default\b|const\b|let\b|var\b|function\b|class\b|async\b|[{*]))/g;
+function strictFileOf(keep: string, code: string, raw: string): boolean {
   let pos = 0;
   for (;;) {
-    const m = /^\s*(['"])([^'"\\\n]*)\1[ \t]*(;|\n|$)/.exec(keep.slice(pos, pos + 400));
+    DIRECTIVE.lastIndex = pos;
+    const m = DIRECTIVE.exec(keep);
     if (!m) break;
-    // A line end only ends the statement when the next line does not continue it with an operator, call, index or member.
-    if (m[3] === "\n" && /^\s*[-+*/%.,?:<>=&|^!~(\[`]/.test(keep.slice(pos + m[0].length, pos + m[0].length + 8))) break;
-    if (m[2] === "use strict") return true;
-    pos += m[0].length;
+    let end = DIRECTIVE.lastIndex;
+    if (end < keep.length && keep[end] !== ";" && keep[end] !== "\n" && keep[end] !== "\r") break;
+    if (keep[end] === ";") end++;
+    else if (end < keep.length) {
+      let k = end;
+      while (k < keep.length && /\s/.test(keep[k]!)) k++;
+      if (CONTINUES.test(keep.slice(k, k + 12))) break;
+    }
+    // The kept text writes a plain template as a quoted string: the directive must be spelled with quotes in the source.
+    if (m[2] === "use strict" && /(['"])use strict\1/.test(raw)) return true;
+    pos = end;
   }
-  return /(?:^|\n)\s*(?:import(?![\w$])\s*(?:[\w$*{]|"")|export(?![\w$])\s*(?:default\b|const\b|let\b|var\b|function\b|class\b|async\b|[{*]))/.test(code);
+  for (const d of code.matchAll(DECLARATION)) {
+    // o.\nimport\nx is a member named import, not a declaration.
+    let k = (d.index ?? 0) - 1;
+    while (k >= 0 && /\s/.test(code[k]!)) k--;
+    if (k >= 0 && code[k] === ".") continue;
+    return true;
+  }
+  return false;
 }
 
 // A scanner that throws must not make a file look safe: a fault reads as "not static" and "widen everything".
@@ -1828,7 +1848,7 @@ function provablyStaticScan(source: string): boolean {
   if (PROCESS_LOADER_WORDS.test(code) || UNSAFE_JS.test(code) || timerGetsCode(code) || steeringKey(code) || computedCallChain(code)) return false;
   // Brackets that do not pair up (a file Bun rejects) are read by nothing below: not static.
   if (bracketIndex(code).mismatch) return false;
-  return !processValueUse(code, aliases, false, strictFileOf(text, code));
+  return !processValueUse(code, aliases, false, strictFileOf(text, code, source));
 }
 
 // exec/eval/compile, a dynamic import, or a loader that runs another file.
@@ -2309,7 +2329,7 @@ function processHazardScan(source: string): boolean {
       if (!prefixed && !manifest && !selector && !joined) return true;
     }
   }
-  return processValueUse(code, names, true, strictFileOf(keep, code));
+  return processValueUse(code, names, true, strictFileOf(keep, code, source));
 }
 
 // setTimeout or setInterval whose first argument is a string or built from one: that string is run as code.
