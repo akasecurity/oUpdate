@@ -4752,58 +4752,97 @@ function logicalLines(text: string, heredocs?: string[]): string[] {
 // The runners of a script of this package. A stage that starts with one runs that script wherever the line sits.
 const SCRIPT_RUNNERS = new Set(["npm", "yarn", "pnpm", "bun", "run-s", "run-p", "npm-run-all"]);
 const STAGE_SCRIPT_WORDS = new Set(["test", "t", "tst", "start", "stop", "restart"]);
-const STAGE_KEYWORDS = new Set(["then", "do", "else", "elif", "if", "while", "until", "time", "!", "exec"]);
+// npm words that run lifecycle scripts without naming them: the scripts each one runs.
+const NPM_LIFECYCLE: Record<string, string[]> = {
+  it: ["test"],
+  cit: ["test"],
+  "install-test": ["test"],
+  "install-ci-test": ["test"],
+  pack: ["prepack", "prepare", "postpack"],
+  version: ["preversion", "version", "postversion"],
+};
+const LAUNCHER_PREFIX = /^(?:env|command|builtin|exec|nohup|time|nice|sudo|stdbuf|corepack)$/;
+const SHELL_NAME = /^(?:sh|bash|dash|zsh|ksh)$/;
+
+// The command a stage runs, past assignments, keywords and launcher prefixes (`env -i A=1`, `nice -n 5`, `nohup`, `corepack`).
+function stageCommand(words: string[]): string[] {
+  let h = 0;
+  while (h < words.length) {
+    const w = words[h]!;
+    if (ASSIGN.test(w) || STAGE_KEYWORD.test(w)) h++;
+    else if (w === "function") h += 2;
+    else if (LAUNCHER_PREFIX.test(binName(w))) {
+      const bin = binName(w);
+      h++;
+      while (h < words.length && (words[h]!.startsWith("-") || ASSIGN.test(words[h]!) || (bin === "nice" && /^-n$/.test(words[h - 1]!)))) h++;
+    } else break;
+  }
+  return words.slice(h);
+}
 
 // A line that is not split into commands (a pipe, a redirect, a subshell, a function definition) still runs the commands in
-// it. The stages are cut apart at every separator, and a stage that starts with a script runner and holds no expansion the
-// scan could not resolve is dispatched on its own: `npm run evil | cat`, `(npm run evil)`, `f() { npm run evil; }; f`.
-function dispatchScriptStages(ctx: Ctx, text: string): void {
-  if (ctx.hold || ctx.depth >= DEPTH) return;
-  const stages: string[] = [];
-  let quote: string | undefined;
-  let cur = "";
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
-    if (quote) {
-      cur += c;
-      if (c === "\\" && quote === '"' && i + 1 < text.length) cur += text[++i]!;
-      else if (c === quote) quote = undefined;
-      continue;
-    }
-    if (c === "\\" && i + 1 < text.length) {
-      cur += c + text[++i]!;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      quote = c;
-      cur += c;
-      continue;
-    }
-    if (/[|&;()<>\n`{}]/.test(c)) {
-      stages.push(cur);
-      cur = "";
-      continue;
-    }
-    cur += c;
-  }
-  stages.push(cur);
+// it. The stages are cut apart by the shell reader (quotes, comments, heredoc bodies and redirect operands are not stages),
+// and a stage that starts with a script runner and holds no expansion the scan could not resolve is dispatched on its own:
+// `npm run evil | cat`, `(npm run evil)`, `f() { npm run evil; }; f`, `FOO=1 npm run evil | cat`, `sh -c 'npm run evil' | cat`.
+function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
+  if (ctx.hold || ctx.depth >= DEPTH || depth > 4) return;
+  const { stages } = shellStages(text);
   for (const stage of stages) {
     if (ctx.hold) return;
-    if (stage.includes(UNRESOLVED)) continue;
-    const ws = stage.trim().split(/\s+/).filter(Boolean);
-    while (ws.length && STAGE_KEYWORDS.has(ws[0]!)) ws.shift();
-    if (!ws.length || !SCRIPT_RUNNERS.has(binName(ws[0]!))) continue;
-    // Only a stage that names a script to run: `npm ls`, `yarn install` and the like run no script of this package.
+    if (stage.some((w) => w.sub || w.v)) continue;
+    const ws = stageCommand(stage.map((w) => w.t));
+    if (!ws.length) continue;
     const bin = binName(ws[0]!);
-    if (bin !== "run-s" && bin !== "run-p" && bin !== "npm-run-all") {
-      const args = ws.slice(1).filter((w) => !w.startsWith("-"));
-      const sub = args.find((w) => RUN_SUB.has(w) || STAGE_SCRIPT_WORDS.has(w) || (bin !== "npm" && typeof ctx.raw[w] === "string"));
-      if (sub === undefined) continue;
+    // A shell given a script text runs its commands like a line.
+    if (SHELL_NAME.test(bin)) {
+      const c = ws.findIndex((w) => /^-[A-Za-z]*c[A-Za-z]*$/.test(w));
+      if (c >= 0 && ws[c + 1] !== undefined) dispatchScriptStages(ctx, ws[c + 1]!, depth + 1);
+      continue;
     }
-    ctx.depth++;
-    dispatch(ctx, ws.join(" "));
-    ctx.depth--;
+    // `xargs npm run` runs the runner on what is piped in.
+    if (bin === "xargs") {
+      const inner = stageCommand(ws.slice(1).filter((w, k, all) => !all.slice(0, k + 1).every((x) => x.startsWith("-"))));
+      if (inner.length && SCRIPT_RUNNERS.has(binName(inner[0]!))) {
+        // The script name comes from the input: a run with no name after it may run any script.
+        const tail = inner[inner.length - 1]!;
+        if (inner.length === 1 || RUN_SUB.has(tail) || /^(?:run-s|run-p|npm-run-all)$/.test(binName(inner[0]!))) {
+          ctx.widenInert = true;
+          widenAll(ctx);
+        } else dispatchRunner(ctx, inner);
+      }
+      continue;
+    }
+    // `npx run-s evil`, `npm exec -- run-s evil`
+    let run = ws;
+    if (bin === "npx" || (bin === "npm" && /^(?:exec|x)$/.test(ws[1] ?? ""))) {
+      const k = ws.findIndex((w, j) => j > (bin === "npx" ? 0 : 1) && !w.startsWith("-"));
+      if (k < 0) continue;
+      run = ws.slice(k);
+    }
+    if (!SCRIPT_RUNNERS.has(binName(run[0]!))) continue;
+    dispatchRunner(ctx, run);
   }
+}
+
+function dispatchRunner(ctx: Ctx, ws: string[]): void {
+  const bin = binName(ws[0]!);
+  const quoted = ws.map((w) => (/[\s'"\\]/.test(w) ? "'" + w.replace(/'/g, "'\\''") + "'" : w));
+  if (bin !== "run-s" && bin !== "run-p" && bin !== "npm-run-all") {
+    const args = ws.slice(1).filter((w) => !w.startsWith("-"));
+    // Only a stage that names a script to run: `npm ls`, `yarn install` and the like run no script of this package.
+    const life = bin === "npm" ? args.map((a) => NPM_LIFECYCLE[a]).find(Boolean) : undefined;
+    if (life) {
+      ctx.depth++;
+      for (const name of life) runScript(ctx, name, true);
+      ctx.depth--;
+      return;
+    }
+    const sub = args.find((w) => RUN_SUB.has(w) || STAGE_SCRIPT_WORDS.has(w) || (bin !== "npm" && typeof ctx.raw[w] === "string"));
+    if (sub === undefined) return;
+  }
+  ctx.depth++;
+  dispatch(ctx, quoted.join(" "));
+  ctx.depth--;
 }
 
 // A body that does not read whole is read one logical line at a time, as the shell runs it: the commands of a line
