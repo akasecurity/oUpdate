@@ -432,7 +432,7 @@ describe("ReviewerError.capped", () => {
   // Base 1 cuts a FLAG's first bytes and stalls; a retry would meet a 502 there and fall through to base 2. Every way the
   // cut can end (the caller's cap: the budget stop; the base's own timeout: an error), crossed with every base-2 state:
   // base 2 is never called, and the part holds.
-  type Base2 = { port: number; hits: () => number; stop: () => void };
+  type Base2 = { port: number; hits: () => number; stop: () => Promise<void> | void };
   const http2 = (reply: () => Response): Base2 => {
     let n = 0;
     const s = Bun.serve({ port: 0, fetch: () => (n++, reply()) });
@@ -467,7 +467,7 @@ describe("ReviewerError.capped", () => {
           else expect(reviewerLayer(r).detail).toContain("part 1/5 failed: ");
           expect(r.decision).not.toBe("land");
         } finally {
-          counted.stop();
+          await counted.stop();
         }
       });
   test("a 2xx body the peer breaks off is a hold: not transient", async () => {
@@ -592,10 +592,19 @@ describe("config-derived text that leaves the reviewer is scrubbed, entry by ent
   });
   test("an empty userinfo, and an @ in a path written %40, are not ambiguous", () => {
     const spec = { type: "openai", name: "router", baseUrls: ["http://127.0.0.1:1"], model: "m1" };
-    // The email-style username is joined at run time so the release scan does not read it as an address.
-    for (const b of ["https://@host/x", "https://:@host/x", "https:///@host/x", "https:@host/x", "https://host/%40scope/v1", `https://${["bob", "x.com"].join("@")}@host/x`]) {
+    // An email-style username is fine with its @ written %40 (a raw one is refused, below); joined at run time for the release scan.
+    for (const b of ["https://@host/x", "https://:@host/x", "https:///@host/x", "https:@host/x", "https://host/%40scope/v1", `https://${["bob", "x.com"].join("%40")}@host/x`]) {
       expect(() => validateReviewerSpec({ ...spec, baseUrls: [b] }), b).not.toThrow();
       expect(() => openaiReviewer({ name: "router", baseUrls: [b], model: "m1" }), b).not.toThrow();
+    }
+  });
+  test("a raw @ inside the userinfo is ambiguous: this parser ends it at the last @, another reader at the first", () => {
+    const spec = { type: "openai", name: "router", baseUrls: ["http://127.0.0.1:1"], model: "m1" };
+    // Joined at run time so the release scan does not read an address or a user:pass@ URL.
+    const at = "@";
+    for (const b of [`http://${userinfo("u", "p")}example.com${at}127.0.0.1`, `https://${["bob", "x.com"].join(at)}${at}host/x`, `https://${userinfo(["bob", "x.com"].join(at), "pw")}host/x`, `https://a${at}b${at}c${at}host`]) {
+      expect(() => validateReviewerSpec({ ...spec, baseUrls: [b] }), b).toThrow(/^base #1 is ambiguous: percent-encode @ \? # in credentials, and @ in a path as %40$/);
+      expect(() => openaiReviewer({ name: "router", baseUrls: [b], model: "m1" }), b).toThrow(/^base #1 is ambiguous/);
     }
   });
   test("a userinfo with an empty username and a password set is parsed userinfo, not ambiguous", () => {

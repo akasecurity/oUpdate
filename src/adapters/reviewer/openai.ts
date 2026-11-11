@@ -350,7 +350,13 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
           fail(base, why(`more than one answer in the response (${choices.length} choices)`));
           break;
         }
-        const choice = Array.isArray(choices) && choices[0] && typeof choices[0] === "object" ? (choices[0] as { message?: unknown; finish_reason?: unknown }) : undefined;
+        const choice = Array.isArray(choices) && choices[0] && typeof choices[0] === "object" ? (choices[0] as { message?: unknown; finish_reason?: unknown; error?: unknown }) : undefined;
+        // An error the server put on the choice or its message says the same as one at the top level.
+        const inner = choice?.message && typeof choice.message === "object" ? (choice.message as { error?: unknown }).error : undefined;
+        if ((choice?.error !== undefined && choice.error !== null) || (inner !== undefined && inner !== null)) {
+          fail(base, why("the response holds an error object"));
+          break;
+        }
         // Only an answer that ended on its own (finish_reason "stop", or none given) is a verdict. A cut-off answer can start
         // APPROVE and lose the FLAG that followed, and a tool call can carry the verdict outside the text. It is checked
         // before the answer's shape, so the error says why the answer stopped.
@@ -383,7 +389,7 @@ export function openaiReviewer(cfg: OpenAIReviewerConfig): Reviewer {
           break;
         }
         // Only the assistant's text is the answer; a message from another role, or one that also carries audio (whose
-        // transcript could say something else), is not.
+        // transcript could say something else), is not. A role given as null (or any non-string) names no assistant: refused.
         if (message.role !== undefined && message.role !== "assistant") {
           fail(base, why("the answer's role is not assistant"));
           break;

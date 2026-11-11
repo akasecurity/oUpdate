@@ -31,11 +31,12 @@ export function loopbackHost(hostname: string): boolean {
  * A base URL whose credentials could be read two ways is refused: an @ the parser did not take as the end of a userinfo
  * (user alice with the password 123?ss parses as host alice, port 123, and a query holding the rest), so whatever prints
  * the parsed URL would print part of a password. The parser ends the host at / or \ too, so alice:123/ss@host sends the
- * request to host alice with part of the password in the path. The parser writes an @ inside a userinfo into the username
- * or password as %40 and leaves every other @ as written, so a raw @ in the parsed path, query or fragment is refused. The
- * raw text is checked too, because dot segments (/../, %2e%2e, \..\) can drop the path part that held the @: after the
- * scheme, no @ may follow the first / \ ? or #. An @ meant for a path must be written %40. The error names the base by its
- * place in the list, never its text. A base the parser refuses outright is left to fail when it is tried.
+ * request to host alice with part of the password in the path. The parser leaves every @ outside a userinfo as written,
+ * so a raw @ in the parsed path, query or fragment is refused. The raw text is checked too, because dot segments (/../,
+ * %2e%2e, \..\) can drop the path part that held the @: after the scheme, no @ may follow the first / \ ? or #, and the
+ * authority holds at most one (with two, this parser ends the userinfo at the last and another reader at the first). An @
+ * meant for a path or a credential must be written %40. The error names the base by its place in the list, never its
+ * text. A base the parser refuses outright is left to fail when it is tried.
  * Known limit: a password whose @ separator was itself percent-encoded (alice:123/ss%40host/x) has no raw @ left, so it
  * parses as host alice, port 123, and passes; nothing in the text can tell it from a real %40 in a path. An error shows
  * such a base only by its place in the list (shownBase prints no path holding %40).
@@ -52,7 +53,10 @@ export function checkBaseUrl(base: string, i: number): void {
   const rest = raw.replace(/^[A-Za-z][A-Za-z0-9+.-]*:[/\\]*/, "");
   const end = rest.search(/[/\\?#]/);
   const rawTail = end >= 0 && rest.slice(end).includes("@");
-  if (rawTail || [u.pathname, u.search, u.hash].some((part) => part.includes("@")))
+  // A second raw @ in the authority: this parser ends the userinfo at the last @, another reader at the first, so the host
+  // a reader sees may not be the one the request goes to.
+  const rawUserinfo = (end >= 0 ? rest.slice(0, end) : rest).split("@").length > 2;
+  if (rawTail || rawUserinfo || [u.pathname, u.search, u.hash].some((part) => part.includes("@")))
     throw new Error(`base #${i + 1} is ambiguous: percent-encode @ ? # in credentials, and @ in a path as %40`);
   if (u.protocol === "http:" && (u.username || u.password) && !loopbackHost(u.hostname))
     throw new Error(`base #${i + 1} has a userinfo over plain http to a non-loopback host: use https`);

@@ -307,3 +307,49 @@ describe("openai reviewer expectHeaders spec", () => {
     expect(() => validateReviewerSpec({ ...spec, expectHeaders: null })).toThrow(/expectHeaders/);
   });
 });
+
+describe("openaiReviewer answer shape: error, audio and role values", () => {
+  // Each test sets the raw body the stub answers with.
+  let reply = "";
+  const stub = Bun.serve({ port: 0, fetch: () => new Response(reply, { status: 200, headers: { "content-type": "application/json" } }) });
+  afterAll(() => stub.stop(true));
+  const ok = '"content":"APPROVE\\nno attack indicators found"';
+  const review = (body: string) => {
+    reply = body;
+    return openaiReviewer({ name: "local", baseUrls: [`http://127.0.0.1:${stub.port}`], model: "m1", retryDelaysMs: [] }).review("x");
+  };
+  const values = ['"x"', "0", "1", "false", "true", "[]", "{}", '{"message":"upstream failed"}'];
+
+  test("any non-null top-level error holds, a scalar one too; null is none", async () => {
+    for (const v of values) await expect(review(`{"error":${v},"choices":[{"message":{${ok}}}]}`), v).rejects.toThrow(/the response holds an error object$/);
+    expect(await review(`{"error":null,"choices":[{"message":{${ok}}}]}`)).toStartWith("APPROVE");
+  });
+  test("an error on the choice or inside its message holds like a top-level one; null is none", async () => {
+    for (const v of values) {
+      await expect(review(`{"choices":[{"error":${v},"message":{${ok}}}]}`), `choice ${v}`).rejects.toThrow(/the response holds an error object$/);
+      await expect(review(`{"choices":[{"message":{${ok},"error":${v}}}]}`), `message ${v}`).rejects.toThrow(/the response holds an error object$/);
+    }
+    expect(await review(`{"choices":[{"error":null,"message":{${ok},"error":null}}]}`)).toStartWith("APPROVE");
+  });
+  test("any non-null audio holds, a scalar one too; audio null is accepted", async () => {
+    for (const v of values) await expect(review(`{"choices":[{"message":{${ok},"audio":${v}}}]}`), v).rejects.toThrow(/the answer carries audio$/);
+    expect(await review(`{"choices":[{"message":{"role":"assistant",${ok},"audio":null}}]}`)).toStartWith("APPROVE");
+  });
+  // Pinned: refused. Only "assistant" or no role at all is the assistant's text; null names no role, as a number does not.
+  test("role null is refused, as is a role of any other type or text", async () => {
+    for (const v of ["null", "1", "true", "[]", '["assistant"]', '{"name":"assistant"}', '""', '"Assistant"', '"assistant "', '"tool"'])
+      await expect(review(`{"choices":[{"message":{"role":${v},${ok}}}]}`), v).rejects.toThrow(/the answer's role is not assistant$/);
+    expect(await review(`{"choices":[{"message":{${ok}}}]}`)).toStartWith("APPROVE");
+  });
+  test("a key repeated in nested metadata holds: usage, message metadata, and an object inside a list", async () => {
+    for (const b of [
+      `{"choices":[{"message":{${ok}}}],"usage":{"prompt_tokens":1,"prompt_tokens":2}}`,
+      `{"choices":[{"message":{${ok},"metadata":{"a":{"b":1,"b":2}}}}]}`,
+      `{"choices":[{"message":{${ok}},"logprobs":{"content":[{"token":"A","token":"F"}]}}]}`,
+      `{"system_fingerprint":"x","choices":[{"message":{${ok}}}],"meta":[[{"k":1}],[{"k":1,"k":2}]]}`,
+    ])
+      await expect(review(b), b).rejects.toThrow(/the response repeats a JSON key$/);
+    // The same key in sibling objects is no repeat.
+    expect(await review(`{"choices":[{"message":{${ok}}}],"meta":[{"k":1},{"k":2}]}`)).toStartWith("APPROVE");
+  });
+});

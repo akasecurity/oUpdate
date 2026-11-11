@@ -454,7 +454,7 @@ Limits evaluation runs (`bun eval/limits/run.ts --reviewer <spec.json>`) write c
 
 A server that turns thinking on another way takes its own switch in `extraBody`. A reviewer that thinks needs the larger `maxTokens`: a short limit cuts the answer off and the review fails closed.
 
-A reviewer base URL is checked when the config is read. A user name or password in a base over plain `http://` to a host other than this machine is refused (use https), and so is a raw `@` anywhere after the host, a path's included (write it `%40`), since a URL parser could read part of a password as the host.
+A reviewer base URL is checked when the config is read. A user name or password in a base over plain `http://` to a host other than this machine is refused (use https). So is a raw `@` anywhere after the host, in the path, query or fragment, and a second raw `@` before it (a user name or password that holds one), since URL parsers do not agree on which `@` ends the password and could read part of it as the host. Percent-encode such characters: `@` as `%40` in a path or a credential, and `?` as `%3F`, `#` as `%23` and `/` as `%2F` in a credential. A user name or password is sent decoded.
 
 ### Score your own model
 
