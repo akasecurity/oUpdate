@@ -681,9 +681,35 @@ const LITERAL_LOAD = new RegExp(
 const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global|window)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
 // child_process only counts as the name of a module being loaded; the word inside a message does not.
 // A load of the process module by name, in any shape.
-const LOADS_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*(['"])(?:node:)?process\1/;
+const LOADS_PROCESS = /(?:\brequire\s*\(|\brequire\s*\.\s*resolve\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*(['"])(?:node:)?process\1/;
 // A string that is exactly a property name reaching Function or a loader, as a computed key or bound to a name ([][k][k]). A comparison (key === "constructor") is a guard, not a use.
 const DANGEROUS_STRING = /(?:\[\s*|(?<![=!<>])=(?!=)\s*)(['"`])(?:constructor|getBuiltinModule|mainModule|_?linkedBinding|createRequire|prepareStackTrace|getThis|getFunction)\1/;
+const DANGEROUS_KEY = /^(?:constructor|getBuiltinModule|mainModule|_?linkedBinding|createRequire|prepareStackTrace|getThis|getFunction)$/;
+// The value of a key made only of string literals, template literals of literals, + and parentheses; undefined for anything else.
+function pureLiteralKey(key: string): string | undefined {
+  let i = 0;
+  let out = "";
+  const ws = () => { while (i < key.length && /[\s()]/.test(key[i]!)) i++; };
+  for (;;) {
+    ws();
+    const m = /^(?:"([^"\\\n]*)"|'([^'\\\n]*)'|`((?:[^`\\$]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*)`)/.exec(key.slice(i));
+    if (!m) return undefined;
+    out += (m[1] ?? m[2] ?? m[3] ?? "").replace(/\$\{\s*(?:"([^"]*)"|'([^']*)')\s*\}/g, (_x, a: string | undefined, b: string | undefined) => a ?? b ?? "");
+    i += m[0].length;
+    ws();
+    if (i >= key.length) return out;
+    if (key[i] !== "+") return undefined;
+    i++;
+  }
+}
+// True when a bracket expression is only literals and spells a dangerous property name.
+function dangerousLiteralKey(keep: string): boolean {
+  for (const m of keep.matchAll(/\[((?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`|[^\]\["'`])*)\]/g)) {
+    const v = pureLiteralKey(m[1]!);
+    if (v !== undefined && DANGEROUS_KEY.test(v)) return true;
+  }
+  return false;
+}
 const LOADS_CHILD_PROCESS = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*['"](?:node:)?(?:child_process|vm|module|worker_threads)\b/;
 // The plain reads of the process object, or of a name for the process module, a static file may make. Any other use (an
 // alias, a computed member, binding, getBuiltinModule, mainModule, an argument to a call) can reach a loader or a native
@@ -785,6 +811,8 @@ const DANGER_WORDS = ["require", "eval", "Function", "module", "import", "vm", "
  * regular expression is decided from the previous token this scan emitted, never from the source text before it: text
  * inside a string, template or regular expression is not a token.
  */
+const TEMPLATE_LITERAL = /(?:[^`\\$\n]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*`/y;
+
 function codeOnly(text: string, watch: string[] = [], keep = false): string | undefined {
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
@@ -890,6 +918,18 @@ function codeOnly(text: string, watch: string[] = [], keep = false): string | un
     } else if (c === "`") {
       const st = i;
       i++;
+      // A template made only of text and ${"literal"} is a plain string (require(`process`)). A tagged one is a call: not changed.
+      TEMPLATE_LITERAL.lastIndex = i;
+      const lit = TEMPLATE_LITERAL.exec(text);
+      if (lit && !/[\w$)\]]\s*$/.test(out)) {
+        const value = lit[0].slice(0, -1).replace(/\$\{\s*(?:"([^"]*)"|'([^']*)')\s*\}/g, (_m, a: string | undefined, b: string | undefined) => a ?? b ?? "");
+        if (!/["\\\n\r\u2028\u2029]/.test(value)) {
+          i += lit[0].length;
+          out += keep ? `"${value}"` : '""';
+          push("str", "");
+          continue;
+        }
+      }
       if (!afterTemplate(st)) return undefined;
     } else if (c === "/" && text[i + 1] === "/") {
       while (i < n && !eol(text[i])) i++;
@@ -1090,7 +1130,7 @@ function processValueUse(code: string, names: string[], lenient = false): boolea
   const id = "[A-Za-z_$][\\w$]*";
   const params = `\\(\\s*${id}(?:\\s*,\\s*${id})*\\s*\\)`;
   const declared = (list: string) => list.replace(new RegExp(`${L}(?:${alt})${R}`, "g"), "_");
-  rest = rest.replace(new RegExp(`(?<![\\w$])(?<![^\\x00-\\x7f\\s])function(?![\\w$])[^(){}]*(${params})`, "g"), (m, p: string, at: number, whole: string) => {
+  rest = rest.replace(new RegExp(`(?<![\\w$])(?<![^\\x00-\\x7f\\s])function(?![\\w$])\\s*\\*?\\s*(?:[A-Za-z_$][\\w$]*)?\\s*(${params})`, "g"), (m, p: string, at: number, whole: string) => {
     // A property (api. function(...)), an object key or a class field named function is not a declaration.
     let j = at;
     while (j > 0 && /\s/.test(whole[j - 1]!)) j--;
@@ -1240,7 +1280,7 @@ function provablyStatic(source: string): boolean {
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
   if (/(?:\brequire\s*\(|\bfrom|\bimport)\s*(['"])(?:node:)?process\1/.test(rest)) return false;
-  if (LOADS_CHILD_PROCESS.test(rest) || DANGEROUS_STRING.test(rest)) return false;
+  if (LOADS_CHILD_PROCESS.test(rest) || DANGEROUS_STRING.test(rest) || dangerousLiteralKey(rest)) return false;
   const code = codeOnly(rest, aliases);
   if (code === undefined) return false;
   // Strings are gone from this text: a loader word or the word process inside a message is not a use.
@@ -1652,7 +1692,7 @@ function processHazard(source: string): boolean {
   if (code.includes("\\")) return true;
   // Any load of the process module other than the plain alias statement (require("process")[..], import("process"),
   // import { default as p } from "process") is a name for it that is not tracked.
-  if (LOADS_PROCESS.test(stripProcessAliases(keep, [])) || DANGEROUS_STRING.test(keep)) return true;
+  if (LOADS_PROCESS.test(stripProcessAliases(keep, [])) || DANGEROUS_STRING.test(keep) || dangerousLiteralKey(keep)) return true;
   // A require, import() or require.resolve whose argument reads process cannot be classified, unless every read is a complete
   // read put in front of a string (process.cwd() + "/tools/") or the manifest path (dirname(process.env.npm_package_json)).
   const flat = code.replace(/`/g, " ");

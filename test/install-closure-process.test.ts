@@ -775,3 +775,25 @@ test("process.on with a non-literal event name is not static (round 25)", () => 
 test("process.on whose result is chained is not static (round 25)", () => {
   expect(held('process.on("exit", () => 1).on("x", () => 2);\nexports.main = () => 1\n')).toBe(true);
 });
+
+// Round 26: literal-only bracket keys, a field named function, templates holding a module name.
+for (const [label, pre] of [
+  ["a template key that spells constructor", 'exports.main = () => [][`${"constructor"}`][`${"constructor"}`](process.env.X)()\n'],
+  ["a concatenated key that spells constructor", 'exports.main = () => []["" + "constructor"]["" + "constructor"](process.env.X)()\n'],
+  ["a parenthesized key that spells constructor", 'exports.main = () => [][("constructor")][("constructor")](process.env.X)()\n'],
+  ["a parenthesized concatenation that spells constructor", 'exports.main = () => [][("con" + "structor")][("con" + "structor")](process.env.X)()\n'],
+  ["a class field named function before a call with process", 'class C { function; x = run(process) }\nexports.main = () => new C()\n'],
+  ["a class field with a value named function before a call with process", 'class C { function = 1; x = run(process) }\nexports.main = () => new C()\n'],
+  ["a method named function before a field with process", 'class C { function() {} x = run(process) }\nexports.main = () => new C()\n'],
+  ["an object key named function before a call with process", 'exports.main = () => { ({ function: 1 }); run(process) }\n'],
+  ["require of a template holding process", 'const p = require(`process`);\nexports.main = () => p["x"]\n'],
+  ["require of a template holding node:process", 'const p = require(`node:process`);\nexports.main = () => p["x"]\n'],
+  ["import() of a template holding process", 'exports.main = () => import(`process`)\n'],
+  ["require.resolve of a template holding process", 'exports.main = () => require.resolve(`process`)\n'],
+  ["require of a template with a literal substitution", 'const p = require(`${"process"}`);\nexports.main = () => p["x"]\n'],
+] as const) {
+  test(`${label} widens the closure (round 26)`, () => expect(widensAll(pre)).toBe(true));
+}
+test("a template with no substitution is still a plain string elsewhere (round 26)", () => {
+  expect(held('exports.main = () => `hello world`\n')).toBe(false);
+});
