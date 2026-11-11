@@ -359,3 +359,47 @@ test("40000 createRequire aliases in a file of about 1 MB are read in bounded ti
   holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"));
   expect(performance.now() - t0).toBeLessThan(5000);
 });
+
+// Seventh review batch: loaders reached through a destructuring key, a computed key, an export, a default value.
+const SEVENTH = `require("./lib/a");\n`;
+for (const [label, hook] of [
+  ["a renaming destructure of require from module, called", `const { require: r } = module;\nr(${BX});`],
+  ["a renaming destructure of require from module, called with call()", `const { require: r } = module;\nr.call(module, ${BX});`],
+  ["a renaming destructure of require from require.main", `const { require: r } = require.main;\nr.call(require.main, ${BX});`],
+  ["a nested renaming destructure", `const { m: { require: r } } = { m: module };\nr.call(module, ${BX});`],
+  ["a renaming destructure after another key", `const { a, require: r } = module;\nr(${BX});`],
+  ["a computed string key of module", `module["require"](${BX});`],
+  ["a computed template key of module", `module[\`require\`](${BX});`],
+  ["module.exports set to require and then called", `module.exports = require;\nmodule.exports(${BX});`],
+  ["module.exports set to require and held by another name", `module.exports = require;\nconst e = module.exports;\ne(${BX});`],
+  ["a default value of require in an arrow", `const f = (load = null || require) => load(${BX});\nf();`],
+  ["a default value of require in a function", `function f(cb = require) { cb(${BX}); }\nf();`],
+  ["require in an array default", `const f = (a = [require]) => a[0](${BX});\nf();`],
+  ["a name that ends in function before the list", `myfunction(require);`],
+  ["a member named function before the list", `o.function(require);`],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
+}
+
+for (const [label, hook] of [
+  ["a createRequire binding first in a function body", CR + `function f(load, opts = {}) {\n  const r = createRequire(__filename);\n  return r("./lib/a");\n}`],
+  ["a createRequire binding first in an arrow body", CR + `const f = (load, opts) => {\n  const r = createRequire(__filename);\n  return r("./lib/a");\n};`],
+  ["a createRequire binding first in a try body", CR + `try {\n  const r = createRequire(__filename);\n  r("./lib/a");\n} catch {}`],
+  ["an exported createRequire binding", CR + `export const r = createRequire(__filename);\nr("./lib/a");`],
+  ["a createRequire binding after another declarator", CR + `const a = 1, r = createRequire(__filename);\nr("./lib/a");`],
+  ["an alias named r next to a regular expression", CR + `const r = createRequire(__filename);\nr("./lib/a");\nconst re = /r/g;\nre.test("r");`],
+] as [string, string][]) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", hook, "x/evil.js"), nested("1.0.1", hook, "x/evil.js"))).toEqual([]);
+  });
+}
+
+for (const [label, hook] of [
+  ["a function that takes require with a default as a parameter", `function wrap(a, require = null) { return a; }`],
+  ["a destructure of a plain object with a require key", `const opts = { require: 1 };\nconst { require: flag } = opts;`],
+  ["a call that passes an object with a require key", `console.log({ require: true });`],
+] as [string, string][]) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
+  });
+}

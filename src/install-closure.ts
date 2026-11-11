@@ -1124,7 +1124,7 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
           out += text.slice(i, end + 1);
         }
         i = end + 1;
-        if (!keep) out += "/r/";
+        if (!keep) out += "/0/"; // a body no identifier can match: a regex literal is never a name
         push("regex", "");
       } else {
         out += "/";
@@ -2498,7 +2498,9 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
 }
 // require without a call: not `require(`, `require.resolve(`, `typeof require`, `require.main/cache/extensions`, not a member name, not a parameter of the
 // module wrapper. module.require and createRequire(...) results count when they are not called on the spot.
-function handedOn(text: string, aliases: string[]): boolean {
+// `r = `, `const r = `, `export const r = `, `const a = 1, r = ` before a createRequire call (optionally through a member chain).
+const BOUND_STMT = /^\s*(?:export\s+)?(?:(?:const|let|var)\s+(?:[A-Za-z_$][\w$]*\s*(?:=\s*[^,;()[\]{}]*)?,\s*)*)?[A-Za-z_$][\w$]*\s*=\s*(?:[\w$]+\s*\.\s*)*$/;
+function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   const names = new Set(["require", ...aliases]);
   for (const m of text.matchAll(/(?<![\w$.])[A-Za-z_$][\w$]*(?![\w$])/g)) {
     const name = m[0];
@@ -2511,11 +2513,14 @@ function handedOn(text: string, aliases: string[]): boolean {
     if (/\btypeof\s+$/.test(before)) continue;
     if (/\b(?:const|let|var|function)\s+$/.test(before)) continue;
     if (/^\s*=(?!=)/.test(after)) continue; // its own binding
-    if (/[{,]\s*$/.test(before) && /^\s*:/.test(after)) continue; // a property name ({ require: true })
+    if (/[{,]\s*$/.test(before) && /^\s*:/.test(after) && !keyInPattern(text, at + name.length)) continue; // a property name ({ require: true }), not a pattern key ({ require: r } = module)
     if (inParamList(text, at, name.length)) continue; // a parameter named like the loader
-    if (name === "require" && /(?:^|[;\n}])\s*module\s*\.\s*exports\s*=\s*$/.test(before) && /^[ \t]*(?:;|\r?\n|$)/.test(after)) continue; // module.exports = require;
+    if (name === "require" && /(?:^|[;\n}])\s*module\s*\.\s*exports\s*=\s*$/.test(before) && /^[ \t]*(?:;|\r?\n|$)/.test(after) && !exportsUsed(text)) continue; // module.exports = require; and nothing reads the export
+
     return true;
   }
+  // A computed member key (module["require"], module[`require`]) is a name, not text.
+  if (/\[\s*(["'`])require\1\s*\]/.test(keptKeys)) return true;
   // module.require handed on (a bare mention, .bind(...)).
   for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
   // A createRequire(...) result that is neither called on the spot nor bound to a plain name (a member, an argument, a ternary).
@@ -2526,21 +2531,64 @@ function handedOn(text: string, aliases: string[]): boolean {
     if (/^\s*\(/.test(text.slice(end, end + 6))) continue;
     const { from } = statementStart(text, m.index ?? 0);
     const stmt = text.slice(from, m.index ?? 0);
-    if (/^(?:\s*(?:\b(?:const|let|var)\s+)?[A-Za-z_$][\w$]*\s*=)\s*(?:[\w$]+\s*\.\s*)*$/.test(stmt)) continue;
+    if (BOUND_STMT.test(stmt)) continue;
     if (/\bconst\s*\{[^}]*\}\s*=\s*require\s*\(\s*["']module["']\s*\)\s*$/.test(stmt)) continue;
     return true;
   }
   return false;
 }
 
+// The { that holds the key ending at `end` is the left side of a destructuring ({ require: r } = module, nested too), not an object literal.
+function keyInPattern(text: string, end: number): boolean {
+  let d = 0;
+  for (let j = end; j < text.length && j - end < 400; j++) {
+    const c = text[j];
+    if (c === ";") return false;
+    if (c === "{" || c === "[" || c === "(") d++;
+    else if (c === ")" || c === "]") {
+      d--;
+      if (d < 0) return false;
+    } else if (c === "}") {
+      d--;
+      if (d < 0) {
+        const next = /^\s*(.)(.?)/.exec(text.slice(j + 1, j + 8));
+        if (next && next[1] === "=" && next[2] !== "=" && next[2] !== ">") {
+          // Taken from a plain name bound to an object literal ({ require: 1 }), the key is data; from module, require.main or anything else it is the loader.
+          const rhs = /^\s*=\s*([A-Za-z_$][\w$]*)\s*(?:;|\r?\n|$)/.exec(text.slice(j + 1, j + 80));
+          return !(rhs && new RegExp(`(?:const|let|var)\\s+${rhs[1]!.replace(/\$/g, "\\$")}\\s*=\\s*\\{`).test(text));
+        }
+        if (!next || (next[1] !== "}" && next[1] !== ",")) return false;
+        d = 0; // inside an enclosing brace of the same left side
+      }
+    }
+  }
+  return false;
+}
+// module.exports = require is read through only when nothing else reads module.exports: a call or an alias of it runs the loader.
+function exportsUsed(text: string): boolean {
+  for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*exports\b/g)) {
+    const rest = text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 40);
+    if (/^\s*=(?!=)/.test(rest) || /^\s*\.\s*[\w$]+\s*=(?!=)/.test(rest)) continue;
+    return true;
+  }
+  return false;
+}
 // The name at `at` sits in a parameter list: (require, exports, module) before a body or an arrow.
 function inParamList(text: string, at: number, len: number): boolean {
+  // Only a bare name in a declaration slot is a parameter: right after the ( or a top-level comma, followed by , ) or a default.
+  // A loader inside a default (cb = require, a = [require], a = x || require) is a value.
+  if (!/[(,]\s*$/.test(text.slice(Math.max(0, at - 40), at)) || !/^\s*(?:[,)]|=(?![=>]))/.test(text.slice(at + len, at + len + 12))) return false;
   let depth = 0;
+  let sq = 0;
   let k = at - 1;
   for (; k >= 0 && at - k < 300; k--) {
     const c = text[k];
     if (c === ")") depth++;
-    else if (c === "(") {
+    else if (c === "]") sq++;
+    else if (c === "[") {
+      if (sq === 0) return false;
+      sq--;
+    } else if (c === "(") {
       if (depth === 0) break;
       depth--;
     } else if (c === "{" || c === ";") return false;
@@ -2557,7 +2605,7 @@ function inParamList(text: string, at: number, len: number): boolean {
     }
   }
   if (text[j] !== ")") return false;
-  return /function\s*\*?\s*[\w$]*\s*$/.test(text.slice(Math.max(0, k - 40), k)) || /^\s*=>/.test(text.slice(j + 1, j + 12));
+  return /(?<![\w$.])function\s*\*?\s*[\w$]*\s*$/.test(text.slice(Math.max(0, k - 40), k)) || /^\s*=>/.test(text.slice(j + 1, j + 12));
 }
 const FUNCTION_START = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/;
 function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
@@ -2613,7 +2661,7 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
   }
   // Any other mention of require, module.require or a createRequire result that is not itself an immediate call is a loader handed on as a value.
   const blank = codeOnly(text, [], false) ?? text;
-  if (handedOn(blank, [...callers].filter((n) => !/^(?:require|import|fork|execFile|execFileSync)$/.test(n)))) {
+  if (handedOn(blank, [...callers].filter((n) => !/^(?:require|import|fork|execFile|execFileSync)$/.test(n)), text)) {
     tier.pkg = true;
     tier.tests = true;
     tier.flows = true;
@@ -2624,7 +2672,7 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     const name = m[0].endsWith("require") ? "require" : "import";
     // A parameter or a property name is a name, not the loader: function (require, exports, module), { a: 1, require: x }.
     if (inParamList(blank, at, name.length)) continue;
-    if (m[0].startsWith(",") && /^\s*:/.test(blank.slice(at + name.length, at + name.length + 6))) continue;
+    if (m[0].startsWith(",") && /^\s*:/.test(blank.slice(at + name.length, at + name.length + 6)) && !keyInPattern(blank, at + name.length)) continue;
     tier.pkg = true;
     tier.tests = true;
     tier.flows = true;
@@ -4254,6 +4302,8 @@ function statementStart(text: string, at: number): { from: number; overflow: boo
   let from = at;
   const floor = Math.max(0, at - 3000);
   while (from > floor && text[from - 1] !== ";") {
+    // The { of a block (after ), =>, try, else, do, finally) opens a new statement: the head before it is not part of this one.
+    if (text[from - 1] === "{" && /(?:\)|=>|\b(?:try|else|do|finally))\s*$/.test(text.slice(Math.max(0, from - 40), from - 1))) break;
     if (text[from - 1] === "\n") {
       const prev = text.slice(Math.max(0, from - 200), from - 1).trimEnd();
       const next = text.slice(from, from + 40).trimStart()[0] ?? "";
