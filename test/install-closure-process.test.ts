@@ -511,3 +511,15 @@ test("a dot before from is seen however far back it lies (round 18)", () => {
 test("an eval whose argument hides a closing paren in a comment still widens (round 18)", () => {
   expect(held(`${A}var s = require("fs"); eval(s.readFileSync /* ) */ + x);\nexports.main = () => 1\n`)).toBe(true);
 });
+
+// Round 18: a template interpolation or brace still open at the end of the file is not static.
+for (const [label, body] of [
+  ["an unterminated template interpolation", "const t = `x${p.cwd()"],
+  ["an unterminated interpolation inside a nested template", "const t = `a${`b${p.cwd()`}"],
+  ["an open brace at the end of the file", "function f() { return p.cwd()"],
+] as const) {
+  test(`${label} is not static (round 18)`, () => expect(held(`${A}${body}\n`)).toBe(true));
+}
+test("balanced nested templates stay static (round 18)", () => {
+  expect(held(`${A}exports.main = () => \`a\${\`b\${p.cwd()}\`}\`\n`)).toBe(false);
+});

@@ -959,6 +959,8 @@ function codeOnly(text: string, watch: string[] = [], keep = false): string | un
       i += tok.length;
     }
   }
+  // An open template interpolation or brace at the end is a file Bun rejects: not static, like any unterminated span.
+  if (braces.length > 0) return undefined;
   return out;
 }
 
