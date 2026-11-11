@@ -294,3 +294,46 @@ for (const [label, hook, scripts] of moreQuiet) {
     });
   }
 }
+
+// env -i clears the variable, xargs keeps the assignments of its inner env, and pack and version run this package's scripts only
+// for a directory spec or a version operand.
+const clearHolds: [string, string, Record<string, string>][] = [
+  ["env -i clears the setting", "npm_config_ignore_scripts=true env -i npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["env - clears the setting", "npm_config_ignore_scripts=true env - npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["env -u clears the setting", "npm_config_ignore_scripts=true env -u npm_config_ignore_scripts npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["env -i clears the setting, no pipe", "npm_config_ignore_scripts=true env -i npm pack", { prepack: "node DIR/evil.js" }],
+  ["an inner env under xargs that turns it off", "printf x | npm_config_ignore_scripts=true xargs env npm_config_ignore_scripts=false npm pack", { prepack: "node DIR/evil.js" }],
+  ["version with a bump", "npm version patch | cat", { preversion: "node DIR/evil.js" }],
+  ["version with a semver", "npm version 1.2.3 | cat", { preversion: "node DIR/evil.js" }],
+  ["version from git", "npm version from-git | cat", { postversion: "node DIR/evil.js" }],
+  ["pack of the current directory", "npm pack . | cat", { prepack: "node DIR/evil.js" }],
+  ["pack of a local path", "npm pack ./sub | cat", { prepack: "node DIR/evil.js" }],
+  ["pack with a destination", "npm pack --pack-destination out | cat", { prepack: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of clearHolds) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} runs the script: a changed ${dir}/evil.js holds`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const clearQuiet: [string, string, Record<string, string>][] = [
+  ["a bare npm version", "npm version | cat", { preversion: "node DIR/evil.js" }],
+  ["packing a registry package", "npm pack ms@2.1.3 | cat", { prepack: "node DIR/evil.js" }],
+  ["packing a registry package by name", "npm pack ms | cat", { prepack: "node DIR/evil.js" }],
+  ["packing a registry package after &&", "true && npm pack ms@2.1.3", { prepack: "node DIR/evil.js" }],
+  ["an env that sets it again after -i", "npm_config_ignore_scripts=false env -i npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["an inner env under xargs that turns it on", "printf x | npm_config_ignore_scripts=false xargs env npm_config_ignore_scripts=true npm pack", { prepack: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of clearQuiet) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} stays quiet: a changed ${dir}/evil.js is not an install change`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc))).toEqual([]);
+    });
+  }
+}

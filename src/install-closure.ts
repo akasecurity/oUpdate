@@ -4765,13 +4765,44 @@ const NPM_LIFECYCLE: Record<string, string[]> = {
 };
 // The lifecycle words that also run a named script themselves: --ignore-scripts does not stop that one.
 const NPM_RUNS_NAMED: Record<string, string[]> = { it: ["test"], cit: ["test"], "install-test": ["test"], "install-ci-test": ["test"] };
+// `npm pack` and `npm version` run this package's lifecycle scripts only for a directory spec (pack) or a version operand
+// (version): `npm pack ms@2.1.3` packs a registry package and a bare `npm version` only lists versions.
+function npmLifecycleApplies(sub: string, rest: string[]): boolean {
+  if (sub !== "pack" && sub !== "version") return true;
+  const ops: string[] = [];
+  let unsure = false; // a flag this does not know may take the next word as its value
+  for (let k = 0; k < rest.length; k++) {
+    const w = rest[k]!;
+    if (w.startsWith("-")) {
+      if (NPM_VALUE_FLAG.test(w) && !w.includes("=")) k++;
+      else if (w === "--ignore-scripts" && /^(?:true|false|1|0)$/.test(rest[k + 1] ?? "")) k++;
+      else if (w.startsWith("--") && !w.includes("=") && !NPM_BOOL_FLAG.test(w)) unsure = true;
+      continue;
+    }
+    ops.push(w);
+  }
+  if (unsure) return true;
+  if (sub === "pack") return ops.length === 0 || ops.some((o) => o === "." || o === ".." || /^(?:\.\.?\/|\/|~|file:)/.test(o));
+  return ops.some((o) => /^(?:major|minor|patch|premajor|preminor|prepatch|prerelease|from-git|v?\d+\.\d+\.\d+.*)$/.test(o));
+}
+// `env -i`, `env -` and `env -u npm_config_ignore_scripts` clear the variable.
+function envClears(words: string[]): boolean {
+  for (let k = 0; k < words.length; k++) {
+    const w = words[k]!;
+    if (!w.startsWith("-") && !ASSIGN.test(w)) return false;
+    if (w === "-i" || w === "-" || w === "--ignore-environment") return true;
+    if ((w === "-u" || w === "--unset") && words[k + 1] === "npm_config_ignore_scripts") return true;
+    if (/^(?:-u|--unset=)npm_config_ignore_scripts$/.test(w)) return true;
+  }
+  return false;
+}
 const LAUNCHER_PREFIX = /^(?:env|command|builtin|exec|nohup|time|nice|sudo|stdbuf|timeout|corepack)$/;
 // Names the shell only looks up, never runs.
 const LOOKUP_ONLY = /^(?:type|which|hash)$/;
 // npm subcommands that run no script of this package.
 const NPM_READ_ONLY = new Set(["help", "view", "v", "show", "info", "config", "c", "get", "set", "ls", "list", "la", "ll", "outdated", "audit", "prefix", "root", "bin", "whoami", "search", "s", "find", "explain", "why", "doctor", "ping", "fund", "help-search", "docs", "repo", "bugs", "home"]);
 // npm flags that take a separate value, and long flags known to take none.
-const NPM_VALUE_FLAG = /^(?:--(?:cache|prefix|workspace|userconfig|globalconfig|registry|loglevel|tag|otp|scope|access|script-shell|include|omit|audit-level|install-strategy|before|logs-dir|tmp|cafile|cert|key|proxy|https-proxy|noproxy|node-options|call|package|message|logs-max|init-module|fetch-retries|fetch-timeout|location|lockfile-version)|-w|-C|-c)$/;
+const NPM_VALUE_FLAG = /^(?:--(?:cache|prefix|workspace|userconfig|globalconfig|registry|loglevel|tag|otp|scope|access|script-shell|include|omit|audit-level|install-strategy|before|logs-dir|tmp|cafile|cert|key|proxy|https-proxy|noproxy|node-options|call|package|message|logs-max|init-module|fetch-retries|fetch-timeout|location|lockfile-version|pack-destination|preid)|-w|-C|-c|-m)$/;
 const NPM_BOOL_FLAG = /^--(?:silent|quiet|verbose|json|global|force|yes|no|dry-run|production|ignore-scripts|if-present|workspaces|include-workspace-root|no-[a-z-]+|foreground-scripts|offline|prefer-offline|prefer-online|legacy-peer-deps|save|save-dev|no-save|audit|fund|help|version|parseable|long|all|link|unicode|color|progress|ws)$/;
 // `--ignore-scripts` (and its env spelling) switch every pre/post and lifecycle script off, not the named one.
 const IGNORE_FLAG_ON = /^--ignore-scripts(?:=(?:true|1))?$/;
@@ -4825,6 +4856,7 @@ function stageCommand(words: string[], assigns?: string[]): string[] {
       while (h < words.length && (words[h]!.startsWith("-") || ASSIGN.test(words[h]!))) {
         const x = words[h]!;
         if (bin === "env" && ASSIGN.test(x)) assigns?.push(x); // only env takes assignments: after another launcher one is a command word, read as a runner's env or not, never as the setting
+        else if (bin === "env" && envClears([x, words[h + 1] ?? ""])) assigns?.push("npm_config_ignore_scripts="); // the variable is cleared
         h += takes && takes.test(x) ? 2 : 1;
       }
       if (bin === "timeout" && h < words.length && /^[0-9.]+[smhd]?$/.test(words[h]!)) h++;
@@ -4858,14 +4890,15 @@ function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
     }
     // `xargs npm run` runs the runner on what is piped in.
     if (bin === "xargs") {
-      const inner = stageCommand(ws.slice(1).filter((w, k, all) => !all.slice(0, k + 1).every((x) => x.startsWith("-"))));
+      const innerAssigns: string[] = [];
+      const inner = stageCommand(ws.slice(1).filter((w, k, all) => !all.slice(0, k + 1).every((x) => x.startsWith("-"))), innerAssigns);
       if (inner.length && SCRIPT_RUNNERS.has(binName(inner[0]!))) {
         // The script name comes from the input: a run with no name after it may run any script.
         const tail = inner[inner.length - 1]!;
         if (inner.length === 1 || RUN_SUB.has(tail) || /^(?:run-s|run-p|npm-run-all)$/.test(binName(inner[0]!))) {
           ctx.widenInert = true;
           widenAll(ctx);
-        } else dispatchRunner(ctx, inner, ignoring);
+        } else dispatchRunner(ctx, inner, envIgnore([...assigns, ...innerAssigns]));
       }
       continue;
     }
@@ -4885,6 +4918,7 @@ function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
   const bin = binName(ws[0]!);
   const quoted = ws.map((w) => (/[\s'"\\]/.test(w) ? "'" + w.replace(/'/g, "'\\''") + "'" : w));
   let npmSub: string | undefined;
+  let npmRest: string[] = [];
   // Only npm has this flag; a flag beats the env, and the last of either wins.
   const setIg = bin === "npm" ? flagIgnore(ws.slice(0, ws.includes("--") ? ws.indexOf("--") : ws.length)) ?? envIg : undefined;
   const ignore = setIg === true;
@@ -4897,6 +4931,7 @@ function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
     if (bin === "npm") {
       let sub: string | undefined;
       let version = false;
+      let subAt = -1;
       let unsure = false; // the word before the subcommand is a flag this does not know takes no value
       for (let q = 1; q < (dd < 0 ? ws.length : dd); q++) {
         const w = ws[q]!;
@@ -4908,9 +4943,11 @@ function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
           continue;
         }
         sub = w;
+        subAt = q;
         break;
       }
       npmSub = sub;
+      npmRest = subAt >= 0 ? ws.slice(subAt + 1, dd < 0 ? ws.length : dd) : [];
       if (version) return;
       if (sub !== undefined && NPM_READ_ONLY.has(sub)) {
         // An unknown flag may have taken the read-only word as its value: a script runner after it still runs.
@@ -4922,6 +4959,7 @@ function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
     // Only the parsed subcommand names lifecycle scripts (`npm run build pack` runs build): and --ignore-scripts switches them off.
     const life = bin === "npm" && npmSub !== undefined ? NPM_LIFECYCLE[npmSub] : undefined;
     if (life) {
+      if (!npmLifecycleApplies(npmSub!, npmRest)) return;
       ctx.depth++;
       if (ignore) for (const name of NPM_RUNS_NAMED[npmSub!] ?? []) runNamed(ctx, name, true);
       else for (const name of life) runScript(ctx, name, true);
@@ -7473,8 +7511,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
       ctx.depth++;
       const savedNoEnv = ctx.noEnvIgnore;
       if (bin !== "env") ctx.noEnvIgnore = true;
+      const savedIg = ctx.ignoreHooks;
+      if (bin === "env" && envClears(argv.slice(i))) ctx.ignoreHooks = false; // env -i clears npm_config_ignore_scripts
       dispatch(ctx, inner.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
       ctx.noEnvIgnore = savedNoEnv;
+      ctx.ignoreHooks = savedIg;
       ctx.depth--;
     }
   }
@@ -7610,7 +7651,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     }
     // `npm it`, `npm pack` and the like run lifecycle scripts without naming them: those scripts are read as named ones, unless
     // --ignore-scripts switches them off.
-    if (!ignoreNow) for (const name of NPM_LIFECYCLE[sub.word] ?? []) runScript(ctx, name, true);
+    if (!ignoreNow && npmLifecycleApplies(sub.word, argv.slice(sub.i + 1, ddIgnore < 0 ? argv.length : ddIgnore))) for (const name of NPM_LIFECYCLE[sub.word] ?? []) runScript(ctx, name, true);
     else for (const name of NPM_RUNS_NAMED[sub.word] ?? []) runNamed(ctx, name, true);
     if (sub.word.includes(UNRESOLVED)) ctx.widenInert = true;
     widenAll(ctx);
