@@ -4489,7 +4489,8 @@ function noteHookArgCwd(ctx: Ctx, token: string): void {
     else addUnder(ctx, dir);
     widenAll(ctx);
   }
-  noteHookArg(ctx, token);
+  // After a `cd` a dotted path is resolved from that directory below, not from the package root.
+  noteHookArg(ctx, token, Boolean(ctx.cwd));
   if (ctx.cwd && token && !token.startsWith("-") && !token.startsWith("/")) {
     const j = joinDir(ctx.cwd, token);
     if (j === undefined) {
@@ -4500,12 +4501,12 @@ function noteHookArgCwd(ctx: Ctx, token: string): void {
   }
 }
 
-function noteHookArg(ctx: Ctx, token: string): void {
+function noteHookArg(ctx: Ctx, token: string, afterCd = false): void {
   // `.` is not a named file. Recording it would be an unresolved-path hold.
   // A glob still reaches addRef, so the glob and pattern-length caps stay holds.
   if (!token || token.startsWith("-")) return;
   const logical = normalize(token);
-  if (logical && /(^|\/)\.{1,2}(\/|$)/.test(logical) && !logical.startsWith("/") && !/^[A-Za-z]:/.test(logical) && !/[\u0005$~*?[]/.test(logical)) {
+  if (!afterCd && logical && /(^|\/)\.{1,2}(\/|$)/.test(logical) && !logical.startsWith("/") && !/^[A-Za-z]:/.test(logical) && !/[\u0005$~*?[]/.test(logical)) {
     // A path with a `.` or `..` segment names the file it resolves to (`lib/../x/evil.js` is x/evil.js). One that leaves the
     // package reads every file, as a path joined to an earlier `cd` does.
     const j = joinDir("", logical);

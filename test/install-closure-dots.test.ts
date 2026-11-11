@@ -52,3 +52,15 @@ for (const [label, hook] of controls) {
 }
 test("a path that resolves to the changed file holds even from an unchanged-looking spelling", () =>
   expect(held("node lib/../lib/ok.js", "lib/ok.js")).toBe(true));
+
+// After a `cd` a dotted path is resolved from that directory, not from the package root.
+test("cd lib && node ../lib/ok.js: a changed unrelated docs/evil.js stays quiet", () =>
+  expect(held("cd lib && node ../lib/ok.js", "docs/evil.js")).toBe(false));
+test("cd lib && node ./../lib/ok.js: a changed unrelated docs/evil.js stays quiet", () =>
+  expect(held("cd lib && node ./../lib/ok.js", "docs/evil.js")).toBe(false));
+for (const d of ["x", "docs", "test"]) {
+  test(`cd lib && node ../${d}/evil.js: a changed ${d}/evil.js holds`, () =>
+    expect(held(`cd lib && node ../${d}/evil.js`, `${d}/evil.js`)).toBe(true));
+}
+test("cd lib && node ../../evil.js leaves the package: a changed docs/evil.js holds", () =>
+  expect(held("cd lib && node ../../evil.js", "docs/evil.js")).toBe(true));
