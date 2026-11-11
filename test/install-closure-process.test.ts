@@ -1347,12 +1347,28 @@ for (const [label, pre] of [
 }
 
 // A this in sloppy code, the module wrapper's arguments and CallSite objects hand out the global object or require.
-const GBM = '["getBuiltin"+"Module"]("child_"+"process")';
+// A this in sloppy code, the module wrapper's arguments and CallSite objects hand out the global object or require.
+// The payload write names neither process nor a loader word: only the global object reached through this can steer node.
+const ENVW = (g: string) => `${g}["pro"+"cess"]["en"+"v"][["NODE_","OPTIONS"].join("")] = "--require ./docs/payload.txt"`;
+const SLOPPY_THIS = "(function () { return this })()";
 for (const [label, pre] of [
-  ["a sloppy function returning this, indexed with a built key", `exports.main = () => (function () { return this })()["pro"+"cess"]${GBM}\n`],
-  ["a sloppy function returning this.process", `function f() { return this.process }\nexports.main = () => f()${GBM}\n`],
-  ["a sloppy function binding this to a name", `function f() { const g = this; return g }\nexports.main = () => f().process${GBM}\n`],
-  ["this from call() with no argument", `exports.main = () => { const t = (function () { return this }).call(); return t.process${GBM} }\n`],
+  ["a sloppy function returning this, indexed with a built key", `exports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a sloppy function returning this.process", `function f() { return this.process }\nexports.main = () => { f()["en"+"v"][["NODE_","OPTIONS"].join("")] = "--require ./docs/payload.txt" }\n`],
+  ["a sloppy function binding this to a name", `function f() { const g = this; return g }\nexports.main = () => { ${ENVW("f()")} }\n`],
+  ["this from call() with no argument", `exports.main = () => { const t = (function () { return this }).call(); ${ENVW("t")} }\n`],
+  ["a string that only starts with the directive", `"use strict" + "ignored"; const self = this; exports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} };\n`],
+  ["a line that starts with the word import", `imported = 1;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a line that starts with the word importer", `importer = 1;\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a directive that a continuing line turns into an expression", `"use strict"\n+ "x";\nexports.main = () => { const g = ${SLOPPY_THIS}; ${ENVW("g")} }\n`],
+  ["a spread of this", `const o = { ...this }; ${ENVW("o")};\nexports.main = () => 1\n`],
+  ["a spread of arguments", `const o = [...arguments]; ${ENVW("o")};\nexports.main = () => 1\n`],
+  ["the top-level this of a strict file", `"use strict";\nconst t = this; ${ENVW("t")};\nexports.main = () => 1\n`],
+  ["typeof on a call chain through this", `var r = typeof this[["pro","cess"].join("")]["en"+"v"]["X"](1);\nexports.main = () => r\n`],
+  ["in on a call chain through this", `var r = "x" in this[["pro","cess"].join("")]["en"+"v"]["X"](1);\nexports.main = () => r\n`],
+] as const) {
+  test(`${label} holds a changed payload outside the hook directory`, () => expect(widensDocs(pre)).toBe(true));
+}
+for (const [label, pre] of [
   ["arguments[1] at the top level", 'exports.main = () => arguments[1]("child_"+"pro"+"cess")\n'],
   ["arguments bound to a name", 'const a = arguments; exports.main = () => a[1]("child_"+"pro"+"cess")\n'],
   ["arguments[2] at the top level", 'exports.main = () => arguments[2]["req"+"uire"]("child_"+"pro"+"cess")\n'],
@@ -1379,6 +1395,18 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} stays static`, () => expect(held(pre)).toBe(false));
 }
-test("process.title with a chained member still widens", () => {
-  expect(widensAll('exports.main = () => process.title.constructor.constructor("return process")()\n')).toBe(true);
+for (const [label, pre] of [
+  ["a really strict function body", '"use strict";\nexports.main = function () { return this }\n'],
+  ["a directive after another directive", '"a directive"; "use strict";\nexports.main = function () { return this }\n'],
+  ["a function after an object key named class", 'const o = { class: function () { return this.x } };\nexports.main = () => o\n'],
+  ["a member named this", 'exports.main = (x) => x.this\n'],
+  ["a word that merely starts with import", 'imported = 1;\nexports.main = () => imported\n'],
+] as const) {
+  test(`${label} stays static`, () => expect(held(pre)).toBe(false));
+}
+test("an object key named class does not make the next function a class body", () => {
+  expect(widensDocs(`const o = { class: 1, f() { return (function () { return this })() } };\nexports.main = () => { const g = o.f(); ${ENVW("g")} }\n`)).toBe(true);
+});
+test("this.execve and this.loadEnvFile are not plain members of this", () => {
+  expect(widensDocs('exports.main = function () { this.execve("x") }\n')).toBe(true);
 });

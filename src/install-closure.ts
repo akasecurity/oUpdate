@@ -1635,7 +1635,8 @@ function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block"
   let j = at;
   while (j > 0 && /\s/.test(code[j - 1]!)) j--;
   if (code.slice(Math.max(0, j - 2), j) === "=>") return "arrow";
-  if (/(?<![\w$.])class\b[^{};]*$/.test(code.slice(Math.max(0, j - 200), j))) return "class";
+  // The word class opens a class body, not an object key (class: function () {}) or a member (x.class).
+  if (/(?<![\w$.])class(?![\w$])(?!\s*:)[^{};]*$/.test(code.slice(Math.max(0, j - 200), j))) return "class";
   if (code[j - 1] === ")") {
     let depth = 0;
     let k = j - 1;
@@ -1655,7 +1656,7 @@ function braceKind(code: string, at: number): "fn" | "arrow" | "class" | "block"
 // this.method() stay. Strict code (a class body, "use strict", import/export) has no global this.
 function thisOrArgumentsLeaks(code: string, strictFile: boolean): boolean {
   const stack: ("fn" | "arrow" | "class" | "block")[] = [];
-  for (const m of code.matchAll(/[{}]|(?<![\w$.])(?:this|arguments)(?![\w$])/g)) {
+  for (const m of code.matchAll(/[{}]|(?<![\w$])(?:this|arguments)(?![\w$])/g)) {
     const at = m.index ?? 0;
     if (m[0] === "{") {
       stack.push(braceKind(code, at));
@@ -1665,6 +1666,10 @@ function thisOrArgumentsLeaks(code: string, strictFile: boolean): boolean {
       stack.pop();
       continue;
     }
+    // A member named this or arguments (x.this) is a name; the dots of a spread (...this) are not a member access.
+    let pj = at;
+    while (pj > 0 && /\s/.test(code[pj - 1]!)) pj--;
+    if (code[pj - 1] === "." && !code.slice(0, pj).endsWith("...")) continue;
     const after = code.slice(at + m[0].length, at + m[0].length + 60);
     if (m[0] === "arguments") {
       if (/^\s*\.\s*length\b/.test(after)) continue;
@@ -1678,14 +1683,17 @@ function thisOrArgumentsLeaks(code: string, strictFile: boolean): boolean {
       if (own) continue;
       return true;
     }
-    if (strictFile || stack.includes("class")) continue;
+    // Inside a class body, or inside a function of a strict file, a plain call has no global this. The top level of a file
+    // (and an arrow there) is still the exports object or the module's this, so it counts in strict files too.
+    if (stack.includes("class") || (strictFile && stack.includes("fn"))) continue;
     // (this && this.__x) is a test: its value is the right side. A comparison does not hand it on either.
     if (/^\s*(?:&&|[!=]==?)/.test(after)) continue;
     let j = at;
     while (j > 0 && /\s/.test(code[j - 1]!)) j--;
-    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(code.slice(Math.max(0, j - 11), j))) continue;
+    // typeof / in / instanceof is not a hand-over only when the operand ends there (typeof this[k][g](...) is a call).
+    if (/(?:^|[^\w$.])(?:typeof|in|instanceof)$/.test(code.slice(Math.max(0, j - 11), j)) && readEnds(code, at + m[0].length)) continue;
     const member = /^\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)/.exec(after);
-    if (member && !/^(?:process|globalThis|global|constructor|__proto__)$/.test(member[1]!)) continue;
+    if (member && !/^(?:process|globalThis|global|constructor|__proto__|execve|loadEnvFile|dlopen|reallyExit|_debugProcess)$/.test(member[1]!)) continue;
     return true;
   }
   return false;
@@ -1759,9 +1767,19 @@ function computedCallChain(code: string): boolean {
   return false;
 }
 
-// "use strict" first in the file, or import / export declarations: strict code.
+// "use strict" as a complete directive statement in the prologue (the string alone, then ; or a line end that does not continue
+// the expression), or import / export declarations (whole words): strict code.
 function strictFileOf(keep: string, code: string): boolean {
-  return /^\s*(['"])use strict\1/.test(keep) || /(?:^|\n)\s*(?:import\s*(?:[\w$*{]|"")|export\s)/.test(code);
+  let pos = 0;
+  for (;;) {
+    const m = /^\s*(['"])([^'"\\\n]*)\1[ \t]*(;|\n|$)/.exec(keep.slice(pos, pos + 400));
+    if (!m) break;
+    // A line end only ends the statement when the next line does not continue it with an operator, call, index or member.
+    if (m[3] === "\n" && /^\s*[-+*/%.,?:<>=&|^!~(\[`]/.test(keep.slice(pos + m[0].length, pos + m[0].length + 8))) break;
+    if (m[2] === "use strict") return true;
+    pos += m[0].length;
+  }
+  return /(?:^|\n)\s*(?:import(?![\w$])\s*(?:[\w$*{]|"")|export(?![\w$])\s*(?:default\b|const\b|let\b|var\b|function\b|class\b|async\b|[{*]))/.test(code);
 }
 
 // A scanner that throws must not make a file look safe: a fault reads as "not static" and "widen everything".
