@@ -740,7 +740,8 @@ function stripProcessAliases(text: string, aliases: string[]): string {
     // A name (with its ; when the statement had one), not nothing. The token before what follows can still differ from the
     // original (a statement without ; ended in ), which is ambiguous, and is now a name), so the second scan is safe only
     // because the first scan, on the original text, has already refused every ambiguous span that could hide a use.
-    return m.trimEnd().endsWith(";") ? `${REMOVED};` : REMOVED;
+    // The whitespace the match took (a line break) is put back: it separates the next token from the placeholder.
+    return (m.trimEnd().endsWith(";") ? `${REMOVED};` : REMOVED) + m.slice(m.trimEnd().length);
   });
 }
 
@@ -881,11 +882,11 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       if (kind === "regex" && end < 0) return undefined;
       // Both readings must see the same names: the span holds none, and what follows the closing / is not a name,
       // a flag or another / that could start a comment.
-      // Read as a division, the closing / must also divide: the span has to end in an operand (a name, a number, ) or ]),
+      // Read as a division, the closing / must also divide: the span has to end in a name or a number (a bracket in a span is refused above),
       // or the two readings would fall out of step. Read as a regex, what follows must end an expression.
       if (kind === "amb" && end >= 0) {
         const span = text.slice(i + 1, end);
-        if (danger.test(span) || !/[\w$)\]]\s*$/.test(span) || !closesCleanly(end + 1)) return undefined;
+        if (danger.test(span) || !/[\w$]\s*$/.test(span) || !closesCleanly(end + 1)) return undefined;
       }
       if (end >= 0) {
         i = end + 1;

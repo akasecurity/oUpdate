@@ -349,3 +349,20 @@ test("a division whose span ends in an operator and whose closing / opens a rege
   expect(held(L2(`const a = (1) / 1 + /;'/.test(1); ${Y} // '`))).toBe(true);
   expect(held(L2(`const a = (1) / 1 - /,'/.test(1); ${Y} // '`))).toBe(true);
 });
+
+// Round 13: a statement without ; keeps the line break it took, so the next line starts a new token.
+for (const [label, pre] of [
+  ["an alias statement with no semicolon and the use on the next line", `const p = require("process")\np.binding("spawn_sync")\n`],
+  ["an alias statement with no semicolon, a different name first on the next line", `const p = require("process")\nfoo()\np.binding("spawn_sync")\n`],
+  ["an alias statement with no semicolon and a computed use on the next line", `const p = require("process")\np["bind"+"ing"]("spawn_sync")\n`],
+  ["an alias statement with no semicolon and a loader call on the next line", `const q = require("node:process")\nq.getBuiltinModule("v"+"m")\n`],
+] as const) {
+  test(`${label} is not static (round 13)`, () => expect(held(pre)).toBe(true));
+}
+test("an alias statement with no semicolon and plain reads on the next line stays static (round 13)", () => {
+  expect(held(`const p = require("process")\nexports.main = () => p.cwd()\n`)).toBe(false);
+});
+
+test("a keyword on the line after a no-semicolon alias statement is still a keyword (round 13)", () => {
+  expect(held(`const p = require("process");\nconst q = require("process")\ntypeof /'/; ${Y} // '\n`)).toBe(true);
+});
