@@ -42,3 +42,37 @@ test("controls: a literal script name still reads only that script's closure", (
     });
   expect(holds(rel("1.0.0"), rel("1.0.1"))).toEqual([]);
 });
+
+// The same class: forms that were deliberate non-holds and dropped without widening.
+const rel2 = (v: string, hook: string) =>
+  files({
+    "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: hook } }),
+    "lib/evil.js": `console.log("evil ${v}")\n`,
+  });
+
+test("node -e inline code that loads a computed path reads the package: the changed lib/evil.js holds", () => {
+  const hook = `node -e "require('./lib/' + 'ev' + 'il')"`;
+  expect(holds(rel2("1.0.0", hook), rel2("1.0.1", hook)).length).toBeGreaterThan(0);
+});
+
+test("node -p inline code with a computed require reads the package", () => {
+  const hook = `node -p "require('./lib/' + 'evil')"`;
+  expect(holds(rel2("1.0.0", hook), rel2("1.0.1", hook)).length).toBeGreaterThan(0);
+});
+
+test("patch-package with a flag it does not model reads every file", () => {
+  const hook = "patch-package --exclude x";
+  expect(holds(rel2("1.0.0", hook), rel2("1.0.1", hook)).length).toBeGreaterThan(0);
+});
+
+test("a static file over 1 MB still names the files it loads", () => {
+  const pad = "// " + "x".repeat(80) + "\n";
+  const big = (v: string) => `require("./other.js")\n` + pad.repeat(13000) + `var v = "${v}"\n`;
+  const rel = (v: string) =>
+    files({
+      "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: "node lib/big.js" } }),
+      "lib/big.js": big("1"),
+      "lib/other.js": `console.log("other ${v}")\n`,
+    });
+  expect(holds(rel("1.0.0"), rel("1.0.1")).length).toBeGreaterThan(0);
+});

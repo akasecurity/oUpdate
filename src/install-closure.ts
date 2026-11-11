@@ -1771,6 +1771,7 @@ function scanJs(ctx: Ctx, key: string): void {
     ctx.scanned.add(key);
     if (stripPkgJsonEnv(text).includes("npm_package_")) fail(ctx, "unresolved: manifest");
     if (!provablyStatic(text)) widenJs(ctx, key, text);
+    else followLoads(ctx, key, text); // a large static file still names the files it loads
     return;
   }
   if (ctx.scanned.size >= DEPTH) {
@@ -4425,6 +4426,9 @@ function evalCode(ctx: Ctx, code: string): void {
   for (const dir of dynamicRequireDirs(code)) addUnder(ctx, dir);
   if (/[+`$]/.test(code) || code.includes("process.env") || !specs.length || !/^[\s;]*$/.test(rest)) {
     fail(ctx, "unresolved: eval");
+    // The inline code runs like a file named "-e" in the package root: the same JS hardening applies to it.
+    if (code.includes(UNRESOLVED)) widenAll(ctx);
+    else if (!provablyStatic(code)) widenJs(ctx, "-e", code);
   }
 }
 
@@ -6753,17 +6757,20 @@ function closePatches(ctx: Ctx, argv: string[], i: number): void {
     if (a === "--patch-dir") {
       const next = argv[++j];
       if (next === undefined || next.startsWith("-")) {
+        widenAll(ctx);
         fail(ctx, "unresolved: runner");
         return;
       }
       rel = next;
     } else if (a.startsWith("--patch-dir=")) rel = a.slice("--patch-dir=".length);
     else {
+      widenAll(ctx);
       fail(ctx, "unresolved: runner");
       return;
     }
     const logical = normalize(rel);
     if (!logical || badPath(logical) || /[*?[]/.test(logical)) {
+      widenAll(ctx);
       fail(ctx, "unresolved: runner");
       return;
     }
