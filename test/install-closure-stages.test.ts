@@ -154,3 +154,53 @@ for (const [label, hook] of flagValueRuns) {
 test("a version flag before the subcommand prints the version and runs nothing", () => {
   expect(holds(dirRelease("0", "npm -v run evil | cat", "docs"), dirRelease("1", "npm -v run evil | cat", "docs"))).toEqual([]);
 });
+
+// Lifecycle words name their scripts only as the parsed subcommand, and --ignore-scripts switches the lifecycle and the pre and
+// post scripts off while the named script still runs.
+const lifeRelease = (v: string, hook: string, dir: "docs" | "test", scripts: Record<string, string>) =>
+  files({
+    "package.json": JSON.stringify({ name: "p", version: "1.0." + v, scripts: { postinstall: hook, build: "echo hi", ...scripts } }),
+    [`${dir}/evil.js`]: `console.log("evil ${v}")\n`,
+    "lib/ok.js": "console.log('ok')\n",
+  });
+
+const lifeQuiet: [string, string, Record<string, string>][] = [
+  ["pack as an argument of another script, piped", "npm run build pack | cat", { prepack: "node DIR/evil.js" }],
+  ["pack as an argument of another script, redirected", "npm run build pack > log", { prepack: "node DIR/evil.js" }],
+  ["version as an argument of another script", "npm run build version | cat", { preversion: "node DIR/evil.js" }],
+  ["pack with --ignore-scripts after &&", "true && npm pack --ignore-scripts", { prepack: "node DIR/evil.js" }],
+  ["pack with --ignore-scripts in an if", "if npm pack --ignore-scripts; then echo ok; fi", { prepack: "node DIR/evil.js" }],
+  ["pack with --ignore-scripts, piped", "npm pack --ignore-scripts | cat", { prepack: "node DIR/evil.js", postpack: "node DIR/evil.js" }],
+  ["pack with the env spelling, piped", "npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["it with --ignore-scripts, piped", "npm it --ignore-scripts | cat", { test: "node DIR/evil.js" }],
+  ["a pre script of a named script with --ignore-scripts", "npm run evil --ignore-scripts | cat", { evil: "echo hi", preevil: "node DIR/evil.js" }],
+  ["a post script of test with --ignore-scripts", "npm test --ignore-scripts | cat", { test: "echo hi", posttest: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of lifeQuiet) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} stays quiet: a changed ${dir}/evil.js is not an install change`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc))).toEqual([]);
+    });
+  }
+}
+
+const lifeRuns: [string, string, Record<string, string>][] = [
+  ["a named script with --ignore-scripts, piped", "npm run evil --ignore-scripts | cat", { evil: "node DIR/evil.js" }],
+  ["test with --ignore-scripts, piped", "npm test --ignore-scripts | cat", { test: "node DIR/evil.js" }],
+  ["a named script with the env spelling", "npm_config_ignore_scripts=true npm run evil | cat", { evil: "node DIR/evil.js" }],
+  ["pack with no flag, piped", "npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["pack with no flag after &&", "true && npm pack", { prepack: "node DIR/evil.js" }],
+  ["pack with --ignore-scripts=false", "npm pack --ignore-scripts=false | cat", { prepack: "node DIR/evil.js" }],
+  ["a pre script of a named script with no flag", "npm run evil | cat", { evil: "echo hi", preevil: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of lifeRuns) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} runs the script: a changed ${dir}/evil.js holds`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc)).length).toBeGreaterThan(0);
+    });
+  }
+}
