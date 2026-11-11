@@ -1779,20 +1779,28 @@ function opensClassBody(code: string, j: number): boolean {
   return false;
 }
 
+// For each ) the index of the ( it closes (-1 when none), by one pass with a stack: the same match a walk back from the ) with a
+// depth count finds, without rescanning nested groups at every brace.
+function parenPairs(code: string): Int32Array {
+  const open = new Int32Array(code.length).fill(-1);
+  const stack: number[] = [];
+  for (let i = 0; i < code.length; i++) {
+    const c = code.charCodeAt(i);
+    if (c === 40) stack.push(i);
+    else if (c === 41 && stack.length > 0) open[i] = stack.pop()!;
+  }
+  return open;
+}
+
 // Where a { opens: a function body ("fn"), an arrow body, a class body, an object literal or a plain block. `outer` is the kind
 // of the brace around it.
-function braceKind(code: string, at: number, outer?: BraceKind): BraceKind {
+function braceKind(code: string, at: number, outer: BraceKind | undefined, openOf: (close: number) => number): BraceKind {
   const j = skipSpaceBack(code, at);
   if (code.slice(Math.max(0, j - 2), j) === "=>") return "arrow";
   // The word class opens a class body, not an object key (class: function () {}) or a member (x.class, x. class, x?.#class).
   if (opensClassBody(code, j)) return "class";
   if (code[j - 1] === ")") {
-    let depth = 0;
-    let k = j - 1;
-    for (; k >= 0; k--) {
-      if (code[k] === ")") depth++;
-      else if (code[k] === "(" && --depth === 0) break;
-    }
+    const k = openOf(j - 1);
     const word = identBack(code, skipSpaceBack(code, Math.max(0, k))).word;
     if (/^(?:if|for|while|switch|catch|with)$/.test(word)) return "block";
     // A { on the next line after a ) that is not a function head or a member of an object or class is a block after a finished
@@ -1844,10 +1852,13 @@ function closesTernary(code: string, c: number): boolean {
 // this.method() stay. Strict code (a class body, "use strict", import/export) has no global this.
 function thisOrArgumentsLeaks(code: string, strictFile: boolean): boolean {
   const stack: BraceKind[] = [];
+  // The pairing of parens is built the first time a { follows a ), once per scan.
+  let pairs: Int32Array | undefined;
+  const openOf = (close: number): number => (pairs ??= parenPairs(code))[close]!;
   for (const m of code.matchAll(/[{}]|(?<![\w$])(?:this|arguments)(?![\w$])/g)) {
     const at = m.index ?? 0;
     if (m[0] === "{") {
-      stack.push(braceKind(code, at, stack[stack.length - 1]));
+      stack.push(braceKind(code, at, stack[stack.length - 1], openOf));
       continue;
     }
     if (m[0] === "}") {
