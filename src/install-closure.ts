@@ -4751,6 +4751,7 @@ function logicalLines(text: string, heredocs?: string[]): string[] {
 
 // The runners of a script of this package. A stage that starts with one runs that script wherever the line sits.
 const SCRIPT_RUNNERS = new Set(["npm", "yarn", "pnpm", "bun", "run-s", "run-p", "npm-run-all"]);
+const STAGE_SCRIPT_WORDS = new Set(["test", "t", "tst", "start", "stop", "restart"]);
 const STAGE_KEYWORDS = new Set(["then", "do", "else", "elif", "if", "while", "until", "time", "!", "exec"]);
 
 // A line that is not split into commands (a pipe, a redirect, a subshell, a function definition) still runs the commands in
@@ -4792,6 +4793,13 @@ function dispatchScriptStages(ctx: Ctx, text: string): void {
     const ws = stage.trim().split(/\s+/).filter(Boolean);
     while (ws.length && STAGE_KEYWORDS.has(ws[0]!)) ws.shift();
     if (!ws.length || !SCRIPT_RUNNERS.has(binName(ws[0]!))) continue;
+    // Only a stage that names a script to run: `npm ls`, `yarn install` and the like run no script of this package.
+    const bin = binName(ws[0]!);
+    if (bin !== "run-s" && bin !== "run-p" && bin !== "npm-run-all") {
+      const args = ws.slice(1).filter((w) => !w.startsWith("-"));
+      const sub = args.find((w) => RUN_SUB.has(w) || STAGE_SCRIPT_WORDS.has(w) || (bin !== "npm" && typeof ctx.raw[w] === "string"));
+      if (sub === undefined) continue;
+    }
     ctx.depth++;
     dispatch(ctx, ws.join(" "));
     ctx.depth--;

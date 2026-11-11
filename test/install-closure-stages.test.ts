@@ -38,6 +38,8 @@ const quiet: [string, string][] = [
   ["a pipe of plain readers", "echo hi | cat"],
   ["a script that does not run the changed file, through a pipe", "npm run quiet | cat"],
   ["a redirect with no runner", "echo hi > out.log"],
+  ["npm ls through a pipe runs no script", "npm ls | head -3"],
+  ["yarn install through a pipe runs no script", "yarn install | cat"],
   ["a read with no runner", "read x < in.txt; echo $x"],
 ];
 
