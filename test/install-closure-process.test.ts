@@ -1315,3 +1315,33 @@ for (const [label, pre] of [
 test("env destructured out of process holds a changed payload (round 28m)", () => {
   expect(widensDocs('const { env } = process;\nexports.main = () => { env[["NODE_", "OPTIONS"].join("")] = "--require ./docs/payload.txt" }\n')).toBe(true);
 });
+
+// A computed key that is not a number or one plain string, then called, indexed again or used with new, reaches Function from any
+// value ("".["con"+"structor"]["con"+"structor"](code)()). The name is built from parts here so no file spells it whole.
+const CTOR = ["con", "structor"].join("");
+const FN_ARGS = '("return 1")()';
+for (const [label, pre] of [
+  ["a key built with join", `const k = ["con", "structor"].join(""); exports.main = () => [][k][k]${FN_ARGS}\n`],
+  ["a template key with a substitution", 'const a = "struc"; exports.main = () => [][`con${a}tor`][`con${a}tor`]' + FN_ARGS + "\n"],
+  ["an escaped template key", `exports.main = () => [][\`${["constru", "\\x63", "tor"].join("")}\`][\`${["constru", "\\x63", "tor"].join("")}\`]${FN_ARGS}\n`],
+  ["a tagged template key", 'const t = (s) => s[0]; exports.main = () => [][t`' + CTOR + '`][t`' + CTOR + "`]" + FN_ARGS + "\n"],
+  ["a key that is a function parameter", `function f(k) { return [][k][k]${FN_ARGS} }\nexports.main = () => f(["con", "structor"].join(""))\n`],
+  ["a key from fromCharCode", `const k = String.fromCharCode(99, 111, 110, 115, 116, 114, 117, 99, 116, 111, 114); exports.main = () => [][k][k]${FN_ARGS}\n`],
+  ["a guarded key used later", `function f(x) { return x === "${CTOR}" ? [][x][x]${FN_ARGS} : 0 }\nexports.main = () => f("${CTOR}")\n`],
+  ["a case label then the use", `function f(x) { switch (x) { case "${CTOR}": return [][x][x]${FN_ARGS} } }\nexports.main = () => f("${CTOR}")\n`],
+  ["two literals joined into the key", `exports.main = () => [][ "con" + "structor" ][ "con" + "structor" ]${FN_ARGS}\n`],
+  ["new through a computed key", `function f(k) { return new [][k][k]("return 1") }\nexports.main = () => f("${CTOR}")()\n`],
+  ["an optional chain through a computed key", `function f(k) { return []?.[k]?.[k]?.("return 1")() }\nexports.main = () => f("${CTOR}")\n`],
+  ["a key held by a name then called", `function f(o, k) { return o[k]("return 1") }\nexports.main = () => f([].map, "${CTOR}")\n`],
+] as const) {
+  test(`${label} holds a changed payload (computed chain)`, () => expect(widensDocs(pre)).toBe(true));
+}
+for (const [label, pre] of [
+  ["a read of an array element by a counter", "const a = [1, 2]; let s = 0; for (let i = 0; i < a.length; i++) s += a[i]; exports.main = () => s\n"],
+  ["a computed read used as a value", "function g(o, key) { return o[key] }\nexports.main = () => g\n"],
+  ["a literal index", "exports.main = () => [1, 2][0]\n"],
+  ["a nested literal index", "const t = [[1, 2], [3, 4]]; exports.main = () => t[1][0]\n"],
+  ["a key that is a plain string literal", 'const o = { run() { return 1 } }; exports.main = () => o["run"]()\n'],
+] as const) {
+  test(`${label} stays static (computed chain)`, () => expect(widensDocs(pre)).toBe(false));
+}
