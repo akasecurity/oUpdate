@@ -4767,6 +4767,11 @@ const NPM_LIFECYCLE: Record<string, string[]> = {
 const NPM_RUNS_NAMED: Record<string, string[]> = { it: ["test"], cit: ["test"], "install-test": ["test"], "install-ci-test": ["test"] };
 // `npm pack` and `npm version` run this package's lifecycle scripts only for a directory spec (pack) or a version operand
 // (version): `npm pack ms@2.1.3` packs a registry package and a bare `npm version` only lists versions.
+// A directory spec: `.`, a local path, `file:`, or `name@` followed by one. A tarball path (.tgz, .tar.gz, .tar) is a file: no hook.
+function isDirSpec(o: string): boolean {
+  if (/\.(?:tgz|tar\.gz|tar)$/.test(o)) return false;
+  return o === "." || o === ".." || /^(?:\.\.?\/|\/|~|file:)/.test(o) || /@(?:file:|\.\.?(?:\/|$)|\/|~)/.test(o);
+}
 function npmLifecycleApplies(sub: string, rest: string[]): boolean {
   if (sub !== "pack" && sub !== "version") return true;
   const ops: string[] = [];
@@ -4781,8 +4786,8 @@ function npmLifecycleApplies(sub: string, rest: string[]): boolean {
     }
     ops.push(w);
   }
-  if (unsure) return true;
-  if (sub === "pack") return ops.length === 0 || ops.some((o) => o === "." || o === ".." || /^(?:\.\.?\/|\/|~|file:)/.test(o));
+  if (unsure && sub === "pack") return true;
+  if (sub === "pack") return ops.length === 0 || ops.some(isDirSpec);
   return ops.some((o) => /^(?:major|minor|patch|premajor|preminor|prepatch|prerelease|from-git|v?\d+\.\d+\.\d+.*)$/.test(o));
 }
 // `env -i`, `env -` and `env -u npm_config_ignore_scripts` clear the variable.
@@ -7512,7 +7517,22 @@ function dispatch(ctx: Ctx, cmd: string): void {
       const savedNoEnv = ctx.noEnvIgnore;
       if (bin !== "env") ctx.noEnvIgnore = true;
       const savedIg = ctx.ignoreHooks;
-      if (bin === "env" && envClears(argv.slice(i))) ctx.ignoreHooks = false; // env -i clears npm_config_ignore_scripts
+      if (bin === "env") {
+        // env's own flags and assignments, in order: -i or -u clear the variable, an assignment sets it. The wrapper drops them from
+        // the inner words, so the setting is carried here.
+        const marks: string[] = [];
+        for (let k = i; k < argv.length; k++) {
+          const w = argv[k]!;
+          if (ASSIGN.test(w)) marks.push(w);
+          else if (w.startsWith("-")) {
+            if (envClears([w, argv[k + 1] ?? ""])) marks.push("npm_config_ignore_scripts=");
+            if (PREFIX_VALUE_FLAG.env!.test(w) && !w.includes("=")) k++;
+          } else break;
+        }
+        const envIg = envIgnore(marks);
+        if (envIg !== undefined && binName(inner[0]!) === "npm") ctx.ignoreHooks = envIg;
+        else if (envClears(argv.slice(i))) ctx.ignoreHooks = false;
+      }
       dispatch(ctx, inner.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
       ctx.noEnvIgnore = savedNoEnv;
       ctx.ignoreHooks = savedIg;

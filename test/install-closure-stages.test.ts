@@ -337,3 +337,41 @@ for (const [label, hook, scripts] of clearQuiet) {
     });
   }
 }
+
+// A `name@file:.` or `name@./` spec is a directory, a tarball path is not, env's assignments survive the plain path, and a bare
+// `npm version` with only flags lists versions.
+const specHolds: [string, string, Record<string, string>][] = [
+  ["a scoped name at file:.", "npm pack @scope/x@file:. | cat", { prepack: "node DIR/evil.js" }],
+  ["a name at file:., plain", "npm pack x@file:.", { prepack: "node DIR/evil.js" }],
+  ["a name at ./", "npm pack x@./ | cat", { prepack: "node DIR/evil.js" }],
+  ["a name at an absolute path", "npm pack x@/abs/dir | cat", { postpack: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of specHolds) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} is a directory spec: a changed ${dir}/evil.js holds`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const specQuiet: [string, string, Record<string, string>][] = [
+  ["a tarball path", "npm pack ./x.tgz | cat", { prepack: "node DIR/evil.js" }],
+  ["a tar.gz path", "npm pack ./x.tar.gz", { prepack: "node DIR/evil.js" }],
+  ["a tar path", "npm pack ../x.tar | cat", { prepack: "node DIR/evil.js" }],
+  ["env -i then the setting, plain", "env -i npm_config_ignore_scripts=true npm pack", { prepack: "node DIR/evil.js" }],
+  ["env --ignore-environment then the setting, plain", "env --ignore-environment npm_config_ignore_scripts=true npm pack", { prepack: "node DIR/evil.js" }],
+  ["env -i then the setting, piped", "env -i npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
+  ["npm version with an unfamiliar flag", "npm version --timing | cat", { preversion: "node DIR/evil.js" }],
+  ["npm version with --json", "npm version --json | cat", { preversion: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of specQuiet) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} stays quiet: a changed ${dir}/evil.js is not an install change`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc))).toEqual([]);
+    });
+  }
+}
