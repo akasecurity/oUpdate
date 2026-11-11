@@ -103,3 +103,23 @@ for (const [label, hook, scripts] of lifecycle) {
 test("npm pack in a split line with no lifecycle script stays quiet", () => {
   expect(holds(release("0", "npm pack | cat"), release("1", "npm pack | cat"))).toEqual([]);
 });
+
+// Read-only npm subcommands and name lookups run no script, though a lifecycle script or the runner is named in the line.
+const lookups: [string, string][] = [
+  ["npm view with a lifecycle word as an operand", "npm view pack version | cat"],
+  ["npm config get with a script name as an operand", "npm config get test | cat"],
+  ["npm ls with a script name as an operand", "npm ls test | cat"],
+  ["npm help run", "npm help run | cat"],
+  ["command -v only looks the runner up", "command -v npm run evil | cat"],
+  ["command -V only looks the runner up", "command -V npm run evil | cat"],
+  ["type only looks the runner up", "type npm run evil | cat"],
+  ["which only looks the runner up", "which npm run evil | cat"],
+  ["hash only looks the runner up", "hash npm run evil | cat"],
+];
+
+for (const [label, hook] of lookups) {
+  test(`${label} stays quiet with test, prepack and prepare scripts that run the changed file`, () => {
+    const scripts = { test: "node lib/evil.js", prepack: "node lib/evil.js", postpack: "node lib/evil.js" };
+    expect(holds(release("0", hook, scripts), release("1", hook, scripts))).toEqual([]);
+  });
+}

@@ -4762,6 +4762,10 @@ const NPM_LIFECYCLE: Record<string, string[]> = {
   version: ["preversion", "version", "postversion"],
 };
 const LAUNCHER_PREFIX = /^(?:env|command|builtin|exec|nohup|time|nice|sudo|stdbuf|corepack)$/;
+// Names the shell only looks up, never runs.
+const LOOKUP_ONLY = /^(?:type|which|hash)$/;
+// npm subcommands that run no script of this package.
+const NPM_READ_ONLY = new Set(["help", "view", "v", "show", "info", "config", "c", "get", "set", "ls", "list", "la", "ll", "outdated", "audit", "prefix", "root", "bin", "whoami", "search", "s", "find", "explain", "why", "doctor", "ping", "fund", "help-search", "docs", "repo", "bugs", "home"]);
 const SHELL_NAME = /^(?:sh|bash|dash|zsh|ksh)$/;
 
 // The command a stage runs, past assignments, keywords and launcher prefixes (`env -i A=1`, `nice -n 5`, `nohup`, `corepack`).
@@ -4771,8 +4775,11 @@ function stageCommand(words: string[]): string[] {
     const w = words[h]!;
     if (ASSIGN.test(w) || STAGE_KEYWORD.test(w)) h++;
     else if (w === "function") h += 2;
+    else if (LOOKUP_ONLY.test(w)) return []; // `type`, `which` and `hash` only look names up
     else if (LAUNCHER_PREFIX.test(binName(w))) {
       const bin = binName(w);
+      // `command -v npm` and `command -V npm` look the name up: nothing runs.
+      if (bin === "command" && words.slice(h + 1).some((x) => /^-[A-Za-z]*[vV][A-Za-z]*$/.test(x))) return [];
       h++;
       while (h < words.length && (words[h]!.startsWith("-") || ASSIGN.test(words[h]!) || (bin === "nice" && /^-n$/.test(words[h - 1]!)))) h++;
     } else break;
@@ -4829,6 +4836,8 @@ function dispatchRunner(ctx: Ctx, ws: string[]): void {
   const quoted = ws.map((w) => (/[\s'"\\]/.test(w) ? "'" + w.replace(/'/g, "'\\''") + "'" : w));
   if (bin !== "run-s" && bin !== "run-p" && bin !== "npm-run-all") {
     const args = ws.slice(1).filter((w) => !w.startsWith("-"));
+    // Only the first operand is the subcommand: `npm view pack version` and `npm config get test` run no script.
+    if (bin === "npm" && (ws.some((w) => w === "-v" || w === "--version") || (args[0] !== undefined && NPM_READ_ONLY.has(args[0])))) return;
     // Only a stage that names a script to run: `npm ls`, `yarn install` and the like run no script of this package.
     const life = bin === "npm" ? args.map((a) => NPM_LIFECYCLE[a]).find(Boolean) : undefined;
     if (life) {
