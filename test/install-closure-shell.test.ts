@@ -271,7 +271,6 @@ for (const [label, hook] of parseLines) {
 }
 
 const noiseLines: [string, string][] = [
-  ["a find without -exec", "find $(pwd) -name x | cat"],
   ["a single quote in a double-quoted default", `echo "\${X:-it's}" | cat`],
   ["arithmetic with a plain number", "echo $((1+2)) | cat"],
   ["a flag value on a node run of a literal script", "node lib/ok.js --out=$(date) | cat"],
@@ -301,5 +300,47 @@ const executorLines: [string, string][] = [
 for (const [label, hook] of executorLines) {
   test(`${label} reads every file: a changed docs/evil.js holds`, () => {
     expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js")).length).toBeGreaterThan(0);
+  });
+}
+
+// Commands that can run a program or load code from an option: a substitution in an argument reads every file, docs and tests
+// included, with or without a pipe or a redirect.
+const optionRunners: [string, string][] = [
+  ["sed with an e command", `sed -e "e sh ${U}" input.txt | cat`],
+  ["sed with an e command and no pipe", `sed -e "e sh ${U}" input.txt`],
+  ["sed with the e flag", `sed "s/a/b/e" ${U} | cat`],
+  ["openssl with a provider path", `openssl list -provider "${U}" | cat`],
+  ["tar with an abbreviated compress program option", `tar --use-compress-prog="${U}" -cf out.tar input.txt | cat`],
+  ["tar with an abbreviated to-command option", `tar --to-comm="${U}" -xf a.tar | cat`],
+  ["tar with -I", `tar -I "${U}" -cf out.tar input.txt | cat`],
+  ["tar with a checkpoint action", `tar --checkpoint-action=exec="${U}" -cf out.tar input.txt | cat`],
+  ["tar with an rsh command", `tar --rsh-command="${U}" -cf out.tar input.txt | cat`],
+  ["sort with a compress program", `sort --compress-program=${U} in | cat`],
+  ["grep with a substituted pattern file", `grep -f ${U} in | cat`],
+  ["curl with a substituted config", `curl -K ${U} | cat`],
+  ["find with an exec", `find . -exec sh ${U} \\; | cat`],
+];
+
+for (const [label, hook] of optionRunners) {
+  for (const changed of ["lib/evil.js", "docs/evil.js"] as const) {
+    test(`${label} reads every file: a changed ${changed} holds`, () => {
+      expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, changed)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+// Plain commands run nothing an argument names: quiet with or without a pipe or a redirect.
+const plainQuiet: [string, string][] = [
+  ["rm of a substituted path", 'rm -rf "$(pwd)/b"'],
+  ["rm of a substituted path into a pipe", 'rm -rf "$(pwd)/b" | cat'],
+  ["mkdir of a substituted directory", "mkdir -p $(dirname x)"],
+  ["mkdir of a substituted directory into a pipe", "mkdir -p $(dirname x) | cat"],
+  ["a copy to a substituted path", 'cp a "$(pwd)/b" > /dev/null'],
+  ["a list of a substituted path", "ls $(pwd) | wc -l"],
+];
+
+for (const [label, hook] of plainQuiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
   });
 }

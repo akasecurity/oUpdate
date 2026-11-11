@@ -4555,12 +4555,15 @@ function widenAll(ctx: Ctx): void {
 // No resolved file still widens to every non-inert file.
 function closeUnknownRunner(ctx: Ctx, argv: string[], i: number): void {
   let resolved = false;
+  const head = argv[i - 1] ?? "";
+  const plain = !head.includes("/") && plainCommand(head);
   for (let j = i; j < argv.length; j++) {
     const arg = argv[j]!;
     if (arg.startsWith("-")) continue;
     // `printf -v N[0] ..` and `read -a N[0]` assign to a variable: the word after the flag is a name, not a file or a glob
     if ((binName(argv[i - 1] ?? "") === "printf" && argv[j - 1] === "-v") || (binName(argv[i - 1] ?? "") === "read" && /^-[A-Za-z]*a$/.test(argv[j - 1] ?? ""))) continue; // read -a N, read -ra N
-    noteHookArgCwd(ctx, arg);
+    // A plain command (rm, mkdir, cp ...) runs nothing an expansion in its arguments names.
+    if (!(plain && arg.includes(UNRESOLVED))) noteHookArgCwd(ctx, arg);
     const logical = normalize(arg);
     if (!logical || badPath(logical)) continue;
     const key = findKey(ctx, logical);
@@ -4771,15 +4774,16 @@ function headUnresolved(cmd: string): boolean {
   return false;
 }
 
-// Commands that read, print or write and cannot run a package file named by an argument: the plain commands of the shell
-// reader, minus a word that makes one run a program (`find -exec`, `tar --to-command`). Only a bare name is the system tool:
-// a path word (`./tools/cat`) is a package file. Every other command with a substitution in an argument may run what it names.
-const SHELL_PLAIN = new Set([":", "[", "[[", "test", "true", "false", "exit", "return", "export", "local", "declare", "typeset", "readonly", "unset", "set", "shift", "cd", "pushd", "popd", "read", "printf", "echo", "pwd", "date", "sleep", "id", "whoami", "uname", "hostname", "seq", "printenv", "type", "hash", "kill", "sed", "dirname", "basename"]);
-function plainStage(name: string, rest: StageWord[]): boolean {
-  if (!SHELL_PLAIN.has(name) && !PLAIN_CMDS.has(name)) return false;
-  const runs = RUNS_PROGRAM[name];
-  if (runs && rest.some((w) => runs.test(w.t))) return false;
-  return !(name === "sed" && rest.some((w) => /^(?:-[A-Za-z]*f|--file)/.test(w.t)));
+// Commands with no option that runs a program or loads code: a substitution in their arguments cannot name a file they run.
+// Everything else (sed `e`, openssl `-provider`, tar `--use-compress-program`, sort, grep, git, make, curl, awk, find, xargs, env,
+// zip, rsync, ssh ...) may run what the substitution names. Only a bare name is the system tool: a path word (`./tools/cat`)
+// is a package file.
+const PLAIN_SUBST = new Set(["echo", "printf", "true", "false", ":", "pwd", "date", "sleep", "mkdir", "rm", "rmdir", "ls", "dirname", "basename", "realpath", "cat", "head", "tail", "wc", "cut", "tr", "uniq", "test", "[", "[[", "cd", "pushd", "popd", "export", "local", "declare", "typeset", "readonly", "unset", "set", "shift", "read", "exit", "return", "type", "which", "hash", "tee", "cp", "mv", "ln"]);
+function plainCommand(name: string): boolean {
+  return PLAIN_SUBST.has(name);
+}
+function plainStage(name: string): boolean {
+  return plainCommand(name);
 }
 // Commands that run a script, a program or the text on their standard input.
 const STAGE_RUNNER = /^(?:sh|bash|dash|zsh|ksh|source|\.|eval|node|nodejs|bun|deno|python[0-9.]*|py|perl|ruby|php)$/;
@@ -5161,7 +5165,7 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>): { hi
     }
     const name = binName(head.t);
     const path = head.t.includes("/");
-    if (!path && plainStage(name, rest)) {
+    if (!path && plainStage(name)) {
       // A declaration keeps what a substitution printed in its variable.
       if (/^(?:export|local|declare|typeset|readonly)$/.test(name)) {
         for (const w of rest) if (ASSIGN.test(w.t) && taints(w)) tainted.add(w.t.slice(0, w.t.indexOf("=")).replace(/\+$/, ""));
