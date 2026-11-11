@@ -375,3 +375,43 @@ for (const [label, hook, scripts] of specQuiet) {
     });
   }
 }
+
+// Pack is quiet only when every operand is a literal registry spec or tarball path; a computed or local operand keeps the
+// lifecycle, and any version operand (a range, a computed word, one after --) runs the version scripts.
+const invHolds: [string, string, Record<string, string>][] = [
+  ["a name at file:. with --dry-run", "npm pack q@file:. --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a name at . with --dry-run", "npm pack q@. --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a substituted directory", "npm pack $(pwd) --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a quoted variable directory", 'npm pack "$PWD" --dry-run', { prepack: "node DIR/evil.js" }],
+  ["a directory with a trailing slash", "npm pack D/ --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a git spec", "npm pack user/repo --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a registry spec beside a directory", "npm pack ms@2.1.3 . --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a version with an equals sign", "npm version =1.0.2", { preversion: "node DIR/evil.js" }],
+  ["a computed version", "V=minor; npm version $V", { preversion: "node DIR/evil.js" }],
+  ["a version after --", "npm version -- patch", { preversion: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of invHolds) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} keeps the lifecycle: a changed ${dir}/evil.js holds`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const invQuiet: [string, string, Record<string, string>][] = [
+  ["a registry spec", "npm pack ms@2.1.3 --dry-run", { prepack: "node DIR/evil.js" }],
+  ["a scoped registry spec with a tag", "npm pack @scope/x@latest | cat", { prepack: "node DIR/evil.js" }],
+  ["two registry specs", "npm pack ms@^2 chalk | cat", { prepack: "node DIR/evil.js" }],
+  ["a tarball path", "npm pack ./x.tgz --dry-run", { prepack: "node DIR/evil.js" }],
+];
+
+for (const [label, hook, scripts] of invQuiet) {
+  for (const dir of ["docs", "test"] as const) {
+    test(`${label} stays quiet: a changed ${dir}/evil.js is not an install change`, () => {
+      const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", dir)]));
+      expect(holds(lifeRelease("0", hook, dir, sc), lifeRelease("1", hook, dir, sc))).toEqual([]);
+    });
+  }
+}

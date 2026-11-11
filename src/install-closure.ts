@@ -4767,17 +4767,28 @@ const NPM_LIFECYCLE: Record<string, string[]> = {
 const NPM_RUNS_NAMED: Record<string, string[]> = { it: ["test"], cit: ["test"], "install-test": ["test"], "install-ci-test": ["test"] };
 // `npm pack` and `npm version` run this package's lifecycle scripts only for a directory spec (pack) or a version operand
 // (version): `npm pack ms@2.1.3` packs a registry package and a bare `npm version` only lists versions.
-// A directory spec: `.`, a local path, `file:`, or `name@` followed by one. A tarball path (.tgz, .tar.gz, .tar) is a file: no hook.
-function isDirSpec(o: string): boolean {
-  if (/\.(?:tgz|tar\.gz|tar)$/.test(o)) return false;
-  return o === "." || o === ".." || /^(?:\.\.?\/|\/|~|file:)/.test(o) || /@(?:file:|\.\.?(?:\/|$)|\/|~)/.test(o);
+// A literal registry spec: a name or @scope/name with an optional @tag, range or version that is not a path. A bare word with no
+// slash is a registry name to npm; anything with an expansion, a path, a git or http spec or user/repo is not one.
+function isRegistrySpec(o: string): boolean {
+  return /^(?:@[a-z0-9~._-]+\/)?[a-z0-9~._-]+(?:@(?:[A-Za-z0-9^<>=*]|~[0-9])[A-Za-z0-9^~<>=*.+|_-]*)?$/.test(o) && !/^[.]/.test(o);
 }
+// A tarball path with a literal name: it is a file, so no hook of this package runs for it.
+function isTarballPath(o: string): boolean {
+  return /^(?:file:)?[A-Za-z0-9._/@+-]+\.(?:tgz|tar\.gz|tar)$/.test(o);
+}
+// `npm pack` and `npm version` run this package's lifecycle scripts for a directory spec (pack) or a version operand (version):
+// `npm pack ms@2.1.3` packs a registry package and a bare `npm version` only lists versions. Pack is quiet only when every
+// operand is a literal registry spec or tarball path; a computed or local operand keeps the lifecycle.
 function npmLifecycleApplies(sub: string, rest: string[]): boolean {
   if (sub !== "pack" && sub !== "version") return true;
   const ops: string[] = [];
   let unsure = false; // a flag this does not know may take the next word as its value
   for (let k = 0; k < rest.length; k++) {
     const w = rest[k]!;
+    if (w === "--") {
+      ops.push(...rest.slice(k + 1)); // after -- every word is an operand
+      break;
+    }
     if (w.startsWith("-")) {
       if (NPM_VALUE_FLAG.test(w) && !w.includes("=")) k++;
       else if (w === "--ignore-scripts" && /^(?:true|false|1|0)$/.test(rest[k + 1] ?? "")) k++;
@@ -4786,9 +4797,8 @@ function npmLifecycleApplies(sub: string, rest: string[]): boolean {
     }
     ops.push(w);
   }
-  if (unsure && sub === "pack") return true;
-  if (sub === "pack") return ops.length === 0 || ops.some(isDirSpec);
-  return ops.some((o) => /^(?:major|minor|patch|premajor|preminor|prepatch|prerelease|from-git|v?\d+\.\d+\.\d+.*)$/.test(o));
+  if (sub === "pack") return unsure || ops.length === 0 || !ops.every((o) => isRegistrySpec(o) || isTarballPath(o));
+  return ops.length > 0;
 }
 // `env -i`, `env -` and `env -u npm_config_ignore_scripts` clear the variable.
 function envClears(words: string[]): boolean {
@@ -4952,7 +4962,7 @@ function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
         break;
       }
       npmSub = sub;
-      npmRest = subAt >= 0 ? ws.slice(subAt + 1, dd < 0 ? ws.length : dd) : [];
+      npmRest = subAt >= 0 ? ws.slice(subAt + 1) : [];
       if (version) return;
       if (sub !== undefined && NPM_READ_ONLY.has(sub)) {
         // An unknown flag may have taken the read-only word as its value: a script runner after it still runs.
@@ -7671,7 +7681,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     }
     // `npm it`, `npm pack` and the like run lifecycle scripts without naming them: those scripts are read as named ones, unless
     // --ignore-scripts switches them off.
-    if (!ignoreNow && npmLifecycleApplies(sub.word, argv.slice(sub.i + 1, ddIgnore < 0 ? argv.length : ddIgnore))) for (const name of NPM_LIFECYCLE[sub.word] ?? []) runScript(ctx, name, true);
+    if (!ignoreNow && npmLifecycleApplies(sub.word, argv.slice(sub.i + 1))) for (const name of NPM_LIFECYCLE[sub.word] ?? []) runScript(ctx, name, true);
     else for (const name of NPM_RUNS_NAMED[sub.word] ?? []) runNamed(ctx, name, true);
     if (sub.word.includes(UNRESOLVED)) ctx.widenInert = true;
     widenAll(ctx);
