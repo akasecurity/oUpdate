@@ -559,3 +559,48 @@ for (const [label, hook] of dateQuiet) {
     expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
   });
 }
+
+// Producers whose output is a path or a host name can hold spaces: they are quiet quoted and hold unquoted. A date format is
+// quiet only with whitelisted escapes.
+const pathLines: [string, string][] = [
+  ["an unquoted pwd", "cmake -DCMAKE_BUILD_TYPE=$(pwd) | cat"],
+  ["an unquoted npm prefix", "cmake -DCMAKE_BUILD_TYPE=$(npm prefix) | cat"],
+  ["an unquoted npm root", "cmake -DCMAKE_BUILD_TYPE=$(npm root) | cat"],
+  ["an unquoted hostname", "cmake -DCMAKE_BUILD_TYPE=$(hostname) | cat"],
+  ["uname -n unquoted", "cmake -DCMAKE_BUILD_TYPE=$(uname -n) | cat"],
+  ["uname -a unquoted", "cmake -DCMAKE_BUILD_TYPE=$(uname -a) | cat"],
+  ["uname -v unquoted", "cmake -DCMAKE_BUILD_TYPE=$(uname -v) | cat"],
+  ["date with %e", "cmake -DCMAKE_BUILD_TYPE=$(date +%e) | cat"],
+  ["date with %a", "cmake -DCMAKE_BUILD_TYPE=$(date +%a) | cat"],
+  ["date with %c", "cmake -DCMAKE_BUILD_TYPE=$(date +%c) | cat"],
+  ["date with %Z", "cmake -DCMAKE_BUILD_TYPE=$(date +%Z) | cat"],
+  ["date with a space in the format", "cmake -DCMAKE_BUILD_TYPE=$(date '+%Y %m') | cat"],
+];
+
+for (const [label, hook] of pathLines) {
+  for (const changed of ["lib/evil.js", "docs/evil.js"] as const) {
+    test(`${label} reads every file: a changed ${changed} holds`, () => {
+      expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, changed)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const pathQuiet: [string, string][] = [
+  ["a quoted pwd", 'cmake -DCMAKE_BUILD_TYPE="$(pwd)" | cat'],
+  ["a quoted npm prefix", 'cmake -DCMAKE_BUILD_TYPE="$(npm prefix)" | cat'],
+  ["a quoted hostname", 'cmake -DCMAKE_BUILD_TYPE="$(hostname)" | cat'],
+  ["uname -m unquoted", "node-gyp rebuild --arch=$(uname -m) | cat"],
+  ["uname -s unquoted", "cmake -DFOO_VERSION=$(uname -s) | cat"],
+  ["date +%T", "cmake -DFOO_VERSION=$(date +%T) | cat"],
+  ["date +%D", "cmake -DFOO_VERSION=$(date +%D) | cat"],
+  ["date +%R", "cmake -DFOO_VERSION=$(date +%R) | cat"],
+  ["date +%H:%M", "cmake -DFOO_VERSION=$(date +%H:%M) | cat"],
+  ["date +%F", "cmake -DFOO_VERSION=$(date +%F) | cat"],
+  ["date +%s", "cmake -DFOO_VERSION=$(date +%s) | cat"],
+];
+
+for (const [label, hook] of pathQuiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(release("1.0.0", hook, "none"), release("1.0.1", hook, "docs/evil.js"))).toEqual([]);
+  });
+}
