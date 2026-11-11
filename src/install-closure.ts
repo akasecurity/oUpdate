@@ -2513,14 +2513,14 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
     if (/\btypeof\s+$/.test(before)) continue;
     if (/\b(?:const|let|var|function)\s+$/.test(before)) continue;
     if (/^\s*=(?!=)/.test(after)) continue; // its own binding
-    if (/[{,]\s*$/.test(before) && /^\s*:/.test(after) && !keyInPattern(text, at + name.length)) continue; // a property name ({ require: true }), not a pattern key ({ require: r } = module)
+    if (/[{,]\s*$/.test(before) && /^\s*:/.test(after) && !keyBindsLoader(text, at + name.length)) continue; // a property name ({ require: true }), not a key that binds a name ({ require: r } = module, a parameter, a catch or for-of binding)
     if (inParamList(text, at, name.length)) continue; // a parameter named like the loader
     if (name === "require" && /(?:^|[;\n}])\s*module\s*\.\s*exports\s*=\s*$/.test(before) && /^[ \t]*(?:;|\r?\n|$)/.test(after) && !exportsUsed(text)) continue; // module.exports = require; and nothing reads the export
 
     return true;
   }
   // A computed member key (module["require"], module[`require`]) is a name, not text.
-  if (/\[\s*(["'`])require\1\s*\]/.test(keptKeys)) return true;
+  if (computedRequire(keptKeys)) return true;
   // module.require handed on (a bare mention, .bind(...)).
   for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
   // A createRequire(...) result that is neither called on the spot nor bound to a plain name (a member, an argument, a ternary).
@@ -2538,16 +2538,24 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   return false;
 }
 
+// A `require:` key ending at `end` binds a name when it sits in a destructuring left side or its value is a plain name (a parameter, a
+// catch or for-of binding, a pattern of any depth). It is data when its value is a literal or the pattern takes from an object literal.
+function keyBindsLoader(text: string, end: number): boolean {
+  const kind = keyInPattern(text, end);
+  if (kind !== "none") return kind === "hold";
+  const value = /^\s*:\s*([A-Za-z_$][\w$]*)/.exec(text.slice(end, end + 80));
+  return value !== null && !/^(?:true|false|null|undefined|NaN|Infinity|function|async|class|new|typeof|void|this|await|delete)$/.test(value[1]!);
+}
 // The { that holds the key ending at `end` is the left side of a destructuring ({ require: r } = module, nested too), not an object literal.
-function keyInPattern(text: string, end: number): boolean {
+function keyInPattern(text: string, end: number): "hold" | "quiet" | "none" {
   let d = 0;
   for (let j = end; j < text.length && j - end < 400; j++) {
     const c = text[j];
-    if (c === ";") return false;
+    if (c === ";") return "none";
     if (c === "{" || c === "[" || c === "(") d++;
     else if (c === ")" || c === "]") {
       d--;
-      if (d < 0) return false;
+      if (d < 0) return "none";
     } else if (c === "}") {
       d--;
       if (d < 0) {
@@ -2555,14 +2563,21 @@ function keyInPattern(text: string, end: number): boolean {
         if (next && next[1] === "=" && next[2] !== "=" && next[2] !== ">") {
           // Taken from a plain name bound to an object literal ({ require: 1 }), the key is data; from module, require.main or anything else it is the loader.
           const rhs = /^\s*=\s*([A-Za-z_$][\w$]*)\s*(?:;|\r?\n|$)/.exec(text.slice(j + 1, j + 80));
-          return !(rhs && new RegExp(`(?:const|let|var)\\s+${rhs[1]!.replace(/\$/g, "\\$")}\\s*=\\s*\\{`).test(text));
+          return rhs && new RegExp(`(?:const|let|var)\\s+${rhs[1]!.replace(/\$/g, "\\$")}\\s*=\\s*\\{`).test(text) ? "quiet" : "hold";
         }
-        if (!next || (next[1] !== "}" && next[1] !== ",")) return false;
+        if (!next || (next[1] !== "}" && next[1] !== ",")) return "none";
         d = 0; // inside an enclosing brace of the same left side
       }
     }
   }
-  return false;
+  return "none";
+}
+// module["require"] on module, require.main, module.parent or a name bound to one of them: the loader by a computed key.
+function computedRequire(text: string): boolean {
+  if (!/\[\s*(["'`])require\1\s*\]/.test(text)) return false;
+  const recv = ["module", "require\\s*\\.\\s*main"];
+  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:module|require\s*\.\s*main)(?:\s*\.\s*parent)*\s*(?![\w$.(\[])/g)) recv.push(m[1]!.replace(/\$/g, "\\$"));
+  return new RegExp(`(?<![\\w$.])(?:${recv.join("|")})(?:\\s*\\.\\s*parent)*\\s*\\[\\s*(["'\`])require\\1\\s*\\]`).test(text);
 }
 // module.exports = require is read through only when nothing else reads module.exports: a call or an alias of it runs the loader.
 function exportsUsed(text: string): boolean {
@@ -2572,6 +2587,14 @@ function exportsUsed(text: string): boolean {
     return true;
   }
   return false;
+}
+// The text before a ( ends in a method head: a name (after { , ; } or a modifier) in an object literal or a class body, a getter, a setter, an
+// async or generator method, or a catch clause. Keywords that take a ( and a block (if, while, for, switch, with) are not methods.
+function methodHead(head: string): boolean {
+  const m = /(?:^|[{,;}]|\b(?:static|async|get|set)\b|\*|\bcatch\b)\s*(?:\*\s*)?([A-Za-z_$][\w$]*)?\s*$/.exec(head);
+  if (!m) return false;
+  if (/\bcatch\s*$/.test(head)) return true;
+  return m[1] !== undefined && !/^(?:if|while|for|switch|with|return|typeof|else|do|catch|function|static|async|get|set)$/.test(m[1]);
 }
 // The name at `at` sits in a parameter list: (require, exports, module) before a body or an arrow.
 function inParamList(text: string, at: number, len: number): boolean {
@@ -2605,7 +2628,8 @@ function inParamList(text: string, at: number, len: number): boolean {
     }
   }
   if (text[j] !== ")") return false;
-  return /(?<![\w$.])function\s*\*?\s*[\w$]*\s*$/.test(text.slice(Math.max(0, k - 40), k)) || /^\s*=>/.test(text.slice(j + 1, j + 12));
+  const head = text.slice(Math.max(0, k - 60), k);
+  return /(?<![\w$.])function\s*\*?\s*[\w$]*\s*$/.test(head) || /^\s*=>/.test(text.slice(j + 1, j + 12)) || (/^\s*\{/.test(text.slice(j + 1, j + 12)) && methodHead(head));
 }
 const FUNCTION_START = /^(?:async\s+)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/;
 function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
@@ -2672,7 +2696,7 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     const name = m[0].endsWith("require") ? "require" : "import";
     // A parameter or a property name is a name, not the loader: function (require, exports, module), { a: 1, require: x }.
     if (inParamList(blank, at, name.length)) continue;
-    if (m[0].startsWith(",") && /^\s*:/.test(blank.slice(at + name.length, at + name.length + 6)) && !keyInPattern(blank, at + name.length)) continue;
+    if (m[0].startsWith(",") && /^\s*:/.test(blank.slice(at + name.length, at + name.length + 6)) && !keyBindsLoader(blank, at + name.length)) continue;
     tier.pkg = true;
     tier.tests = true;
     tier.flows = true;

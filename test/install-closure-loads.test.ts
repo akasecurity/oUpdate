@@ -403,3 +403,27 @@ for (const [label, hook] of [
     expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
   });
 }
+
+// Eighth review batch: a loader key that binds a name in a parameter, catch or for-of pattern; computed keys on other receivers; method parameters.
+for (const [label, hook] of [
+  ["a destructuring parameter that renames require", `function f({ require: r }) { r.call(module, ${BX}); }\nf(module);`],
+  ["a catch binding that renames require", `try { throw module; } catch ({ require: r }) { r.call(module, ${BX}); }`],
+  ["a for-of binding that renames require", `for (const { require: r } of [module]) { r.call(module, ${BX}); }`],
+  ["a nested destructuring parameter that renames require", `function f({ m: { require: r } }) { r.call(module, ${BX}); }\nf({ m: module });`],
+  ["a computed key on a name bound to module", `const m = module;\nm["require"](${BX});`],
+  ["a computed key on module.parent", `module.parent["require"](${BX});`],
+] as [string, string][]) {
+  test(`${label} holds the changed x/evil.js`, () => expect(nestHolds(SEVENTH + hook, "x/evil.js")).toBe(true));
+}
+
+for (const [label, hook] of [
+  ["a computed require key on an options object", `const options = { require: true };\nconsole.log(options["require"]);`],
+  ["a method that takes require as a parameter", `const o = { f(require) { return 1; } };\no.f(1);`],
+  ["a class method that takes require as a parameter", `class C { m(require) { return 1; } static s(require, b) { return b; } }\nnew C().m(1);`],
+  ["a getter-free async method that takes require", `const o = { async f(require) { return 1; }, *g(require) { yield 1; } };\no.f(1);`],
+  ["a catch clause that names its binding require", `try { run(); } catch (require) { console.log(1); }`],
+] as [string, string][]) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", SEVENTH + hook, "x/evil.js"), nested("1.0.1", SEVENTH + hook, "x/evil.js"))).toEqual([]);
+  });
+}
