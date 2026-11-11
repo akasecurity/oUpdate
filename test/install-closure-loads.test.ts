@@ -240,3 +240,78 @@ test("30000 distinct named functions in a file of about 1 MB are read in bounded
   holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"));
   expect(performance.now() - t0).toBeLessThan(5000);
 });
+
+// Fifth review batch.
+const CR = `const { createRequire } = require("module"); `;
+const fifth: [string, string, string][] = [
+  ["a member import( call", `const L = {}; L.import = require; L.import("../x/" + process.argv[2])`, "x/evil.js"],
+  ["createRequire on the line after the =", CR + `const r =\n  createRequire(__filename);\nr(${BX})`, "x/evil.js"],
+  ["createRequire with CRLF line ends", CR + `const r =\r\n  createRequire(__filename);\r\nr(${BX})`, "x/evil.js"],
+  ["createRequire after a multiline comment", CR + `const r = /* a\n b */\n  createRequire(__filename);\nr(${BX})`, "x/evil.js"],
+  ["createRequire after a dot", `require("module").createRequire(__filename)(${BX})`, "x/evil.js"],
+  ["module.createRequire", `module.createRequire(__filename)(${BX})`, "x/evil.js"],
+  ["a recursive call by the inner name of a function expression", `const go = function inner(x) { if (x === "./lib/a") inner(${BX}); require(x); };\ngo("./lib/a");`, "x/evil.js"],
+  ["a spawn element held by a name, read from the package root", `const p = "x/" + process.argv[2]; require("child_process").spawnSync("node", [p])`, "x/evil.js"],
+  ["an exported function's own direct call", R + `export function go(x) { require(x) }\ngo(${BX})`, "x/evil.js"],
+];
+for (const [label, hook, changed] of fifth) {
+  test(`${label} holds the changed ${changed}`, () => expect(nestHolds(hook, changed)).toBe(true));
+}
+
+for (const [label, hook] of [
+  ["an execFile callback", `require("child_process").execFile("node", ["--version"], (err, stdout) => console.log(stdout))`],
+  ["an execFile callback held by a name", `const cb = (err, stdout) => console.log(stdout); require("child_process").execFile("node", ["--version"], cb)`],
+  ["a named tool run with a cwd option", `require("child_process").spawnSync("node-gyp", ["rebuild"], { cwd: __dirname })`],
+] as [string, string][]) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", hook, "x/evil.js"), nested("1.0.1", hook, "x/evil.js"))).toEqual([]);
+  });
+}
+
+test("2000 createRequire calls in a file of about 1 MB are read in bounded time", () => {
+  const code = CR + Array.from({ length: 2000 }, (_, i) => `const r${i} = createRequire(__filename);\n`).join("") + `const pad = "${"x".repeat(950_000)}";\nr7(${BX});\n`;
+  const t0 = performance.now();
+  holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"));
+  expect(performance.now() - t0).toBeLessThan(5000);
+});
+
+test("5000 nested calls in a file of about 1 MB are read in bounded time", () => {
+  const code = `${"f(".repeat(5000)}1${")".repeat(5000)};\nconst pad = "${"x".repeat(950_000)}";\nrequire(${BX});\n`;
+  const t0 = performance.now();
+  holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"));
+  expect(performance.now() - t0).toBeLessThan(5000);
+});
+
+// A loader handed on any way but an immediate call (the enumerated family of the fo16 probe, trimmed).
+const LOADER_VALUES: [string, string][] = [
+  ["require", "require"],
+  ["module.require.bind", "module.require.bind(module)"],
+  ["createRequire", `require("module").createRequire(__filename)`],
+];
+const HANDED: [string, (v: string) => string][] = [
+  ["an optional call", (v) => `const r = ${v}; r?.(${BX});`],
+  ["a parenthesized call", (v) => `const r = ${v}; (r)(${BX});`],
+  [".call", (v) => `const r = ${v}; r.call(null, ${BX});`],
+  [".apply", (v) => `const r = ${v}; r.apply(null, [${BX}]);`],
+  ["Reflect.apply", (v) => `const r = ${v}; Reflect.apply(r, null, [${BX}]);`],
+  ["a member held loader", (v) => `const L = {}; L.load = ${v}; L.load.call(null, ${BX});`],
+  ["a logical default", (v) => `const r = null || ${v}; r(${BX});`],
+  ["a member named import called directly", (v) => `const L = {}; L.import = ${v}; L.import(${BX});`],
+  ["an object literal member named import", (v) => `const L = { import: ${v} }; L.import(${BX});`],
+];
+for (const [lname, lv] of LOADER_VALUES) {
+  for (const [cname, f] of HANDED) {
+    test(`${lname} through ${cname} holds the changed x/evil.js`, () => expect(nestHolds(R + f(lv), "x/evil.js")).toBe(true));
+  }
+}
+
+for (const [label, hook] of [
+  ["a function that takes require as a parameter", `function wrap(require, exports, module) { return require("./lib/a"); }`],
+  ["typeof require", `if (typeof require !== "undefined") { require("./lib/a") }`],
+  ["require.main === module", `if (require.main === module) { require("./lib/a") }`],
+  ["require.cache", `delete require.cache[require.resolve("./lib/a")]; require("./lib/a")`],
+] as [string, string][]) {
+  test(`${label} does not hold an unrelated changed x/evil.js`, () => {
+    expect(holds(nested("1.0.0", hook, "x/evil.js"), nested("1.0.1", hook, "x/evil.js"))).toEqual([]);
+  });
+}
