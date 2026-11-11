@@ -416,3 +416,41 @@ for (const [label, pre] of [
 ] as const) {
   test(`${label} is not static (round 15, division)`, () => expect(held(pre)).toBe(true));
 }
+
+// Round 16: any gap (none, space, line break, block or line comment) between import/from and its string.
+const GAPS = ["", " ", "\n", "/*c*/", " /* c */ ", "// c\n"];
+const KEYWORDS: [string, (gap: string) => string][] = [
+  ["import", (g) => `import${g}"fs"`],
+  ["import { a } from", (g) => `import {a} from${g}"fs"`],
+  ["import {a}from", (g) => `import{a}from${g}"fs"`],
+  ["export * from", (g) => `export * from${g}"fs"`],
+  ["export {a} from", (g) => `export {a} from${g}"fs"`],
+  ["import p from", (g) => `import q from${g}"fs"`],
+];
+const FOLLOWS: [string, string][] = [
+  ["a bare quote regex", `\n${QX}\n`],
+  ["a call that holds the use", `\n(${Y})\n`],
+];
+for (const [kw, make] of KEYWORDS) for (const g of GAPS) for (const [fl, tail] of FOLLOWS) {
+  test(`${kw} with gap ${JSON.stringify(g)} then ${fl} is not static (round 16)`, () => expect(held(`import p from "node:process";\n${make(g)}${tail}`)).toBe(true));
+}
+for (const pre of [
+  'import{binding}from"node:process";binding("spawn_sync")\n',
+  'import p from"process";p.binding("spawn_sync")\n',
+  'import p from/* c */"process";p.binding("spawn_sync")\n',
+  'import p from /* c */ "node:process"; p.getBuiltinModule("v"+"m")\n',
+  'import/* c */p from"process";p.binding("spawn_sync")\n',
+  'import*as p from"process";p.binding("spawn_sync")\n',
+]) test(`a minified or commented process import is a process alias: ${JSON.stringify(pre.slice(0, 40))} (round 16)`, () => expect(held(pre)).toBe(true));
+test("a minified process import with plain reads stays static (round 16)", () => {
+  expect(held('import p from"node:process";exports.main=()=>p.cwd()\n')).toBe(false);
+  expect(held('import*as p from"process";exports.main=()=>p.platform\n')).toBe(false);
+});
+test("an import declaration is a statement: a / that starts the next line is a regex and the file stays static (round 16)", () => {
+  expect(held(`${A}import q from "fs"\n/x/.test(1); exports.main = () => p.cwd()\n`)).toBe(false);
+});
+test("a relative import written without spaces is followed to its file (round 16)", () => {
+  const pre = 'import{x}from"./helper.js";import v from"node:process";export const main=()=>v.exit(x)\n';
+  const rel = (ver: string, h: string) => release(ver, pre).set("preinstall/helper.js", enc(h));
+  expect(holds(rel("1.0.0", "export const x = 1\n"), rel("1.0.1", "export const x = 2\n"))).toContain("file preinstall/helper.js");
+});

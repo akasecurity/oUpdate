@@ -603,8 +603,7 @@ function decodeJsString(raw: string): string | undefined {
 }
 
 function followLoads(ctx: Ctx, key: string, text: string): void {
-  const re = /(?:\brequire|\bimport)\(\s*(['"])([^'"]+)\1\s*\)|\bfrom\s+(['"])([^'"]+)\3|\bimport\s+(['"])([^'"]+)\5/g;
-  for (const m of text.matchAll(re)) {
+  for (const m of text.matchAll(new RegExp(LITERAL_LOAD.source, "g"))) {
     if (ctx.hold) return;
     let spec = m[2] || m[4] || m[6] || "";
     if (spec.includes("\\")) {
@@ -671,14 +670,22 @@ function addBundled(ctx: Ctx, root: string): void {
 }
 
 // Literal loads the precise walk already follows, plus the modeled config require.
-const LITERAL_LOAD = /(?:\brequire|\bimport)\(\s*(['"])([^'"]+)\1\s*\)|\bfrom\s+(['"])([^'"]+)\3|\bimport\s+(['"])([^'"]+)\5/g;
+// Whitespace and comments between a keyword and its string: none at all is valid (from"x"), and a comment may stand there.
+const GAP = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n\r\u2028\u2029]*)`;
+const LITERAL_LOAD = new RegExp(
+  String.raw`(?:\brequire|\bimport)\(\s*(['"])([^'"]+)\1\s*\)|\bfrom${GAP}*(['"])([^'"]+)\3|\bimport${GAP}*(['"])([^'"]+)\5`,
+  "g",
+);
 // Anything still able to name a file. module.exports is removed first; it is the static CJS assignment.
 const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWorker\b|\bvm\b|\bchild_process\b|\bprocess\.binding\b|\bdlopen\b|\b(?:globalThis|global)\s*\[|\bconstructor\b|\bReflect\b|\bProxy\b/;
 // The plain reads of the process object a name for the process module may make. Any other use of such a name (a computed
 // member, binding, getBuiltinModule, an argument to a call) can reach a loader or a native module, so it is not static.
 const PROCESS_READ = "(?:env\\s*\\.\\s*[A-Za-z_$][\\w$]*|platform\\b|arch\\b|versions?\\b(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)?|argv\\b|cwd\\s*\\(\\s*\\)|exit\\s*\\(|exitCode\\b|std(?:out|err)\\s*\\.\\s*write\\s*\\()";
 // `const p = require("process")` or `import p from "node:process"`: the only loads of the process module that stay static.
-const PROCESS_ALIAS = /\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(?:node:)?process\2\s*\)|import\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s+(['"])(?:node:)?process\4)\s*;?/g;
+const PROCESS_ALIAS = new RegExp(
+  String.raw`\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(?:node:)?process\2\s*\)|import(?:${GAP}+|(?=\*))(?:\*${GAP}*as${GAP}+)?([A-Za-z_$][\w$]*)${GAP}+from${GAP}*(['"])(?:node:)?process\4)\s*;?`,
+  "g",
+);
 
 // A static file may require these. Any other bare builtin is unsafe, so the load stays in the text.
 const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer"]);
@@ -722,7 +729,7 @@ function stripLiteralLoad(raw: string): boolean {
 // One predicate for JS. A file that fails it widens by the shape of its computed loads.
 // A name for the process module is a whole statement: when the next token continues the expression (a member, a call,
 // a computed member, a ? or a template), the load is not a plain name and is left in the text.
-// The index of the first character after "i" that is not whitespace or a comment.
+// The index of the first character at or after "from" that is not whitespace or a comment.
 function skipTrivia(whole: string, from: number): number {
   let i = from;
   for (;;) {
@@ -738,17 +745,8 @@ function skipTrivia(whole: string, from: number): number {
 
 function stripProcessAliases(text: string, aliases: string[]): string {
   return text.replace(PROCESS_ALIAS, (m, a1, _q, a2, _q4, at: number, whole: string) => {
-    let i = at + m.length;
-    for (;;) {
-      while (i < whole.length && /\s/.test(whole[i]!)) i++;
-      if (whole.startsWith("<!--", i) || whole.startsWith("-->", i)) return m;
-      if (whole.startsWith("//", i)) {
-        while (i < whole.length && !/[\n\r\u2028\u2029]/.test(whole[i]!)) i++;
-      } else if (whole.startsWith("/*", i)) {
-        const end = whole.indexOf("*/", i + 2);
-        i = end < 0 ? whole.length : end + 2;
-      } else break;
-    }
+    const i = skipTrivia(whole, at + m.length);
+    if (whole.startsWith("<!--", i) || whole.startsWith("-->", i)) return m;
     if (i < whole.length && ".[(?`".includes(whole[i]!)) return m;
     aliases.push(String(a1 || a2));
     // An import declaration is a statement; a const statement without ; continues as an expression after its ) and is a
@@ -999,6 +997,7 @@ function provablyStatic(text: string): boolean {
     return removedText(declaration);
   });
   if (viaOther) return false;
+  // No space after this one on purpose: a property access can follow it (module.exports.in is a property).
   rest = rest.replace(/\bmodule\s*\.\s*exports\b/g, REMOVED);
   // Any other load of the process module (a bare require, a named import) is not a plain name for it.
   if (/(?:\brequire\s*\(|\bfrom\s+|\bimport\s+)\s*['"](?:node:)?process\b/.test(rest)) return false;
