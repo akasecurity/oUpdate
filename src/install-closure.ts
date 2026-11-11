@@ -4762,55 +4762,266 @@ function headUnresolved(cmd: string): boolean {
   return false;
 }
 
-// Commands that read or print and cannot run a package file named by an argument.
-const HARMLESS_STAGE = new Set(["echo", "printf", "true", "false", ":", "cat", "ls", "pwd", "date", "sleep", "wc", "grep", "head", "tail", "sort", "uniq", "tee", "cut", "tr"]);
+// Commands that read or print and cannot run a package file named by an argument. Only a bare name is the system tool: a path
+// word (`./tools/cat`) is a package file.
+const HARMLESS_STAGE = new Set(["echo", "printf", "true", "false", ":", "cat", "ls", "pwd", "date", "sleep", "wc", "grep", "head", "tail", "uniq", "tee", "cut", "tr", "[", "[[", "test", "exit", "return", "export", "unset", "read"]);
+// Commands that run a script, a program or the text on their standard input.
+const STAGE_RUNNER = /^(?:sh|bash|dash|zsh|ksh|source|\.|eval|node|nodejs|bun|deno|python[0-9.]*|py|perl|ruby|php)$/;
+const STAGE_PM = /^(?:npm|npx|yarn|pnpm)$/;
+const STAGE_PREFIX = /^(?:env|command|builtin|exec|nohup|time|nice|sudo|stdbuf)$/;
+const STAGE_KEYWORD = /^(?:\{|\}|!|if|then|elif|else|do|done|fi|while|until)$/;
 
-// A line the shell reader could not split (a pipe, a redirect, a subshell) that holds an expansion it could not resolve: the
-// stages are cut apart here at every separator, and a stage that holds the placeholder and is not a plain reader (`node $(...)`,
-// `sh $(...)`, an unresolved command word) may run any file of the package, so every file is read.
-let inGypCommand = 0;
-function unreadableUnresolved(ctx: Ctx, loose: string, orig: string): void {
-  if (inGypCommand > 0 || !loose.includes(UNRESOLVED)) return;
-  let quote: string | undefined;
+type StageWord = { t: string; sub: boolean; v: boolean }; // sub: a command substitution; v: a variable or arithmetic expansion
+
+// The commands of a line cut apart the way the shell reads them: quotes and backslashes tracked, each `$(...)` and backtick
+// body collected (and its place in the word marked), redirections and their operands left out. `unsure` is a quote or a
+// substitution that never closes.
+function shellStages(line: string): { stages: StageWord[][]; bodies: string[]; unsure: boolean } {
+  const stages: StageWord[][] = [];
+  const bodies: string[] = [];
+  let words: StageWord[] = [];
   let cur = "";
-  const stages: string[] = [];
-  for (const c of loose) {
-    if (quote) {
-      cur += c;
-      if (c === quote) quote = undefined;
+  let inWord = false;
+  let sub = false;
+  let v = false;
+  let skip = false; // the next word is a redirection operand
+  let unsure = false;
+  const endWord = (): void => {
+    if (!inWord) return;
+    if (skip) skip = false;
+    else words.push({ t: cur, sub, v });
+    cur = "";
+    inWord = false;
+    sub = false;
+    v = false;
+  };
+  const endStage = (): void => {
+    endWord();
+    if (words.length) stages.push(words);
+    words = [];
+  };
+  const take = (i: number, tick: boolean): number => {
+    const e = tick ? endTick(line, i) : endParen(line, i + 2);
+    if (e < 0) {
+      unsure = true;
+      return line.length;
+    }
+    bodies.push(tick ? line.slice(i + 1, e - 1) : line.slice(i + 2, e - 1));
+    sub = true;
+    inWord = true;
+    cur += UNRESOLVED;
+    return e;
+  };
+  const dollar = (i: number): number => {
+    // `$((..))` is arithmetic, `${..}` and `$name` are variables: not commands.
+    v = true;
+    inWord = true;
+    cur += UNRESOLVED;
+    if (line[i + 1] === "(" && line[i + 2] === "(") {
+      const e = endParen(line, i + 2);
+      if (e < 0) {
+        unsure = true;
+        return line.length;
+      }
+      bodies.push(line.slice(i + 3, e - 2));
+      return e;
+    }
+    if (line[i + 1] === "{") {
+      const e = endBrace(line, i + 2);
+      if (e < 0) {
+        unsure = true;
+        return line.length;
+      }
+      return e;
+    }
+    const m = /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/.exec(line.slice(i + 1));
+    return i + 1 + (m ? m[0].length : 0);
+  };
+  for (let i = 0; i < line.length; ) {
+    const c = line[i]!;
+    if (c === "\\") {
+      if (i + 1 >= line.length) unsure = true;
+      else {
+        cur += line[i + 1];
+        inWord = true;
+      }
+      i += 2;
       continue;
     }
-    if (c === "'" || c === '"') {
-      quote = c;
-      cur += c;
+    if (c === "'") {
+      const e = line.indexOf("'", i + 1);
+      inWord = true;
+      if (e < 0) {
+        unsure = true;
+        break;
+      }
+      cur += line.slice(i + 1, e);
+      i = e + 1;
       continue;
     }
-    if (/[|&;()<>\n`]/.test(c)) {
-      stages.push(cur);
-      cur = "";
+    if (c === '"') {
+      inWord = true;
+      let j = i + 1;
+      for (; j < line.length && line[j] !== '"'; ) {
+        const d = line[j]!;
+        if (d === "\\") {
+          cur += line[j + 1] ?? "";
+          j += 2;
+        } else if (d === "`") j = take(j, true);
+        else if (d === "$" && line[j + 1] === "(" && line[j + 2] !== "(") j = take(j, false);
+        else if (d === "$" && line[j + 1] !== undefined && /[A-Za-z_{(0-9@*#?$!-]/.test(line[j + 1]!)) j = dollar(j);
+        else {
+          cur += d;
+          j++;
+        }
+      }
+      if (j >= line.length) {
+        unsure = true;
+        break;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === "`") {
+      i = take(i, true);
+      continue;
+    }
+    if (c === "$" && line[i + 1] === "(" && line[i + 2] !== "(") {
+      i = take(i, false);
+      continue;
+    }
+    if (c === "$" && line[i + 1] !== undefined && /[A-Za-z_{(0-9@*#?$!-]/.test(line[i + 1]!)) {
+      i = dollar(i);
+      continue;
+    }
+    if (c === "<" && line[i + 1] === "(" || c === ">" && line[i + 1] === "(") {
+      // a process substitution: a word whose body is a command
+      const e = endParen(line, i + 2);
+      if (e < 0) {
+        unsure = true;
+        break;
+      }
+      bodies.push(line.slice(i + 2, e - 1));
+      cur += UNRESOLVED;
+      sub = true;
+      inWord = true;
+      i = e;
+      continue;
+    }
+    if (c === "<" || c === ">" || (c === "&" && line[i + 1] === ">")) {
+      if (inWord && /^\d+$/.test(cur) && !sub && !v) {
+        cur = "";
+        inWord = false; // the descriptor of `2>`
+      } else endWord();
+      let j = i;
+      while (j < line.length && /[<>&|]/.test(line[j]!)) j++;
+      skip = true; // the operand: a file, a descriptor or a here-string
+      i = j;
+      continue;
+    }
+    if (c === "|" || c === ";" || c === "\n" || c === "(" || c === ")" || (c === "&" && line[i + 1] !== ">")) {
+      endStage();
+      i++;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      endWord();
+      i++;
       continue;
     }
     cur += c;
+    inWord = true;
+    i++;
   }
-  stages.push(cur);
-  for (const stage of stages) {
-    if (!stage.includes(UNRESOLVED)) continue;
-    const words = stage.trim().split(/\s+/).filter((w) => w && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) && !/^\d*$/.test(w));
-    const head = words[0] ?? "";
-    if (head && !head.includes(UNRESOLVED) && HARMLESS_STAGE.has(binName(head))) continue;
-    // A stage that only assigns (`x=$(make -C sub) > log`) runs what its substitutions hold: `make` and `cd` keep their
-    // directory-scoped read (noteUnparsedMake), a plain reader needs nothing, any other command reads every file.
-    if (!head) {
-      const inner = substitutions(orig);
-      if (inner !== null && inner.every((b) => {
-        const w = b.trim().split(/\s+/).find((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) ?? "";
-        return /^(?:make|gmake|cd)$/.test(binName(w)) || HARMLESS_STAGE.has(binName(w));
-      })) continue;
+  endStage();
+  return { stages, bodies, unsure };
+}
+
+// True when a stage of the line (or of a substitution in it) may run a file of the package that the text does not name.
+function stageHazard(line: string, depth: number): { hit: boolean; inert: boolean } {
+  const { stages, bodies, unsure } = shellStages(line);
+  if (unsure) return { hit: true, inert: true };
+  let hit = false;
+  let inert = false;
+  const widen = (wide: boolean): void => {
+    hit = true;
+    if (wide) inert = true;
+  };
+  const unresolved = stages.some((st) => st.some((w) => w.sub || w.v));
+  stages.forEach((words, at) => {
+    let h = 0;
+    while (h < words.length) {
+      const w = words[h]!;
+      if (ASSIGN.test(w.t) || STAGE_KEYWORD.test(w.t)) h++;
+      else if (!w.sub && !w.v && STAGE_PREFIX.test(w.t)) {
+        h++;
+        while (h < words.length && (words[h]!.t.startsWith("-") || ASSIGN.test(words[h]!.t))) h++;
+      } else break;
     }
-    ctx.widenInert = true;
-    widenAll(ctx);
-    return;
+    const head = words[h];
+    if (!head) return; // only assignments: what their substitutions hold is read as bodies
+    if (head.sub || head.v) {
+      // An unresolved command word may be any runner; a path word keeps the directory-scoped read.
+      widen(!head.t.includes("/"));
+      return;
+    }
+    if (!head.t.includes("/") && HARMLESS_STAGE.has(head.t)) return;
+    const rest = words.slice(h + 1);
+    const name = binName(head.t);
+    if (STAGE_RUNNER.test(name)) {
+      const first = rest.find((w) => !w.t.startsWith("-"));
+      if (!first) {
+        if (at > 0 && unresolved) widen(true); // no script: it reads its standard input, which an earlier stage feeds
+      } else if (first.sub || first.v || rest.some((w) => w.sub)) widen(true);
+      return;
+    }
+    if (STAGE_PM.test(name)) {
+      if (rest.filter((w) => !w.t.startsWith("-")).slice(0, 2).some((w) => w.sub || w.v) || rest.some((w) => w.sub)) widen(true);
+      return;
+    }
+    if (rest.some((w) => w.sub)) widen(true);
+  });
+  if (depth < 6) {
+    for (const body of bodies) {
+      const r = stageHazard(body, depth + 1);
+      if (r.hit) widen(r.inert);
+    }
+  } else if (bodies.length) widen(true);
+  return { hit, inert };
+}
+
+// The text of the gyp command being read: a gyp `<!(...)` command runs at build time with its own `$1`-style words, so the rule
+// below is not applied to that one command (a script it reaches is read as any hook line is).
+let gypBodyText: string | undefined;
+
+// A line the shell reader could not split (a pipe, a redirect, a subshell) that holds an expansion it could not resolve: each
+// stage and each substitution body is read as a command, and a stage that runs a command or file named by the expansion, or
+// reads its standard input, may run any file of the package, so every file is read.
+function unreadableUnresolved(ctx: Ctx, loose: string, orig: string): void {
+  if (!loose.includes(UNRESOLVED) || orig.trim() === gypBodyText) return;
+  const r = stageHazard(orig, 0);
+  if (!r.hit) return;
+  if (r.inert) ctx.widenInert = true;
+  widenAll(ctx);
+}
+
+// A line that did split into commands still runs whatever its substitutions hold (`: $(node $(cat n))`, `x=$(sh $(cat n))`): each
+// substitution body is read as a command line of its own.
+function substBodiesHazard(ctx: Ctx, orig: string): void {
+  if (orig.trim() === gypBodyText || (!orig.includes("$(") && !orig.includes("`"))) return;
+  const { bodies, unsure } = shellStages(orig);
+  let hit = unsure;
+  let inert = unsure;
+  for (const b of bodies) {
+    const r = stageHazard(b, 1);
+    if (r.hit) {
+      hit = true;
+      inert ||= r.inert;
+    }
   }
+  if (!hit) return;
+  if (inert) ctx.widenInert = true;
+  widenAll(ctx);
 }
 
 function readParts(ctx: Ctx, body: string): void {
@@ -4843,6 +5054,7 @@ function readParts(ctx: Ctx, body: string): void {
         } else dispatch(ctx, cmd);
       }
       ctx.depth--;
+      substBodiesHazard(ctx, line);
     } else if (loose !== null) unreadableUnresolved(ctx, loose, line);
     if (ctx.hold) return;
     if (lines.length > 1) noteUnreadable(ctx, line); // a body of one line is noted whole by the caller
@@ -7114,12 +7326,14 @@ function scanGyp(ctx: Ctx, logical: string, seen: Set<string>): void {
   const saved = ctx.fromGyp;
   ctx.fromGyp = true;
   const gypVars = gypStringVars(text);
-  // A gyp `<!(...)` command runs at build time, with its own `$1`-style words: the unresolved-stage rule below is for hooks.
-  inGypCommand++;
   try {
-    for (const cmd of gypCommands(text)) runBody(ctx, substGypVars(cmd, gypVars));
+    for (const cmd of gypCommands(text)) {
+      const body = substGypVars(cmd, gypVars);
+      gypBodyText = body.trim();
+      runBody(ctx, body);
+    }
   } finally {
-    inGypCommand--;
+    gypBodyText = undefined;
   }
   const includes = takeList(text, "includes");
   if (includes === null) fail(ctx, "unresolved: gyp");
