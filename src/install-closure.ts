@@ -760,7 +760,12 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
     `['"\`\\\\\\u0080-\\uffff(){}\\[\\]]|(?<![\\w$])(?:${[...DANGER_WORDS, ...watch].map((w) => w.replace(/\$/g, "\\$&")).join("|")})(?![\\w$])`,
   );
   const eol = (c: string | undefined) => c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029";
-  const regexWord = /(?:^|[^\w$.])(?:return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await|instanceof)$/;
+  // A keyword opens a regular expression, unless a . or ?. (with any space or comment between) makes it a property name.
+  const regexWord = (code: string): boolean => {
+    const t = code.trimEnd();
+    const m = /(?:^|[^\w$])(return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await|instanceof)$/.exec(t);
+    return m !== null && !t.slice(0, t.length - m[1]!.length).trimEnd().endsWith(".");
+  };
   const template = (): boolean => {
     for (; i < n; i++) {
       const c = text[i]!;
@@ -819,7 +824,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       if (e < 0) return undefined;
       out += /[\n\r\u2028\u2029]/.test(text.slice(i, e)) ? "\n" : " ";
       i = e + 2;
-    } else if (c === "/" && ((regexAfter.has(prev) && !/(?:\+\+|--)$/.test(out.trimEnd())) || regexWord.test(out.trimEnd()) || ambiguousRegex(i, prev))) {
+    } else if (c === "/" && ((regexAfter.has(prev) && !/(?:\+\+|--)$/.test(out.trimEnd())) || regexWord(out) || ambiguousRegex(i, prev))) {
       let cls = false;
       i++;
       for (; i < n && !eol(text[i]); i++) {
@@ -835,7 +840,7 @@ function codeOnly(text: string, watch: string[] = []): string | undefined {
       prev = "r";
     } else {
       if (c === "<" && text.startsWith("<!--", i)) return undefined;
-      if (c === "-" && text.startsWith("-->", i) && /(?:^|[\n\r\u2028\u2029])[ \t]*$/.test(out)) return undefined;
+      if (c === "-" && text.startsWith("-->", i) && /(?:^|[\n\r\u2028\u2029])[^\S\n\r\u2028\u2029]*$/.test(out)) return undefined;
       if (c === "{") braces.push(false);
       if (c === "}") {
         const tpl = braces.pop();

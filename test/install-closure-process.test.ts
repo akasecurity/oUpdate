@@ -181,3 +181,20 @@ test("benign regexes, divisions and comments stay static (round 5)", () => {
   expect(held(`${A}if (1) /a/.test("");\n{} /a/.test("");\nconst n = p.cwd().length++ / 2;\nconst t = \`\${1 / 2}\`;\nlet x = 3; x-- / 2;\n// <!-- -->\nexports.main = () => n + t\n`)).toBe(false);
   expect(held(`#!/usr/bin/env node\n${A}exports.main = () => p.cwd()\n`)).toBe(false);
 });
+
+// Round 6: a keyword after a property dot is a name, and any JS whitespace may precede a --> comment.
+const Y = 'p.getBuiltinModule("v"+"m").runInThisContext("console.log(42)")';
+for (const [label, pre] of [
+  ["a space after the dot before return", `${A}const obj = {return: 1}; obj. return / ${Y} / 1;\n`],
+  ["a newline after the dot before return", `${A}const obj = {return: 1}; obj.\nreturn / ${Y} / 1;\n`],
+  ["an optional chain with a space before typeof", `${A}const obj = {typeof: 1}; obj?. typeof / ${Y} / 1;\n`],
+  ["a block comment between the dot and the keyword", `${A}const obj = {in: 1}; obj./* c */in / ${Y} / 1;\n`],
+  ["a vertical tab before a --> comment", `${A}const a=1;\n\v--> \`\n${Y}\n// \`\n`],
+  ["a form feed before a --> comment", `${A}const a=1;\n\f--> \`\n${Y}\n// \`\n`],
+  ["a vertical tab and spaces before a --> comment", `${A}const a=1;\n \v \f--> \`\n${Y}\n// \`\n`],
+] as const) {
+  test(`${label} is not static (round 6)`, () => expect(held(pre)).toBe(true));
+}
+test("a keyword that opens a regex after a dot-free position stays a regex (round 6)", () => {
+  expect(held(`${A}const n = p.cwd().length; function f() { return /a/.test("x") }\nexports.main = () => f() + n\n`)).toBe(false);
+});
