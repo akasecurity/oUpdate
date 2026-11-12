@@ -34,6 +34,10 @@ const loaders: [string, string][] = [
   ["node:test default export .run", `const test = require("node:test"); test.run({ files: [${J}] })`],
   ["cluster settings object with a built exec", `const c = require("cluster"); c.settings = { exec: ${J} }; c.fork()`],
   ["cluster named through a variable", `const n = "cluster"; const c = require(n); c.setupPrimary({ exec: ${J} }); c.fork()`],
+  ["cluster settings destructured, exec assigned bare", `const { settings } = require("cluster"); settings.exec = ${J}; require("cluster").fork()`],
+  ["cluster settings through a with block", `with (require("cluster")) { settings.exec = ${J}; fork() }`],
+  ["cluster settings assigned on the load itself", `require("cluster").settings = { exec: ${J} }; require("cluster").fork()`],
+  ["cluster settings exec through a bracket key", `const { settings } = require("cluster"); settings["exec"] = ${J}; require("cluster").fork()`],
   ["cluster.setupPrimary with a built exec", `const c = require("cluster"); c.setupPrimary({ exec: ${J} }); c.fork()`],
 ];
 for (const [name, hook] of loaders) {
@@ -60,6 +64,8 @@ const rooted: [string, (t: string) => string][] = [
   ["node:test run through an alias", (t) => `import { run as r } from "node:test"; r({ files: [${t}] })`],
   ["node:test default export .run", (t) => `const test = require("node:test"); test.run({ files: [${t}] })`],
   ["cluster settings object with a built exec", (t) => `const c = require("cluster"); c.settings = { exec: ${t} }; c.fork()`],
+  ["cluster settings destructured, exec assigned bare", (t) => `const { settings } = require("cluster"); settings.exec = ${t}; require("cluster").fork()`],
+  ["cluster settings through a with block", (t) => `with (require("cluster")) { settings.exec = ${t}; fork() }`],
   ["cluster named through a variable", (t) => `const n = "cluster"; const c = require(n); c.setupPrimary({ exec: ${t} }); c.fork()`],
 ];
 for (const [name, code] of rooted) {
@@ -101,6 +107,50 @@ for (const [name, hook] of benign) {
 for (const stmt of [`require("_stream_wrap")`, `require("node:_stream_wrap")`, `import "_stream_wrap"`, `import { a } from "node:_stream_wrap"`]) {
   test(`${stmt} is not static (it reaches net)`, () => {
     expect(provablyStatic(`${stmt}\nexports.main = () => 1\n`)).toBe(false);
+  });
+}
+
+// Member words that are not a load of a file: a string that holds a bracket key, a read of a member, a receiver that is not the builtin.
+const benign2: [string, string][] = [
+  ["a bracket key inside a string beside cluster", `const c = require("cluster"); console.log('x["settings"]')`],
+  ["a bracket key inside a string beside node:test", `require("node:test"); console.log('x["run"]')`],
+  ["a read of a member named run", `const t = require("node:test"); const o = { run: 42 }; console.log(o.run)`],
+  ["a read of a member named register", `require("cluster"); const o = { register: 1 }; console.log(o.register)`],
+  ["a settings assignment in a class beside a module string", `class Store { constructor() { this.settings = {} } }; if (pkg.type === "module") console.log(new Store())`],
+  ["service worker register with a module type", `navigator.serviceWorker.register("/sw.js", { type: "module" })`],
+  ["a register call on another package beside a module string", `require("ts-node").register(); const t = { type: "module" }`],
+  ["a plugin register with a module string", `fastify.register(plugin); const t = "module"`],
+  ["a method named register beside a module string", `const o = { register(x) { return x } }; o.register(1); const t = "module"`],
+  ["a run of another receiver beside node:test", `require("node:test"); db.prepare("select 1").run()`],
+  ["a run of a package receiver beside node:test", `const db = require("better-sqlite3"); require("node:test"); db.run("select 1")`],
+  ["a settings assignment on another receiver beside cluster", `const c = require("cluster"); const o = {}; o.settings = 1; console.log(c.isPrimary)`],
+];
+for (const [name, hook] of benign2) {
+  test(`a benign hook is not widened: ${name}`, () => {
+    expect(held(hook)).toBe(false);
+    const t = classifyJs("h.js", `${hook}\n`);
+    expect([t.pkg, t.tests, t.flows]).toEqual([false, false, false]);
+  });
+}
+
+// The trigger reads the text once: a long benign text must not cost more than a small multiple of reading it.
+const timed = (src: string) => {
+  const start = performance.now();
+  classifyJs("h.js", src);
+  return performance.now() - start;
+};
+const shapes: [string, (n: number) => string][] = [
+  ["braces in one string beside node:test", (n) => `const t = require("node:test"); console.log("${"{".repeat(n)}")\n`],
+  ["nested open braces with run beside node:test", (n) => `require("node:test"); ${"{ run; ".repeat(n / 6)}${"}".repeat(n / 6)}\n`],
+  ["brackets in a string beside cluster", (n) => `const c = require("cluster"); console.log("${'["'.repeat(n / 2)}")\n`],
+  ["many bound names beside module", (n) => `const a = require("module");\n${"const x = require(n);\n".repeat(n / 22)}`],
+];
+for (const [name, make] of shapes) {
+  test(`reading a long text stays linear: ${name}`, () => {
+    timed(make(1 << 16));
+    const small = Math.max(timed(make(1 << 16)), 5);
+    const big = timed(make(1 << 20));
+    expect(big).toBeLessThan(small * 16 * 4 + 400);
   });
 }
 
