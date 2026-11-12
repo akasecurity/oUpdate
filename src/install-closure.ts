@@ -1041,15 +1041,22 @@ function loadsFileByBuiltin(text: string, blank: string): boolean {
   // The load of a module that is not one plain string (a name built from pieces, held by a variable, or spelled with an escape) could be vm: it counts as a vm load.
   const computedLoad = /\b(?:require|import)\s*\((?!\s*(?:"[^"\\\n]*"|'[^'\\\n]*'|`[^`\\$]*`)\s*\))|\bgetBuiltinModule\s*\((?!\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\))/.test(text);
   // vm named as a string anywhere (an import specifier, an argument to any call such as a createRequire result) counts as loaded: whatever loads it runs the strings given to it.
-  // A vector element that makes a child node run a string (-e, --eval, -p, --print), and a data: import, run a string as code.
+  // A vector element that makes a child node run a string (-e, --eval, -p, --print), and a data: import, run a string as code, and any string of the file may be the one: the file keeps its strings as code.
+  // The one exception is a string that is provably data: the whole and only argument of a console call (console.log("module.register is deprecated")), which prints it and runs nothing.
+  // Those strings are blanked (same length) in the text read as code, unless the file rebinds console or hands it on. This is how another program's -p (mkdir -p, cp -p, git log -p) beside a message
+  // no longer holds the file.
   const stringRunsAsCode = /["'`](?:-e|--eval|-p|--print)["'`]|\bimport\s*\(\s*["'`]data:/.test(text);
+  let read = text;
+  if (stringRunsAsCode && !/\bconsole\s*(?:(?:\.\s*\w+|\[[^\]]*\])\s*=(?!=)|=(?!=))|=\s*console\b|[(,]\s*console\s*[,)]|\.\.\.\s*console\b|\{[^{}]*\}\s*=\s*console\b/.test(text)) {
+    read = text.replace(/(\bconsole\s*\.\s*(?:log|info|warn|error|debug)\s*\(\s*(["']))((?:(?!\2)[^\\\n]|\\.)*)(\2\s*\))/g, (_all, head: string, _q: string, lit: string, tail: string) => `${head}${" ".repeat(lit.length)}${tail}`);
+  }
   const vmLoaded = computedLoad || /["'`](?:node:)?vm["'`]/.test(text);
   // A call on a constructor member (Function reached as (function(){}).constructor(...)) runs a string as code too.
-  const code = vmLoaded || /\b(?:eval|Function|runInNewContext|runInThisContext|runInContext|compileFunction)\s*\(|\bnew\s+(?:vm\s*\.\s*)?Script\s*\(|(?:\.|\])\s*constructor\s*\(/.test(blank) || stringRunsAsCode ? text : blank;
+  const code = vmLoaded || /\b(?:eval|Function|runInNewContext|runInThisContext|runInContext|compileFunction)\s*\(|\bnew\s+(?:vm\s*\.\s*)?Script\s*\(|(?:\.|\])\s*constructor\s*\(/.test(blank) || stringRunsAsCode ? read : blank;
   // A bracket key counts only where the bracket itself is code, so the same text inside a string is not a use. The string spans come from reading the text again.
   const spans: SpanNote[] = [];
   const again = codeOnly(text, [], true, spans);
-  const stringsKnown = again === text && code !== text;
+  const stringsKnown = again === text && code !== text && !stringRunsAsCode;
   const inString = (i: number): boolean => {
     if (!stringsKnown) return false;
     let lo = 0;
@@ -1121,7 +1128,16 @@ function loadsFileByBuiltin(text: string, blank: string): boolean {
   };
   // A name bound to module, module.constructor, require.main or process.mainModule (const M = module.constructor): its register and _load are the loader.
   const selfNames = new Set<string>();
-  for (const m of code.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:\(\s*0\s*,\s*)?(?:module|require\s*\.\s*main|process\s*\.\s*mainModule)(?=\s*(?:[;,)\n]|$|\.\s*constructor\b(?!\s*\.)))/g)) selfNames.add(m[1] ?? "");
+  const selfTail = /(?:[;,)]|\.\s*constructor\b(?!\s*\.))/y;
+  const selfData = /\.\s*(?:exports|prototype|constructor\s*\.\s*prototype)\b/y;
+  for (const m of code.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:\(\s*0\s*,\s*)?(?:module|require\s*\.\s*main|process\s*\.\s*mainModule)(?=(\s*))\2/g)) {
+    // The whole run of blanks after the name is one atomic match (the lookahead is not retried): a line break in it ends the statement unless the run is followed by .exports, .prototype or
+    // .constructor.prototype, so module\n.exports is no alias, while module\n.constructor and every other continuation stay one, as before.
+    const end = (m.index ?? 0) + m[0].length;
+    selfTail.lastIndex = end;
+    selfData.lastIndex = end;
+    if (end === code.length || selfTail.test(code) || ((m[2] ?? "").includes("\n") && !selfData.test(code))) selfNames.add(m[1] ?? "");
+  }
   if (selfNames.size && (viaReceiver(selfNames, String.raw`(?:register|_load)\b`, CALL) || handedOff(selfNames, String.raw`(?:register|_load)`))) return true;
   if (named("cluster")) {
     const r = receivers("cluster");

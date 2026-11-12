@@ -644,3 +644,165 @@ test("a long TS entry is read in linear time, backtick-regex input included", ()
     expect(big).toBeLessThan(small * 60 + 1000);
   }
 });
+
+// Round 9: a file with a -e, -p, --eval or --print element keeps its strings as code, except a console message (console.log("module.register is deprecated")), which is data.
+// Any string of a file with a flag element may be the code that runs, so only the whole argument of a console call is left out of the reading. A computed path (no complete filename literal) so that only the loader rules can hold these.
+const PRE = `const { execFileSync, spawnSync } = require("child_process"); `;
+const PATH_JS = `process.cwd()+'/lib/'+'evil'+'.js'`;
+const REG_MJS = `module.constructor.register(require('url').pathToFileURL(process.cwd()+'/lib/'+'evil'+'.mjs').href)`;
+const LOAD_JS = `require('module')._load(${PATH_JS})`;
+// Held by the builtin rules alone: no _load chain and no computed path in the text for the older rules to hold.
+const REG_P = `module.constructor.register(p)`;
+const round9Benign: [string, string][] = [
+  ["mkdir -p beside a log string naming module.register", `const { execFileSync } = require("child_process"); execFileSync("mkdir", ["-p", "build"]); console.log("module.register is not used here")`],
+  ["mkdir -p beside a module load and a deprecation message", `const m = require("module"); execFileSync("mkdir", ["-p", "out"]); console.warn("m.register is deprecated")`],
+  ["cp -p beside a message", `const { execFileSync } = require("child_process"); execFileSync("cp", ["-p", "a", "b"]); console.log("module.register is internal")`],
+  ["git log -p beside a message", `const { execFileSync } = require("child_process"); execFileSync("git", ["log", "-p", "HEAD"]); console.log("constructor.register")`],
+  ["grep -e beside a message", `const { execFileSync } = require("child_process"); execFileSync("grep", ["-e", "x", "f"]); console.log("module.register")`],
+  ["a flag name in an array that is not given to a call, beside a console message", `require("cluster"); const flags = ["--print"]; console.log("module.register")`],
+  ["a data: import of plain text beside a message", `import("data:text/javascript,export default 1"); console.log("module.register is internal")`],
+  ["module on its own line before .exports", `const api = module\n  .exports;\napi.register = (server) => {};`],
+  ["module on its own line before .exports after many blank lines", `const api = module\n\n\n  \n.exports;\napi.register = (server) => {};`],
+  ["module.constructor.prototype across lines", `const m = module\n  .constructor\n  .prototype;\nm.register = () => 1;`],
+  // Known limits, held on neither this rule nor the earlier ones, or lost to the static list (also on main).
+  ["a name bound to module || x", `const m = module || x; m.register(${J})`],
+  ["a builtin stream name beside a message about _load", `import "node:_stream_duplex"; console.log("module._load is internal")`],
+];
+for (const [name, hook] of round9Benign) {
+  test(`round 9, not held: ${name}`, () => {
+    expect(held(hook)).toBe(false);
+  });
+}
+
+// Accepted cost, held by the new bare-receiver rule only: a parameter named constructor.
+test("round 9, accepted cost, held: a parameter named constructor with a register method", () => {
+  expect(held(`function f(constructor) { return constructor.register(1) } f({ register(x) { return x } })`)).toBe(true);
+});
+// Known limit (also on main): Function reached through a constructor call with the loader passed as an argument.
+test("round 9, not held: Function built from a string that loads through a passed module.constructor", () => {
+  expect(held(`(function(){}).constructor("M","p","return M._load(p)")(module.constructor, ${J})`)).toBe(false);
+});
+
+// Held, as on main: the strings of a file with a flag element are code, whatever spelling runs them.
+const spawnNode = (args: string) => `require("child_process").spawnSync(process.execPath, ${args});`;
+const round9Held: [string, string][] = [
+  ["a loader in -e beside mkdir -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); ${spawnNode(`["-e", "${REG_P}"]`)}`],
+  ["a loader in -e beside mkdir -p, a computed path", `${PRE}execFileSync("mkdir", ["-p", "build"]); ${spawnNode(`["-e", "${LOAD_JS}"]`)}`],
+  ["a register in -e beside git log -p", `${PRE}execFileSync("git", ["log", "-p", "HEAD"]); ${spawnNode(`["-e", "${REG_MJS}"]`)}`],
+  ["a loader in --print", spawnNode(`["--print", "${REG_P}"]`)],
+  ["a loader in -p after a plain flag", spawnNode(`["-p", "1", "-p", "${REG_P}"]`)],
+  ["a bracket key in -e", spawnNode(`["-e", "module.constructor['register'](p)"]`)],
+  ["code held in a variable after -e", `const code = "module.constructor.register(require('url').pathToFileURL(" + "process.cwd()+'/lib/'+'evil'+'.mjs').href)"; ${spawnNode(`["-e", code]`)}`],
+  ["code held in a variable, a name as the loader", `const src = "module.constructor._load(" + "${PATH_JS})"; ${spawnNode(`["-e", src]`)}`],
+  ["code built by concatenation after -e", spawnNode(`["-e", "1;" + "${REG_MJS}"]`)],
+  ["code built by concatenation in the middle", spawnNode(`["-e", "1;module.constructor." + "register(require('url').pathToFileURL(process.cwd()+'/lib/'+'evil'+'.mjs').href)"]`)],
+  ["a flag held in a variable", `const F = "-e"; ${spawnNode(`[F, "${REG_MJS}"]`)}`],
+  ["a flag array joined by concat", spawnNode(`["-e"].concat(["${REG_MJS}"])`)],
+  ["a flag array spread", `const a = ["-e"], b = ["${REG_MJS}"]; ${spawnNode(`[...a, ...b]`)}`],
+  ["a comment between the flag and the code", spawnNode(`["-e", /* run */ "${REG_MJS}"]`)],
+  ["a line comment between the flag and the code", spawnNode(`["-e", // run\n"${REG_MJS}"]`)],
+  ["--print then -e then code", `const code = "${REG_MJS}"; ${spawnNode(`["--print", "-e", code]`)}`],
+  ["a backslash line continuation in the code", spawnNode(`["-e", "1;\\\n${REG_MJS}"]`)],
+  ["a template with a nested backtick", spawnNode(`["-e", \`\${\`x\`};${REG_MJS}\`]`)],
+  ["a template with a substitution", `const x = 1; ${spawnNode(`["-e", \`\${x};${REG_MJS}\`]`)}`],
+  ["a flag at the end of an array then the code", `const a = ["-e"]; a.push("${REG_MJS}"); ${spawnNode(`a`)}`],
+  ["a data: import with an inner double quote", `import('data:text/javascript,import M from "node:module";M["register"](require("url").pathToFileURL(process.cwd()+"/lib/"+"evil"+".mjs").href)');`],
+  ["a data: import with an inner single quote", `import("data:text/javascript,import M from 'node:module';M.register(new URL(process.cwd()+'/lib/'+'evil'+'.mjs', 'file:').href)");`],
+  ["a data: import built by concatenation", `import("data:text/javascript," + "import M from 'node:module';M.register(process.cwd()+'/lib/'+'evil'+'.mjs')");`],
+  ["a bound this on .constructor.register", `class X { f() { this .constructor.register("file://" + __dirname + "/lib/" + "evil" + ".mjs") } } X.prototype.f.call(module);`],
+  ["a line break before .constructor.register on a bound this", `class X { f() { this\n.constructor.register("file://" + __dirname + "/lib/" + "evil" + ".mjs") } } X.prototype.f.call(module);`],
+  ["a parenthesized this", `class X { f() { (this).constructor.register("file://" + __dirname + "/lib/" + "evil" + ".mjs") } } X.prototype.f.call(module);`],
+  ["module || this", `class X { f() { (module || this).constructor.register("file://" + __dirname + "/lib/" + "evil" + ".mjs") } } new X().f();`],
+  ["a comma expression ending in this", `class X { f() { (0, this).constructor.register("file://" + __dirname + "/lib/" + "evil" + ".mjs") } } X.prototype.f.call(module);`],
+  ["a call receiver around this", `const foo = (x) => x; class X { f() { foo(this).constructor.register("file://" + __dirname + "/lib/" + "evil" + ".mjs") } } X.prototype.f.call(module);`],
+  ["this with a dollar before constructor.register", `class A { go() { return $this.constructor.register(${JM}) } }`],
+  ["-pe with a loader", spawnNode(`["-pe", "${LOAD_JS}"]`)],
+  ["--eval= with a loader", spawnNode(`["--eval=${LOAD_JS}"]`)],
+  ["a shell string with node -e and a loader", `require("child_process").execSync("node -e \\"${LOAD_JS}\\"");`],
+  ["a worker with eval and a loader", `new (require("worker_threads").Worker)("${LOAD_JS}", { eval: true });`],
+  ["a worker with eval beside mkdir -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); new (require("worker_threads").Worker)("${LOAD_JS}", { eval: true });`],
+  ["a bracket _load on a name bound in an -e string", spawnNode(`["-e", 'const M = require("module"); M["_load"](${PATH_JS})']`)],
+  ["Reflect.get of _load in an -e string", spawnNode(`["-e", 'const M = require("module"); Reflect.get(M, "_load")(${PATH_JS})']`)],
+  ["a cluster settings exec key in an -e string", spawnNode(`["-e", 'const c = require("cluster"); c["settings"]["exec"] = ${PATH_JS}; c.fork()']`)],
+  ["a cluster settings exec key in a -pe string", spawnNode(`["-pe", "require('cluster')['settings']['exec'] = ${PATH_JS}"]`)],
+  ["a literal module load in a string beside cluster", `require("cluster"); log('see require("module")._load(${PATH_JS})')`],
+  ["a settings exec key named in a string beside cluster", `require("cluster"); console.log('settings["exec"] must be set')`],
+  ["a flag name in an array beside a log string naming module.register, and a bare log call", `require("cluster"); const flags = ["--print"]; log("module.register")`],
+  ["a string handed to a user function beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); run("${REG_P}");`],
+  ["a string held in a name beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); const s = "${REG_P}"; run(s);`],
+  ["an indirect eval beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); (0, eval)("${REG_P}");`],
+  ["a timer code string beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); setTimeout("${REG_P}", 0);`],
+  ["a data: string given to --import beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); spawnSync(process.execPath, ["--import", "data:text/javascript,${REG_P}"]);`],
+  ["a worker with eval set through a name beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); const o = {}; o.eval = true; new (require("worker_threads").Worker)("${REG_P}", o);`],
+  ["a console call with more than the one string beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); console.log("${REG_P}", 1);`],
+  ["a console call whose string is joined beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); console.log("${REG_P}" + x);`],
+  ["a console call after console is rebound beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); console.log = eval; console.log("${REG_P}");`],
+  ["a console call after console is handed on beside a plain -p", `${PRE}execFileSync("mkdir", ["-p", "build"]); f(console); console.log("${REG_P}");`],
+  ["this and a line break before constructor.register", `class A { static register(x) { return x } go() { return this\n  .constructor\n  .register(1) } }`],
+  ["this and a space before constructor.register", `class A { static register(x) { return x } go() { return this .constructor.register(1) } }`],
+];
+for (const [name, hook] of round9Held) {
+  test(`round 9, held: ${name}`, () => {
+    expect(held(hook)).toBe(true);
+  });
+}
+
+// A string is left out of the reading only as the whole argument of a console call; the same string anywhere else, or in a flag, is code.
+test("round 9, only a console message is data: the same string in a flag is code", () => {
+  const ctor = REG_P;
+  expect(held(`${PRE}execFileSync("mkdir", ["-p", "build"]); console.log("${ctor}")`)).toBe(false);
+  expect(held(`${PRE}execFileSync("mkdir", ["-p", "build"]); ${spawnNode(`["-e", "${ctor}"]`)}`)).toBe(true);
+});
+
+// A line-break run before a dot after a bound module name was read once per line break: the cost must stay linear in the run. A check on timings must itself fail on a quadratic read.
+const MB = 1 << 20;
+const floorMs = (n: number) => Math.max(1, n / MB);
+// Sizes double. Each time counts at least a floor that grows with the size (1 ms per MB), so a small reading near the timer's noise does not make a ratio. A linear read doubles from one size
+// to the next (a ratio near 2) and has a slope near 1; a quadratic read quadruples. The ratio bound leaves room for noise and sits well below 4.
+const readsQuadratic = (sizes: number[], times: number[]): boolean => {
+  const te = times.map((t, i) => Math.max(t, floorMs(sizes[i] ?? 0)));
+  for (let i = 1; i < te.length; i++) if ((te[i] ?? 0) > (te[i - 1] ?? 0) * 3.2) return true;
+  const xs = sizes.map((n) => Math.log(n));
+  const ys = te.map((t) => Math.log(t));
+  const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < xs.length; i++) {
+    num += ((xs[i] ?? 0) - mx) * ((ys[i] ?? 0) - my);
+    den += ((xs[i] ?? 0) - mx) ** 2;
+  }
+  return num / den > 1.5;
+};
+const lineSizes = [0.125, 0.25, 0.5, 1, 2, 4, 8].map((m) => Math.round(m * MB));
+test("the timing check fails on a synthetic quadratic and passes on a linear read", () => {
+  for (const c of [0.3, 1, 30, 1000]) expect(readsQuadratic(lineSizes, lineSizes.map((n) => c * (n / MB) ** 2))).toBe(true);
+  for (const c of [0.5, 3, 40]) expect(readsQuadratic(lineSizes, lineSizes.map((n) => c * (n / MB)))).toBe(false);
+  // A linear read with a fixed cost and a wobble of +-30% still passes.
+  const wobble = [1.2, 0.8, 1.1, 0.9, 1.3, 0.75, 1];
+  expect(readsQuadratic(lineSizes, lineSizes.map((n, i) => (2 + 6 * (n / MB)) * (wobble[i] ?? 1)))).toBe(false);
+  // The old per-line-break retry: 54 ms for 16 K breaks against 3 ms, and over a second at 0.25 MB.
+  expect(readsQuadratic(lineSizes, lineSizes.map((n) => (n / MB) ** 2 * 4000))).toBe(true);
+});
+const medianOf = (make: () => string, runs: number) => {
+  const xs: number[] = [];
+  for (let i = 0; i < runs; i++) {
+    const src = make();
+    const start = performance.now();
+    classifyJs("h.js", src);
+    xs.push(performance.now() - start);
+  }
+  return xs.sort((a, b) => a - b)[runs >> 1] ?? 0;
+};
+const lineShapes: [string, (n: number) => string][] = [
+  ["line breaks between a bound module name and .exports", (n) => `const m = module${"\n".repeat(n)}.exports; require("cluster");`],
+  ["blanks and line breaks between a bound module name and .exports", (n) => `const m = module${" \n".repeat(n / 2)}.exports; require("cluster");`],
+];
+for (const [name, make] of lineShapes) {
+  test(`reading a line-break run is linear from 0.125 MB to 8 MB: ${name}`, () => {
+    // A slow machine inflates one reading: the check has to fail on every attempt, as a quadratic read does.
+    let quadratic = true;
+    for (let attempt = 0; attempt < 3 && quadratic; attempt++) quadratic = readsQuadratic(lineSizes, lineSizes.map((n) => medianOf(() => make(n), n < MB ? 5 : n === MB ? 3 : 1)));
+    expect(quadratic).toBe(false);
+  }, 60000);
+}
