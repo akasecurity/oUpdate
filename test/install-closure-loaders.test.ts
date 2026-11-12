@@ -527,3 +527,120 @@ for (const [name, hook] of round8Benign) {
     expect([t.pkg, t.tests, t.flows]).toEqual([false, false, false]);
   });
 }
+
+// A TS install entry reads like a JS one: a load that is not one plain string can reach any file, docs included.
+// Only docs/evil.js changes between the releases; the hook and the TS body are the same.
+const tsRelease = (v: string, hookName: string, hook: string, entry: string, entryPath: string, extra: Record<string, string> = {}, same = false) =>
+  files({
+    "package.json": JSON.stringify({ name: "p", version: v, scripts: { [hookName]: hook } }),
+    [entryPath]: entry,
+    "lib/a.js": "module.exports = 1\n",
+    "docs/evil.js": `console.log("evil ${same ? "x" : v}")\n`,
+    ...extra,
+  });
+const tsHeld = (entry: string, opts: { hookName?: string; hook?: string; path?: string; extra?: Record<string, string>; same?: boolean } = {}) => {
+  const path = opts.path ?? "lib/x.ts";
+  const hookName = opts.hookName ?? "postinstall";
+  const hook = opts.hook ?? `bun ${path}`;
+  return prepass("npm", tsRelease("1.0.0", hookName, hook, entry, path, opts.extra, opts.same), tsRelease("1.0.1", hookName, hook, entry, path, opts.extra, opts.same)).hard.some((s) => s.kind === "install-script");
+};
+
+const tsBuilt: [string, string][] = [
+  ["a joined array", `require("../docs/" + ["evil","js"].join("."));\n`],
+  ["a constant name", `const n = "evil"; require("../docs/" + n + ".js");\n`],
+  ["a typed constant name", `const n: string = "evil"; require("../docs/" + n + ".js");\n`],
+  ["a template path", "const n = \"evil\"; require(`../docs/${n}.js`);\n"],
+  ["a dynamic import of a built path", `const n = "evil"; await import("../docs/" + n + ".js");\n`],
+  ["createRequire with a built path", `import { createRequire } from "node:module"; const r = createRequire(import.meta.url); r("../docs/" + ["evil","js"].join("."));\n`],
+  ["createRequire called in place", `import { createRequire } from "node:module"; createRequire(import.meta.url)("../docs/" + "ev" + "il.js");\n`],
+  ["a require handle held as a value", `const r = require; r("../docs/" + ["evil","js"].join("."));\n`],
+  ["import.meta.require", `(import.meta as any).require("../docs/" + ["evil","js"].join("."));\n`],
+  ["eval of a built text", `eval("require('../docs/' + 'ev' + 'il.js')");\n`],
+];
+for (const [name, body] of tsBuilt) {
+  test(`a TS entry with ${name} holds`, () => {
+    expect(tsHeld(body)).toBe(true);
+  });
+}
+
+test("the same built load in a JS entry holds, and a literal in a TS entry holds", () => {
+  expect(tsHeld(`require("../docs/" + ["evil","js"].join("."));\n`, { path: "lib/x.js", hook: "node lib/x.js" })).toBe(true);
+  expect(tsHeld(`require("../docs/evil.js");\n`)).toBe(true);
+});
+
+test("a TS entry with a built load holds for each extension", () => {
+  for (const ext of ["ts", "tsx", "mts", "cts"]) {
+    const body = ext === "mts"
+      ? `import { createRequire } from "node:module"; const require = createRequire(import.meta.url); const n = "evil"; require("../docs/" + n + ".js");\n`
+      : `const n = "evil"; require("../docs/" + n + ".js");\n`;
+    expect(tsHeld(body, { path: `lib/x.${ext}` })).toBe(true);
+  }
+});
+
+test("a TS entry with a built load holds under each runner", () => {
+  const body = `const n = "evil"; require("../docs/" + n + ".js");\n`;
+  for (const runner of ["bun", "bun run", "tsx", "ts-node", "bunx tsx", "node --import tsx"]) {
+    expect(tsHeld(body, { hook: `${runner} lib/x.ts` })).toBe(true);
+  }
+});
+
+test("a TS entry with a built load holds as a root hook file, a preinstall hook and a nested file", () => {
+  const body = `const n = "evil"; require("./docs/" + n + ".js");\n`;
+  expect(tsHeld(body, { path: "x.ts" })).toBe(true);
+  expect(tsHeld(body, { hookName: "preinstall" })).toBe(true);
+  expect(tsHeld(`const n = "evil"; require("../docs/" + n + ".js");\n`, { path: "lib/x.ts", hook: "node h.js", extra: { "h.js": `require("./lib/x.ts");\n` } })).toBe(true);
+});
+
+const tsAny: [string, string][] = [
+  ["a createRequire alias", `import { createRequire as cr } from "node:module"; const r = cr(import.meta.url); r("../docs/" + ["evil","js"].join("."));\n`],
+  ["a createRequire with another base and a plain literal", `import { createRequire } from "node:module"; createRequire("file:///elsewhere/")("../docs/evil.js");\n`],
+  ["a quote and a backtick in a regex", "const r = /['\"`]/; const n = \"evil\"; require(\"../docs/\" + n + \".js\");\n"],
+  ["a nested template", "const n = \"evil\"; const s = `a ${`b ${n}`}`; require(`../docs/${n}.js`);\n"],
+  ["eval inside a template", "const s = `${eval(\"require('../docs/evil.js')\")}`;\n"],
+  ["Function and Worker", `new Function("return require('../docs/evil.js')")(); new Worker("../docs/evil.js");\n`],
+  ["a unicode escape in the require word", `const n = "evil"; \\u0072equire("../docs/" + n + ".js");\n`],
+  ["child_process", `import { execSync } from "node:child_process"; execSync("node ../docs/" + "evil.js");\n`],
+  ["Bun.spawn", `Bun.spawnSync(["bun", "../docs/" + "evil.js"]);\n`],
+  ["vm", `import vm from "node:vm"; vm.runInThisContext("require('../docs/' + 'evil.js')");\n`],
+  ["a // inside .tsx text", `const a = <a href="http://x">http://x</a>; const n = "evil"; require("../docs/" + n + ".js");\n`],
+  ["no load at all", `const a: number = 1;\nconsole.log(a);\n`],
+  ["a type-only import", `import type { X } from "./y";\nconst a: X | undefined = undefined;\n`],
+  ["a literal relative require", `const y = require("./y");\nconsole.log(y);\n`],
+];
+for (const [name, body] of tsAny) {
+  test(`a TS entry holds when any file changed: ${name}`, () => {
+    expect(tsHeld(body, { path: "lib/x.tsx", extra: { "lib/y.ts": "export const y = 1;\n" } })).toBe(true);
+    expect(tsHeld(body, { extra: { "lib/y.ts": "export const y = 1;\n" } })).toBe(true);
+  });
+}
+
+test("an extension-less TS import reaches the computed load in the helper", () => {
+  const helper = `const n = "evil"; require("../docs/" + n + ".js");\n`;
+  expect(tsHeld(`import "./helper";\n`, { extra: { "lib/helper.ts": helper } })).toBe(true);
+});
+
+test("a plain TS entry with no other file changed is not held", () => {
+  expect(tsHeld(`const a: number = 1;\n`, { same: true })).toBe(false);
+  expect(tsHeld(`const n = "evil"; require("../docs/" + n + ".js");\n`, { same: true })).toBe(false);
+});
+
+test("a long TS entry is read in linear time, backtick-regex input included", () => {
+  const time = (make: (n: number) => string, n: number) => {
+    const src = make(n);
+    const t0 = performance.now();
+    tsHeld(src);
+    return performance.now() - t0;
+  };
+  const shapes: ((n: number) => string)[] = [
+    (n) => `const a: number = 1;\n${'const b: Array<string> = ["x"]; // note\n'.repeat(n)}`,
+    (n) => "const r = /\\`/;\n".repeat(n),
+    (n) => "`x`;\n".repeat(n * 2),
+    (n) => "const r = /require/;\n".repeat(n),
+  ];
+  for (const make of shapes) {
+    time(make, 100);
+    const small = Math.max(time(make, 2_000), 1);
+    const big = time(make, 60_000); // about 1 MB
+    expect(big).toBeLessThan(small * 60 + 1000);
+  }
+});
