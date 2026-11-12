@@ -209,7 +209,7 @@ export function hashedBinary(path: string, before: Uint8Array | undefined, after
   return !shownAsText(path, after) && ((!!after && isBinary(after)) || (!!before && isBinary(before)));
 }
 
-function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Array | undefined, state = !before ? "added" : !after ? "removed" : "changed"): string[] {
+function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Array | undefined, state = !before ? "added" : !after ? "removed" : "changed", cut?: Set<string>): string[] {
   const head = `=== ${path} (${state}) ===\n`;
   // A text-signature file that code loads is code: show it, with a NUL escaped, instead of a benign hash.
   if (state !== "loaded by code" && hashedBinary(path, before, after)) {
@@ -226,7 +226,8 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
       c = { before, out: unchangedBlobDefs(bt, at) };
       if (after) blobDefsCache.set(after, c);
     }
-    if (c.out) out.push(c.out);
+    if (c.out?.text) out.push(c.out.text);
+    if (c.out?.cut) cut?.add(path);
   }
   return out;
 }
@@ -242,7 +243,7 @@ const BLOB_RUN = 400; // the pre-pass encoded-blob threshold
 const BLOB_DEFS_MAX = 8;
 const BLOB_LINE_MAX = 20_000; // a longer line is shown as its head and tail with its length and sha256
 const BLOB_TOTAL_MAX = 60_000; // past this, the remaining lines are a length and sha256 only
-const blobDefsCache = new WeakMap<Uint8Array, { before: Uint8Array | undefined; out: string | undefined }>();
+const blobDefsCache = new WeakMap<Uint8Array, { before: Uint8Array | undefined; out: { text: string; cut: boolean } | undefined }>();
 
 function encodedRunLead(l: string): string[] {
   const names: string[] = [];
@@ -262,7 +263,7 @@ function encodedRunLead(l: string): string[] {
   return names;
 }
 
-function unchangedBlobDefs(before: string, after: string): string | undefined {
+function unchangedBlobDefs(before: string, after: string): { text: string; cut: boolean } | undefined {
   const ops = diffSeq(before.split("\n"), after.split("\n"));
   if (!ops) return undefined;
   const defs = new Map<string, number[]>();
@@ -288,8 +289,6 @@ function unchangedBlobDefs(before: string, after: string): string | undefined {
     for (const m of l.matchAll(/[\p{L}_$][\p{L}\p{N}_$]*/gu)) {
       const n = m[0];
       if (!defs.has(n) || firstUse.has(n)) continue;
-      const p = m.index! - 1;
-      if (p >= 0 && l[p] === "." && !(p >= 2 && l[p - 1] === "." && l[p - 2] === ".")) continue; // a property, not the name
       firstUse.set(n, at);
     }
   }
@@ -301,21 +300,37 @@ function unchangedBlobDefs(before: string, after: string): string | undefined {
     const prior = at.filter((i) => i < use).reverse();
     for (const i of [...prior, ...at.filter((i) => i >= use)]) picked.push([n, i]);
   }
-  let total = 0;
-  let out = "";
+  // Limits apply to the final text: a line is quoted first (each control character can grow to six), then its length,
+  // the label and the hash all count against the per-line and the total cap.
+  const header = "[unchanged lines that define a name the changed lines use, each holding an encoded run]\n";
+  let out = header;
+  // A line cut to head and tail, shown as a hash, left past the cap or past the definition limit is not fully shown: the file is a hold for a human.
+  let cut = picked.length > BLOB_DEFS_MAX;
   for (const [n, i] of picked.slice(0, BLOB_DEFS_MAX)) {
     const l = kept[i]!;
     const h = new Bun.CryptoHasher("sha256").update(l).digest("hex");
-    let shown: string;
-    if (total + Math.min(l.length, BLOB_LINE_MAX) > BLOB_TOTAL_MAX) shown = `[${l.length} chars, sha256 ${h}]`;
-    else {
-      const body = l.length > BLOB_LINE_MAX ? `${l.slice(0, BLOB_LINE_MAX - 2000)}…${l.slice(-2000)} [${l.length} chars, sha256 ${h}]` : l;
-      total += body.length;
-      shown = l.includes("\r") || /[ \t]$/.test(l) ? JSON.stringify(body) : body;
+    const meta = `[${l.length} chars, sha256 ${h}]`;
+    const prefix = `=${i + 1} (a definition of ${n}): `;
+    const quote = l.includes("\r") || /[ \t]$/.test(l);
+    const entry = (body: string) => `${prefix}${quote ? JSON.stringify(body) : body}\n`;
+    const limit = Math.min(BLOB_LINE_MAX, BLOB_TOTAL_MAX - out.length);
+    let e = entry(l);
+    for (let k = 1; e.length > limit && k > 1 / 64; k /= 2) {
+      cut = true;
+      const tail = Math.floor(2000 * k);
+      e = entry(`${l.slice(0, Math.floor((BLOB_LINE_MAX - 2000) * k))}…${l.slice(l.length - tail)} ${meta}`);
     }
-    out += `=${i + 1} (a definition of ${n}): ${shown}\n`;
+    if (e.length > limit) {
+      cut = true;
+      e = entry(meta);
+    }
+    if (out.length + e.length > BLOB_TOTAL_MAX) {
+      cut = true;
+      break;
+    }
+    out += e;
   }
-  return `[unchanged lines that define a name the changed lines use, each holding an encoded run]\n${out}`;
+  return out === header && !cut ? undefined : { text: out === header ? "" : out, cut };
 }
 
 // Files named as never executing: images, fonts, source maps, type declarations, prose. Prose is judged by the
@@ -2405,7 +2420,7 @@ function loadedByCode(oldFiles: FileMap, newFiles: FileMap): Set<string> {
 // Splits the diff into prompt-sized chunks on line boundaries. Inert files (isInert) that are not entries are
 // left out only with `dropInert`; a text-signature file that code loads is shown anyway. Long lines are sliced,
 // not dropped. `only` as a set keeps those paths in sorted order; as an array it keeps them in the array's order (a ranking).
-export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, only?: Set<string> | string[], dropInert = false, signals: Set<string> = new Set()): string[] {
+export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, only?: Set<string> | string[], dropInert = false, signals: Set<string> = new Set(), cutDefs?: Set<string>): string[] {
   const paths = Array.isArray(only) ? only : [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter((p) => !only || only.has(p)).sort();
   const { entries, fresh, gained, linked } = entryView(oldFiles, newFiles);
   const loaded = loadedByCode(oldFiles, newFiles);
@@ -2446,7 +2461,7 @@ export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, onl
       continue;
     }
     if (loaded.has(p)) {
-      for (const piece of fileDiff(p, a, b, "loaded by code")) push(piece);
+      for (const piece of fileDiff(p, a, b, "loaded by code", cutDefs)) push(piece);
       continue;
     }
     if (generated.has(p)) {
@@ -2456,7 +2471,7 @@ export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, onl
       if (b && b.length > LARGE_FILE_BYTES && mapStringsClass(b) === "strings") for (const piece of mapStringPieces(p, a, b)) push(piece);
       continue;
     }
-    for (const piece of fileDiff(p, a, b)) push(piece);
+    for (const piece of fileDiff(p, a, b, undefined, cutDefs)) push(piece);
     // An added or changed link shows its target whole beside it, changed or not.
     const t = b && isLink(b) ? linkTarget(newFiles, p) : undefined;
     if (t !== undefined && !shownTargets.has(t)) {
@@ -2743,14 +2758,16 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       // a hard one or a scanner hit, still shows it in full.
       const bigMapOk = (x: { kind: string; path: string }) => x.kind === "large-file" && x.path.endsWith(".map") && strictMapOf(artifacts.new.get(x.path)!) !== undefined && mapStringsClass(artifacts.new.get(x.path)!) !== "mappings";
       const signalled = new Set([...pre.hard, ...pre.soft.filter((x) => !bigMapOk(x) && !isRegistrySignal(x))].map((x) => x.path));
-      let chunks = chunkDiff(artifacts.old, artifacts.new, cap, undefined, false, signalled);
+      let cutDefs = new Set<string>();
+      let chunks = chunkDiff(artifacts.old, artifacts.new, cap, undefined, false, signalled, cutDefs);
       // More than one stage of parts: read the ranked files first (the first FLAG ends the review), then the rest, every part.
       // (Over the limit the narrowing below ranks the files itself, so the diff is not cut twice.)
       if (chunks.length > stagePartCount(input.maxParts) && chunks.length <= limit) {
         const ranked = realPaths(rankPriorityPaths(pre, scanHits)), seen = new Set(ranked);
         const rest = [...new Set([...artifacts.old.keys(), ...artifacts.new.keys()])].filter((q) => !seen.has(q)).sort();
-        const reordered = chunkDiff(artifacts.old, artifacts.new, cap, [...ranked, ...rest], false, signalled);
-        if (reordered.length <= limit) chunks = reordered; // at the exact boundary the sorted order is kept on purpose (another cut can pack to one part more); every part is still read
+        const reCut = new Set<string>();
+        const reordered = chunkDiff(artifacts.old, artifacts.new, cap, [...ranked, ...rest], false, signalled, reCut);
+        if (reordered.length <= limit) { chunks = reordered; cutDefs = reCut; } // at the exact boundary the sorted order is kept on purpose (another cut can pack to one part more); every part is still read
       }
       let note = "";
       let overPriority = "";
@@ -2851,6 +2868,9 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           layers.push({ layer: "reviewer", verdict: "stop", detail: `${overFull}; ${input.reviewer.name} APPROVE on the priority files (${chunks.length} part(s))${note}; needs a human` });
         else if (badLinks.length && !flagged.length)
           layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: link target of ${badLinks.join(", ")} missing, outside the package, a directory, another link or binary; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
+        else if (cutDefs.size && !flagged.length)
+          // A definition the diff names but cannot show whole (too long, past the caps) can hold the payload: the APPROVE does not cover it.
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: definition too large to show in ${[...cutDefs].join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
         else if (rejected.length && !flagged.length)
           layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: parser rejected ${rejected.join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
         else if (binaries.length && !flagged.length && waivedBinaries.length === binaries.length)

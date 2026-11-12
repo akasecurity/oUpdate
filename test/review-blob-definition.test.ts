@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chunkDiff } from "../src/review.ts";
+import { chunkDiff, reviewUpdate } from "../src/review.ts";
 import type { FileMap } from "../src/prepass.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -31,8 +31,8 @@ describe("an unchanged definition that holds an encoded run, named by a changed 
     expect(out).not.toContain("unchanged lines that define");
   });
 
-  test("a name used only as a property is not a use", () => {
-    expect(base("console.log(o.D);")).not.toContain(B);
+  test("a property use of the name lists the definition (cost only: no property skip)", () => {
+    expect(base("console.log(o.D);")).toContain(B);
     expect(base("f(...D);")).toContain(B);
   });
 
@@ -102,5 +102,80 @@ describe("an unchanged definition that holds an encoded run, named by a changed 
     const slow = time(mk("a".repeat(399) + '"'));
     const control = time(mk("a".repeat(50) + '"'));
     expect(slow).toBeLessThan(control * 6 + 50);
+  });
+});
+
+describe("the caps apply to the escaped text", () => {
+  test("three definitions with a carriage return and control characters stay under the total cap", () => {
+    const d = (n: number) => `const d${n}=\`${"A".repeat(400)}\r${"\x01".repeat(18_500)}\`;`;
+    const o = [0, 1, 2].map(d).join("\n") + "\n";
+    const old = map({ "index.js": o });
+    const now = map({ "index.js": `${o}void [d0,d1,d2];\n` });
+    const chunks = chunkDiff(old, now, 60_000);
+    const all = chunks.join("");
+    const supplement = all.slice(all.indexOf("[unchanged lines that define"));
+    expect(supplement.length).toBeLessThanOrEqual(60_000);
+    expect(all.length).toBeLessThan(70_000);
+    expect(chunks.length).toBeLessThanOrEqual(2);
+    expect(supplement).toContain("a definition of d0");
+  });
+});
+
+describe("a definition on a property, and one too large to show whole", () => {
+  const pkg = JSON.stringify({ name: "p", version: "1.0.0", main: "index.js" });
+  const diff = (ctx: string, use: string, cut?: Set<string>) =>
+    chunkDiff(map({ "package.json": pkg, "index.js": `${ctx}\nmodule.exports=1;\n` }), map({ "package.json": pkg, "index.js": `${ctx}\nmodule.exports=1;\n${use}\n` }), 10_000_000, undefined, false, new Set(), cut).join("");
+
+  for (const r of ["exports", "module.exports", "this", "globalThis", "o"]) {
+    test(`${r}.D defined and used as a property shows the definition`, () => {
+      expect(diff(`${r === "o" ? "const o={};" : ""}${r}.D="${B}";`, `eval(Buffer.from(${r}.D,"base64").toString());`)).toContain(B);
+    });
+  }
+  test("an optional-chained use o?.D shows the definition", () => {
+    expect(diff(`const o={};o.D="${B}";`, `eval(Buffer.from(o?.D,"base64").toString());`)).toContain(B);
+  });
+
+  test("a 30,000-char definition line is cut and reported", () => {
+    const cut = new Set<string>();
+    const mid = "A".repeat(22000) + "PAYLOADMIDDLEMARK" + "A".repeat(7983);
+    diff(`const D="${mid}";`, "eval(D);", cut);
+    expect([...cut]).toEqual(["index.js"]);
+  });
+
+  test("four 14,900-char decoys used first leave D past the total cap: reported", () => {
+    const dec = [0, 1, 2, 3].map((i) => `const Z${i}="${String.fromCharCode(66 + i).repeat(14900)}";`).join("\n");
+    const cut = new Set<string>();
+    diff(`${dec}\nconst D="${B}";`, `void Z0,Z1,Z2,Z3;eval(Buffer.from(D,"base64").toString());`, cut);
+    expect([...cut]).toEqual(["index.js"]);
+  });
+
+  test("nine used definitions are past the limit of eight: reported", () => {
+    const d = Array.from({ length: 9 }, (_, i) => `const Z${i}="${String.fromCharCode(66 + i).repeat(400)}";`).join("\n");
+    const cut = new Set<string>();
+    diff(d, Array.from({ length: 9 }, (_, i) => `void Z${i};`).join(""), cut);
+    expect([...cut]).toEqual(["index.js"]);
+  });
+
+  test("a definition shown whole is not reported", () => {
+    const cut = new Set<string>();
+    diff(`const D="${B}";`, "eval(D);", cut);
+    expect(cut.size).toBe(0);
+  });
+
+  test("the review holds for a human when a used definition is cut, even on an APPROVE", async () => {
+    const mid = "A".repeat(22000) + "PAYLOADMIDDLEMARK" + "A".repeat(7983);
+    const ctx = `const D="${mid}";\nmodule.exports=1;\n`;
+    const r = await reviewUpdate({
+      eco: "npm", name: "p", from: "1.0.0", to: "1.0.1",
+      registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+      advisories: { query: async () => [] },
+      reviewer: { name: "fake", review: async () => "APPROVE\nno attack indicators found" },
+      cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"),
+      loadArtifacts: async () => ({ old: map({ "package.json": pkg, "index.js": ctx }), new: map({ "package.json": pkg, "index.js": `${ctx}eval(D);\n` }) }),
+    });
+    const l = r.layers.find((x) => x.layer === "reviewer");
+    expect(l?.verdict).toBe("stop");
+    expect(l?.detail).toContain("not model-reviewable: definition too large to show in index.js");
+    expect(l?.detail).toContain("needs a human");
   });
 });
