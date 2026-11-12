@@ -5552,9 +5552,11 @@ function scanAdded(ctx: Ctx, key: string): void {
     if (!applyNonJs(ctx, text, "sh") && (runsOtherFile(text) || sourcesOtherFile(text))) narrowWiden(ctx, key);
     return;
   }
-  // A TS body is JavaScript-shaped. The same-directory floor stays; it is not a shell script.
+  // A TS body is JavaScript-shaped, and nothing here reads it: a built path, a createRequire handle, a dynamic import or an
+  // import it follows (`./helper`, no extension) can reach any file, so every file of the package is read.
   if (/\.(?:ts|tsx|mts|cts)$/i.test(base)) {
     ctx.scanned.add(key);
+    widenEvery(ctx);
     narrowWiden(ctx, key);
     return;
   }
