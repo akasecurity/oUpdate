@@ -105,8 +105,11 @@ export function cargoBuildScript(toml: string | undefined): string | undefined {
 /**
  * The [package] build key: the script path it names, false when it turns the build script off, undefined when absent
  * (or true: the crate root's build.rs).
- * Known limit: a list of scripts (build = ["a.rs", "b.rs"], an unstable Cargo form) reads as undefined, so only the crate
- * root's build.rs is followed and the listed scripts raise nothing here unless one is a build.rs on its own path.
+ * A list of scripts (build = ["a.rs", "b.rs"], an unstable Cargo form) reads as undefined here, so the crate root's
+ * build.rs is followed as usual; cargoBuildList reads the list and cargoListSignals raises a soft signal for it and for
+ * each listed script that is added or changed.
+ * Known limit: whether Cargo accepts a list, and which listed script runs, is not checked; every listed file is treated
+ * as a script that runs.
  */
 function cargoBuildKey(toml: string | undefined): string | false | undefined {
   if (toml === undefined) return undefined;
@@ -133,6 +136,93 @@ function cargoBuildKeyLines(toml: string): string | false | undefined {
   return undefined;
 }
 
+/** The strings of a TOML array, from just after its opening bracket to the closing one: basic and literal strings, comments
+ * skipped, one pass. An unterminated string is dropped. */
+function tomlStringArray(src: string): string[] {
+  const out: string[] = [];
+  const n = src.length;
+  let i = 0;
+  while (i < n) {
+    const c = src[i]!;
+    if (c === "]") break;
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < n && src[j] !== c && src[j] !== "\n") j += c === '"' && src[j] === "\\" ? 2 : 1;
+      if (src[j] === c) out.push(src.slice(i + 1, j));
+      i = j + 1;
+    } else if (c === "#") {
+      while (i < n && src[i] !== "\n") i++;
+    } else i++;
+  }
+  return out;
+}
+
+const listEntry = (e: string) => e.trim().replace(/^\.\//, "");
+
+/** The [package] build key when it is a list of scripts, the entries as written (a leading ./ removed); undefined when it
+ * is not a list. Read with the TOML parser first, then a line reader for a Cargo.toml the parser refuses. */
+function cargoBuildList(toml: string | undefined): string[] | undefined {
+  if (toml === undefined) return undefined;
+  try {
+    const build = (Bun.TOML.parse(toml) as { package?: { build?: unknown } }).package?.build;
+    return Array.isArray(build) ? build.filter((e): e is string => typeof e === "string").map(listEntry) : undefined;
+  } catch {
+    return cargoBuildListLines(toml);
+  }
+}
+
+function cargoBuildListLines(toml: string): string[] | undefined {
+  let inPackage = false;
+  const all = lines(toml);
+  for (let i = 0; i < all.length; i++) {
+    const l = all[i]!.replace(/\s#[\s\S]*$/, "").trim();
+    const sec = /^\[([^\]]+)\]$/.exec(l);
+    if (sec) { inPackage = sec[1]!.trim() === "package"; continue; }
+    if (!inPackage) continue;
+    const m = /^build\s*=\s*\[/.exec(l);
+    if (!m) continue;
+    // The array may run over several lines: read from the bracket to its close.
+    const first = all[i]!;
+    const rest = first.slice(first.indexOf("[", first.indexOf("build")) + 1);
+    return tomlStringArray([rest, ...all.slice(i + 1)].join("\n")).map(listEntry);
+  }
+  return undefined;
+}
+
+/**
+ * Soft signals for a list-form build key. One on the manifest when the list is new or its entries changed (provided a
+ * listed file ships), and one per listed script that is added (not named by the old manifest, or not in the old files) or
+ * changed. A listed build.rs is read on its own path, as the string form is.
+ */
+function cargoListSignals(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged: (path: string) => boolean): Signal[] {
+  const list = cargoBuildList(text(newFiles, p));
+  if (!list?.length) return [];
+  const oldToml = text(oldFiles, p);
+  const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
+  const norm = (e: string) => posix.normalize(dir + e);
+  const paths = [...new Set(list.map(norm))].filter((sp) => newFiles.has(sp));
+  if (!paths.length) return [];
+  const oldList = cargoBuildList(oldToml);
+  const oldScript = cargoBuildScript(oldToml);
+  const oldNamed = new Set([...(oldList ?? []), ...(oldScript !== undefined ? [oldScript] : [])].map(norm));
+  const out: Signal[] = [];
+  const key = (l: string[]) => [...new Set(l.map(norm))].sort().join("\n");
+  if (!oldList || key(oldList) !== key(list)) {
+    const kind = oldList ? "rust-build-script-changed" : "rust-build-script-added";
+    out.push({ kind, path: p, detail: `${oldList ? "changed" : "new"} list of custom build scripts in ${p}; they run at build time`.slice(0, 160) });
+  }
+  for (const sp of paths) {
+    const named = oldNamed.has(sp);
+    const prev = oldFiles.get(sp);
+    // A script shipped before and unchanged raises nothing of its own: the list signal covers a newly listed one.
+    if (prev && unchanged(sp)) continue;
+    if (isRustBuildScript(sp) && (named || !prev || !unchanged(sp))) continue;
+    const added = !named || !prev;
+    out.push({ kind: added ? "rust-build-script-added" : "rust-build-script-changed", path: sp, detail: `${added ? "new" : "changed"} custom build script named in ${p}; it runs at build time` });
+  }
+  return out;
+}
+
 /** Per release: `seen`, the signal already reported for each build script path (one per path, however many manifests
  * name it, and a build.rs read on its own path counts); `same`, each path's old-versus-new byte comparison, made once
  * however many manifests share the script. */
@@ -155,7 +245,7 @@ function cargoSignals(oldFiles: FileMap, newFiles: FileMap, p: string, st: Cargo
     if (v === undefined) st.same.set(path, (v = sameBytes(oldFiles.get(path), newFiles.get(path))));
     return v;
   };
-  return oncePerPath(st, cargoSignal(oldFiles, newFiles, p, unchanged));
+  return [oncePerPath(st, cargoSignal(oldFiles, newFiles, p, unchanged)), ...cargoListSignals(oldFiles, newFiles, p, unchanged).map((s) => oncePerPath(st, s))].flat();
 }
 function cargoSignal(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged: (path: string) => boolean): Signal | undefined {
   const key = cargoBuildKey(text(newFiles, p));

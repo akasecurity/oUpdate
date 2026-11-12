@@ -628,3 +628,98 @@ describe("soft follow-ups: a script added and changed, normalized paths, a build
     expect(ecosystemSignals(files({ [WF]: old }), files({ [WF]: nu }))).toEqual([{ kind: "workflow-permissions-widened", path: WF, detail }]);
   });
 });
+
+describe("a list-form Cargo build key raises soft signals", () => {
+  const head = (dir = "") => `[package]\nname = "${dir || "x"}"\nversion = "1.0.0"\n`;
+  // Forms: the TOML parser reads each one, and again with a broken tail so only the line reader can.
+  const FORMS: Record<string, string> = {
+    double: `build = ["a.rs", "b.rs"]`,
+    single: `build = ['a.rs', 'b.rs']`,
+    spaced: `build   =   [   "a.rs"  ,  "b.rs"   ]`,
+    trailing: `build = ["a.rs", "b.rs",]`,
+    multiline: `build = [\n  "a.rs",\n  "b.rs",\n]`,
+    commented: `build = [ # scripts\n  "a.rs", # first\n  # "c.rs",\n  "b.rs"\n]`,
+    dotslash: `build = ["./a.rs", "./b.rs"]`,
+  };
+  const BREAK = "\n[dependencies]\nbroken = [\n";
+  const run = (o: Record<string, string>, n: Record<string, string>) => ecosystemSignals(files(o), files(n)).map((x) => `${x.kind} ${x.path}`);
+  for (const [name, form] of Object.entries(FORMS)) {
+    for (const [mode, tail] of [["parser", ""], ["line reader", BREAK]] as const) {
+      test(`held: ${name}, ${mode}: a new list with two new scripts`, () => {
+        const nu = { "Cargo.toml": head() + form + "\n" + tail, "a.rs": "1", "b.rs": "2" };
+        expect(run({ "Cargo.toml": head() }, nu)).toEqual(["rust-build-script-added Cargo.toml", "rust-build-script-added a.rs", "rust-build-script-added b.rs"]);
+      });
+    }
+  }
+  test("held: a list with one entry", () => {
+    expect(run({ "Cargo.toml": head() }, { "Cargo.toml": head() + 'build = ["gen.rs"]\n', "gen.rs": "1" })).toEqual(["rust-build-script-added Cargo.toml", "rust-build-script-added gen.rs"]);
+  });
+  test("held: a list whose script changed (list itself the same)", () => {
+    const t = head() + 'build = ["a.rs", "b.rs"]\n';
+    expect(run({ "Cargo.toml": t, "a.rs": "1", "b.rs": "2" }, { "Cargo.toml": t, "a.rs": "1", "b.rs": "3" })).toEqual(["rust-build-script-changed b.rs"]);
+  });
+  test("held: a list that gains an entry is a changed list and an added script", () => {
+    const o = { "Cargo.toml": head() + 'build = ["a.rs"]\n', "a.rs": "1" };
+    expect(run(o, { ...o, "Cargo.toml": head() + 'build = ["a.rs", "b.rs"]\n', "b.rs": "2" })).toEqual(["rust-build-script-changed Cargo.toml", "rust-build-script-added b.rs"]);
+  });
+  test("held: a list newly added over unchanged scripts is the list signal only", () => {
+    const f = { "a.rs": "1", "b.rs": "2" };
+    expect(run({ "Cargo.toml": head(), ...f }, { "Cargo.toml": head() + 'build = ["a.rs", "b.rs"]\n', ...f })).toEqual(["rust-build-script-added Cargo.toml"]);
+  });
+  test("held: scripts in subdirectories, and a list in a workspace member", () => {
+    expect(run({ "Cargo.toml": head() }, { "Cargo.toml": head() + 'build = ["./tools/a.rs", "gen/b.rs"]\n', "tools/a.rs": "1", "gen/b.rs": "2" })).toEqual([
+      "rust-build-script-added Cargo.toml", "rust-build-script-added tools/a.rs", "rust-build-script-added gen/b.rs",
+    ]);
+    const m = head("m") + 'build = ["scripts/a.rs", "../shared/b.rs"]\n';
+    expect(run({ "Cargo.toml": "[workspace]\nmembers = [\"crates/m\"]\n" }, { "Cargo.toml": "[workspace]\nmembers = [\"crates/m\"]\n", "crates/m/Cargo.toml": m, "crates/m/scripts/a.rs": "1", "crates/shared/b.rs": "2" })).toEqual([
+      "rust-build-script-added crates/m/Cargo.toml", "rust-build-script-added crates/m/scripts/a.rs", "rust-build-script-added crates/shared/b.rs",
+    ]);
+  });
+  test("held: a listed script named by two manifests is one signal", () => {
+    const t = head() + 'build = ["../shared/a.rs"]\n';
+    expect(run({ "m1/Cargo.toml": head(), "m2/Cargo.toml": head() }, { "m1/Cargo.toml": t, "m2/Cargo.toml": t, "shared/a.rs": "1" })).toEqual([
+      "rust-build-script-added m1/Cargo.toml", "rust-build-script-added shared/a.rs", "rust-build-script-added m2/Cargo.toml",
+    ]);
+  });
+  test("held: a build.rs listed on its own path is raised once, there", () => {
+    const t = head() + 'build = ["build.rs", "a.rs"]\n';
+    expect(run({ "Cargo.toml": head() }, { "Cargo.toml": t, "build.rs": "1", "a.rs": "2" })).toEqual(["rust-build-script-added Cargo.toml", "rust-build-script-added a.rs", "rust-build-script-added build.rs"]);
+  });
+  test("held: a string key moving to a list names the new script as added", () => {
+    const o = { "Cargo.toml": head() + 'build = "a.rs"\n', "a.rs": "1", "b.rs": "2" };
+    expect(run(o, { ...o, "Cargo.toml": head() + 'build = ["a.rs", "b.rs"]\n' })).toEqual(["rust-build-script-added Cargo.toml"]);
+    expect(run(o, { ...o, "Cargo.toml": head() + 'build = ["a.rs", "b.rs"]\n', "b.rs": "3" })).toEqual(["rust-build-script-added Cargo.toml", "rust-build-script-added b.rs"]);
+  });
+  test("quiet: plain, default, off, unchanged list, entries missing from the tree", () => {
+    expect(run({ "Cargo.toml": head() }, { "Cargo.toml": head() + 'build = "build.rs"\n', "build.rs": "1" })).toEqual(["rust-build-script-added build.rs"]);
+    expect(run({ "Cargo.toml": head(), "build.rs": "1" }, { "Cargo.toml": head() + 'build = "build.rs"\n', "build.rs": "1" })).toEqual([]);
+    expect(run({ "Cargo.toml": head(), "build.rs": "1" }, { "Cargo.toml": head(), "build.rs": "1" })).toEqual([]);
+    expect(run({ "Cargo.toml": head() }, { "Cargo.toml": head() + "build = false\n", "build.rs": "1" })).toEqual(["rust-build-script-added build.rs"]);
+    const t = head() + 'build = ["a.rs", "b.rs"]\n';
+    const f = { "a.rs": "1", "b.rs": "2" };
+    expect(run({ "Cargo.toml": t, ...f }, { "Cargo.toml": t, ...f })).toEqual([]);
+    expect(run({ "Cargo.toml": t, ...f }, { "Cargo.toml": t.replace("1.0.0", "1.0.1"), ...f })).toEqual([]);
+    expect(run({ "Cargo.toml": head() }, { "Cargo.toml": t })).toEqual([]);
+    expect(run({ "Cargo.toml": head() }, { "Cargo.toml": head() + "build = []\n", "a.rs": "1" })).toEqual([]);
+    // Same entries in another order and spelling: not a changed list.
+    expect(run({ "Cargo.toml": t, ...f }, { "Cargo.toml": head() + 'build = ["./b.rs", "a.rs"]\n', ...f })).toEqual([]);
+  });
+  test("a list read by the line reader needs the package section", () => {
+    expect(run({ "Cargo.toml": "[x]\n" }, { "Cargo.toml": '[dependencies]\nbuild = ["a.rs"]\nbroken = [\n', "a.rs": "1" })).toEqual([]);
+  });
+  test("cost: an unterminated or huge list stays linear in size", () => {
+    const time = (n: number) => {
+      const body = `[package]\nbuild = [\n${'  "a.rs", # c\n'.repeat(n)}\nbroken = [\n`;
+      const f = { "Cargo.toml": body, "a.rs": "1" };
+      const t = performance.now();
+      ecosystemSignals(files({ "Cargo.toml": "[package]\n" }), files(f));
+      return performance.now() - t;
+    };
+    time(1000);
+    const small = Math.max(time(20_000), 1);
+    const big = time(160_000);
+    // 8x the input: linear is about 8x; a quadratic reader would be about 64x.
+    expect(big / small, `${small.toFixed(0)} ms -> ${big.toFixed(0)} ms`).toBeLessThan(24);
+    expect(big).toBeLessThan(5000);
+  });
+});
