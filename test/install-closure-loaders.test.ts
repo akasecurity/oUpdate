@@ -273,6 +273,8 @@ const vmRenamed: [string, (b: string, call: string, t: string) => string][] = [
   ["a destructured runInNewContext", (b, call, t) => `const J = ${t}; const { runInNewContext: run } = require("vm"); run("${call}", { M: require("${b}"), p: J })`],
   ["a bracket call of runInNewContext", (b, call, t) => `const J = ${t}; const vm = require("vm"); vm["runInNewContext"]("${call}", { M: require("${b}"), p: J })`],
   ["an import with an alias", (b, call, t) => `const J = ${t}; import { runInNewContext as run } from "node:vm"; run("${call}", { M: require("${b}"), p: J })`],
+  ["a bracket call on the load itself", (b, call, t) => `const J = ${t}; require("node:vm")["runInNewContext"]("${call}", { M: require("${b}"), p: J })`],
+  ["a compileFunction held in a name", (b, call, t) => `const J = ${t}; const r = require("vm").compileFunction; r("${call}", ["M", "p"])(require("${b}"), J)`],
   ["a namespace import", (b, call, t) => `const J = ${t}; import * as vm from "node:vm"; vm.runInNewContext("${call}", { M: require("${b}"), p: J })`],
 ];
 for (const [name, form] of vmRenamed) {
