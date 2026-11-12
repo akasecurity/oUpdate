@@ -17,7 +17,7 @@ const release = (v: string, hook: string) =>
 const held = (hook: string) => prepass("npm", release("1.0.0", hook), release("1.0.1", hook)).hard.some((s) => s.kind === "install-script");
 
 const J = `["./lib/", "evil"].join("")`;
-const JM = `["./lib/", "evil.mjs"].join("")`;
+const JM = `require("url").pathToFileURL(__dirname + "/lib/evil.mjs").href`;
 
 const loaders: [string, string][] = [
   ["Module._load with a built path", `require("module")._load(${J})`],
@@ -43,8 +43,8 @@ const loaders: [string, string][] = [
   ["cluster settings.exec in a string given to eval", `const c = require("cluster"); const T = ${J}; eval("c.settings.exec = T"); c.fork()`],
   ["module._load in a string given to vm.runInNewContext", `const vm = require("vm"); const J = ${J}; vm.runInNewContext("M._load(p)", { M: require("module"), p: J })`],
   ["module._load in a string given to vm.compileFunction", `const vm = require("vm"); const J = ${J}; vm.compileFunction("M._load(p)", ["M", "p"])(require("module"), J)`],
-  ["module._load in a string given to vm.runInThisContext", `const vm = require("vm"); const M = require("module"); const J = ${J}; vm.runInThisContext("M._load(J)")`],
-  ["module._load in a string given to a vm Script", `const vm = require("vm"); const M = require("module"); const J = ${J}; new vm.Script("M._load(J)").runInThisContext()`],
+  ["module._load in a string given to vm.runInThisContext", `const vm = require("vm"); globalThis.M = require("module"); globalThis.J = ${J}; vm.runInThisContext("M._load(J)")`],
+  ["module._load in a string given to a vm Script", `const vm = require("vm"); globalThis.M = require("module"); globalThis.J = ${J}; new vm.Script("M._load(J)").runInThisContext()`],
   ["Reflect.get of _load after padding strings", `const M = require("module"); const pad = "xxxxxxxxxx"; const T = ${J}; Reflect.get(M, "_load")(T); console.log(T, M)`],
   ["module.constructor.register beside a cluster load", `require("cluster"); module.constructor.register(${JM})`],
   ["cluster.setupPrimary with a built exec", `const c = require("cluster"); c.setupPrimary({ exec: ${J} }); c.fork()`],
@@ -133,6 +133,9 @@ const benign2: [string, string][] = [
   ["a run of another receiver beside node:test", `require("node:test"); db.prepare("select 1").run()`],
   ["a run of a package receiver beside node:test", `const db = require("better-sqlite3"); require("node:test"); db.run("select 1")`],
   ["a bracket read of cluster settings", `const c = require("cluster"); console.log(c["settings"])`],
+  ["a bracket key of module inside a string", `require("cluster"); console.log('module["_load"]')`],
+  ["a bracket key of constructor inside a string", `require("cluster"); console.log('constructor["register"]')`],
+  ["a usage message that names a settings key", `const c = require("cluster"); log('usage: get(c, "settings")')`],
   ["a cluster binding and a settings string given to console.log", `const c = require("cluster"); console.log(c, "settings")`],
   ["a padded cluster binding and a settings string given to console.log", `const c = require("cluster"); const pad = "xxxxxxxxxx"; console.log(pad, c, "settings")`],
   ["a test of a module member in an if", `const M = require("module"); if (M.register) console.log(1)`],
@@ -182,13 +185,22 @@ const shapes: [string, (n: number) => string][] = [
   ["many settings hand-offs beside cluster", (n) => `const c = require("cluster"); ${"f(c.settings, 1);".repeat(n / 17)}`],
   ["many bound names beside module", (n) => `const a = require("module");\n${"const x = require(n);\n".repeat(n / 22)}`],
 ];
-// The same shape at four times the size: a linear read costs about four times as much, a quadratic one about sixteen.
+// The same shape at 256 KB, 1 MB and 2 MB: the slope of log time against log size is about 1 for a linear read and about 2 for a quadratic one.
+// Observed slopes on the nine shapes run from 0.6 to 1.15; the bound leaves room for noise and is far below 2.
 for (const [name, make] of shapes) {
   test(`reading a long text is linear in its size: ${name}`, () => {
     median3(() => make(1 << 16));
-    const small = Math.max(median3(() => make(1 << 19)), 5);
-    const big = median3(() => make(1 << 21));
-    expect(big / small).toBeLessThan(10);
+    // A slow machine inflates one reading: the bound has to fail on every attempt, as a quadratic read does.
+    const slopes: number[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const small = Math.max(median3(() => make(1 << 18)), 5);
+      median3(() => make(1 << 20));
+      const big = Math.max(median3(() => make(1 << 21)), 5);
+      const slope = Math.log(big / small) / Math.log(8);
+      slopes.push(slope);
+      if (slope < 1.4) break;
+    }
+    expect(Math.min(...slopes)).toBeLessThan(1.4);
   }, 60000);
 }
 
@@ -253,6 +265,36 @@ for (const [name, form] of vmForms) {
       });
     }
   }
+}
+
+// A vm verb renamed, destructured, called through a bracket or imported: the string it runs is still read as code once the file loads vm.
+const vmRenamed: [string, (b: string, call: string, t: string) => string][] = [
+  ["a destructured compileFunction", (b, call, t) => `const J = ${t}; const { compileFunction: cf } = require("vm"); cf("${call}", ["M", "p"])(require("${b}"), J)`],
+  ["a destructured runInNewContext", (b, call, t) => `const J = ${t}; const { runInNewContext: run } = require("vm"); run("${call}", { M: require("${b}"), p: J })`],
+  ["a bracket call of runInNewContext", (b, call, t) => `const J = ${t}; const vm = require("vm"); vm["runInNewContext"]("${call}", { M: require("${b}"), p: J })`],
+  ["an import with an alias", (b, call, t) => `const J = ${t}; import { runInNewContext as run } from "node:vm"; run("${call}", { M: require("${b}"), p: J })`],
+  ["a namespace import", (b, call, t) => `const J = ${t}; import * as vm from "node:vm"; vm.runInNewContext("${call}", { M: require("${b}"), p: J })`],
+];
+for (const [name, form] of vmRenamed) {
+  for (const [builtin, call] of [["module", "M._load(p)"], ["cluster", "M.setupPrimary({ exec: p }); M.fork()"]] as [string, string][]) {
+    for (const dir of ["lib", "test"]) {
+      test(`${builtin} loader in a string given to vm through ${name}: held (${dir})`, () => {
+        expect(heldAt("h.js", form(builtin, call, `["./${dir}/", "evil"].join("")`), { postinstall: "node h.js" }, {}, `${dir}/evil.js`)).toBe(true);
+      });
+    }
+  }
+}
+
+// register behind any constructor chain, but not behind this.
+const registerChains: [string, string][] = [
+  ["the prototype of module", `require("cluster"); Object.getPrototypeOf(module).constructor.register(JM)`],
+  ["__proto__ of module", `require("cluster"); module.__proto__.constructor.register(JM)`],
+  ["the cache entry of this file", `require("cluster"); require.cache[__filename].constructor.register(JM)`],
+];
+for (const [name, code] of registerChains) {
+  test(`constructor.register behind ${name}: held`, () => {
+    expect(heldAt("h.js", code.replace("JM", JM), { postinstall: "node h.js" }, {}, "lib/evil.js")).toBe(true);
+  });
 }
 
 // Shapes held at the previous head: they stay held.

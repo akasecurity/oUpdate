@@ -950,13 +950,14 @@ function stripLiteralLoad(raw: string): boolean {
 // A read of a member (typeof m.register, c["settings"]) loads nothing. A name rebound by a parameter of the same name is not tracked either way: a shadowed receiver still counts (a limit; skipping it would let a file hide a load behind an unused parameter).
 // Every pattern here is anchored on its own literal or has no span that can be retried from each of many starts, and nothing is compared or rescanned per match.
 function loadsFileByBuiltin(text: string, blank: string): boolean {
-  // A string that holds code is read as code (eval, Function, a vm call given a string): then the operations are looked for in the text with its strings kept.
-  const code = /\b(?:eval|Function|runInNewContext|runInThisContext|runInContext|compileFunction)\s*\(|\bnew\s+(?:vm\s*\.\s*)?Script\s*\(/.test(blank) ? text : blank;
-  if (/\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(code) || /(?<![\w$.])(?:module\s*\.\s*(?:constructor\s*\.\s*)?|(?:main|mainModule)\s*\.\s*constructor\s*\.\s*)register\b/.test(code) || /\b(?:module|constructor)\s*(?:\.\s*constructor\s*)?\[\s*["'`](?:_load|register)["'`]\s*\]/.test(text)) return true;
+  // A string that holds code is read as code: a file that calls eval or Function, or loads vm at all (whatever a verb is renamed to), gets its operations looked for in
+  // the text with its strings kept.
+  const vmLoaded = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bgetBuiltinModule\s*\(\s*)["'`](?:node:)?vm["'`]/.test(text);
+  const code = vmLoaded || /\b(?:eval|Function)\s*\(|\bnew\s+Script\s*\(/.test(blank) ? text : blank;
   // A bracket key counts only where the bracket itself is code, so the same text inside a string is not a use. The string spans come from reading the text again.
   const spans: SpanNote[] = [];
   const again = codeOnly(text, [], true, spans);
-  const stringsKnown = again === text;
+  const stringsKnown = again === text && code !== text;
   const inString = (i: number): boolean => {
     if (!stringsKnown) return false;
     let lo = 0;
@@ -970,6 +971,12 @@ function loadsFileByBuiltin(text: string, blank: string): boolean {
     }
     return false;
   };
+  const keyedAt = (re: RegExp): boolean => {
+    for (const m of text.matchAll(re)) if (!inString(m.index ?? 0)) return true;
+    return false;
+  };
+  if (/\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(code) || /(?<![\w$.])module\s*\.\s*(?:constructor\s*\.\s*)?register\b|(?<!\bthis\s*\.\s*)\bconstructor\s*\.\s*register\b/.test(code)) return true;
+  if (keyedAt(/\b(?:module|constructor)\s*(?:\.\s*constructor\s*)?\[\s*["'`](?:_load|register)["'`]\s*\]/g)) return true;
   const nonLiteralLoad = /\b(?:require|import)\s*\(\s*[^"'`\s)]|\bgetBuiltinModule\s*\(/.test(blank);
   const literalNamed = (name: string): boolean => new RegExp(`(?:\\bfrom\\s*|\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*)["'\`](?:node:)?${name}["'\`]`).test(text);
   const named = (name: string): boolean => literalNamed(name) || (nonLiteralLoad && new RegExp(`["'\`](?:node:)?${name}["'\`]`).test(text));
@@ -1014,7 +1021,7 @@ function loadsFileByBuiltin(text: string, blank: string): boolean {
   };
   // The binding given to a call with the member's name as a string (Reflect.get(M, "_load")): both are read from the same text, so the window is cut from it too.
   const withKeys = (names: Set<string>, keys: string): boolean => {
-    for (const m of text.matchAll(new RegExp(String.raw`[(,]\s*([\w$]+)\s*,\s*["'\`](?:${keys})["'\`]\s*[,)]`, "g"))) if (names.has(m[1] ?? "") && !readOnly((m.index ?? 0) + 1, text)) return true;
+    for (const m of text.matchAll(new RegExp(String.raw`[(,]\s*([\w$]+)\s*,\s*["'\`](?:${keys})["'\`]\s*[,)]`, "g"))) if (names.has(m[1] ?? "") && !inString(m.index ?? 0) && !readOnly((m.index ?? 0) + 1, text)) return true;
     return false;
   };
   if (named("cluster")) {
