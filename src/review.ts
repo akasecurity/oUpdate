@@ -8,7 +8,7 @@ import { benignBinary } from "./benign-binary.ts";
 import { findWaiver, sha256Hex, type Waiver } from "./waiver.ts";
 import { cooldownVerdict } from "./cooldown.ts";
 import { shown } from "./ident.ts";
-import { prepass, SOFT_PATTERNS, LARGE_FILE_BYTES, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, expandNpmScripts, npmHookFileArgs, starMatch, bindingRunsGyp, gypCommands, hookEnvPaths, STAR_PATTERN_MAX, STAR_KEY_MAX, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
+import { prepass, SOFT_PATTERNS, LARGE_FILE_BYTES, bytesEqual, isLink, artifactPath, artifactMembers, artifactKey, expandNpmScripts, npmHookFileArgs, interpreterFileArgs, starMatch, bindingRunsGyp, gypCommands, hookEnvPaths, STAR_PATTERN_MAX, STAR_KEY_MAX, type Ecosystem, type FileMap, type PrepassResult } from "./prepass.ts";
 import { installView, otherInstallEntry, prepareInert } from "./install-closure.ts";
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
@@ -438,6 +438,185 @@ function targetFiles(dir: string, rel: unknown, candidates: Iterable<string>, at
 
 // Manifest fields other than main, module, browser, bin and exports that a bundler or loader reads as an entry file.
 const LOADER_FIELDS = ["react-native", "svelte", "jsnext:main", "es2015", "esnext", "source"] as const;
+
+// A GitHub action runs the files its action.yml names: runs.main, runs.pre and runs.post of a node action, and the
+// script a composite step hands to node, bun, sh, bash or python. Each is a path from the action's own directory.
+// Only the package root's action.yml counts, and only for a file the release adds or changes (changedActionEntries):
+// such a file is parsed as code when it has no extension, and a binary one is not passed as benign. An action entry
+// is never a reach root and never changes how an unchanged file is read, so it adds no part to a review and an old
+// action.yml hides nothing.
+// The YAML parser resolves anchors and aliases. A file it refuses is read as lines under its `runs:` block, which
+// may name a file the parser would not and never fewer.
+const ACTION_FILE = /(^|\/)action\.ya?ml$/;
+const ACTION_PATH = /\$\{\{\s*github\.action_path\s*\}\}|\$\{GITHUB_ACTION_PATH\}|\$GITHUB_ACTION_PATH/g;
+/** Composite `run:` text tokenized per action.yml, in UTF-16 code units (string length, not bytes). Distinct strings only; a string past what is left is not read. */
+const ACTION_RUN_BYTES = 256 * 1024;
+
+interface ActionRuns { using: string; mains: string[]; runs: string[] }
+
+function actionRunsParsed(src: string): ActionRuns | undefined {
+  let doc: unknown;
+  try {
+    doc = Bun.YAML.parse(src);
+  } catch {
+    return undefined;
+  }
+  if (Array.isArray(doc)) return undefined;
+  const out: ActionRuns = { using: "", mains: [], runs: [] };
+  const runs = doc && typeof doc === "object" ? (doc as Record<string, unknown>).runs : undefined;
+  if (!runs || typeof runs !== "object" || Array.isArray(runs)) return out;
+  const r = runs as Record<string, unknown>;
+  out.using = typeof r.using === "string" ? r.using.trim().toLowerCase() : "";
+  for (const k of ["main", "pre", "post"]) {
+    const v = r[k];
+    if (typeof v === "string" && v.trim()) out.mains.push(v.trim());
+  }
+  if (Array.isArray(r.steps)) {
+    for (const step of r.steps) {
+      const run = step && typeof step === "object" ? (step as Record<string, unknown>).run : undefined;
+      if (typeof run === "string") out.runs.push(run);
+    }
+  }
+  return out;
+}
+
+const isBlank = (c: string | undefined) => c === " " || c === "\t";
+
+/** One YAML line as a key: its indent, the key (quoted or not), the value with a trailing comment cut. No regex, so a long line costs linear time. */
+function actionKey(line: string): { indent: number; key: string; value: string } | undefined {
+  let i = 0;
+  while (isBlank(line[i])) i++;
+  const indent = i;
+  if (line[i] === "-" && (i + 1 >= line.length || isBlank(line[i + 1]))) {
+    i++;
+    while (isBlank(line[i])) i++;
+  }
+  const q = line[i] === '"' || line[i] === "'" ? line[i]! : "";
+  if (q) i++;
+  const start = i;
+  while (i < line.length && /[A-Za-z0-9_-]/.test(line[i]!)) i++;
+  if (i === start) return undefined;
+  const key = line.slice(start, i);
+  if (q) {
+    if (line[i] !== q) return undefined;
+    i++;
+  }
+  while (isBlank(line[i])) i++;
+  if (line[i] !== ":" || (i + 1 < line.length && !isBlank(line[i + 1]))) return undefined;
+  let value = line.slice(i + 1);
+  for (let j = 0; j < value.length; j++) {
+    if (value[j] === "#" && (j === 0 || isBlank(value[j - 1]))) {
+      value = value.slice(0, j);
+      break;
+    }
+  }
+  return { indent, key, value: value.trim() };
+}
+
+function actionRunsLines(src: string): ActionRuns {
+  const out: ActionRuns = { using: "", mains: [], runs: [] };
+  const unquote = (v: string) => v.replace(/^(["'])(.*)\1$/, "$2").trim();
+  let inRuns = false;
+  let child = -1;
+  let block = -1;
+  let body = "";
+  const flush = () => {
+    if (body) out.runs.push(body);
+    body = "";
+  };
+  for (const line of src.split(/\r\n|[\r\n\u0085\u2028\u2029]/)) {
+    if (block >= 0) {
+      const indent = line.length - line.trimStart().length;
+      if (!line.trim() || indent > block) {
+        body += `${line}\n`;
+        continue;
+      }
+      block = -1;
+      flush();
+    }
+    if (!line.trim() || line.trimStart().startsWith("#")) continue;
+    const k = actionKey(line);
+    if (!isBlank(line[0]) && !line.startsWith("-")) {
+      inRuns = k?.key === "runs" && k.value === "";
+      child = -1;
+      continue;
+    }
+    if (!inRuns || !k) continue;
+    if (child < 0) child = k.indent;
+    if (k.key === "run") {
+      if (/^[|>][-+0-9]*$/.test(k.value)) block = k.indent;
+      else if (k.value) out.runs.push(unquote(k.value));
+    } else if (k.indent === child && k.value) {
+      if (k.key === "using") out.using = unquote(k.value).toLowerCase();
+      else if (k.key === "main" || k.key === "pre" || k.key === "post") out.mains.push(unquote(k.value));
+    }
+  }
+  flush();
+  return out;
+}
+
+const actionCache = new WeakMap<Uint8Array, string[]>();
+
+/** The paths one action.yml names, as written (not yet placed in the package). Read once per file content. */
+function actionTargets(bytes: Uint8Array): string[] {
+  const hit = actionCache.get(bytes);
+  if (hit) return hit;
+  const src = dec.decode(bytes);
+  const read = actionRunsParsed(src) ?? actionRunsLines(src);
+  const out: string[] = [];
+  // A docker action's entrypoint lives in its image; a node action has no steps.
+  if (read.using !== "docker" && read.using !== "composite") out.push(...read.mains);
+  if (read.using === "composite" || read.using === "") {
+    let left = ACTION_RUN_BYTES;
+    for (const run of new Set(read.runs)) {
+      if (run.length > left) continue;
+      left -= run.length;
+      // The action's own directory is where its files sit; a step runs from the caller's workspace, so the action's files are named through its path variable.
+      for (const t of interpreterFileArgs(run.replace(ACTION_PATH, "."))) if (/\.[A-Za-z0-9]+$/.test(t)) out.push(t);
+    }
+  }
+  actionCache.set(bytes, out);
+  return out;
+}
+
+/**
+ * The files the action.yml / action.yaml files in `files` run, placed like a package.json's targets. A path that is
+ * absolute, holds a shell variable or leaves the package, and a file that is not there, name nothing. A manifest
+ * below the root counts only with `nested`.
+ */
+export function actionEntryPaths(files: FileMap, placed: FileMap = files, nested = false): Set<string> {
+  const out = new Set<string>();
+  for (const [p, bytes] of files) {
+    if (!ACTION_FILE.test(p) || isLink(bytes)) continue;
+    const members = artifactMembers(placed, p);
+    const inner = members ? artifactPath(placed, p) : p;
+    if (!ACTION_FILE.test(inner) || (!nested && inner !== "action.yml" && inner !== "action.yaml")) continue;
+    const dir = inner.replace(/\/?[^/]*$/, "");
+    for (const token of actionTargets(bytes)) {
+      if (token.startsWith("/") || token.includes("\\") || token.includes("$") || hasScheme(token)) continue;
+      const full = resolveIn(dir, token);
+      if (full === undefined) continue;
+      const k = !members ? full : members.has(full) ? (artifactKey(placed, members, full) ?? full) : undefined;
+      if (k !== undefined && files.has(k)) out.add(k);
+    }
+  }
+  return out;
+}
+
+/**
+ * The files the package root's action.yml runs that this release adds or changes. Only those: an unchanged file keeps
+ * the reading it has without an action.yml, so an action entry never changes what is shown, how many parts a review
+ * takes, or what an unchanged file parses as. Two uses: a changed extensionless entry is parsed as code (and held when
+ * the parser rejects it), and a changed entry is not passed as a benign binary.
+ */
+function changedActionEntries(oldFiles: FileMap, newFiles: FileMap): Set<string> {
+  const out = new Set<string>();
+  for (const k of actionEntryPaths(newFiles)) {
+    const a = oldFiles.get(k);
+    if (!a || !bytesEqual(a, newFiles.get(k)!)) out.add(k);
+  }
+  return out;
+}
 
 /**
  * The files the package.json files in `files` load or run. In a merged map a package.json resolves inside its own
@@ -2043,7 +2222,7 @@ function parserRejected(oldFiles: FileMap, newFiles: FileMap): string[] {
     const path = artifactPath(newFiles, p);
     const parseDecl = declarationFile(path) && declarationsToParse(newFiles, newFiles, entries).has(p);
     if (declarationFile(path) && !parseDecl) continue;
-    const force = extensionlessEntry(path, p, entries) || parseDecl;
+    const force = extensionlessEntry(path, p, entries) || extensionlessEntry(path, p, view.actionChanged) || parseDecl;
     if (isLink(b) || !(loaderFor(path) || force || nodeShebang(b)) || !parseCode(path, b, force).rejected) continue;
     const a = oldFiles.get(p);
     if ((!a || !bytesEqual(a, b)) || view.fresh.has(p) || view.gained.has(p) || view.linked.has(p)) out.push(p);
@@ -2051,7 +2230,7 @@ function parserRejected(oldFiles: FileMap, newFiles: FileMap): string[] {
   return out.sort();
 }
 
-interface CodeView { entries: Set<string>; fresh: Set<string>; gained: Set<string>; linked: Set<string> }
+interface CodeView { entries: Set<string>; actionChanged: Set<string>; fresh: Set<string>; gained: Set<string>; linked: Set<string> }
 const viewCache = new WeakMap<FileMap, WeakMap<FileMap, CodeView>>();
 
 // Coverage is the reach difference UNION the full-manifest fresh set. A retarget of an export
@@ -2105,7 +2284,7 @@ function entryView(oldFiles: FileMap, newFiles: FileMap): CodeView {
     if (t !== undefined && !fresh.has(t) && !shownByChangedLink.has(t)) linked.add(t);
   }
   for (const t of linked) gained.delete(t);
-  const view = { entries, fresh, gained, linked };
+  const view = { entries, actionChanged: changedActionEntries(oldFiles, newFiles), fresh, gained, linked };
   inner.set(newFiles, view);
   return view;
 }
@@ -2782,13 +2961,13 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       const cap = input.chunkChars ?? 60_000;
       // A diff is read in full, stage by stage, up to this many parts (CEILING_PARTS unless the caller set a cap); only a larger one is narrowed.
       const limit = partLimit(input.maxParts, input.maxStages);
-      const { entries, fresh, gained, linked } = entryView(artifacts.old, artifacts.new);
+      const { entries, actionChanged, fresh, gained, linked } = entryView(artifacts.old, artifacts.new);
       const rejected = parserRejected(artifacts.old, artifacts.new);
       const reviewable = [...new Set([...pre.added, ...pre.changed, ...fresh, ...gained, ...linked])];
       const whole = (p: string) => fresh.has(p) || gained.has(p) || linked.has(p);
       // Shown in the diff as code, so an APPROVE covers them. A hash-only benign pass does not.
       const loaded = loadedByCode(artifacts.old, artifacts.new);
-      const binaries = reviewable.filter((p) => !loaded.has(p) && (entries.has(p) || !benignBinary(p, artifacts!.new.get(p))) && hashedBinary(p, whole(p) ? undefined : artifacts!.old.get(p), artifacts!.new.get(p)));
+      const binaries = reviewable.filter((p) => !loaded.has(p) && (entries.has(p) || actionChanged.has(p) || !benignBinary(p, artifacts!.new.get(p))) && hashedBinary(p, whole(p) ? undefined : artifacts!.old.get(p), artifacts!.new.get(p)));
       const waivedBinaries = binaries.flatMap((path) => {
         const bytes = artifacts!.new.get(path);
         const w = bytes && findWaiver(input.waivers, { eco: input.eco, name: input.name, version: input.to, sha256: sha256Hex(bytes) });

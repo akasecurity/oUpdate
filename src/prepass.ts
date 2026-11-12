@@ -539,6 +539,57 @@ export function npmHookFileArgs(body: string): string[] {
   return walk(body, 0);
 }
 
+const INTERPRETERS = new Set(["node", "nodejs", "bun", "sh", "bash", "python", "python3"]);
+
+// Flags of node, bun, sh, bash and python whose next word is their value, not the script.
+const SCRIPT_VALUE_FLAGS = new Set(["-o", "-O", "--loader", "--experimental-loader", "-C", "--conditions", "--input-type", "--max-old-space-size", "-W", "-X"]);
+
+/**
+ * The script file each node, bun, sh, bash or python command in a shell body runs: the first word that is not a flag,
+ * plus the files node and bun preload with -r, --require or --import. Later words are the script's own arguments (an
+ * asset it reads), and the body of `-c` / `-e` is not a file. Other commands' words (cp, cat, source) are no script.
+ */
+export function interpreterFileArgs(body: string): string[] {
+  const out: string[] = [];
+  for (const cmd of splitShell(body)) {
+    const argv = shellWords(cmd);
+    let i = 0;
+    while (i < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i]!)) i++;
+    if (i >= argv.length) continue;
+    const bin = binName(argv[i]!);
+    if (!INTERPRETERS.has(bin)) continue;
+    const nodeBin = bin === "node" || bin === "nodejs" || bin === "bun";
+    let sub = bin === "bun";
+    for (let j = i + 1; j < argv.length; j++) {
+      const a = argv[j]!;
+      if (a === "--") {
+        if (argv[j + 1] !== undefined) out.push(argv[j + 1]!);
+        break;
+      }
+      if (a.startsWith("-")) {
+        const eq = a.indexOf("=");
+        const name = eq > 0 ? a.slice(0, eq) : a;
+        const inline = eq > 0 ? a.slice(eq + 1) : undefined;
+        if (name === "-c" || name === "-m" || name === "-e" || name === "--eval" || name === "-p" || name === "--print") break;
+        const takesValue = nodeBin ? name === "-r" || name === "--require" || name === "--import" : false;
+        if (takesValue || SCRIPT_VALUE_FLAGS.has(name)) {
+          const value = inline ?? argv[j + 1];
+          if (inline === undefined) j++;
+          if (takesValue && value) out.push(value);
+        }
+        continue;
+      }
+      if (sub && (a === "run" || a === "x")) {
+        sub = false;
+        continue;
+      }
+      out.push(a);
+      break;
+    }
+  }
+  return out;
+}
+
 // npm runs `node-gyp rebuild` when binding.gyp is on disk, gypfile is not false, and neither
 // install nor preinstall is set. A hook that itself runs node-gyp still reads the gyp file.
 export function bindingRunsGyp(pj: Record<string, unknown>): boolean {
