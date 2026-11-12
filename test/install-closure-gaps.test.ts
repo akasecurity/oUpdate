@@ -208,6 +208,7 @@ for (const [label, hook] of roundTwoQuiet) {
 // The cost of reading a substitution in arithmetic as code: any substitution in an arithmetic context holds, and a variable set from any
 // substitution is hot. These common forms hold although the output is a number (accepted; the same as the main rule).
 const acceptedHolds: [string, string][] = [
+  ["a variable set from a substitution and unset by name on a later line", 'TMP=$(mktemp -d)\ncp lib/ok.js "$TMP"\nunset TMP'],
   ["an unset of a variable set from a substitution", 'TMP=$(mktemp -d); cp lib/ok.js "$TMP"; rm -rf "$TMP"; unset TMP'],
   ["a for loop over seq with arithmetic on the loop variable on the next line", "for i in $(seq 1 3); do\necho $((i * 2))\ndone"],
   ["a single-bracket integer test of a substitution (zsh and ksh evaluate it)", "[ $(cat name.txt) -eq 0 ] && echo x"],
@@ -267,6 +268,7 @@ for (const [label, hook] of round5Held) {
 // Round six: `unset` of a variable set from a substitution holds on any line (a nameref made on another line, or inside eval or a function,
 // is unset through the value), and a variable set from a substitution on an earlier line does not widen commands that only use it.
 const round6Held: [string, string][] = [
+  ["a nameref declared on one line, assigned on the next and unset on the third, no pipe", "declare -n X\nX=$(cat name.txt)\nunset X"],
   ["a nameref declared on the line above the assignment and unset", "declare -n X\nX=$(cat name.txt); unset X | cat"],
   ["a nameref declared by eval and then unset", "eval 'declare -n X'; X=$(cat name.txt); unset X | cat"],
   ["a local -n in a function defined on another line", "f() { local -n X; }\nX=$(cat name.txt); unset X | cat"],
@@ -282,6 +284,10 @@ for (const [label, hook] of round6Held) {
 }
 
 const round6Quiet: [string, string][] = [
+  // Same on main: a variable set on one line is not carried into the arguments of another command on the next.
+  ["a variable set on one line and given to a wrapper that runs node on the next", 'F=$(cat name.txt)\ncross-env A=1 node "$F" | cat'],
+  // A design limit, also on main: a line that does not split and holds no unresolved expansion is never read for evaluation.
+  ["a count in a variable evaluated by an arithmetic command on the next line", "COUNT=$(ls dist | wc -l | tr -d ' ')\nif (( COUNT == 0 )); then node lib/ok.js; fi"],
   ["a temp dir from mktemp used as an argument on the next line", 'TMP=$(mktemp -d)\ncurl -fsSL https://example.com/x.tgz | tar -xz -C "$TMP"'],
   ["a path from pwd used as an argument on the next line", 'ROOT=$(pwd)\nmake -C "$ROOT/native" 2>&1 | tee build.log'],
   ["a temp dir from mktemp used by git clone on the next line", 'DIR=$(mktemp -d)\ngit clone --depth 1 https://example.com/r.git "$DIR" >/dev/null'],
@@ -323,7 +329,7 @@ const timeAt = (make: (bytes: number) => string, bytes: number): { ms: number; h
 };
 const slope = (points: [number, number][]): number => {
   const xs = points.map(([bytes]) => Math.log(bytes));
-  const ys = points.map(([, ms]) => Math.log(Math.max(ms, 1)));
+  const ys = points.map(([, ms]) => Math.log(Math.max(ms, 0.05)));
   const mx = xs.reduce((x, y) => x + y, 0) / xs.length;
   const my = ys.reduce((x, y) => x + y, 0) / ys.length;
   let num = 0;
@@ -354,13 +360,16 @@ const linearShapes: Shape[] = [
   ["a line per unclosed brace", (b) => lines(b, (i) => `: \${X${i}\n`), 0],
   ["one long line of unclosed braces", (b) => ": ${X ".repeat(Math.floor(b / 6)) + "\n", 0],
   ["a line per default with a bare brace that bash never closes", (b) => lines(b, () => "echo ${X:-{}\n"), 0],
-  ["a line per pattern removal with a bare brace", (b) => lines(b, () => "v=${v%%{*}\n"), 49152],
+  // Head holds from nine such lines (the shared scan budget runs out); main is quiet below about 4,400 lines (49 thousand characters).
+  ["a line per pattern removal with a bare brace", (b) => lines(b, () => "v=${v%%{*}\n"), 0],
   ["one double-quoted string of defaults with a bare brace", (b) => 'echo "' + "${X:-{}".repeat(Math.floor(b / 7)) + '"\n', 0],
   ["one unquoted heredoc of defaults with a bare brace", (b) => "cat <<EOF >/dev/null\n" + "${X:-{}".repeat(Math.floor(b / 7)) + "\nEOF\n", 0],
   ["one line of assignments from substitutions", (b) => Array.from({ length: Math.floor(b / 14) }, (_, i) => `x${i}=$(a)`).join(";") + "\n", 0],
   ["one export of assignments from substitutions", (b) => "export " + Array.from({ length: Math.floor(b / 12) }, (_, i) => `x${i}=$(a)`).join(" ") + "\n", 0],
   ["an unclosed substitution over a long run of spaces", (b) => "x=$(true" + " ".repeat(b) + "x)\n", 0],
-  ["one declare -n of many names", (b) => "declare -n " + Array.from({ length: Math.floor(b / 12) }, (_, i) => `r${i}=x${i}`).join(" ") + "\n", 0],
+  // Sized by length: a line of N names runs past the cap before b characters. Held at every size, on main too.
+  ["one declare -n of many names", (b) => { let t = "declare -n "; for (let i = 0; t.length < b; i++) t += (i === 0 ? "" : " ") + `r${i}=x${i}`; return t + "\n"; }, 0],
+  ["one declare -n with a repeated assignment word", (b) => { let t = "declare -n "; while (t.length < b) t += "x=y "; return t + "\n"; }, 0],
 ];
 
 const PERF_SIZES = [24576, 49152, 98304, 196608];
