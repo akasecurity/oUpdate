@@ -952,8 +952,10 @@ function stripLiteralLoad(raw: string): boolean {
 function loadsFileByBuiltin(text: string, blank: string): boolean {
   // A string that holds code is read as code: a file that calls eval or Function, or loads vm at all (whatever a verb is renamed to), gets its operations looked for in
   // the text with its strings kept.
-  const vmLoaded = /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bgetBuiltinModule\s*\(\s*)["'`](?:node:)?vm["'`]/.test(text);
-  const code = vmLoaded || /\b(?:eval|Function)\s*\(|\bnew\s+Script\s*\(/.test(blank) ? text : blank;
+  // The load of a module that is not one plain string (a name built from pieces, held by a variable, or spelled with an escape) could be vm: it counts as a vm load.
+  const computedLoad = /\b(?:require|import)\s*\(\s*(?!(?:"[^"\\\n]*"|'[^'\\\n]*'|`[^`\\$]*`)\s*\))|\bgetBuiltinModule\s*\(\s*(?!(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\))/.test(text);
+  const vmLoaded = computedLoad || /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bgetBuiltinModule\s*\(\s*)["'`](?:node:)?vm["'`]/.test(text);
+  const code = vmLoaded || /\b(?:eval|Function|runInNewContext|runInThisContext|runInContext|compileFunction)\s*\(|\bnew\s+(?:vm\s*\.\s*)?Script\s*\(/.test(blank) ? text : blank;
   // A bracket key counts only where the bracket itself is code, so the same text inside a string is not a use. The string spans come from reading the text again.
   const spans: SpanNote[] = [];
   const again = codeOnly(text, [], true, spans);
@@ -975,7 +977,7 @@ function loadsFileByBuiltin(text: string, blank: string): boolean {
     for (const m of text.matchAll(re)) if (!inString(m.index ?? 0)) return true;
     return false;
   };
-  if (/\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(code) || /(?<![\w$.])module\s*\.\s*(?:constructor\s*\.\s*)?register\b|(?<!\bthis\s*\.\s*)\bconstructor\s*\.\s*register\b/.test(code)) return true;
+  if (/\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(code) || /(?<![\w$.])module\s*\.\s*(?:__proto__\s*\.\s*)?(?:constructor\s*\.\s*)?register\b|\b(?:main|mainModule)\s*\.\s*constructor\s*\.\s*register\b|\bgetPrototypeOf\s*\(\s*(?:module|require\s*\.\s*main|process\s*\.\s*mainModule)\s*\)\s*\.\s*constructor\s*\.\s*register\b|\brequire\s*\.\s*cache\s*\[[^\]]*\]\s*\.\s*constructor\s*\.\s*register\b/.test(code)) return true;
   if (keyedAt(/\b(?:module|constructor)\s*(?:\.\s*constructor\s*)?\[\s*["'`](?:_load|register)["'`]\s*\]/g)) return true;
   const nonLiteralLoad = /\b(?:require|import)\s*\(\s*[^"'`\s)]|\bgetBuiltinModule\s*\(/.test(blank);
   const literalNamed = (name: string): boolean => new RegExp(`(?:\\bfrom\\s*|\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*)["'\`](?:node:)?${name}["'\`]`).test(text);

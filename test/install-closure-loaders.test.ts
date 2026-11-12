@@ -2,12 +2,14 @@ import { expect, test } from "bun:test";
 import { classifyJs, provablyStatic } from "../src/install-closure.ts";
 import { prepass, type FileMap } from "../src/prepass.ts";
 
+// A hook that starts an import declaration is an ES module: its package says so, and it has no require.
+const isEsm = (src: string) => /(?:^|[;\n])\s*import\s+[\w{*"']/.test(src);
 const enc = (s: string) => new TextEncoder().encode(s);
 const files = (o: Record<string, string>): FileMap => new Map(Object.entries(o).map(([k, v]) => [k, enc(v)]));
 // An unchanged postinstall hook; only lib/evil.js and lib/evil.mjs change between the releases.
 const release = (v: string, hook: string) =>
   files({
-    "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: "node h.js" } }),
+    "package.json": JSON.stringify({ name: "p", version: v, ...(isEsm(hook) ? { type: "module" } : {}), scripts: { postinstall: "node h.js" } }),
     "h.js": hook,
     "lib/a.js": "module.exports = 1\n",
     "build.js": "module.exports = 2\n",
@@ -18,6 +20,7 @@ const held = (hook: string) => prepass("npm", release("1.0.0", hook), release("1
 
 const J = `["./lib/", "evil"].join("")`;
 const JM = `require("url").pathToFileURL(__dirname + "/lib/evil.mjs").href`;
+const JM_ESM = `new URL("./lib/evil.mjs", import.meta.url).href`;
 
 const loaders: [string, string][] = [
   ["Module._load with a built path", `require("module")._load(${J})`],
@@ -25,7 +28,7 @@ const loaders: [string, string][] = [
   ["_load of a destructured name", `const { _load } = require("module"); _load(${J})`],
   ["module.constructor through a bracket", `module.constructor["_load"](${J})`],
   ["module.register with a built path", `require("module").register(${JM})`],
-  ["register imported by name", `import { register } from "node:module"; register(${JM}, import.meta.url)`],
+  ["register imported by name", `import { register } from "node:module"; register(${JM_ESM}, import.meta.url)`],
   ["register through a bracket", `const M = require("module"); M["register"](${JM})`],
   ["register held as a value", `const r = require("module").register; r(${JM})`],
   ["node:test run with built files (require)", `require("node:test").run({ files: [${J}] })`],
@@ -58,8 +61,8 @@ for (const [name, hook] of loaders) {
 // The same loader code in a file the install hook or the package root runs: the hook file at the package root, a hook that requires a
 // nested loader file, a preinstall hook. The changed file is under lib/ or test/ (docs/ is left out by design: a literal-free docs load is not followed).
 const place = (hookPath: string, hookSrc: string, scripts: Record<string, string>, extra: Record<string, string>) => (v: string, changed: string) => {
-  const base: Record<string, string> = { "package.json": JSON.stringify({ name: "p", version: v, scripts }), "index.js": "console.log('idx')\n", ...extra, [hookPath]: hookSrc };
-  for (const d of ["lib", "test"]) base[`${d}/evil.js`] = changed === `${d}/evil.js` ? `console.log("evil ${v}")\n` : "console.log('evil')\n";
+  const base: Record<string, string> = { "package.json": JSON.stringify({ name: "p", version: v, ...(isEsm(hookSrc) ? { type: "module" } : {}), scripts }), "index.js": "console.log('idx')\n", ...extra, [hookPath]: hookSrc };
+  for (const d of ["lib", "test"]) for (const ext of ["js", "mjs"]) base[`${d}/evil.${ext}`] = changed === `${d}/evil.${ext}` ? `console.log("evil ${v}")\n` : "console.log('evil')\n";
   return files(base);
 };
 const heldAt = (hookPath: string, hookSrc: string, scripts: Record<string, string>, extra: Record<string, string>, changed: string) => {
@@ -145,6 +148,7 @@ const benign2: [string, string][] = [
   ["a message that holds module.constructor.register", `require("cluster"); console.log("module.constructor.register")`],
   ["this.constructor.register beside a cluster load", `require("cluster"); class A { go() { this.constructor.register(this) } }`],
   ["a property named module with a register method", `require("cluster"); app.module.register(x)`],
+  ["a class method named register called through a constructor", `require("cluster"); class Foo { static register(x) { console.log(x) } } const app = new Foo(); app.constructor.register("ok")`],
   ["a message that names module.register", `require("cluster"); throw new Error("module.register failed")`],
   ["a timer and a deprecation message that names m.register", `const m = require("module"); setTimeout(done, 10); log("m.register is deprecated")`],
   ["typeof a module member", `const m = require("module"); console.log(typeof m.register)`],
@@ -185,18 +189,29 @@ const shapes: [string, (n: number) => string][] = [
   ["many settings hand-offs beside cluster", (n) => `const c = require("cluster"); ${"f(c.settings, 1);".repeat(n / 17)}`],
   ["many bound names beside module", (n) => `const a = require("module");\n${"const x = require(n);\n".repeat(n / 22)}`],
 ];
-// The same shape at 256 KB, 1 MB and 2 MB: the slope of log time against log size is about 1 for a linear read and about 2 for a quadratic one.
-// Observed slopes on the nine shapes run from 0.6 to 1.15; the bound leaves room for noise and is far below 2.
+// The same shape at 256 KB, 1 MB and 2 MB: the least-squares slope of log time against log size over the three points is about 1 for a linear read and
+// about 2 for a quadratic one. Observed slopes on the nine shapes run from 0.6 to 1.3; the bound leaves room for noise and is far below 2.
+const slopeOf = (sizes: number[], times: number[]): number => {
+  const xs = sizes.map((n) => Math.log(n));
+  const ys = times.map((t) => Math.log(Math.max(t, 5)));
+  const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < xs.length; i++) {
+    num += ((xs[i] ?? 0) - mx) * ((ys[i] ?? 0) - my);
+    den += ((xs[i] ?? 0) - mx) ** 2;
+  }
+  return num / den;
+};
 for (const [name, make] of shapes) {
   test(`reading a long text is linear in its size: ${name}`, () => {
     median3(() => make(1 << 16));
     // A slow machine inflates one reading: the bound has to fail on every attempt, as a quadratic read does.
     const slopes: number[] = [];
+    const sizes = [1 << 18, 1 << 20, 1 << 21];
     for (let attempt = 0; attempt < 3; attempt++) {
-      const small = Math.max(median3(() => make(1 << 18)), 5);
-      median3(() => make(1 << 20));
-      const big = Math.max(median3(() => make(1 << 21)), 5);
-      const slope = Math.log(big / small) / Math.log(8);
+      const slope = slopeOf(sizes, sizes.map((n) => median3(() => make(n))));
       slopes.push(slope);
       if (slope < 1.4) break;
     }
@@ -272,10 +287,10 @@ const vmRenamed: [string, (b: string, call: string, t: string) => string][] = [
   ["a destructured compileFunction", (b, call, t) => `const J = ${t}; const { compileFunction: cf } = require("vm"); cf("${call}", ["M", "p"])(require("${b}"), J)`],
   ["a destructured runInNewContext", (b, call, t) => `const J = ${t}; const { runInNewContext: run } = require("vm"); run("${call}", { M: require("${b}"), p: J })`],
   ["a bracket call of runInNewContext", (b, call, t) => `const J = ${t}; const vm = require("vm"); vm["runInNewContext"]("${call}", { M: require("${b}"), p: J })`],
-  ["an import with an alias", (b, call, t) => `const J = ${t}; import { runInNewContext as run } from "node:vm"; run("${call}", { M: require("${b}"), p: J })`],
+  ["an import with an alias", (b, call, t) => `import { runInNewContext as run } from "node:vm"; import B from "node:${b}"; const J = ${t}; run("${call}", { M: B, p: J })`],
   ["a bracket call on the load itself", (b, call, t) => `const J = ${t}; require("node:vm")["runInNewContext"]("${call}", { M: require("${b}"), p: J })`],
   ["a compileFunction held in a name", (b, call, t) => `const J = ${t}; const r = require("vm").compileFunction; r("${call}", ["M", "p"])(require("${b}"), J)`],
-  ["a namespace import", (b, call, t) => `const J = ${t}; import * as vm from "node:vm"; vm.runInNewContext("${call}", { M: require("${b}"), p: J })`],
+  ["a namespace import", (b, call, t) => `import * as vm from "node:vm"; import B from "node:${b}"; const J = ${t}; vm.runInNewContext("${call}", { M: B, p: J })`],
 ];
 for (const [name, form] of vmRenamed) {
   for (const [builtin, call] of [["module", "M._load(p)"], ["cluster", "M.setupPrimary({ exec: p }); M.fork()"]] as [string, string][]) {
@@ -283,6 +298,30 @@ for (const [name, form] of vmRenamed) {
       test(`${builtin} loader in a string given to vm through ${name}: held (${dir})`, () => {
         expect(heldAt("h.js", form(builtin, call, `["./${dir}/", "evil"].join("")`), { postinstall: "node h.js" }, {}, `${dir}/evil.js`)).toBe(true);
       });
+    }
+  }
+}
+
+// vm loaded through a name that is not one plain string: built from pieces, held by a variable, spelled with an escape.
+const vmSpellings: [string, string, string][] = [
+  ["a name built from pieces", "", `require("v" + "m")`],
+  ["a name held by a variable", `const n = "vm"; `, "require(n)"],
+  ["a name spelled with an escape", "", `require("\\x76m")`],
+];
+const vmComputedForms: [string, (vm: string, b: string, call: string, t: string) => string][] = [
+  ["runInNewContext", (vm, b, call, t) => `${vm}.runInNewContext("${call}", { M: require("${b}"), p: ${t} })`],
+  ["compileFunction", (vm, b, call, t) => `${vm}.compileFunction("${call}", ["M", "p"])(require("${b}"), ${t})`],
+  ["runInContext", (vm, b, call, t) => `const vm = ${vm}; vm.runInContext("${call}", vm.createContext({ M: require("${b}"), p: ${t} }))`],
+];
+for (const [spelling, pre, expr] of vmSpellings) {
+  for (const [name, form] of vmComputedForms) {
+    for (const [builtin, call] of [["module", "M._load(p)"], ["cluster", "M.setupPrimary({ exec: p }); M.fork()"]] as [string, string][]) {
+      for (const dir of ["lib", "test"]) {
+        test(`${builtin} loader in a string given to vm loaded by ${spelling}, ${name}: held (${dir})`, () => {
+          const hook = `${pre}${form(expr, builtin, call, `["./${dir}/", "evil"].join("")`)}`;
+          expect(heldAt("h.js", hook, { postinstall: "node h.js" }, {}, `${dir}/evil.js`)).toBe(true);
+        });
+      }
     }
   }
 }
@@ -295,7 +334,7 @@ const registerChains: [string, string][] = [
 ];
 for (const [name, code] of registerChains) {
   test(`constructor.register behind ${name}: held`, () => {
-    expect(heldAt("h.js", code.replace("JM", JM), { postinstall: "node h.js" }, {}, "lib/evil.js")).toBe(true);
+    expect(heldAt("h.js", code.replace("JM", JM), { postinstall: "node h.js" }, {}, "lib/evil.mjs")).toBe(true);
   });
 }
 
