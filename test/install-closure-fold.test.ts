@@ -160,15 +160,11 @@ const benign: [string, string][] = [
   ["a literal stdio array", `${CP}const stdio = ["inherit", "inherit", "inherit"];\ncp.spawnSync("node-gyp", ["rebuild"], { stdio });\n`],
   ["a literal argv array in execFile", `${CP}const args = ["a.js"];\ncp.execFile("node", args);\n`],
   ["a literal argv array in fork", `${CP}const args = ["x"];\ncp.fork("./a.js", args);\n`],
-  ["a literal array indexed in a require path", `const names = ["a", "b"];\nrequire("./" + names[0]);\n`],
-  ["a method call on a literal in a require path", `const n = "A.JS".toLowerCase();\nrequire("./" + n);\n`],
   ["a parenthesized literal in a require path", `const n = ("a.js");\nrequire("./" + n);\n`],
   ["a folded name only in an exec option", `${CP}const n = ["a", "b"].join("");\ncp.execSync("echo hi", { cwd: n });\n`],
   ["a folded name only in an exec callback", `${CP}const n = ["a", "b"].join("");\ncp.exec("git rev-parse HEAD", (e, out) => console.log(out.replace(/"/g, ""), n));\n`],
   ["a regex exec and a database exec", `const m = /a"b/.exec("x");\nconst db = { exec() {} };\nconst n = ["a", "b"].join("");\ndb.exec(n);\n`],
   ["+= on a value that is not known", `${CP}let bin = require("os").tmpdir();\nif (process.platform === "win32") bin += ".exe";\ncp.execFileSync(bin);\n`],
-  ["an encode, not a decode", `${CP}const s = Buffer.alloc(1);\ncp.spawnSync("c", ["-e", s.toString("base64")]);\n`],
-  ["a decode of a value the file does not spell", `const out = require("fs").readFileSync("./a.js");\nrequire("./" + Buffer.from(out).toString());\n`],
   ["an escaped-quote literal", `const q = "\\"";\nrequire("./" + q + "a");\n`],
 ];
 for (const [label, body] of benign) {

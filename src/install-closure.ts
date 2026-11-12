@@ -2907,6 +2907,8 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
     classifyLoads(tier, fromKey, text);
     // A command that runs a file named through a folded or decoded name can name any file, docs included.
     if (!tier.all && runnerFolds(text)) tier.all = true;
+    // A load path or exec command with a part that is neither a literal nor a known runtime value can name any file.
+    if (!tier.all && constPartsWiden(text)) tier.all = true;
   } finally {
     cls = undefined;
   }
@@ -3307,6 +3309,286 @@ function runnerFolds(text: string): boolean {
     if (pieces.some((p) => tailFolds(p, false))) return true;
   }
   return false;
+}
+
+// A load path or an exec command with any part that is not a literal or a known runtime value reads as naming any file. One pass over the
+// text; the work is charged to one budget and every cap widens.
+const RUN_FN = "execSync|execFileSync|execFile|exec|spawnSync|spawn|fork";
+const RUN_NAME = new RegExp(`^(?:${RUN_FN})$`);
+const LOAD_CALLS = new Set(["require", "import", "getBuiltinModule", "require.resolve", "module.require", "process.mainModule.require", "process.getBuiltinModule"]);
+const RUNTIME_PART = /^(?:process\.(?:platform|arch|execPath|version|argv0|versions\.[\w$]+|env\.[\w$]+|env\[(["'])[^"'\\]*\1\]|argv\[\d+\])|__dirname|__filename|import\.meta\.(?:dirname|filename|url))$/;
+// The end of the string or regular expression literal opened at s[i] (a quote or a slash): its closing character, or the line's end.
+function litEnd(s: string, i: number): number {
+  const q = s[i]!;
+  let inClass = false;
+  for (i++; i < s.length && (inClass || s[i] !== q); i++) {
+    if (s[i] === "\n" && q !== "`") break;
+    if (s[i] === "\\") i++;
+    else if (q === "/") inClass = s[i] === "[" || (inClass && s[i] !== "]");
+  }
+  return i;
+}
+// A slash after an operator or an opening bracket starts a regular expression; after a name, a number or a closing bracket it divides.
+function slashOpensRegex(s: string, i: number): boolean {
+  let b = i - 1;
+  while (b >= 0 && s[b]! <= " ") b--;
+  return /[(,=:[!&|?{};+*%<>~^-]/.test(s[b] ?? ";");
+}
+// The bracket closing the one at `open`, literals skipped; -1 when there is none.
+function closeAt(s: string, open: number): number {
+  let d = 0;
+  for (let i = open; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === '"' || c === "'" || c === "`" || (c === "/" && slashOpensRegex(s, i))) i = litEnd(s, i);
+    else if (c === "(" || c === "[" || c === "{") d++;
+    else if ((c === ")" || c === "]" || c === "}") && --d === 0) return i;
+  }
+  return -1;
+}
+function constPartsWiden(text: string): boolean {
+  const c = cls!;
+  const budget = 8 * text.length + 100000;
+  let spent = 0;
+  const inits = new Map<string, string[]>(); // every value a name is given
+  const other = new Set<string>(); // names bound any other way: parameter, destructure, loop, import, function, mutation
+  const params = new Set<string>();
+  let poison = false;
+  const ids = (s: string): string[] => s.match(/[A-Za-z_$][\w$]*(?![\w$])(?!\s*:)/g) ?? []; // an object key is no binding
+  const back = (close: number, cap: number): number => {
+    let d = 0;
+    for (let k = close; k >= 0 && close - k < cap; k--) {
+      const ch = text[k]!;
+      if (ch === ")" || ch === "]" || ch === "}") d++;
+      else if ((ch === "(" || ch === "[" || ch === "{") && --d === 0) return (spent += close - k), k;
+    }
+    return (spent += cap), -1;
+  };
+  const NEXT = /\s*(?=[+.?:&|])/y;
+  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\+|\|\||\?\?|&&)?=(?![=>])/g)) {
+    let i = (m.index ?? 0) + m[0].length;
+    while (i < text.length && text[i]! <= " ") i++;
+    const start = i;
+    const cap = Math.min(text.length, start + 2000);
+    let d = 0;
+    let last = "";
+    for (; i < cap; i++) {
+      const ch = text[i]!;
+      if (ch > " ") last = ch;
+      if (ch === '"' || ch === "'" || ch === "`") i = litEnd(text, i);
+      else if (ch === "(" || ch === "[" || ch === "{") d++;
+      else if (ch === ")" || ch === "]" || ch === "}") {
+        if (d === 0) break;
+        d--;
+      } else if (d === 0 && (ch === ";" || ch === ",")) break;
+      else if (d === 0 && ch === "\n" && !/[+\-*/?:&|.,=(]/.test(last)) {
+        // A line that continues the expression starts (after blanks) with an operator; the blanks are crossed once.
+        NEXT.lastIndex = i + 1;
+        if (!NEXT.test(text)) break;
+        i = NEXT.lastIndex - 1;
+      }
+    }
+    if ((spent += i - start + 40) > budget) return true;
+    const name = m[1]!;
+    const list = inits.get(name);
+    if (i >= cap && cap < text.length) other.add(name);
+    else if (i > start) (list ?? inits.set(name, []).get(name)!).push(text.slice(start, i).trim());
+    if (list && list.length > 20) other.add(name);
+  }
+  const names = (re: RegExp, set: Set<string>, extra?: Set<string>): void => {
+    for (const m of text.matchAll(re)) for (const n of ids(m[1]!)) (set.add(n), extra?.add(n));
+  };
+  names(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)(?![\w$]|\s*=(?![=>])|\s*[;,\n])/g, other);
+  names(/\b(?:function(?![\w$])[\s*]*|class\s+)([A-Za-z_$][\w$]*)/g, other);
+  names(/\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g, other, params);
+  names(/\bimport(?![\w$])([^'";()]{0,300}?)\bfrom\b/g, other);
+  names(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>/g, other, params);
+  names(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\+\+|--|(?:\*\*|<<|>>>?|[-*/%&|^])=)/g, other);
+  names(/(?:\+\+|--)\s*([A-Za-z_$][\w$]*)/g, other);
+  // A parameter list is the (...) before an arrow or a body; a destructuring is the [...] or {...} before `=`, `of` or `in`.
+  for (const re of [/\)\s*(?:=>|\{)/g, /[\]}]\s*(?:=(?![=>])|\b(?:of|in)\b)/g]) {
+    for (const m of text.matchAll(re)) {
+      const close = m.index ?? 0;
+      const k = back(close, 2000);
+      if (spent > budget) return true;
+      if (k < 0) poison = true;
+      else if (m[0][0] === ")" && /\b(?:if|while|for|switch|with)\s*$/.test(text.slice(Math.max(0, k - 12), k))) continue;
+      else for (const n of ids(text.slice(k, close))) (other.add(n), m[0][0] === ")" && params.add(n));
+    }
+  }
+  // Run functions renamed or held by a name (`{ execSync: run }`, `import { exec as run }`, `const run = cp.execSync`, `promisify(cp.exec)`).
+  const runs = new Set<string>();
+  names(new RegExp(`\\b(?:${RUN_FN})\\s*(?::|\\bas\\b)\\s*([A-Za-z_$][\\w$]*)`, "g"), runs);
+  const RUN_END = new RegExp(`(?:^|[.\\s(\\["'\`])(?:${RUN_FN})["'\`\\]\\s]*\\)?$`);
+  for (let r = 0; r < 3 && new RegExp(`\\b(?:${RUN_FN})\\b`).test(text); r++) for (const [k, list] of inits) if (list.some((x) => RUN_END.test(x) || runs.has(x))) runs.add(k);
+  const loaders = new Set(loaderNames(text).filter((n) => /^[\w$]+$/.test(n)));
+  // Whether src is made only of literals and the runtime values: a name counts when every value it is given does.
+  const seen = new Map<string, boolean>();
+  const prog: string[] = []; // names being read: a name that mentions itself (`bin = bin + ".exe"`) adds nothing
+  const modIs = (base: string, spec: string): boolean => {
+    const re = new RegExp(`^require\\(["'](?:node:)?${spec}["']\\)$`);
+    const l = inits.get(base);
+    return re.test(base) || (!!l && !other.has(base) && l.every((x) => re.test(x)));
+  };
+  const pfns = new Set(c.fns); // bare join, resolve, dirname, ... taken from the path module
+  for (const m of text.matchAll(/\{([^{}]*)\}\s*(?:=\s*require\s*\(\s*|from\s*)['"](?:node:)?path(?:\/posix)?['"]/g)) {
+    for (const part of m[1]!.split(",")) {
+      const mm = /^\s*(join|resolve|dirname|basename|extname|relative)\s*(?:(?::|\bas\b)\s*([\w$]+))?\s*$/.exec(part);
+      if (mm) pfns.add(mm[2] ?? mm[1]!);
+    }
+  }
+  const ok = (src: string, d: number): boolean => {
+    if (d > 8 || (spent += src.length + 1) > budget) return false;
+    for (const raw of splitTop(src, "+")) {
+      const p = raw.trim();
+      if (/^(?:0x[\da-fA-F]+|\d+(?:\.\d+)?|(["'])(?:(?!\1)[^\\]|\\.)*\1)$/.test(p)) continue;
+      const w = p.length < 160 ? p.replace(/\s+/g, "") : "";
+      if (w && RUNTIME_PART.test(w)) continue;
+      const sep = /^([\w$]+)\.(?:sep|delimiter)$/.exec(w);
+      if (sep && c.mods.has(sep[1]!)) continue;
+      if (/^[A-Za-z_$][\w$]*$/.test(p)) {
+        if (prog[prog.length - 1] === p) continue;
+        let r = seen.get(p);
+        if (r === undefined) {
+          const list = inits.get(p);
+          if (seen.size >= 200 || poison || other.has(p) || !list) return false;
+          seen.set(p, false);
+          prog.push(p);
+          r = list.every((x) => ok(x, d + 1));
+          prog.pop();
+          seen.set(p, r);
+        }
+        if (r) continue;
+        return false;
+      }
+      if ((p[0] === "(" || p[0] === "[") && closeAt(p, 0) === p.length - 1) {
+        const inner = p.slice(1, -1);
+        if (p[0] === "(" ? ok(inner, d + 1) : splitTop(inner, ",").every((e) => ok(e.trim().replace(/^\.\.\./, ""), d + 1))) continue;
+        return false;
+      }
+      if (p[0] === "`" && p.length > 1 && p.endsWith("`")) {
+        let good = true;
+        for (let i = 1; good && i < p.length - 1; i++) {
+          if (p[i] === "\\") i++;
+          else if (p[i] === "`") good = false;
+          else if (p[i] === "$" && p[i + 1] === "{") {
+            const j = closeAt(p, i + 1);
+            good = j > 0 && ok(p.slice(i + 2, j), d + 1);
+            i = j;
+          }
+        }
+        if (good) continue;
+        return false;
+      }
+      const call = matchCall(p);
+      if (!call) return false;
+      const fn = call.callee.replace(/\s+/g, "").replace(/\?\./g, ".").replace(/\.(?:posix|win32)(?=\.)/, "");
+      const dot = fn.indexOf(".");
+      const member = fn.slice(dot + 1);
+      const path = fn === "require.resolve" || (dot > 0 && (c.mods.has(fn.slice(0, dot)) || modIs(fn.slice(0, dot), "path")) && /^(?:join|resolve|dirname|basename|extname|relative)$/.test(member)) || pfns.has(fn);
+      const good = path ? splitTop(call.args, ",").every((a) => ok(a.trim(), d + 1)) : !call.args.trim() && (fn === "process.cwd" || (dot > 0 && (fn.startsWith("os.") || modIs(fn.slice(0, dot), "os")) && /^(?:platform|arch|homedir|tmpdir|type)$/.test(member)));
+      if (good) continue;
+      return false;
+    }
+    return true;
+  };
+  const list = (a: string): string[] => splitTop(a, ",").map((s) => s.trim());
+  const elems = (x: string | undefined): string[] => (x === undefined ? [] : x.startsWith("[") && closeAt(x, 0) === x.length - 1 ? list(x.slice(1, -1)) : [x]);
+  const cp = /child_|child["'`]|getBuiltinModule|createRequire|_process/.test(text);
+  const STEP = /\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)|\s*(?:\?\.\s*)?\[\s*(['"`])([\w$]+)\2\s*\]/y;
+  const CALL = /\s*(?:\?\.\s*)?\(/y;
+  const notFn = new Map<string, boolean>(); // per callee name: bound to a parameter or to something that is not a function
+  // One call: a load, a run, or (in a file that names child_process) a callee the scan cannot resolve. Returns true to widen.
+  const visit = (segs: string[], dotted: boolean, paren: number): boolean => {
+    const norm = segs.join(".");
+    const last = segs[segs.length - 1]!;
+    const viaCall = segs.length > 1 && /^(?:call|apply|bind)$/.test(last);
+    const name = viaCall ? segs[segs.length - 2]! : last;
+    const load = !dotted && (LOAD_CALLS.has(norm) || (loaders.has(segs[0]!) && (segs.length === 1 || (segs.length === 2 && last === "resolve"))));
+    const reflect = !dotted && norm === "Reflect.apply";
+    const run = RUN_NAME.test(name) || (!dotted && runs.has(name) && segs.length === (viaCall ? 2 : 1)) || reflect;
+    if (!load && !run) {
+      if (!cp || dotted || segs.length > 1 || loaders.has(norm) || pfns.has(norm) || c.mods.has(norm)) return false;
+      let bad = notFn.get(norm);
+      if (bad === undefined) notFn.set(norm, (bad = params.has(norm) || (inits.get(norm) ?? []).some((x) => !/^(?:async\b\s*)?(?:function\b|\(|[A-Za-z_$][\w$]*\s*=>)/.test(x))));
+      return bad;
+    }
+    const close = closeAt(text, paren);
+    if (close < 0) return true;
+    const args = text.slice(paren + 1, close);
+    spent += args.length + 1;
+    let a = list(args);
+    // A load of one bare name that is a parameter or has no value here (require(x)) is left to the existing handling.
+    if (load) return !(/^[A-Za-z_$][\w$]*$/.test(a[0] ?? "") && (params.has(a[0]!) || !inits.has(a[0]!))) && !ok(a[0] ?? "", 0);
+    let fn = name;
+    if (reflect) {
+      fn = /([\w$]+)["'`\]\s]*$/.exec((a[0] ?? "").slice(-80))?.[1] ?? "";
+      if (!RUN_NAME.test(fn) && !runs.has(fn)) return false;
+      a = elems(a[2]).map((s) => s.trim());
+    } else if (viaCall) a = last === "apply" ? elems(a[1]).map((s) => s.trim()) : a.slice(1);
+    const need = [a[0] ?? ""];
+    const v = a[1];
+    // The argument array of spawn, execFile and fork (held by a name too); exec has only the command.
+    if ((!/^exec(?:Sync)?$/.test(fn) || runs.has(fn)) && v !== undefined && !v.startsWith("{") && !/=>|^(?:async\s+)?function\b/.test(v)) need.push(v);
+    return need.some((x) => !ok(x.replace(/^\.\.\./, ""), 0));
+  };
+  const TOK = /["'`{}()[\]/]|(?<![\w$])[A-Za-z_$][\w$]*/g;
+  const stack: number[] = [];
+  const opens: number[] = []; // the ( and [ not yet closed
+  let depth = 0;
+  let pos = 0;
+  const tpl = (i: number): number => {
+    for (; i < text.length; i++) {
+      const ch = text[i]!;
+      if (ch === "\\") i++;
+      else if (ch === "`") return i + 1;
+      else if (ch === "$" && text[i + 1] === "{") return stack.push(depth++), i + 2;
+    }
+    return i;
+  };
+  for (let m = TOK.exec(text); m; TOK.lastIndex = pos, m = TOK.exec(text)) {
+    if (spent > budget) return true;
+    const t = m[0];
+    const at = m.index;
+    pos = TOK.lastIndex;
+    if (t === "/" && !slashOpensRegex(text, at)) continue;
+    if (t === '"' || t === "'" || t === "/") pos = litEnd(text, at) + 1;
+    else if (t === "`") pos = tpl(pos);
+    else if (t === "{") depth++;
+    else if (t === "}") {
+      depth--;
+      if (stack.length && stack[stack.length - 1] === depth) (stack.pop(), (pos = tpl(pos)));
+    } else if (t === "(" || t === "[") opens.push(at);
+    else if (t === "]" || t === ")") {
+      const k = opens.pop() ?? -1;
+      CALL.lastIndex = pos;
+      if (!cp || !CALL.test(text)) continue;
+      const inner = text.slice(k + 1, Math.min(at, k + 201));
+      const word = t === "]" ? /^\s*(['"`])([\w$]+)\1\s*$/.exec(inner) : null;
+      // A computed member, a curried call or a parenthesized callee that is no function (`(a || run)(x)`): it cannot be resolved.
+      if (k < 0 || (t === "]" ? !word : !/^\s*(?:async\b|function\b|\([^)]*\)\s*=>|[\w$]+\s*=>)/.test(inner))) return true;
+      if (word && visit([word[2]!], true, CALL.lastIndex - 1)) return true;
+    } else {
+      const segs = [t];
+      let end = pos;
+      for (; segs.length < 12; end = STEP.lastIndex) {
+        STEP.lastIndex = end;
+        const st = STEP.exec(text);
+        if (!st) break;
+        segs.push((st[1] ?? st[3])!);
+      }
+      pos = end;
+      CALL.lastIndex = end;
+      if (!CALL.test(text)) continue;
+      let q = at - 1;
+      while (q >= 0 && text[q]! <= " ") q--;
+      const paren = CALL.lastIndex - 1;
+      if (visit(segs, text[q] === ".", paren)) return true;
+      pos = paren + 1;
+      if (LOAD_CALLS.has(segs.join(".")) || RUN_NAME.test(segs[segs.length - 1]!)) pos = Math.max(pos, closeAt(text, paren) + 1);
+      else opens.push(paren);
+    }
+  }
+  return spent > budget;
 }
 
 function unclassifiedUnsafe(text: string): boolean {
