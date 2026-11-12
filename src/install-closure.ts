@@ -902,13 +902,14 @@ const PROCESS_ALIAS = new RegExp(
 );
 
 // A static file may require these. Any other bare builtin is unsafe, so the load stays in the text.
-const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer"]);
+const STATIC_BUILTINS = new Set(["fs", "path", "os", "util", "events", "assert", "url", "crypto", "stream", "zlib", "buffer", "_stream_duplex", "_stream_passthrough", "_stream_readable", "_stream_transform", "_stream_writable"]);
 const NODE_BUILTINS = new Set([
   ...STATIC_BUILTINS,
   "async_hooks", "child_process", "cluster", "console", "constants", "dgram", "diagnostics_channel",
   "dns", "domain", "http", "http2", "https", "inspector", "module", "net", "perf_hooks", "process",
   "punycode", "querystring", "readline", "repl", "sqlite", "string_decoder", "sys", "test", "timers",
   "tls", "trace_events", "tty", "v8", "vm", "wasi", "worker_threads",
+  "_http_agent", "_http_client", "_http_common", "_http_incoming", "_http_outgoing", "_http_server", "_stream_wrap", "_tls_common", "_tls_wrap",
 ]);
 
 function builtinRoot(spec: string): string | undefined {
@@ -940,6 +941,134 @@ function stripLiteralLoad(raw: string): boolean {
   // A node: name that is not on the allowlist is a builtin too, including one this list does not know yet.
   if (spec.startsWith("node:")) return false;
   return !NODE_BUILTINS.has(root);
+}
+
+// A builtin that runs another file by name: cluster (setupPrimary, settings.exec), module (register, _load), node:test (run).
+// The file has to load the builtin. A literal name is a load of it; a name held by a variable beside a require or import that is not a literal counts only
+// for a receiver bound through that variable. The operation has to be in code position on the builtin: a call, a bracket call, or an assignment to cluster's
+// settings, through a name bound to the builtin's load or on the load itself. A bare setupPrimary( or register( call counts only when the name is a literal.
+// A read of a member (typeof m.register, c["settings"]) loads nothing. A name rebound by a parameter of the same name is not tracked either way: a shadowed receiver still counts (a limit; skipping it would let a file hide a load behind an unused parameter).
+// Every pattern here is anchored on its own literal or has no span that can be retried from each of many starts, and nothing is compared or rescanned per match.
+function loadsFileByBuiltin(text: string, blank: string): boolean {
+  // A string that holds code is read as code: a file that calls eval or Function, or loads vm at all (whatever a verb is renamed to), gets its operations looked for in
+  // the text with its strings kept.
+  // The load of a module that is not one plain string (a name built from pieces, held by a variable, or spelled with an escape) could be vm: it counts as a vm load.
+  const computedLoad = /\b(?:require|import)\s*\((?!\s*(?:"[^"\\\n]*"|'[^'\\\n]*'|`[^`\\$]*`)\s*\))|\bgetBuiltinModule\s*\((?!\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\))/.test(text);
+  // vm named as a string anywhere (an import specifier, an argument to any call such as a createRequire result) counts as loaded: whatever loads it runs the strings given to it.
+  // A vector element that makes a child node run a string (-e, --eval, -p, --print), and a data: import, run a string as code.
+  const stringRunsAsCode = /["'`](?:-e|--eval|-p|--print)["'`]|\bimport\s*\(\s*["'`]data:/.test(text);
+  const vmLoaded = computedLoad || /["'`](?:node:)?vm["'`]/.test(text);
+  // A call on a constructor member (Function reached as (function(){}).constructor(...)) runs a string as code too.
+  const code = vmLoaded || /\b(?:eval|Function|runInNewContext|runInThisContext|runInContext|compileFunction)\s*\(|\bnew\s+(?:vm\s*\.\s*)?Script\s*\(|(?:\.|\])\s*constructor\s*\(/.test(blank) || stringRunsAsCode ? text : blank;
+  // A bracket key counts only where the bracket itself is code, so the same text inside a string is not a use. The string spans come from reading the text again.
+  const spans: SpanNote[] = [];
+  const again = codeOnly(text, [], true, spans);
+  const stringsKnown = again === text && code !== text;
+  const inString = (i: number): boolean => {
+    if (!stringsKnown) return false;
+    let lo = 0;
+    let hi = spans.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const sp = spans[mid]!;
+      if (i < sp.at) hi = mid - 1;
+      else if (i >= sp.at + sp.len) lo = mid + 1;
+      else return true;
+    }
+    return false;
+  };
+  const keyedAt = (re: RegExp): boolean => {
+    for (const m of text.matchAll(re)) if (!inString(m.index ?? 0)) return true;
+    return false;
+  };
+  // Any constructor chain ending in register or _load is held; module itself too. Only register is exempt behind this (this.constructor.register(this) is a class method):
+  // this can be bound to module, so this.constructor._load stays held. A receiver ahead of _load may follow a dot or a $ (deps.module._load, $module._load).
+  if (/(?<![\w$.])module\s*(?:\?\.|\.)\s*(?:__proto__\s*(?:\?\.|\.)\s*)?register\b|(?<!\w)module\s*(?:\?\.|\.)\s*(?:__proto__\s*(?:\?\.|\.)\s*)?_load\b/.test(code)) return true;
+  if (/(?<![\w$.])constructor\s*(?:\?\.|\.)\s*(?:_load|register)\b|(?:\?\.|\.)\s*constructor\s*(?:\?\.|\.)\s*_load\b|(?<!(?<![\w$.])this\??)(?:\?\.|\.)\s*constructor\s*(?:\?\.|\.)\s*register\b/.test(code)) return true;
+  if (keyedAt(/\b(?:module|constructor)\s*(?:\.\s*constructor\s*)?\[\s*["'`](?:_load|register)["'`]\s*\]/g) || keyedAt(/\[\s*["'`]constructor["'`]\s*\]\s*(?:\?\.|\.)\s*(?:_load|register)\b/g)) return true;
+  const nonLiteralLoad = /\b(?:require|import)\s*\(\s*[^"'`\s)]|\bgetBuiltinModule\s*\(/.test(blank);
+  const literalNamed = (name: string): boolean => new RegExp(`(?:\\bfrom\\s*|\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*)["'\`](?:node:)?${name}["'\`]`).test(text);
+  const named = (name: string): boolean => literalNamed(name) || (nonLiteralLoad && new RegExp(`["'\`](?:node:)?${name}["'\`]`).test(text));
+  // Names bound to a load of the builtin: const c = require("cluster"), import c from "cluster", import * as c from "cluster", and a require of a variable that holds the name.
+  const receivers = (name: string): Set<string> => {
+    const out = new Set<string>();
+    for (const m of text.matchAll(new RegExp(String.raw`(?:const|let|var)\s+([\w$]+)\s*=\s*(?:await\s+)?require\s*\(\s*["'\`](?:node:)?${name}["'\`]`, "g"))) out.add(m[1] ?? "");
+    for (const m of text.matchAll(new RegExp(String.raw`\bimport\s+(?:\*\s+as\s+)?([\w$]+)\s*(?:,\s*\{[^{}]*\}\s*)?from\s*["'\`](?:node:)?${name}["'\`]`, "g"))) out.add(m[1] ?? "");
+    for (const m of text.matchAll(new RegExp(String.raw`(?:const|let|var)\s+([\w$]+)\s*=\s*process\s*\.\s*getBuiltinModule\s*\(\s*["'\`](?:node:)?${name}["'\`]`, "g"))) out.add(m[1] ?? "");
+    const held = new Set<string>();
+    for (const m of text.matchAll(new RegExp(String.raw`(?:const|let|var)\s+([\w$]+)\s*=\s*["'\`](?:node:)?${name}["'\`]`, "g"))) held.add(m[1] ?? "");
+    if (held.size) for (const m of text.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:await\s+)?require\s*\(\s*([\w$]+)\s*\)/g)) if (held.has(m[2] ?? "")) out.add(m[1] ?? "");
+    return out;
+  };
+  // A member of a name bound to the builtin, in code: one pass over the member's own matches, a set lookup for the receiver. `after` is what must follow the member.
+  const viaReceiver = (names: Set<string>, member: string, after: string): boolean => {
+    for (const m of code.matchAll(new RegExp(String.raw`(?<![\w$.])([\w$]+)\s*\.\s*(?:${member})\s*${after}`, "g"))) if (names.has(m[1] ?? "")) return true;
+    return false;
+  };
+  const keyedVia = (names: Set<string>, key: string, after: string): boolean => {
+    for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])([\w$]+)\s*\[\s*["'\`](?:${key})["'\`]\s*\]\s*${after}`, "g"))) if (names.has(m[1] ?? "") && !inString(m.index ?? 0)) return true;
+    return false;
+  };
+  // The builtin loaded by a literal and used on the spot: require("cluster").settings = ..., require("module").register, require("node:test").run.
+  const direct = (name: string, member: string): boolean =>
+    new RegExp(String.raw`\brequire\s*\(\s*["'\`](?:node:)?${name}["'\`]\s*\)\s*(?:\.\s*${member}|\[\s*["'\`]${member}["'\`]\s*\])`).test(text);
+  const CALL = String.raw`\(`;
+  const SET = String.raw`=(?!=)`;
+  // A member read for its value only (typeof x.m, console.log(x.m)) loads nothing; any other mention of a loader member is a hand-off of it.
+  const readOnly = (i: number, src: string): boolean => {
+    const before = src.slice(Math.max(0, i - 80), i);
+    return /(?:\btypeof|!)\s*$/.test(before) || /\bif\s*\(\s*$/.test(before) || /\b(?:console\s*\.\s*\w+|JSON\s*\.\s*stringify|String)\s*\(\s*(?:[\w$.]+\s*\(\s*)?[^()]*$/.test(before);
+  };
+  const handedOff = (names: Set<string>, member: string): boolean => {
+    for (const m of code.matchAll(new RegExp(String.raw`(?<![\w$.])([\w$]+)\s*\.\s*(?:${member})\b`, "g"))) if (names.has(m[1] ?? "") && !readOnly(m.index ?? 0, code)) return true;
+    return false;
+  };
+  // The binding's settings object given first to a call (Object.assign(c.settings, ...), Reflect.set(c.settings, "exec", p)): a copy from it (Object.assign({}, c.settings)) is not.
+  const givenAway = (names: Set<string>): boolean => {
+    for (const m of code.matchAll(/\(\s*([\w$]+)\s*[,)]/g)) if (names.has(m[1] ?? "") && !readOnly((m.index ?? 0) + 1, code)) return true;
+    return false;
+  };
+  // The binding given to a call with the member's name as a string (Reflect.get(M, "_load")): both are read from the same text, so the window is cut from it too.
+  const withKeys = (names: Set<string>, keys: string): boolean => {
+    for (const m of text.matchAll(new RegExp(String.raw`[(,]\s*([\w$]+)\s*,\s*["'\`](?:${keys})["'\`]\s*[,)]`, "g"))) if (names.has(m[1] ?? "") && !inString(m.index ?? 0) && !readOnly((m.index ?? 0) + 1, text)) return true;
+    return false;
+  };
+  // A name bound to module, module.constructor, require.main or process.mainModule (const M = module.constructor): its register and _load are the loader.
+  const selfNames = new Set<string>();
+  for (const m of code.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:\(\s*0\s*,\s*)?(?:module|require\s*\.\s*main|process\s*\.\s*mainModule)(?=\s*(?:[;,)\n]|$|\.\s*constructor\b(?!\s*\.)))/g)) selfNames.add(m[1] ?? "");
+  if (selfNames.size && (viaReceiver(selfNames, String.raw`(?:register|_load)\b`, CALL) || handedOff(selfNames, String.raw`(?:register|_load)`))) return true;
+  if (named("cluster")) {
+    const r = receivers("cluster");
+    if (literalNamed("cluster") && (/\b(?:setupPrimary|setupMaster)\s*\(|\bsettings\s*\.\s*exec\b/.test(code) || /\bsettings\s*\[\s*["'`]exec["'`]\s*\]/.test(text))) return true;
+    if (viaReceiver(r, String.raw`(?:setupPrimary|setupMaster)\b`, CALL) || viaReceiver(r, String.raw`settings\b`, SET) || viaReceiver(r, String.raw`settings\s*\.\s*exec\b`, "")) return true;
+    if (keyedVia(r, "setupPrimary|setupMaster", CALL) || keyedVia(r, "settings", String.raw`(?:=(?!=)|\[\s*["'\`]exec["'\`]\s*\]|\.\s*exec\b)`)) return true;
+    if (direct("cluster", String.raw`(?:setupPrimary|setupMaster)\s*\(`) || direct("cluster", String.raw`settings\s*=(?!=)`)) return true;
+    // Hand-offs: the settings object or setupPrimary given to a call or held in a value, and a name destructured from the load given to a call.
+    if (handedOff(r, String.raw`(?:setupPrimary|setupMaster)`) || withKeys(r, "setupPrimary|setupMaster|settings")) return true;
+    for (const m of code.matchAll(/\(\s*([\w$]+)\s*\.\s*settings\s*[,)]/g)) if (r.has(m[1] ?? "") && !readOnly((m.index ?? 0) + 1, code)) return true;
+    const parts = new Set<string>();
+    for (const m of text.matchAll(/\{([^{}]*)\}\s*=\s*(?:await\s+)?require\s*\(\s*["'`](?:node:)?cluster["'`]/g)) {
+      for (const part of (m[1] ?? "").split(",")) {
+        const bits = part.split(":").map((x) => x.trim());
+        if (bits[0] === "settings") parts.add(bits[1] || "settings");
+      }
+    }
+    if (parts.size && givenAway(parts)) return true;
+  }
+  if (named("module")) {
+    const r = receivers("module");
+    if (literalNamed("module") && /\b(?:register|_load)\s*\(/.test(code)) return true;
+    if (viaReceiver(r, String.raw`(?:register|_load)\b`, CALL) || keyedVia(r, "register|_load", CALL)) return true;
+    if (direct("module", String.raw`(?:register|_load)\b`)) return true;
+    if (handedOff(r, String.raw`(?:register|_load)`) || withKeys(r, "register|_load")) return true;
+  }
+  if (named("test") && /["'`]node:test["'`]/.test(text)) {
+    const r = receivers("test");
+    if (viaReceiver(r, String.raw`run\b`, CALL) || keyedVia(r, "run", CALL) || direct("test", String.raw`run\b`)) return true;
+    for (const m of text.matchAll(/\bimport\s*\{([^{}]*)\}\s*from\s*["'`]node:test["'`]/g)) if (/\brun\b/.test(m[1] ?? "")) return true;
+    for (const m of text.matchAll(/\{([^{}]*)\}\s*=\s*(?:await\s+)?require\s*\(\s*["'`]node:test["'`]/g)) if (/\brun\b/.test(m[1] ?? "")) return true;
+  }
+  return false;
 }
 
 // One predicate for JS. A file that fails it widens by the shape of its computed loads.
@@ -2926,14 +3055,17 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     const args = argsOf(text, after + call[0].length - 1);
     if (args !== undefined) loadEffect(tier, fromKey, firstArg(args), text, true);
   }
-  // A code-running builtin that loads a file by name (cluster.setupPrimary({ exec }), module.register(...), Module._load(...)).
-  if ((/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["'`](?:node:)?(?:cluster|module)["'`]/.test(text) && /\b(?:setupPrimary|setupMaster)\s*\(|\bsettings\s*\.\s*exec\b|\bregister\s*\(|\b_load\s*\(/.test(text)) || /\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(text)) {
+  // A code-running builtin that loads a file by name (cluster.setupPrimary({ exec }), cluster.settings = { exec }, module.register(...), Module._load(...), the run of node:test).
+  const blank = codeOnly(text, [], false) ?? text;
+  const loadsByName = loadsFileByBuiltin(text, blank);
+  // Never narrower than the rules this one replaced: a literal cluster or module load with a loader verb anywhere, and a module or constructor _load chain anywhere, in the text with its strings kept.
+  const sameAsBefore = (/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["'`](?:node:)?(?:cluster|module)["'`]/.test(text) && /\b(?:setupPrimary|setupMaster)\s*\(|\bsettings\s*\.\s*exec\b|\bregister\s*\(|\b_load\s*\(/.test(text)) || /\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(text);
+  if (loadsByName || sameAsBefore) {
     tier.pkg = true;
     tier.tests = true;
     tier.flows = true;
   }
   // Any other mention of require, module.require or a createRequire result that is not itself an immediate call is a loader handed on as a value.
-  const blank = codeOnly(text, [], false) ?? text;
   if (handedOn(blank, [...callers].filter((n) => !/^(?:require|import|fork|execFile|execFileSync)$/.test(n)), text)) {
     tier.pkg = true;
     tier.tests = true;
