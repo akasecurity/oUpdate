@@ -13,7 +13,7 @@ import { installView, otherInstallEntry, prepareInert } from "./install-closure.
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
 import { newFindings, type Finding } from "./adapters/scanner/types.ts";
-import { renderLineDiff } from "./linediff.ts";
+import { diffSeq, lineEndingsOnly, renderLineDiff, type Op } from "./linediff.ts";
 
 export type LayerName = "cooldown" | "advisory" | "prepass" | "scan" | "reviewer" | "gate";
 export const LAYERS: LayerName[] = ["cooldown", "advisory", "prepass", "scan", "reviewer", "gate"];
@@ -209,7 +209,7 @@ export function hashedBinary(path: string, before: Uint8Array | undefined, after
   return !shownAsText(path, after) && ((!!after && isBinary(after)) || (!!before && isBinary(before)));
 }
 
-function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Array | undefined, state = !before ? "added" : !after ? "removed" : "changed"): string[] {
+function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Array | undefined, state = !before ? "added" : !after ? "removed" : "changed", cut?: Set<string>): string[] {
   const head = `=== ${path} (${state}) ===\n`;
   // A text-signature file that code loads is code: show it, with a NUL escaped, instead of a benign hash.
   if (state !== "loaded by code" && hashedBinary(path, before, after)) {
@@ -217,7 +217,172 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
     return [`${head}[binary, ${after?.length ?? 0} bytes, sha256 ${h}]\n`];
   }
   const text = (b: Uint8Array | undefined) => b && dec.decode(b).replaceAll("\0", "\\x00");
-  return [head, renderLineDiff(text(before), text(after))];
+  const bt = text(before);
+  const at = text(after);
+  // The ordered diff is computed once for the rendering and for the definitions listed after it.
+  // A whole-file line-ending conversion has every line changed: it is named, not diffed, and no definitions are listed.
+  let ops: { v: Op[] | undefined } | undefined;
+  const getOps =
+    bt !== undefined && at !== undefined
+      ? (a?: string[], b?: string[]): Op[] | undefined => (ops ??= { v: lineEndingsOnly(bt, at) ? undefined : diffSeq(a ?? bt.split("\n"), b ?? at.split("\n")) }).v
+      : undefined;
+  const out = [head, renderLineDiff(bt, at, getOps)];
+  if (getOps && at !== undefined && (state === "changed" || state === "loaded by code")) {
+    let c = after && blobDefsCache.get(after);
+    if (!c || c.before !== before) {
+      c = { before, out: unchangedBlobDefs(at, getOps) };
+      if (after) blobDefsCache.set(after, c);
+    }
+    if (c.out?.text) out.push(c.out.text);
+    if (c.out?.cut) cut?.add(path);
+  }
+  return out;
+}
+
+// A changed line that names an identifier whose definition (`D = "<encoded run>"`) sits on an unchanged line:
+// the diff does not show that line, so a new `eval(Buffer.from(D, "base64"))` hides the payload it runs.
+// The definitions of the names added lines use are listed after the diff. "Unchanged" is taken from the diff itself
+// (its `=` lines), so a line the diff already prints, or one that moved, is not listed twice; when the diff fell back to
+// the whole new version, nothing is listed. Runs are found by one character pass over unchanged lines of BLOB_RUN or
+// more characters; the number of lines, the length of each and the total shown are capped, and the result is cached per file pair.
+// The selection is broad and so is the hold: any token on a changed line (a string, a comment, a property, a parameter too) selects the
+// definitions of that name, and a selected definition that cannot be shown whole (cut, hash only, past the caps or the limit) holds the file.
+// No exemption is read from the changed line: a one-line reading of what is code and what is not is attacker-controlled. The cost is a hold
+// for a cut definition whose name also appears, unrelated, on a changed line.
+const BLOB_RUN = 400; // the pre-pass encoded-blob threshold
+const BLOB_DEFS_MAX = 8;
+const BLOB_LINE_MAX = 20_000; // a longer line is shown as its head and tail with its length and sha256
+const BLOB_TOTAL_MAX = 60_000; // past this, the remaining lines are a length and sha256 only
+const blobDefsCache = new WeakMap<Uint8Array, { before: Uint8Array | undefined; out: { text: string; cut: boolean } | undefined }>();
+
+// An identifier: ID_Start, then ID_Continue: letters, digits, combining marks, connector punctuation (U+203F) and the joiners U+200C and U+200D.
+const IDENT = /[\p{L}_$][\p{L}\p{N}\p{M}\p{Pc}_$\u200C\u200D]*/gu;
+
+/** The names an encoded run of BLOB_RUN or more characters is assigned to on this line (`D = "<run>"`, `o.D = "<run>"`). */
+function encodedRunLead(l: string): string[] {
+  const found: string[] = [];
+  let start = -1;
+  const isEnc = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 || c === 61 || c === 95 || c === 45;
+  for (let i = 0; i <= l.length; i++) {
+    if (i < l.length && isEnc(l.charCodeAt(i))) {
+      if (start < 0) start = i;
+      continue;
+    }
+    if (start >= 0 && i - start >= BLOB_RUN && found.length < 16) {
+      const lead = /([\p{L}_$][\p{L}\p{N}\p{M}\p{Pc}_$\u200C\u200D]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
+      if (lead) found.push(lead[1]!);
+    }
+    start = -1;
+  }
+  return found;
+}
+
+/** True when some line is BLOB_RUN or more characters. */
+function hasLongLine(s: string): boolean {
+  for (let a = 0; a < s.length; ) {
+    let e = s.indexOf("\n", a);
+    if (e < 0) e = s.length;
+    if (e - a >= BLOB_RUN) return true;
+    a = e + 1;
+  }
+  return false;
+}
+
+function unchangedBlobDefs(after: string, getOps: (a?: string[], b?: string[]) => Op[] | undefined): { text: string; cut: boolean } | undefined {
+  if (!hasLongLine(after)) return undefined;
+  const ops = getOps();
+  if (!ops) return undefined;
+  const defs = new Map<string, number[]>();
+  const added: { l: string; at: number }[] = [];
+  const kept: string[] = [];
+  let ni = 0;
+  for (const o of ops) {
+    if (o.op === "-") continue;
+    if (o.op === "+") added.push({ l: o.v, at: ni });
+    else if (o.v.length >= BLOB_RUN) {
+      kept[ni] = o.v;
+      for (const name of encodedRunLead(o.v)) {
+        const at = defs.get(name);
+        if (!at) defs.set(name, [ni]);
+        else if (at[at.length - 1] !== ni) at.push(ni);
+      }
+    }
+    ni++;
+  }
+  if (!defs.size || !added.length) return undefined;
+  const firstUse = new Map<string, number>();
+  for (const { l, at } of added) {
+    for (const m of l.matchAll(IDENT)) {
+      // A shell or PHP variable `$D` names the definition `D`: leading `$` signs are dropped unless the name itself is defined with them.
+      const n = defs.has(m[0]) ? m[0] : m[0].replace(/^\$+/, "");
+      if (defs.has(n) && !firstUse.has(n)) firstUse.set(n, at);
+    }
+  }
+  if (!firstUse.size) return undefined;
+  // Names in the order their first use appears; each name's definitions nearest-preceding first. A line that defines several used names is listed once.
+  const lineNames = new Map<number, string[]>();
+  for (const [n, use] of [...firstUse].sort((a, b) => a[1] - b[1])) {
+    const at = defs.get(n)!;
+    const prior = at.filter((i) => i < use).reverse();
+    for (const i of [...prior, ...at.filter((i) => i >= use)]) {
+      const names = lineNames.get(i);
+      if (!names) lineNames.set(i, [n]);
+      else if (!names.includes(n)) names.push(n);
+    }
+  }
+  // Limits apply to the final text: a line is quoted first (each control character can grow to six), then its length,
+  // the label and the hash all count against the per-line and the total cap. Only the capped head and tail are ever escaped.
+  const header = "[unchanged lines that define a name the changed lines use, each holding an encoded run]\n";
+  let out = header;
+  const notShown = new Set<string>(); // the names of a definition that is cut, hash only, left past the caps or past the limit
+  const entries = [...lineNames];
+  let stopped = false;
+  entries.forEach(([i, names], k) => {
+    if (stopped || k >= BLOB_DEFS_MAX) {
+      for (const n of names) notShown.add(n);
+      return;
+    }
+    const l = kept[i]!;
+    const hash = new Bun.CryptoHasher("sha256").update(l).digest("hex");
+    const meta = `[${l.length} chars, sha256 ${hash}]`;
+    const prefix = `=${i + 1} (a definition of ${names.join(", ")}): `;
+    const quote = l.includes("\r") || l[l.length - 1] === " " || l[l.length - 1] === "\t";
+    const render = (s: string) => (quote ? JSON.stringify(s) : s);
+    const limit = Math.min(BLOB_LINE_MAX, BLOB_TOTAL_MAX - out.length - prefix.length - 1);
+    let body: string | undefined;
+    let whole = true;
+    // A line that fits the per-line limit (the label is not counted against it) is shown whole, even at 19,990 chars.
+    if (l.length + (quote ? 2 : 0) <= limit) {
+      body = render(l);
+      if (body.length > limit) body = undefined;
+    }
+    if (body === undefined) {
+      for (let f = 1; f > 1 / 64; f /= 2) {
+        const headN = Math.floor((BLOB_LINE_MAX - 2000) * f);
+        const tailN = Math.floor(2000 * f);
+        const b = render(`${l.slice(0, headN)}…${l.slice(Math.max(headN, l.length - tailN))} ${meta}`);
+        if (b.length <= limit) {
+          body = b;
+          whole = false; // the head and tail with the length and hash are longer than a line they would cover, so a line cut here is never whole
+          break;
+        }
+      }
+    }
+    if (body === undefined) {
+      whole = false;
+      body = render(meta);
+    }
+    const e = `${prefix}${body}\n`;
+    if (out.length + e.length > BLOB_TOTAL_MAX) {
+      stopped = true;
+      for (const n of names) notShown.add(n);
+      return;
+    }
+    out += e;
+    if (!whole) for (const n of names) notShown.add(n);
+  });
+  const cut = notShown.size > 0; // every name here is on a changed line: that is how the lines were selected
+  return out === header && !cut ? undefined : { text: out === header ? "" : out, cut };
 }
 
 // Files named as never executing: images, fonts, source maps, type declarations, prose. Prose is judged by the
@@ -2030,7 +2195,7 @@ function mapStringTexts(m: Record<string, unknown>): string[] {
 }
 
 /** What a "strings" map shows beside its hash line: the changed sources' contents (in full where a soft pattern matches a line, else one hash line), and the names, file and sourceRoot when they changed. */
-function mapStringPieces(path: string, before: Uint8Array | undefined, after: Uint8Array): string[] {
+function mapStringPieces(path: string, before: Uint8Array | undefined, after: Uint8Array, cut?: Set<string>): string[] {
   const now = strictMapOf(after)?.map;
   const was = before ? strictMapOf(before)?.map : undefined;
   const list = (m: Record<string, unknown> | undefined, k: string) => (Array.isArray(m?.[k]) ? (m![k] as (string | null)[]) : []);
@@ -2043,7 +2208,7 @@ function mapStringPieces(path: string, before: Uint8Array | undefined, after: Ui
     const o = oldSources[i] === src ? oldContent[i] ?? "" : undefined;
     if (o === c) return;
     // A changed entry with a line a soft pattern matches is shown as a diff; any other changed entry is one line (path, bytes, sha256), as a clean big map hides it anyway.
-    if (c.split("\n").some((line) => SOFT_PATTERNS.some(({ re }) => re.test(line)))) out.push(...fileDiff(`${path} sourcesContent ${src}`, o === undefined ? undefined : enc.encode(o), enc.encode(c), o === undefined ? "added" : "changed"));
+    if (c.split("\n").some((line) => SOFT_PATTERNS.some(({ re }) => re.test(line)))) out.push(...fileDiff(`${path} sourcesContent ${src}`, o === undefined ? undefined : enc.encode(o), enc.encode(c), o === undefined ? "added" : "changed", cut));
     else out.push(`=== ${path} sourcesContent ${src} (${o === undefined ? "added" : "changed"}) ===\n[source text, ${enc.encode(c).length} bytes, sha256 ${new Bun.CryptoHasher("sha256").update(c).digest("hex")}]\n`);
   });
   for (const k of ["sources", "names", "file", "sourceRoot"]) {
@@ -2307,7 +2472,7 @@ function loadedByCode(oldFiles: FileMap, newFiles: FileMap): Set<string> {
 // Splits the diff into prompt-sized chunks on line boundaries. Inert files (isInert) that are not entries are
 // left out only with `dropInert`; a text-signature file that code loads is shown anyway. Long lines are sliced,
 // not dropped. `only` as a set keeps those paths in sorted order; as an array it keeps them in the array's order (a ranking).
-export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, only?: Set<string> | string[], dropInert = false, signals: Set<string> = new Set()): string[] {
+export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, only?: Set<string> | string[], dropInert = false, signals: Set<string> = new Set(), cutDefs?: Set<string>): string[] {
   const paths = Array.isArray(only) ? only : [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter((p) => !only || only.has(p)).sort();
   const { entries, fresh, gained, linked } = entryView(oldFiles, newFiles);
   const loaded = loadedByCode(oldFiles, newFiles);
@@ -2348,17 +2513,17 @@ export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, onl
       continue;
     }
     if (loaded.has(p)) {
-      for (const piece of fileDiff(p, a, b, "loaded by code")) push(piece);
+      for (const piece of fileDiff(p, a, b, "loaded by code", cutDefs)) push(piece);
       continue;
     }
     if (generated.has(p)) {
       const h = b ? new Bun.CryptoHasher("sha256").update(b).digest("hex") : "-";
       push(`=== ${p} (${!a ? "added" : !b ? "removed" : "changed"}) ===\n[source map, strict v3 data, ${b?.length ?? 0} bytes, sha256 ${h}, ${generated.get(p)}]\n`);
       // A padded map (the pre-pass did not scan it) whose strings raise a soft pattern: the changed strings are shown (an entry that matches a pattern in full, any other as one hash line) and the mappings stay a hash.
-      if (b && b.length > LARGE_FILE_BYTES && mapStringsClass(b) === "strings") for (const piece of mapStringPieces(p, a, b)) push(piece);
+      if (b && b.length > LARGE_FILE_BYTES && mapStringsClass(b) === "strings") for (const piece of mapStringPieces(p, a, b, cutDefs)) push(piece);
       continue;
     }
-    for (const piece of fileDiff(p, a, b)) push(piece);
+    for (const piece of fileDiff(p, a, b, undefined, cutDefs)) push(piece);
     // An added or changed link shows its target whole beside it, changed or not.
     const t = b && isLink(b) ? linkTarget(newFiles, p) : undefined;
     if (t !== undefined && !shownTargets.has(t)) {
@@ -2645,14 +2810,16 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
       // a hard one or a scanner hit, still shows it in full.
       const bigMapOk = (x: { kind: string; path: string }) => x.kind === "large-file" && x.path.endsWith(".map") && strictMapOf(artifacts.new.get(x.path)!) !== undefined && mapStringsClass(artifacts.new.get(x.path)!) !== "mappings";
       const signalled = new Set([...pre.hard, ...pre.soft.filter((x) => !bigMapOk(x) && !isRegistrySignal(x))].map((x) => x.path));
-      let chunks = chunkDiff(artifacts.old, artifacts.new, cap, undefined, false, signalled);
+      let cutDefs = new Set<string>();
+      let chunks = chunkDiff(artifacts.old, artifacts.new, cap, undefined, false, signalled, cutDefs);
       // More than one stage of parts: read the ranked files first (the first FLAG ends the review), then the rest, every part.
       // (Over the limit the narrowing below ranks the files itself, so the diff is not cut twice.)
       if (chunks.length > stagePartCount(input.maxParts) && chunks.length <= limit) {
         const ranked = realPaths(rankPriorityPaths(pre, scanHits)), seen = new Set(ranked);
         const rest = [...new Set([...artifacts.old.keys(), ...artifacts.new.keys()])].filter((q) => !seen.has(q)).sort();
-        const reordered = chunkDiff(artifacts.old, artifacts.new, cap, [...ranked, ...rest], false, signalled);
-        if (reordered.length <= limit) chunks = reordered; // at the exact boundary the sorted order is kept on purpose (another cut can pack to one part more); every part is still read
+        const reCut = new Set<string>();
+        const reordered = chunkDiff(artifacts.old, artifacts.new, cap, [...ranked, ...rest], false, signalled, reCut);
+        if (reordered.length <= limit) { chunks = reordered; cutDefs = reCut; } // at the exact boundary the sorted order is kept on purpose (another cut can pack to one part more); every part is still read
       }
       let note = "";
       let overPriority = "";
@@ -2722,6 +2889,8 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           else if (scope === "priority") note = `; priority files only, ${leftOut(seen)} file(s) not reviewed`;
           else note = `; ${leftOut(seen)} file(s) not reviewed`;
         }
+        // A definition the diff cannot show whole is named in any hold that has another reason too: the stop must not lose either.
+        const cutNote = cutDefs.size ? `; definition too large to show in ${[...cutDefs].join(", ")}` : "";
         if (outOfTime) {
           // The parts left unread can carry the attack, so an APPROVE on the rest never lands.
           const seen = filesRead(chunks, texts.length);
@@ -2752,15 +2921,18 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           // An unread file can carry the attack (xrpl 4.2.1 landed this way), so this APPROVE holds for a human.
           layers.push({ layer: "reviewer", verdict: "stop", detail: `${overFull}; ${input.reviewer.name} APPROVE on the priority files (${chunks.length} part(s))${note}; needs a human` });
         else if (badLinks.length && !flagged.length)
-          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: link target of ${badLinks.join(", ")} missing, outside the package, a directory, another link or binary; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: link target of ${badLinks.join(", ")} missing, outside the package, a directory, another link or binary; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}${cutNote}; needs a human` });
         else if (rejected.length && !flagged.length)
-          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: parser rejected ${rejected.join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
-        else if (binaries.length && !flagged.length && waivedBinaries.length === binaries.length)
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: parser rejected ${rejected.join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}${cutNote}; needs a human` });
+        else if (binaries.length && !flagged.length && waivedBinaries.length === binaries.length && !cutDefs.size) // a cut definition is not covered by a waiver on the binaries
           // A person accepted each of these bytes for this release; a changed hash finds no waiver and holds.
           layers.push({ layer: "reviewer", verdict: "pass", detail: `${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; binary file(s) waived: ${waivedBinaries.map((b) => `${b.path} sha256 ${b.w.sha256} by ${b.w.who} at ${b.w.at}: ${b.w.reason}`).join("; ")}` });
         else if (binaries.length && !flagged.length)
           // The model saw these only as a hash, so its APPROVE does not cover them.
-          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: binary file(s) ${binaries.join(", ")}; ${binaries.map((b) => { const bytes = artifacts!.new.get(b); return `${b} sha256 ${bytes ? sha256Hex(bytes) : "-"}`; }).join(", ")} for ${input.eco} ${input.name}@${input.to}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: binary file(s) ${binaries.join(", ")}; ${binaries.map((b) => { const bytes = artifacts!.new.get(b); return `${b} sha256 ${bytes ? sha256Hex(bytes) : "-"}`; }).join(", ")} for ${input.eco} ${input.name}@${input.to}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}${cutNote}; needs a human` });
+        else if (cutDefs.size && !flagged.length)
+          // A definition the diff names but cannot show whole (too long, past the caps) can hold the payload: the APPROVE does not cover it.
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: definition too large to show in ${[...cutDefs].join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
         else
           layers.push(
             flagged.length
