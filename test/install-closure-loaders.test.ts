@@ -38,6 +38,10 @@ const loaders: [string, string][] = [
   ["cluster settings through a with block", `with (require("cluster")) { settings.exec = ${J}; fork() }`],
   ["cluster settings assigned on the load itself", `require("cluster").settings = { exec: ${J} }; require("cluster").fork()`],
   ["cluster settings exec through a bracket key", `const { settings } = require("cluster"); settings["exec"] = ${J}; require("cluster").fork()`],
+  ["module.register in a string given to eval", `const M = require("module"); const T = ${JM}; eval("M.register(T)")`],
+  ["cluster.setupPrimary in a string given to eval", `const c = require("cluster"); const T = ${J}; eval("c.setupPrimary({ exec: T })"); c.fork()`],
+  ["cluster settings.exec in a string given to eval", `const c = require("cluster"); const T = ${J}; eval("c.settings.exec = T"); c.fork()`],
+  ["module.constructor.register beside a cluster load", `require("cluster"); module.constructor.register(${JM})`],
   ["cluster.setupPrimary with a built exec", `const c = require("cluster"); c.setupPrimary({ exec: ${J} }); c.fork()`],
 ];
 for (const [name, hook] of loaders) {
@@ -115,7 +119,7 @@ const benign2: [string, string][] = [
   ["a bracket key inside a string beside cluster", `const c = require("cluster"); console.log('x["settings"]')`],
   ["a bracket key inside a string beside node:test", `require("node:test"); console.log('x["run"]')`],
   ["a read of a member named run", `const t = require("node:test"); const o = { run: 42 }; console.log(o.run)`],
-  ["a read of a member named register", `require("cluster"); const o = { register: 1 }; console.log(o.register)`],
+  ["a read of a member named register", `require("module"); const o = { register: 1 }; console.log(o.register)`],
   ["a settings assignment in a class beside a module string", `class Store { constructor() { this.settings = {} } }; if (pkg.type === "module") console.log(new Store())`],
   ["service worker register with a module type", `navigator.serviceWorker.register("/sw.js", { type: "module" })`],
   ["a register call on another package beside a module string", `require("ts-node").register(); const t = { type: "module" }`],
@@ -123,6 +127,14 @@ const benign2: [string, string][] = [
   ["a method named register beside a module string", `const o = { register(x) { return x } }; o.register(1); const t = "module"`],
   ["a run of another receiver beside node:test", `require("node:test"); db.prepare("select 1").run()`],
   ["a run of a package receiver beside node:test", `const db = require("better-sqlite3"); require("node:test"); db.run("select 1")`],
+  ["a bracket read of cluster settings", `const c = require("cluster"); console.log(c["settings"])`],
+  ["typeof a module member", `const m = require("module"); console.log(typeof m.register)`],
+  ["typeof a node:test member", `const t = require("node:test"); console.log(typeof t.run)`],
+  ["a bracket assignment of a key named register beside module", `const m = require("module"); routes["register"] = fn`],
+  ["a bracket assignment of a key named run beside node:test", `require("node:test"); opts["run"] = true`],
+  ["run set on a receiver bound to a non-literal require", `const t = require("node:test"); const n = "node:path"; const p = require(n); p.run = () => 42; console.log(p.run())`],
+  ["settings set on a receiver bound to a non-literal require", `const cluster = require("cluster"); const conf = require(confPath); conf.settings = {}`],
+  ["a read of run through a parameter named like the receiver", `const t = require("node:test"); function f(t) { return t.run } console.log(f({ run: 42 }))`],
   ["a settings assignment on another receiver beside cluster", `const c = require("cluster"); const o = {}; o.settings = 1; console.log(c.isPrimary)`],
 ];
 for (const [name, hook] of benign2) {
@@ -134,23 +146,83 @@ for (const [name, hook] of benign2) {
 }
 
 // The trigger reads the text once: a long benign text must not cost more than a small multiple of reading it.
-const timed = (src: string) => {
-  const start = performance.now();
-  classifyJs("h.js", src);
-  return performance.now() - start;
+const median3 = (make: () => string) => {
+  const xs: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const src = make();
+    const start = performance.now();
+    classifyJs("h.js", src);
+    xs.push(performance.now() - start);
+  }
+  return xs.sort((a, b) => a - b)[1] ?? 0;
 };
 const shapes: [string, (n: number) => string][] = [
+  ["bracket keys in a string beside module", (n) => `require("module");console.log("${"['_load']".repeat(n / 9)}")`],
+  ["bracket keys in code beside module", (n) => `const m = require("module"); ${"m['x'];".repeat(n / 7)}`],
   ["braces in one string beside node:test", (n) => `const t = require("node:test"); console.log("${"{".repeat(n)}")\n`],
-  ["nested open braces with run beside node:test", (n) => `require("node:test"); ${"{ run; ".repeat(n / 6)}${"}".repeat(n / 6)}\n`],
+  ["nested open braces with run beside node:test", (n) => `require("node:test"); ${"{ run; ".repeat(n / 7)}${"}".repeat(n / 7)}\n`],
   ["brackets in a string beside cluster", (n) => `const c = require("cluster"); console.log("${'["'.repeat(n / 2)}")\n`],
   ["many bound names beside module", (n) => `const a = require("module");\n${"const x = require(n);\n".repeat(n / 22)}`],
 ];
+// The same builtin load and a string as long, with no bracket keys or braces: what reading the text once costs.
+const control = (n: number) => `require("module");console.log("${"a".repeat(n)}")`;
 for (const [name, make] of shapes) {
-  test(`reading a long text stays linear: ${name}`, () => {
-    timed(make(1 << 16));
-    const small = Math.max(timed(make(1 << 16)), 5);
-    const big = timed(make(1 << 20));
-    expect(big).toBeLessThan(small * 16 * 4 + 400);
+  test(`reading a long text costs a small multiple of the plain text: ${name}`, () => {
+    const n = 2 << 20;
+    median3(() => control(1 << 16));
+    const plain = Math.max(median3(() => control(n)), 5);
+    expect(median3(() => make(n)) / plain).toBeLessThan(40);
+  }, 60000);
+}
+
+// The loader or the settings object handed to a call, with a literal extension-less path: Reflect and Object read the member by a string or take the
+// settings object whole, so the member never appears as code after the binding.
+const handOffs: [string, (t: string) => string][] = [
+  ["Reflect.get of _load", (t) => `const M = require("module"); Reflect.get(M, "_load")(${t})`],
+  ["Object.assign on cluster settings", (t) => `const c = require("cluster"); Object.assign(c.settings, { exec: ${t} }); c.fork()`],
+  ["Object.assign on settings destructured from cluster", (t) => `const { settings, fork } = require("cluster"); Object.assign(settings, { exec: ${t} }); fork()`],
+  ["a quoted settings object then a quoted exec key", (t) => `const c = require("cluster"); c["settings"]["exec"] = ${t}; c.fork()`],
+  ["Reflect.set of exec on cluster settings", (t) => `const c = require("cluster"); Reflect.set(c.settings, "exec", ${t}); c.fork()`],
+];
+for (const [name, code] of handOffs) {
+  for (const dir of ["lib", "test"]) {
+    const t = `"./${dir}/evil"`;
+    const changed = `${dir}/evil.js`;
+    test(`${name}: held at the hook, the package-root file, a nested file and a preinstall hook (${changed})`, () => {
+      expect(heldAt("h.js", code(t), { postinstall: "node h.js" }, {}, changed)).toBe(true);
+      expect(heldAt("index.js", code(t), { postinstall: "node index.js" }, {}, changed)).toBe(true);
+      expect(heldAt("h.js", `require("./sub/loader.js")\n`, { postinstall: "node h.js" }, { "sub/loader.js": code(t) }, changed)).toBe(true);
+      expect(heldAt("h.js", code(t), { preinstall: "node h.js" }, {}, changed)).toBe(true);
+    });
+  }
+}
+
+// Shapes held at the previous head: they stay held.
+const kept: [string, string][] = [
+  ["settings.exec assigned after a destructure", `const { settings } = require("cluster"); settings.exec = "./lib/evil"; require("cluster").fork()`],
+  ["a receiver alias", `const c = require("cluster"); const k = c; k.setupPrimary({ exec: "./lib/evil" }); k.fork()`],
+  ["a quoted settings object then a quoted exec key", `const c = require("cluster"); c["settings"]["exec"] = "./lib/evil"; c.fork()`],
+  ["a with block over the load", `with (require("cluster")) { setupPrimary({ exec: "./lib/evil" }); fork() }`],
+  ["a rebind after a shadowing function", `const c = require("cluster"); (function (c) { return c })(1); c.setupPrimary({ exec: "./lib/evil" }); c.fork()`],
+  ["a computed member of module", `const M = require("module"); const k = "_load"; M[k]("./lib/evil")`],
+  ["process.mainModule.constructor._load", `process.mainModule.constructor._load("./lib/evil")`],
+  ["module.constructor through a bracket", `module.constructor["_load"]("./lib/evil")`],
+];
+for (const [name, code] of kept) {
+  test(`still held: ${name}`, () => {
+    expect(heldAt("h.js", code, { postinstall: "node h.js" }, {}, "lib/evil.js")).toBe(true);
+  });
+}
+
+for (const [name, code] of [
+  ["a bracket read of cluster settings", `const c = require("cluster"); console.log(c["settings"])`],
+  ["typeof a module member", `const m = require("module"); console.log(typeof m.register)`],
+  ["typeof a node:test member", `const t = require("node:test"); console.log(typeof t.run)`],
+] as [string, string][]) {
+  test(`${name} is not a load in a root file, a nested file or a preinstall hook`, () => {
+    expect(heldAt("index.js", code, { postinstall: "node index.js" }, {}, "lib/evil.js")).toBe(false);
+    expect(heldAt("h.js", `require("./sub/loader.js")\n`, { postinstall: "node h.js" }, { "sub/loader.js": code }, "lib/evil.js")).toBe(false);
+    expect(heldAt("h.js", code, { preinstall: "node h.js" }, {}, "lib/evil.js")).toBe(false);
   });
 }
 
