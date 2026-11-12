@@ -2028,7 +2028,8 @@ function braceKind(code: string, at: number, outer: BraceKind | undefined, openO
   // code).
   const prev = code[j - 1] ?? "";
   if (code.slice(j - 3, j) === "...") return "object";
-  if (/[=,(\[?|&!*%<>^~]/.test(prev) || ((prev === "+" || prev === "-") && code[j - 2] !== prev)) return "object";
+  if (/[=,(\[?|&*%<>^~]/.test(prev) || ((prev === "+" || prev === "-") && code[j - 2] !== prev)) return "object";
+  // A ! before a brace is often a TypeScript non-null assertion (x!\n{ ... }), not a prefix: read the brace as a block, as before.
   const w = identBack(code, j).word;
   if (w !== "" && !/[\r\n\u2028\u2029]/.test(code.slice(j, at)) && /^(?:return|yield|await|throw|typeof|void|new|in|of|delete|instanceof|default)$/.test(w)) return "object";
   // The value of a key (a: {) in an object literal, or the alternate of a ternary (c ? a : {).

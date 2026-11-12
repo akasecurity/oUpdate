@@ -527,3 +527,45 @@ for (const [name, hook] of round8Benign) {
     expect([t.pkg, t.tests, t.flows]).toEqual([false, false, false]);
   });
 }
+
+// A TypeScript non-null assertion before a brace on the next line (x!\n{ ... }) ends a statement, so the brace is a block and the
+// module wrapper's arguments inside it is not provably harmless. The closure reader scans the file by its text, so the same source is placed as a root hook file, a nested file and a preinstall hook (a .ts hook file is not followed by the prepass at all, which is a separate gap).
+const NN_LOAD = `arguments[1](["child_","pro","cess"].join("")).execSync("echo hi")`;
+const NN_IN = `{ m(1)\n{ ${NN_LOAD} } }`;
+const NN_M = `const v = require("node:process"); const m = (..._a: unknown[]) => 0;`;
+const nonNull: [string, string][] = [
+  ["a let initialized with x! then a block", `${NN_M} let x = 1; let y = x!\n${NN_IN}`],
+  ["a call argument x! then a block", `${NN_M} let x = 1; m(x!)\n${NN_IN}`],
+  ["x!.toString() then a block", `${NN_M} let x = 1; x!.toString()\n${NN_IN}`],
+  ["x! among call arguments then a block", `${NN_M} let x: any = 1; m(x!, 2)\n${NN_IN}`],
+];
+for (const [name, src] of nonNull) {
+  test(`non-null assertion, ${name}: not provably static`, () => {
+    expect(provablyStatic(src)).toBe(false);
+  });
+  for (const dir of ["lib", "test"]) {
+    const changed = `${dir}/evil.js`;
+    test(`non-null assertion, ${name}: held in the root hook file (${changed})`, () => {
+      expect(heldAt("index.js", src, { postinstall: "node index.js" }, {}, changed)).toBe(true);
+    });
+    test(`non-null assertion, ${name}: held in a nested file the hook requires (${changed})`, () => {
+      expect(heldAt("h.js", `require("./sub/loader.js")\n`, { postinstall: "node h.js" }, { "sub/loader.js": src }, changed)).toBe(true);
+    });
+    test(`non-null assertion, ${name}: held in a preinstall hook (${changed})`, () => {
+      expect(heldAt("h.js", src, { preinstall: "node h.js" }, {}, changed)).toBe(true);
+    });
+  }
+}
+// Controls: the same shapes without the assertion are held as before, and a plain quiet .ts hook is not widened.
+for (const [name, src] of [
+  ["a call then a block", `${NN_M} let x = 1; m(x)\n${NN_IN}`],
+  ["a let then a block", `${NN_M} let x = 1; let y = x\n${NN_IN}`],
+] as const) {
+  test(`non-null assertion control, ${name}: held as before`, () => {
+    expect(heldAt("index.js", src, { postinstall: "node index.js" }, {}, "lib/evil.js")).toBe(true);
+  });
+}
+test("non-null assertion control: a quiet .ts hook with x! is not widened", () => {
+  const src = `const v = require("node:process"); let x: number | undefined = 1; let y = x!\nconsole.log(y, v.pid)\n`;
+  expect(heldAt("index.js", src, { postinstall: "node index.js" }, {}, "lib/evil.js")).toBe(false);
+});
