@@ -1184,6 +1184,70 @@ describe("carried tar notes after review (each lets a new or changed note pass i
     expect(recordWheel("recclean", okRec + 'pkg/__init__.py,"sha256=a,b",1\n"pkg/__init__.py",,\n')).toEqual([]);
   });
 
+  // A wheel whose zip members (and so unpacked tree files) are `members`, with the given RECORD.
+  // `treeKeys` maps a member name to the key the unpacked tree holds it under (a macOS extraction decomposes names).
+  const treeWheel = (name: string, members: string[], rec: string, treeKeys = new Map<string, string>()) => {
+    const p = join(dir, `${n++}-${name}.whl`);
+    const files = [{ name: "x-1.0.1.dist-info/METADATA", data: "Name: x\n" }, { name: "x-1.0.1.dist-info/WHEEL", data: "Wheel-Version: 1.0\n" }, ...members.map((m) => ({ name: m, data: "" })), { name: "x-1.0.1.dist-info/RECORD", data: rec }];
+    writeFileSync(p, zipBytes(files));
+    const tree = new Map<string, Uint8Array>(files.map((e) => [writtenCollapsed(treeKeys.get(e.name) ?? e.name), new TextEncoder().encode(e.data)] as const));
+    return zipNameNotes(p, files.map((e) => e.name), tree).map((t) => t.note);
+  };
+  const recOf = (...paths: string[]) => "x-1.0.1.dist-info/METADATA,,\nx-1.0.1.dist-info/WHEEL,,\n" + paths.map((p) => `${p},,\n`).join("");
+  const recordNotes = (notes: string[]) => notes.filter((m) => m.includes("the wheel RECORD"));
+  const nfc = "pkg/caf\u00e9.py";
+  const nfd = "pkg/cafe\u0301.py";
+  const onlyNorm = (p: string) => `zip member ${p}: the wheel RECORD names it, the unpacked archive has a file of that name only after Unicode normalization`;
+  const absent = (p: string) => `zip member ${p}: the wheel RECORD names it, the unpacked archive has no such file`;
+
+  test("a RECORD row that matches a tree file only after normalization holds, and every other row stays as before", () => {
+    // held
+    expect(treeWheel("recnfcrow", [nfd], recOf(nfc))).toEqual([onlyNorm(nfc)]);
+    expect(treeWheel("recnfdrow", [nfc], recOf(nfd))).toEqual([onlyNorm(nfd)]);
+    expect(treeWheel("recnoexact", ["pkg/a.py", nfd], recOf("pkg/a.py", nfc))).toEqual([onlyNorm(nfc)]);
+    expect(treeWheel("recabsent", ["pkg/a.py"], recOf("pkg/b.py"))).toEqual([absent("pkg/b.py")]);
+    // a case-only difference is not a normalization match: main held it as an absent file, and so does this
+    expect(treeWheel("reccase", ["pkg/a.py"], recOf("pkg/A.py"))).toEqual([absent("pkg/A.py")]);
+    // quiet
+    expect(treeWheel("recascii", ["pkg/a.py"], recOf("pkg/a.py"))).toEqual([]);
+    expect(recordNotes(treeWheel("recexactnfc", [nfc], recOf(nfc)))).toEqual([]);
+    expect(recordNotes(treeWheel("recexactnfd", [nfd], recOf(nfd)))).toEqual([]);
+    // the zip wrote the row's name, so a host without normalization installs that file even where the tree key is decomposed
+    expect(recordNotes(treeWheel("recwrittennfc", [nfc], recOf(nfc), new Map([[nfc, nfd]])))).toEqual([]);
+    expect(recordNotes(treeWheel("recwrittennfd", [nfd], recOf(nfc), new Map([[nfd, nfd]])))).toEqual([onlyNorm(nfc)]);
+    expect(treeWheel("recdistinfo", ["pkg/a.py"], recOf("pkg/a.py", "x-1.0.1.dist-info/RECORD"))).toEqual([]);
+  });
+
+  test("a RECORD row naming one of a normalization-equal pair of files is quiet when its exact name is in the tree", () => {
+    // main matched the row in NFD and stayed quiet; an exact match still does
+    expect(recordNotes(treeWheel("rectwinnfc", [nfc, nfd], recOf(nfc)))).toEqual([]);
+    expect(recordNotes(treeWheel("rectwinnfd", [nfc, nfd], recOf(nfd)))).toEqual([]);
+  });
+
+  test("RECORD rows are matched in time linear in their count and length", () => {
+    // Every row names a tree file under a long accented name, so each row is normalized and looked up and none holds.
+    const run = (rows: number) => {
+      const members = Array.from({ length: rows }, (_, i) => `pkg/${"d\u00e9".repeat(150)}${i}.py`);
+      const files = [{ name: "x-1.0.1.dist-info/METADATA", data: "Name: x\n" }, { name: "x-1.0.1.dist-info/WHEEL", data: "Wheel-Version: 1.0\n" }, ...members.map((m) => ({ name: m, data: "" })), { name: "x-1.0.1.dist-info/RECORD", data: recOf(...members) }];
+      const p = join(dir, `${n++}-recperf${rows}.whl`);
+      writeFileSync(p, zipBytes(files));
+      const tree = new Map<string, Uint8Array>(files.map((e) => [e.name, new TextEncoder().encode(e.data)] as const));
+      const names = files.map((e) => e.name);
+      const t0 = performance.now();
+      const notes = zipNameNotes(p, names, tree).length;
+      return { notes, ms: performance.now() - t0 };
+    };
+    run(500);
+    const small = run(2000);
+    const big = run(8000);
+    console.log(`recperf small ${small.ms.toFixed(1)} ms, big ${big.ms.toFixed(1)} ms, ratio ${(big.ms / small.ms).toFixed(2)}`);
+    expect(small.notes + big.notes).toBe(0);
+    expect(small.ms).toBeGreaterThan(10);
+    // 4x the rows: linear is about 4x, a quadratic is about 16x
+    expect(big.ms / small.ms).toBeLessThan(6);
+    expect(big.ms).toBeLessThan(20_000);
+  });
+
   test("a RECORD over the row cap holds with its distinct paths counted once, and repeats do not reach it", () => {
     const many = Array.from({ length: 10_001 }, (_, i) => `pkg/m${i}.py,,\n`).join("");
     expect(recordWheel("reccap", okRec + many).some((m) => m.includes("lists 10004 distinct paths, over the 10000 that are checked"))).toBe(true);
