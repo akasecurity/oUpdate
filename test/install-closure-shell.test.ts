@@ -548,6 +548,7 @@ const dateLines: [string, string][] = [
   ["let on an expression naming such a variable", `printf -v X '%s' "${U}"; let "X + 1" | cat`],
   ["a bare name in a numeric test", `printf -v X '%s' "${U}"; [[ X -eq 0 ]] | cat`],
   ["a bare name in a numeric test with -lt", `printf -v X '%s' "${U}"; [ X -lt 1 ] 2>/dev/null`],
+  ["a bare name in a double-bracket numeric test with -lt", `printf -v X '%s' "${U}"; [[ X -lt 1 ]] 2>/dev/null`],
   ["an increment of such a variable", `printf -v X '%s' "${U}"; ((X++)) | cat`],
 ];
 
