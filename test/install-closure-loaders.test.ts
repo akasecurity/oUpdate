@@ -41,6 +41,11 @@ const loaders: [string, string][] = [
   ["module.register in a string given to eval", `const M = require("module"); const T = ${JM}; eval("M.register(T)")`],
   ["cluster.setupPrimary in a string given to eval", `const c = require("cluster"); const T = ${J}; eval("c.setupPrimary({ exec: T })"); c.fork()`],
   ["cluster settings.exec in a string given to eval", `const c = require("cluster"); const T = ${J}; eval("c.settings.exec = T"); c.fork()`],
+  ["module._load in a string given to vm.runInNewContext", `const vm = require("vm"); const J = ${J}; vm.runInNewContext("M._load(p)", { M: require("module"), p: J })`],
+  ["module._load in a string given to vm.compileFunction", `const vm = require("vm"); const J = ${J}; vm.compileFunction("M._load(p)", ["M", "p"])(require("module"), J)`],
+  ["module._load in a string given to vm.runInThisContext", `const vm = require("vm"); const M = require("module"); const J = ${J}; vm.runInThisContext("M._load(J)")`],
+  ["module._load in a string given to a vm Script", `const vm = require("vm"); const M = require("module"); const J = ${J}; new vm.Script("M._load(J)").runInThisContext()`],
+  ["Reflect.get of _load after padding strings", `const M = require("module"); const pad = "xxxxxxxxxx"; const T = ${J}; Reflect.get(M, "_load")(T); console.log(T, M)`],
   ["module.constructor.register beside a cluster load", `require("cluster"); module.constructor.register(${JM})`],
   ["cluster.setupPrimary with a built exec", `const c = require("cluster"); c.setupPrimary({ exec: ${J} }); c.fork()`],
 ];
@@ -128,6 +133,17 @@ const benign2: [string, string][] = [
   ["a run of another receiver beside node:test", `require("node:test"); db.prepare("select 1").run()`],
   ["a run of a package receiver beside node:test", `const db = require("better-sqlite3"); require("node:test"); db.run("select 1")`],
   ["a bracket read of cluster settings", `const c = require("cluster"); console.log(c["settings"])`],
+  ["a cluster binding and a settings string given to console.log", `const c = require("cluster"); console.log(c, "settings")`],
+  ["a padded cluster binding and a settings string given to console.log", `const c = require("cluster"); const pad = "xxxxxxxxxx"; console.log(pad, c, "settings")`],
+  ["a test of a module member in an if", `const M = require("module"); if (M.register) console.log(1)`],
+  ["a negated module member", `const m = require("module"); console.log(!!m._load)`],
+  ["a copy from cluster settings", `const c = require("cluster"); const o = Object.assign({}, c.settings); console.log(o)`],
+  ["a read of cluster settings by Reflect.get in console.log", `const c = require("cluster"); console.log(Reflect.get(c, "settings"))`],
+  ["a message that holds module.constructor.register", `require("cluster"); console.log("module.constructor.register")`],
+  ["this.constructor.register beside a cluster load", `require("cluster"); class A { go() { this.constructor.register(this) } }`],
+  ["a property named module with a register method", `require("cluster"); app.module.register(x)`],
+  ["a message that names module.register", `require("cluster"); throw new Error("module.register failed")`],
+  ["a timer and a deprecation message that names m.register", `const m = require("module"); setTimeout(done, 10); log("m.register is deprecated")`],
   ["typeof a module member", `const m = require("module"); console.log(typeof m.register)`],
   ["typeof a node:test member", `const t = require("node:test"); console.log(typeof t.run)`],
   ["a bracket assignment of a key named register beside module", `const m = require("module"); routes["register"] = fn`],
@@ -162,16 +178,17 @@ const shapes: [string, (n: number) => string][] = [
   ["braces in one string beside node:test", (n) => `const t = require("node:test"); console.log("${"{".repeat(n)}")\n`],
   ["nested open braces with run beside node:test", (n) => `require("node:test"); ${"{ run; ".repeat(n / 7)}${"}".repeat(n / 7)}\n`],
   ["brackets in a string beside cluster", (n) => `const c = require("cluster"); console.log("${'["'.repeat(n / 2)}")\n`],
+  ["padding strings before a Reflect.get of _load", (n) => `const M = require("module");\n${'const pad = "xxxxxxxxxx";\n'.repeat(n / 25)}Reflect.get(M, "_load")(p)`],
+  ["many settings hand-offs beside cluster", (n) => `const c = require("cluster"); ${"f(c.settings, 1);".repeat(n / 17)}`],
   ["many bound names beside module", (n) => `const a = require("module");\n${"const x = require(n);\n".repeat(n / 22)}`],
 ];
-// The same builtin load and a string as long, with no bracket keys or braces: what reading the text once costs.
-const control = (n: number) => `require("module");console.log("${"a".repeat(n)}")`;
+// The same shape at four times the size: a linear read costs about four times as much, a quadratic one about sixteen.
 for (const [name, make] of shapes) {
-  test(`reading a long text costs a small multiple of the plain text: ${name}`, () => {
-    const n = 2 << 20;
-    median3(() => control(1 << 16));
-    const plain = Math.max(median3(() => control(n)), 5);
-    expect(median3(() => make(n)) / plain).toBeLessThan(40);
+  test(`reading a long text is linear in its size: ${name}`, () => {
+    median3(() => make(1 << 16));
+    const small = Math.max(median3(() => make(1 << 19)), 5);
+    const big = median3(() => make(1 << 21));
+    expect(big / small).toBeLessThan(10);
   }, 60000);
 }
 
@@ -194,6 +211,47 @@ for (const [name, code] of handOffs) {
       expect(heldAt("h.js", `require("./sub/loader.js")\n`, { postinstall: "node h.js" }, { "sub/loader.js": code(t) }, changed)).toBe(true);
       expect(heldAt("h.js", code(t), { preinstall: "node h.js" }, {}, changed)).toBe(true);
     });
+  }
+}
+
+// Padding strings before the call, of every count and length: the string that names the member is read from the same text as the window around it,
+// so no count or length hides the call.
+const padded: [string, (t: string) => string][] = [
+  ["Reflect.get of _load", (t) => `const M = require("module"); PADS const T = ${t}; Reflect.get(M, "_load")(T); console.log(T, M)`],
+  ["Object.assign on cluster settings", (t) => `const c = require("cluster"); PADS const T = ${t}; Object.assign(c.settings, { exec: T }); c.fork()`],
+  ["Reflect.set of exec on cluster settings", (t) => `const c = require("cluster"); PADS const T = ${t}; Reflect.set(c.settings, "exec", T); c.fork()`],
+];
+for (const [name, code] of padded) {
+  for (const dir of ["lib", "test"]) {
+    test(`${name}: held for every padding count and length (${dir})`, () => {
+      const t = `["./${dir}/", "evil"].join("")`;
+      for (let count = 0; count <= 20; count++) {
+        for (const len of [1, 5, 10, 40, 200]) {
+          const pads = Array.from({ length: count }, (_, i) => `const s${i} = "${"x".repeat(len)}";`).join(" ");
+          const hook = code(t).replace("PADS", pads);
+          if (!heldAt("h.js", hook, { postinstall: "node h.js" }, {}, `${dir}/evil.js`)) throw new Error(`not held with ${count} pads of ${len}`);
+        }
+      }
+    });
+  }
+}
+
+// A string of code given to a vm call, for module and for cluster.
+const vmForms: [string, (builtin: string, call: string, t: string) => string][] = [
+  ["runInNewContext", (b, call, t) => `const vm = require("vm"); vm.runInNewContext("${call}", { M: require("${b}"), p: ${t} })`],
+  ["compileFunction", (b, call, t) => `const vm = require("vm"); vm.compileFunction("${call}", ["M", "p"])(require("${b}"), ${t})`],
+  ["a Script run in a new context", (b, call, t) => `const vm = require("vm"); new vm.Script("${call}").runInNewContext({ M: require("${b}"), p: ${t} })`],
+  ["runInThisContext with globals", (b, call, t) => `const vm = require("vm"); globalThis.M = require("${b}"); globalThis.p = ${t}; vm.runInThisContext("${call}")`],
+  ["runInContext with createContext", (b, call, t) => `const vm = require("vm"); const ctx = vm.createContext({ M: require("${b}"), p: ${t} }); vm.runInContext("${call}", ctx)`],
+];
+for (const [name, form] of vmForms) {
+  for (const [builtin, call] of [["module", "M._load(p)"], ["cluster", "M.setupPrimary({ exec: p }); M.fork()"]] as [string, string][]) {
+    for (const dir of ["lib", "test"]) {
+      test(`${builtin} loader in a string given to vm, ${name}: held (${dir})`, () => {
+        const t = `["./${dir}/", "evil"].join("")`;
+        expect(heldAt("h.js", form(builtin, call, t), { postinstall: "node h.js" }, {}, `${dir}/evil.js`)).toBe(true);
+      });
+    }
   }
 }
 
