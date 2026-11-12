@@ -55,10 +55,10 @@ test("E1 a prefix that leaves the entry directory holds the package except docs 
   expect(hard(e1, { ...e1, "README.md": "b\n" })).toEqual([]);
 });
 
-test("E2 a base64 name holds the package except docs, including tests", () => {
+test("E2 a base64 name holds every file, including tests and docs", () => {
   holds(e2, "lib/a.js", evil);
   holds(e2, "test/z.js", evil);
-  expect(hard(e2, { ...e2, "README.md": "b\n" })).toEqual([]);
+  expect(hard(e2, { ...e2, "README.md": "b\n" }).length).toBeGreaterThan(0);
 });
 
 test("E3 a fork whose prefix leaves the entry directory holds that file and not docs or tests", () => {
