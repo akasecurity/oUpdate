@@ -13,7 +13,7 @@ import { installView, otherInstallEntry, prepareInert } from "./install-closure.
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
 import { newFindings, type Finding } from "./adapters/scanner/types.ts";
-import { diffSeq, renderLineDiff } from "./linediff.ts";
+import { diffSeq, renderLineDiff, type Op } from "./linediff.ts";
 
 export type LayerName = "cooldown" | "advisory" | "prepass" | "scan" | "reviewer" | "gate";
 export const LAYERS: LayerName[] = ["cooldown", "advisory", "prepass", "scan", "reviewer", "gate"];
@@ -219,11 +219,14 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
   const text = (b: Uint8Array | undefined) => b && dec.decode(b).replaceAll("\0", "\\x00");
   const bt = text(before);
   const at = text(after);
-  const out = [head, renderLineDiff(bt, at)];
-  if (bt !== undefined && at !== undefined && (state === "changed" || state === "loaded by code")) {
+  // The ordered diff is computed once for the rendering and for the definitions listed after it.
+  let ops: { v: Op[] | undefined } | undefined;
+  const getOps = bt !== undefined && at !== undefined ? () => (ops ??= { v: diffSeq(bt.split("\n"), at.split("\n")) }).v : undefined;
+  const out = [head, renderLineDiff(bt, at, getOps)];
+  if (getOps && at !== undefined && (state === "changed" || state === "loaded by code")) {
     let c = after && blobDefsCache.get(after);
     if (!c || c.before !== before) {
-      c = { before, out: unchangedBlobDefs(bt, at) };
+      c = { before, out: unchangedBlobDefs(at, getOps) };
       if (after) blobDefsCache.set(after, c);
     }
     if (c.out?.text) out.push(c.out.text);
@@ -238,11 +241,10 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
 // (its `=` lines), so a line the diff already prints, or one that moved, is not listed twice; when the diff fell back to
 // the whole new version, nothing is listed. Runs are found by one character pass over unchanged lines of BLOB_RUN or
 // more characters; the number of lines, the length of each and the total shown are capped, and the result is cached per file pair.
-// The listing is broad: every added token selects the definitions of that name (a comment, a string, a property too).
-// A definition that cannot be shown whole (cut, hash only, past the caps or the limit) holds the file only when a changed line
-// USES the name: comments, strings and regex literals do not count, nor a declaration or parameter name (a parameter shadows its own
-// function body), nor a `.name` property unless a definition of the name is itself a property. A name that a changed line
-// uses through another binding of the same spelling (an inner variable, a closure) still counts: that cost is not removable here.
+// The selection is broad and so is the hold: any token on a changed line (a string, a comment, a property, a parameter too) selects the
+// definitions of that name, and a selected definition that cannot be shown whole (cut, hash only, past the caps or the limit) holds the file.
+// No exemption is read from the changed line: a one-line reading of what is code and what is not is attacker-controlled. The cost is a hold
+// for a cut definition whose name also appears, unrelated, on a changed line.
 const BLOB_RUN = 400; // the pre-pass encoded-blob threshold
 const BLOB_DEFS_MAX = 8;
 const BLOB_LINE_MAX = 20_000; // a longer line is shown as its head and tail with its length and sha256
@@ -250,11 +252,10 @@ const BLOB_TOTAL_MAX = 60_000; // past this, the remaining lines are a length an
 const blobDefsCache = new WeakMap<Uint8Array, { before: Uint8Array | undefined; out: { text: string; cut: boolean } | undefined }>();
 
 const IDENT = /[\p{L}_$][\p{L}\p{N}_$]*/gu;
-const IDENT_CH = /[\p{L}\p{N}_$]/u;
 
-/** The names an encoded run of BLOB_RUN or more characters is assigned to on this line (`D = "<run>"`), with whether the name is a property (`o.D = ...`). */
-function encodedRunLead(l: string): { name: string; prop: boolean }[] {
-  const found: { name: string; prop: boolean }[] = [];
+/** The names an encoded run of BLOB_RUN or more characters is assigned to on this line (`D = "<run>"`, `o.D = "<run>"`). */
+function encodedRunLead(l: string): string[] {
+  const found: string[] = [];
   let start = -1;
   const isEnc = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 || c === 61 || c === 95 || c === 45;
   for (let i = 0; i <= l.length; i++) {
@@ -263,146 +264,12 @@ function encodedRunLead(l: string): { name: string; prop: boolean }[] {
       continue;
     }
     if (start >= 0 && i - start >= BLOB_RUN && found.length < 16) {
-      const lead = /(\.\s*)?([\p{L}_$][\p{L}\p{N}_$]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
-      if (lead) found.push({ name: lead[2]!, prop: lead[1] !== undefined });
+      const lead = /([\p{L}_$][\p{L}\p{N}_$]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
+      if (lead) found.push(lead[1]!);
     }
     start = -1;
   }
   return found;
-}
-
-/** The line with comments, string contents, template text (not its `${}` parts) and regex literals blanked to spaces, so indices still match. */
-function blankNonCode(l: string): string {
-  const n = l.length;
-  let out = "";
-  let last = ""; // the last significant character kept, to tell a regex literal from a division
-  let i = 0;
-  const blank = (to: number) => {
-    const j = Math.min(n, to);
-    out += " ".repeat(j - i);
-    i = j;
-  };
-  while (i < n) {
-    const c = l[i]!;
-    if (c === "'" || c === '"') {
-      let j = i + 1;
-      while (j < n && l[j] !== c) j += l[j] === "\\" ? 2 : 1;
-      blank(j + 1);
-      last = c;
-    } else if (c === "`") {
-      let j = i + 1;
-      out += " ";
-      i++;
-      while (j < n && l[j] !== "`") {
-        if (l[j] === "\\") j += 2;
-        else if (l[j] === "$" && l[j + 1] === "{") {
-          blank(j);
-          let depth = 0;
-          while (j < n) {
-            if (l[j] === "{") depth++;
-            else if (l[j] === "}" && --depth === 0) break;
-            j++;
-          }
-          out += l.slice(i, Math.min(n, j + 1));
-          i = Math.min(n, j + 1);
-          j = i;
-        } else j++;
-      }
-      blank(j + 1);
-      last = "`";
-    } else if (c === "/" && l[i + 1] === "/") blank(n);
-    else if (c === "/" && l[i + 1] === "*") {
-      const e = l.indexOf("*/", i + 2);
-      blank(e < 0 ? n : e + 2);
-    } else if (c === "/" && (last === "" || "(,=:[!&|?{};".includes(last))) {
-      let j = i + 1;
-      let cls = false;
-      while (j < n && (cls || l[j] !== "/")) {
-        if (l[j] === "\\") j++;
-        else if (l[j] === "[") cls = true;
-        else if (l[j] === "]") cls = false;
-        j++;
-      }
-      blank(j + 1);
-      last = "/";
-    } else {
-      out += c;
-      i++;
-      if (c !== " " && c !== "\t") last = c;
-    }
-  }
-  return out;
-}
-
-/** The end of a function body or arrow expression that starts at `from` (after the parameter list), on one line: the matching `}`, or the end of the expression. */
-function bodyEnd(code: string, from: number): number {
-  let p = from;
-  while (code[p] === " ") p++;
-  if (code[p] === "=" && code[p + 1] === ">") p += 2;
-  while (code[p] === " ") p++;
-  const block = code[p] === "{";
-  let depth = 0;
-  for (let q = p; q < code.length; q++) {
-    const c = code[q]!;
-    if (c === "{" || c === "(" || c === "[") depth++;
-    else if (c === "}" || c === ")" || c === "]") {
-      depth--;
-      if (block ? depth === 0 : depth < 0) return block ? q + 1 : q;
-    } else if (!block && depth === 0 && (c === "," || c === ";")) return q;
-  }
-  return code.length;
-}
-
-const DECL_WORDS = new Set(["const", "let", "var", "function", "class"]);
-
-/** Which of `names` a changed line uses (see the note above unchangedBlobDefs). `props` are names a definition of which is a property. */
-function narrowUses(lines: string[], names: Set<string>, props: Set<string>): Set<string> {
-  const used = new Set<string>();
-  for (const l of lines) {
-    if (used.size === names.size) break;
-    const code = blankNonCode(l);
-    const shadows: { names: Set<string>; from: number; to: number }[] = [];
-    for (const m of code.matchAll(/\bfunction\b\s*\*?\s*[\p{L}\p{N}_$]*\s*\(([^()]*)\)|\bcatch\s*\(([^()]*)\)|\(([^()]*)\)\s*=>|([\p{L}_$][\p{L}\p{N}_$]*)\s*=>/gu)) {
-      const list = m[1] ?? m[2] ?? m[3];
-      const bound = new Set<string>();
-      let from = m.index!;
-      let after = m.index! + m[0].length;
-      if (list !== undefined) {
-        const lo = m.index! + m[0].lastIndexOf("(") + 1;
-        for (const t of list.matchAll(IDENT)) {
-          const before = list.slice(0, t.index!).trimEnd();
-          const next = list.slice(t.index! + t[0].length).trimStart();
-          if ((before === "" || before.endsWith(",")) && (next === "" || next[0] === "," || next[0] === "=")) bound.add(t[0]);
-        }
-        from = lo;
-        after = lo + list.length + 1;
-      } else bound.add(m[4]!);
-      if (bound.size) shadows.push({ names: bound, from, to: bodyEnd(code, after) });
-    }
-    for (const m of code.matchAll(IDENT)) {
-      const tok = m[0];
-      if (!names.has(tok) || used.has(tok)) continue;
-      const at = m.index!;
-      let p = at - 1;
-      while (p >= 0 && code[p] === " ") p--;
-      const pc = p >= 0 ? code[p]! : "";
-      if (pc === "." && !(p >= 2 && code[p - 1] === "." && code[p - 2] === ".")) {
-        if (props.has(tok)) used.add(tok);
-        continue;
-      }
-      if (IDENT_CH.test(pc)) {
-        let q = p;
-        while (q >= 0 && IDENT_CH.test(code[q]!)) q--;
-        if (DECL_WORDS.has(code.slice(q + 1, p + 1))) continue;
-      }
-      let nx = at + tok.length;
-      while (nx < code.length && code[nx] === " ") nx++;
-      if (code[nx] === ":" && code[nx + 1] !== ":" && (pc === "{" || pc === ",")) continue; // an object key
-      if (shadows.some((s) => at >= s.from && at < s.to && s.names.has(tok))) continue;
-      used.add(tok);
-    }
-  }
-  return used;
 }
 
 /** True when some line is BLOB_RUN or more characters. */
@@ -416,12 +283,11 @@ function hasLongLine(s: string): boolean {
   return false;
 }
 
-function unchangedBlobDefs(before: string, after: string): { text: string; cut: boolean } | undefined {
+function unchangedBlobDefs(after: string, getOps: () => Op[] | undefined): { text: string; cut: boolean } | undefined {
   if (!hasLongLine(after)) return undefined;
-  const ops = diffSeq(before.split("\n"), after.split("\n"));
+  const ops = getOps();
   if (!ops) return undefined;
   const defs = new Map<string, number[]>();
-  const props = new Set<string>();
   const added: { l: string; at: number }[] = [];
   const kept: string[] = [];
   let ni = 0;
@@ -430,8 +296,7 @@ function unchangedBlobDefs(before: string, after: string): { text: string; cut: 
     if (o.op === "+") added.push({ l: o.v, at: ni });
     else if (o.v.length >= BLOB_RUN) {
       kept[ni] = o.v;
-      for (const { name, prop } of encodedRunLead(o.v)) {
-        if (prop) props.add(name);
+      for (const name of encodedRunLead(o.v)) {
         const at = defs.get(name);
         if (!at) defs.set(name, [ni]);
         else if (at[at.length - 1] !== ni) at.push(ni);
@@ -443,7 +308,8 @@ function unchangedBlobDefs(before: string, after: string): { text: string; cut: 
   const firstUse = new Map<string, number>();
   for (const { l, at } of added) {
     for (const m of l.matchAll(IDENT)) {
-      const n = m[0];
+      // A shell or PHP variable `$D` names the definition `D`: leading `$` signs are dropped unless the name itself is defined with them.
+      const n = defs.has(m[0]) ? m[0] : m[0].replace(/^\$+/, "");
       if (defs.has(n) && !firstUse.has(n)) firstUse.set(n, at);
     }
   }
@@ -480,6 +346,7 @@ function unchangedBlobDefs(before: string, after: string): { text: string; cut: 
     const limit = Math.min(BLOB_LINE_MAX, BLOB_TOTAL_MAX - out.length - prefix.length - 1);
     let body: string | undefined;
     let whole = true;
+    // A line that fits the per-line limit (the label is not counted against it) is shown whole, even at 19,990 chars.
     if (l.length + (quote ? 2 : 0) <= limit) {
       body = render(l);
       if (body.length > limit) body = undefined;
@@ -491,7 +358,7 @@ function unchangedBlobDefs(before: string, after: string): { text: string; cut: 
         const b = render(`${l.slice(0, headN)}…${l.slice(Math.max(headN, l.length - tailN))} ${meta}`);
         if (b.length <= limit) {
           body = b;
-          whole = headN + tailN >= l.length;
+          whole = false; // the head and tail with the length and hash are longer than a line they would cover, so a line cut here is never whole
           break;
         }
       }
@@ -509,7 +376,7 @@ function unchangedBlobDefs(before: string, after: string): { text: string; cut: 
     out += e;
     if (!whole) for (const n of names) notShown.add(n);
   });
-  const cut = notShown.size > 0 && narrowUses(added.map((a) => a.l), notShown, props).size > 0;
+  const cut = notShown.size > 0; // every name here is on a changed line: that is how the lines were selected
   return out === header && !cut ? undefined : { text: out === header ? "" : out, cut };
 }
 
@@ -2323,7 +2190,7 @@ function mapStringTexts(m: Record<string, unknown>): string[] {
 }
 
 /** What a "strings" map shows beside its hash line: the changed sources' contents (in full where a soft pattern matches a line, else one hash line), and the names, file and sourceRoot when they changed. */
-function mapStringPieces(path: string, before: Uint8Array | undefined, after: Uint8Array): string[] {
+function mapStringPieces(path: string, before: Uint8Array | undefined, after: Uint8Array, cut?: Set<string>): string[] {
   const now = strictMapOf(after)?.map;
   const was = before ? strictMapOf(before)?.map : undefined;
   const list = (m: Record<string, unknown> | undefined, k: string) => (Array.isArray(m?.[k]) ? (m![k] as (string | null)[]) : []);
@@ -2336,7 +2203,7 @@ function mapStringPieces(path: string, before: Uint8Array | undefined, after: Ui
     const o = oldSources[i] === src ? oldContent[i] ?? "" : undefined;
     if (o === c) return;
     // A changed entry with a line a soft pattern matches is shown as a diff; any other changed entry is one line (path, bytes, sha256), as a clean big map hides it anyway.
-    if (c.split("\n").some((line) => SOFT_PATTERNS.some(({ re }) => re.test(line)))) out.push(...fileDiff(`${path} sourcesContent ${src}`, o === undefined ? undefined : enc.encode(o), enc.encode(c), o === undefined ? "added" : "changed"));
+    if (c.split("\n").some((line) => SOFT_PATTERNS.some(({ re }) => re.test(line)))) out.push(...fileDiff(`${path} sourcesContent ${src}`, o === undefined ? undefined : enc.encode(o), enc.encode(c), o === undefined ? "added" : "changed", cut));
     else out.push(`=== ${path} sourcesContent ${src} (${o === undefined ? "added" : "changed"}) ===\n[source text, ${enc.encode(c).length} bytes, sha256 ${new Bun.CryptoHasher("sha256").update(c).digest("hex")}]\n`);
   });
   for (const k of ["sources", "names", "file", "sourceRoot"]) {
@@ -2648,7 +2515,7 @@ export function chunkDiff(oldFiles: FileMap, newFiles: FileMap, cap: number, onl
       const h = b ? new Bun.CryptoHasher("sha256").update(b).digest("hex") : "-";
       push(`=== ${p} (${!a ? "added" : !b ? "removed" : "changed"}) ===\n[source map, strict v3 data, ${b?.length ?? 0} bytes, sha256 ${h}, ${generated.get(p)}]\n`);
       // A padded map (the pre-pass did not scan it) whose strings raise a soft pattern: the changed strings are shown (an entry that matches a pattern in full, any other as one hash line) and the mappings stay a hash.
-      if (b && b.length > LARGE_FILE_BYTES && mapStringsClass(b) === "strings") for (const piece of mapStringPieces(p, a, b)) push(piece);
+      if (b && b.length > LARGE_FILE_BYTES && mapStringsClass(b) === "strings") for (const piece of mapStringPieces(p, a, b, cutDefs)) push(piece);
       continue;
     }
     for (const piece of fileDiff(p, a, b, undefined, cutDefs)) push(piece);

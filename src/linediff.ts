@@ -104,14 +104,14 @@ function tokenDiff(oldLine: string, newLine: string): string | undefined {
 const QUOTE_NOTE = " [lines below are exact text as JSON strings, to show a CR or trailing whitespace]";
 const needsQuote = (l: string) => l.includes("\r") || /[ \t]$/.test(l);
 
-export function renderLineDiff(before: string | undefined, after: string | undefined): string {
+export function renderLineDiff(before: string | undefined, after: string | undefined, getOps?: () => Op[] | undefined): string {
   if (before !== undefined && after !== undefined && before !== after && (after === before.replaceAll("\n", "\r\n") || before === after.replaceAll("\n", "\r\n"))) {
     return "[line endings only: every line converted between CRLF and LF]\n";
   }
   const split = (s: string | undefined) => (s === undefined ? [] : s.split("\n"));
   const oldLines = split(before);
   const newLines = split(after);
-  const ops = diffSeq(oldLines, newLines);
+  const ops = getOps ? getOps() : diffSeq(oldLines, newLines); // a caller that also needs the ops passes one memoized call
   if (!ops) {
     // Too many edits to order: show the whole new version. Dropping lines both versions hold would hide a
     // reorder (an activation line moved above its payload); the review's size holds bound the length.
