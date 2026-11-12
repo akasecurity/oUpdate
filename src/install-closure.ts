@@ -2902,9 +2902,11 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
   const text = codeOnly(source, [], true) ?? source;
   if (hasUnbounded(text, source)) tier.all = true;
-  cls = { text, ...pathNames(text), bind: new Map(), memo: new Map(), visiting: new Set(), steps: 0, defSteps: 0 };
+  cls = { text, raw: source, ...pathNames(text), bind: new Map(), memo: new Map(), visiting: new Set(), steps: 0, defSteps: 0, fold: new Map(), foldSteps: 0 };
   try {
     classifyLoads(tier, fromKey, text);
+    // A command that runs a file named through a folded or decoded name can name any file, docs included.
+    if (!tier.all && runnerFolds(text)) tier.all = true;
   } finally {
     cls = undefined;
   }
@@ -3282,6 +3284,27 @@ function dynamicProcessRunner(text: string): boolean {
     const args = argsOf(text, paren);
     if (args === undefined) return true;
     if (/__dirname|__filename|\$\{|\+/.test(stripBraceGroups(args))) return true;
+  }
+  return false;
+}
+
+function runnerFolds(text: string): boolean {
+  const cp = new Set(["child_process", "cp"]);
+  for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"](?:node:)?child_process['"]\s*\)/g)) cp.add(m[1]!);
+  for (const m of text.matchAll(/(?<![\w$])(execSync|spawnSync|exec|spawn|execFileSync|execFile|fork)\s*\(/g)) {
+    const at = m.index ?? 0;
+    // A member call counts only on child_process or a name bound to it: /re/.exec(s) and db.exec(sql) are not runs.
+    const recv = /([A-Za-z_$][\w$]*)\s*\.\s*$/.exec(text.slice(Math.max(0, at - 60), at));
+    if (/\.\s*$/.test(text.slice(Math.max(0, at - 60), at)) && !(recv && cp.has(recv[1]!))) continue;
+    const args = argsOf(text, at + m[0].lastIndexOf("("));
+    if (args === undefined) continue;
+    // The command or file is the first argument; spawn, execFile and fork also read the elements of the argument array.
+    const pieces = [firstArg(args)];
+    if (!/^exec(?:Sync)?$/.test(m[1]!)) {
+      const second = splitTop(args, ",")[1]?.trim() ?? "";
+      if (second.startsWith("[") && second.endsWith("]")) pieces.push(...splitTop(second.slice(1, -1), ","));
+    }
+    if (pieces.some((p) => tailFolds(p, false))) return true;
   }
   return false;
 }
@@ -4888,7 +4911,7 @@ function bindingsOf(name: string): string[] {
 // One classify call's view of the file: the path-module names, and the bindings it has already read. A name is read once,
 // a name met again while it is being read counts for nothing more, and past this many names the answer is the package.
 type FnDef = { fname?: string; alias?: string; params: string[]; kind: "named" | "export" | "anon" | "method"; destructured: string };
-type ClsCtx = { text: string; mods: Set<string>; fns: Set<string>; bind: Map<string, string[]>; memo: Map<string, JsEffect>; visiting: Set<string>; steps: number; defs?: FnDef[]; refs?: Map<string, { calls: string[]; other: boolean; exported: boolean }>; defSteps: number };
+type ClsCtx = { text: string; raw: string; mods: Set<string>; fns: Set<string>; bind: Map<string, string[]>; memo: Map<string, JsEffect>; visiting: Set<string>; steps: number; fold?: Map<string, FoldKind>; foldSteps?: number; quoted?: Set<string>; defs?: FnDef[]; refs?: Map<string, { calls: string[]; other: boolean; exported: boolean }>; defSteps: number };
 let cls: ClsCtx | undefined;
 const BIND_STEPS = 200;
 const WIDE: JsEffect = { t: "pkg", tests: true, flows: true };
@@ -5117,7 +5140,9 @@ function effectOf(fromKey: string, expr: string, _text = "", depth = 0): JsEffec
     if (root !== "process" && root !== "__dirname" && root !== "__filename" && root !== "module" && root !== "exports") return nameEffect(fromKey, root, depth);
   }
   if (!t || strLit(t) !== undefined) return { t: "none" };
-  if (/Buffer\.from\s*\(|\bbase64\b|\batob\s*\(/.test(t)) return { t: "pkg", tests: true, flows: true };
+  // A decode of a value the file spells (a literal, a name built from literals) names no file in the text: it can be any file, docs included.
+  // A decode of anything else keeps the package tier.
+  if (DECODE_WORD.test(t)) return decodesKnown(t) ? { t: "all" } : { t: "pkg", tests: true, flows: true };
   const call = matchCall(t);
   // A join or resolve is a path call when its receiver is the path module (`path`, `path?.join`, `(path).join`,
   // require("path/win32").join, a destructured join). Any other join is a string built by joining pieces: when every piece is a
@@ -5270,6 +5295,8 @@ function effectOfPlus(fromKey: string, expr: string): JsEffect {
 // A prefix that stays inside the file's directory widens to that directory.
 // `..` or an escaped prefix widens to the package, docs excluded.
 function finishDynamic(base: string[], parts: string[], escaped: boolean, tail: string, anchored: boolean): JsEffect {
+  // A tail that is, or reads a name bound to, a value built from literals or decoded names no file in the text: it can be any file, docs included.
+  if (tailFolds(tail)) return { t: "all" };
   const danger = tailDanger(tail);
   if (escaped || danger.dotdot) return { t: "pkg", tests: !danger.one, flows: !danger.one };
   const dir = parts.join("/");
@@ -5286,6 +5313,156 @@ function finishDynamic(base: string[], parts: string[], escaped: boolean, tail: 
   if (left) return { t: "pkg", tests: dirHits(dir, "test"), flows: dirHits(dir, "flow") };
   if (dir === b) return { t: "same" };
   return { t: "prefix", dir };
+}
+
+type FoldKind = "lit" | "fold" | "other";
+// What main read as a decode in a load argument; a decode of a value the file does not spell is still only the package tier.
+const DECODE_WORD = /Buffer\.from\s*\(|\bbase64\b|\batob\s*\(/;
+const FOLD_BINDINGS = 50;
+// A value's text split into its string and template literals (counted), the code around them, and the holes of templates.
+function foldShape(t: string): { lits: number; rest: string; holes: string[] } | undefined {
+  const rest: string[] = [];
+  let lits = 0;
+  const holes: string[] = [];
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i]!;
+    if (c !== "'" && c !== '"' && c !== "`") {
+      rest.push(c);
+      continue;
+    }
+    lits++;
+    rest.push(" ");
+    let j = i + 1;
+    for (; j < t.length && t[j] !== c; j++) {
+      if (t[j] === "\\") j++;
+      else if (c === "`" && t[j] === "$" && t[j + 1] === "{") {
+        let d = 0;
+        let k = j + 1;
+        for (; k < t.length; k++) {
+          if (t[k] === "{") d++;
+          else if (t[k] === "}" && --d === 0) break;
+        }
+        if (k >= t.length) return undefined;
+        holes.push(t.slice(j + 2, k));
+        j = k;
+      }
+    }
+    if (j >= t.length) return undefined;
+    i = j;
+  }
+  return { lits, rest: rest.join(""), holes };
+}
+// The text of one quoted string, an escaped quote included; undefined for anything else.
+function plainLit(t: string): string | undefined {
+  const q = t[0];
+  if ((q !== '"' && q !== "'") || t.length < 2 || t[t.length - 1] !== q) return undefined;
+  for (let i = 1; i < t.length - 1; i++) {
+    if (t[i] === "\\") i++;
+    else if (t[i] === q) return undefined;
+  }
+  return t.slice(1, -1);
+}
+// The quoted strings of the file's own text, read once per classify. The kept text writes a plain template as a quoted string, so a
+// value the file spells only as a template is not in this set. A line that does not close its quote is skipped to its end.
+function quotedStrings(): Set<string> {
+  const c = cls!;
+  if (c.quoted) return c.quoted;
+  const set = new Set<string>();
+  const raw = c.raw;
+  for (let i = 0; i < raw.length; i++) {
+    const q = raw[i];
+    if (q !== '"' && q !== "'") continue;
+    let j = i + 1;
+    for (; j < raw.length && raw[j] !== q && raw[j] !== "\n"; j++) if (raw[j] === "\\") j++;
+    if (raw[j] === q) set.add(raw.slice(i + 1, j));
+    i = j;
+  }
+  c.quoted = set;
+  return set;
+}
+// The first arguments of the decodes (Buffer.from(x), atob(x)) in a text.
+function decodeArgs(t: string): string[] {
+  const out: string[] = [];
+  for (const m of t.matchAll(/(?<![\w$.])(?:Buffer\s*\.\s*from|atob)\s*\(/g)) {
+    const args = argsOf(t, (m.index ?? 0) + m[0].length - 1);
+    if (args !== undefined) out.push(firstArg(args).trim());
+  }
+  return out;
+}
+// A decode of a literal or of a name built from literals: the value is not in the text.
+function decodesKnown(t: string): boolean {
+  return decodeArgs(t).some((a) => foldKind(a, 0) !== "other");
+}
+const FOLD_WORDS = new Set(["join", "concat"]);
+function foldKind(init: string, depth: number, prevOk = false): FoldKind {
+  const t = init.trim();
+  const plain = plainLit(t);
+  // A plain template reads as a quoted string in the kept text; the file's own text tells whether the value is spelled as a quoted string.
+  if (plain !== undefined) return !cls || quotedStrings().has(plain) ? "lit" : "fold";
+  if (/^[A-Za-z_$][\w$]*$/.test(t)) return nameFoldKind(t, depth + 1);
+  if (DECODE_WORD.test(t)) {
+    const args = decodeArgs(t);
+    if (args.length > 0) return args.some((a) => foldKind(a, depth + 1) !== "other") ? "fold" : "other";
+  }
+  const shape = foldShape(t);
+  if (!shape) return "fold";
+  // Only a fold operator builds a value: a + , a template with a substitution, a join or a concat. An array, a call or an index of literals is not one.
+  if (!/\+/.test(shape.rest) && shape.holes.length === 0 && !/\.\s*(?:join|concat)\s*\(/.test(shape.rest)) return "other";
+  const ids: string[] = [];
+  for (const h of shape.holes) {
+    const hole = h.trim();
+    if (plainLit(hole) !== undefined) continue;
+    if (!/^[A-Za-z_$][\w$]*$/.test(hole)) return "other";
+    ids.push(hole);
+  }
+  for (const m of shape.rest.matchAll(/(?<![\w$.])[A-Za-z_$][\w$]*/g)) {
+    if (FOLD_WORDS.has(m[0])) continue;
+    // += on a value that is not known reads an unknown left side.
+    if (m[0] === "__prev") {
+      if (!prevOk) return "other";
+      continue;
+    }
+    ids.push(m[0]);
+  }
+  const word = shape.rest.replace(/(?<![\w$])[A-Za-z_$][\w$]*/g, " ").replace(/\.\s*(?:join|concat)\b/g, " ");
+  if (!/^[\s+,.()[\]\d]*$/.test(word)) return "other";
+  let named = false;
+  for (const id of ids) {
+    const k = nameFoldKind(id, depth + 1);
+    if (k === "other") return "other";
+    if (k === "fold") named = true;
+  }
+  return shape.lits > 0 || named ? "fold" : "other";
+}
+function nameFoldKind(name: string, depth: number): FoldKind {
+  const c = cls;
+  if (!c) return "other";
+  const memo = (c.fold ??= new Map());
+  const hit = memo.get(name);
+  if (hit) return hit;
+  // Past the budget the answer is the closed one.
+  if (depth > 6 || (c.foldSteps = (c.foldSteps ?? 0) + 1) > BIND_STEPS) return "fold";
+  memo.set(name, "other");
+  const inits = bindingsOf(name);
+  let kind: FoldKind;
+  if (inits.length > FOLD_BINDINGS) kind = "fold";
+  else {
+    const base = inits.filter((i) => !i.startsWith("__prev + ")).map((i) => foldKind(i, depth));
+    const prevOk = base.length > 0 && base.every((k) => k !== "other");
+    const kinds = [...base, ...inits.filter((i) => i.startsWith("__prev + ")).map((i) => foldKind(i, depth, prevOk))];
+    kind = kinds.includes("fold") ? "fold" : inits.length > 0 && kinds.every((k) => k === "lit") ? "lit" : "other";
+  }
+  memo.set(name, kind);
+  return kind;
+}
+// True when the tail of a computed path reads a name whose value is built from literals (a join, a +, a template) or decoded. A text the
+// scan cannot split reads as folded when `closed`, and as not folded otherwise.
+function tailFolds(tail: string, closed = true): boolean {
+  const shape = foldShape(tail);
+  if (!shape) return closed;
+  const ids = shape.holes.flatMap((h) => h.match(/(?<![\w$.])[A-Za-z_$][\w$]*/g) ?? []);
+  ids.push(...(shape.rest.match(/(?<![\w$.])[A-Za-z_$][\w$]*/g) ?? []));
+  return ids.some((id) => nameFoldKind(id, 0) === "fold");
 }
 
 function tailDanger(tail: string): { one: boolean; dotdot: boolean } {

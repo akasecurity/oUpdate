@@ -32,9 +32,13 @@ const cases: [string, Record<string, string>][] = [
   ["F6 npm_package_json dirname", sub("const p=require('path');const n='run';require(p.join(p.dirname(process.env.npm_package_json),'tools',n+'.js'))\n")],
 ];
 
+// A name built from literals (F1, F2) can spell a docs path, so a docs change holds there too; the others keep docs out.
+const folded = new Set(["F1 prefix then computed ../ tail", "F2 template prefix, traversal tail"]);
 for (const [name, base] of cases) {
   test(`${name} holds, and the unchanged twin is quiet`, () => {
     holds(base, "tools/run.js", evil);
-    expect(hard(base, { ...base, "README.md": "b\n" })).toEqual([]);
+    const docs = hard(base, { ...base, "README.md": "b\n" });
+    if (folded.has(name)) expect(docs.length).toBeGreaterThan(0);
+    else expect(docs).toEqual([]);
   });
 }
