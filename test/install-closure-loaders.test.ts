@@ -148,7 +148,6 @@ const benign2: [string, string][] = [
   ["a message that holds module.constructor.register", `require("cluster"); console.log("module.constructor.register")`],
   ["this.constructor.register beside a cluster load", `require("cluster"); class A { go() { this.constructor.register(this) } }`],
   ["a property named module with a register method", `require("cluster"); app.module.register(x)`],
-  ["a class method named register called through a constructor", `require("cluster"); class Foo { static register(x) { console.log(x) } } const app = new Foo(); app.constructor.register("ok")`],
   ["a message that names module.register", `require("cluster"); throw new Error("module.register failed")`],
   ["a timer and a deprecation message that names m.register", `const m = require("module"); setTimeout(done, 10); log("m.register is deprecated")`],
   ["typeof a module member", `const m = require("module"); console.log(typeof m.register)`],
@@ -187,13 +186,18 @@ const shapes: [string, (n: number) => string][] = [
   ["brackets in a string beside cluster", (n) => `const c = require("cluster"); console.log("${'["'.repeat(n / 2)}")\n`],
   ["padding strings before a Reflect.get of _load", (n) => `const M = require("module");\n${'const pad = "xxxxxxxxxx";\n'.repeat(n / 25)}Reflect.get(M, "_load")(p)`],
   ["many settings hand-offs beside cluster", (n) => `const c = require("cluster"); ${"f(c.settings, 1);".repeat(n / 17)}`],
+  ["a long run of require.cache[ opens", (n) => `require("cluster"); ${"require.cache[".repeat(n / 14)}`],
+  ["a long run of spaces beside cluster", (n) => `require("cluster"); ${" ".repeat(n)}`],
+  ["a long run of line breaks beside cluster", (n) => `require("cluster");${"\n".repeat(n)}`],
+  ["a long run of this-dot-constructor members", (n) => `require("cluster"); ${"this.constructor.".repeat(n / 17)}`],
+  ["a long run of constructor members", (n) => `require("cluster"); ${"x.constructor.".repeat(n / 14)}`],
   ["many bound names beside module", (n) => `const a = require("module");\n${"const x = require(n);\n".repeat(n / 22)}`],
 ];
-// The same shape at 256 KB, 1 MB and 2 MB: the least-squares slope of log time against log size over the three points is about 1 for a linear read and
+// The same shape at 1 MB, 2 MB and 4 MB (times under 20 ms count as 20): the least-squares slope of log time against log size over the three points is about 1 for a linear read and
 // about 2 for a quadratic one. Observed slopes on the nine shapes run from 0.6 to 1.3; the bound leaves room for noise and is far below 2.
 const slopeOf = (sizes: number[], times: number[]): number => {
   const xs = sizes.map((n) => Math.log(n));
-  const ys = times.map((t) => Math.log(Math.max(t, 5)));
+  const ys = times.map((t) => Math.log(Math.max(t, 20)));
   const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
   const my = ys.reduce((a, b) => a + b, 0) / ys.length;
   let num = 0;
@@ -206,10 +210,10 @@ const slopeOf = (sizes: number[], times: number[]): number => {
 };
 for (const [name, make] of shapes) {
   test(`reading a long text is linear in its size: ${name}`, () => {
-    median3(() => make(1 << 16));
+    median3(() => make(1 << 18));
     // A slow machine inflates one reading: the bound has to fail on every attempt, as a quadratic read does.
     const slopes: number[] = [];
-    const sizes = [1 << 18, 1 << 20, 1 << 21];
+    const sizes = [1 << 20, 1 << 21, 1 << 22];
     for (let attempt = 0; attempt < 3; attempt++) {
       const slope = slopeOf(sizes, sizes.map((n) => median3(() => make(n))));
       slopes.push(slope);
@@ -311,6 +315,8 @@ const vmSpellings: [string, string, string][] = [
 const vmComputedForms: [string, (vm: string, b: string, call: string, t: string) => string][] = [
   ["runInNewContext", (vm, b, call, t) => `${vm}.runInNewContext("${call}", { M: require("${b}"), p: ${t} })`],
   ["compileFunction", (vm, b, call, t) => `${vm}.compileFunction("${call}", ["M", "p"])(require("${b}"), ${t})`],
+  ["a renamed runInNewContext", (vm, b, call, t) => `const { runInNewContext: r } = ${vm}; r("${call}", { M: require("${b}"), p: ${t} })`],
+  ["a renamed compileFunction", (vm, b, call, t) => `const { compileFunction: cf } = ${vm}; cf("${call}", ["M", "p"])(require("${b}"), ${t})`],
   ["runInContext", (vm, b, call, t) => `const vm = ${vm}; vm.runInContext("${call}", vm.createContext({ M: require("${b}"), p: ${t} }))`],
 ];
 for (const [spelling, pre, expr] of vmSpellings) {
@@ -324,6 +330,68 @@ for (const [spelling, pre, expr] of vmSpellings) {
       }
     }
   }
+}
+
+// Any constructor chain ending in register or _load is held, whatever the receiver is called or how the path is built; only this.constructor is a class method.
+const chainTarget = (dir: string) => `"file://" + __dirname + String.fromCharCode(${Array.from(`/${dir}/evil.mjs`).map((c) => c.charCodeAt(0)).join(",")})`;
+const chains: [string, (u: string, p: string) => string][] = [
+  ["an alias of module", (u) => `require("cluster"); const M = module; M.constructor.register(${u})`],
+  ["a comma expression", (u) => `require("cluster"); (0, module).constructor.register(${u})`],
+  ["the prototype of the constructor", (u) => `require("cluster"); const Module = module.constructor; Module.prototype.constructor.register(${u})`],
+  ["a quoted constructor key", (u) => `require("cluster"); module["constructor"].register(${u})`],
+  ["optional chaining", (u) => `require("cluster"); module?.constructor?.register(${u})`],
+  ["module.parent", (u) => `require("cluster"); module.parent.constructor.register(${u})`],
+  ["module.children", (u) => `require("cluster"); module.children[0].constructor.register(${u})`],
+  ["a name bound to the constructor, _load", (_u, p) => `require("cluster"); const M = module.constructor; M._load(${p})`],
+  ["a quoted constructor key, _load", (_u, p) => `require("cluster"); module["constructor"]._load(${p})`],
+  ["optional chaining, _load", (_u, p) => `require("cluster"); module?.constructor?._load(${p})`],
+];
+for (const [name, code] of chains) {
+  for (const dir of ["lib", "test"]) {
+    test(`a loader through a constructor chain, ${name}: held (${dir})`, () => {
+      const ext = name.endsWith("_load") ? "js" : "mjs";
+      expect(heldAt("h.js", code(chainTarget(dir), `["./${dir}/", "evil"].join("")`), { postinstall: "node h.js" }, {}, `${dir}/evil.${ext}`)).toBe(true);
+    });
+  }
+}
+
+// Code run from a string through a call that is not spelled eval, Function or a vm verb.
+test("a string run through .constructor( holds", () => {
+  expect(heldAt("h.js", `(function () {}).constructor("M", "p", "return M._load(p)")(require("module"), ${J})`, { postinstall: "node h.js" }, {}, "lib/evil.js")).toBe(true);
+});
+test("vm loaded through a createRequire result holds", () => {
+  expect(heldAt("h.js", `const r = require("module").createRequire(__filename); const { runInNewContext: run } = r("vm"); run("M._load(p)", { M: require("module"), p: ${J} })`, { postinstall: "node h.js" }, {}, "lib/evil.js")).toBe(true);
+  expect(heldAt("h.js", `import { createRequire } from "node:module"; const r = createRequire(import.meta.url); const J = ${J}; const { runInNewContext: run } = r("node:vm"); run("M._load(p)", { M: r("module"), p: J })`, { postinstall: "node h.js" }, {}, "lib/evil.js")).toBe(true);
+});
+
+// Whitespace or a line break inside the parentheses of a literal load does not make it computed: the file stays in code position.
+const spaced: [string, string][] = [
+  ["a space before the name", `require( "cluster"); console.log("module.register")`],
+  ["a line break before the name", `require(\n"cluster"); console.log("module.register")`],
+  ["a wrapped dynamic import", `import(\n  "./x.js"\n); console.log("module.register")`],
+];
+for (const [name, hook] of spaced) {
+  test(`a literal load with whitespace inside is not a computed load: ${name}`, () => {
+    expect(held(hook)).toBe(false);
+  });
+}
+test("a literal load with whitespace inside still sees its loader", () => {
+  expect(held(`const c = require(\n  "cluster"\n); c.setupPrimary({ exec: ${J} }); c.fork()`)).toBe(true);
+  expect(held(`const c = require( "cluster" ); c.setupPrimary({ exec: ${J} }); c.fork()`)).toBe(true);
+});
+
+// Accepted costs of the conservative rule: held although nothing is loaded.
+const accepted: [string, string][] = [
+  ["a class method register called through a constructor", `require("cluster"); class Foo { static register(x) { console.log(x) } } const app = new Foo(); app.constructor.register("ok")`],
+  ["a main property with a constructor register", `require("cluster"); app.main.constructor.register("ok")`],
+  ["a dynamic require and a warning that names module.register", `const plugin = require(pluginPath); console.warn("module.register() is unavailable")`],
+  ["a dynamic require and a string with a bracket key", `const p = require(dyn); console.log('module["register"]')`],
+  ["a local function named like a vm verb", `require("cluster"); function compileFunction() { return 1 } compileFunction(); console.log("module.register")`],
+];
+for (const [name, hook] of accepted) {
+  test(`accepted cost, held: ${name}`, () => {
+    expect(held(hook)).toBe(true);
+  });
 }
 
 // register behind any constructor chain, but not behind this.

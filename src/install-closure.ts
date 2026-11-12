@@ -953,9 +953,11 @@ function loadsFileByBuiltin(text: string, blank: string): boolean {
   // A string that holds code is read as code: a file that calls eval or Function, or loads vm at all (whatever a verb is renamed to), gets its operations looked for in
   // the text with its strings kept.
   // The load of a module that is not one plain string (a name built from pieces, held by a variable, or spelled with an escape) could be vm: it counts as a vm load.
-  const computedLoad = /\b(?:require|import)\s*\(\s*(?!(?:"[^"\\\n]*"|'[^'\\\n]*'|`[^`\\$]*`)\s*\))|\bgetBuiltinModule\s*\(\s*(?!(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\))/.test(text);
-  const vmLoaded = computedLoad || /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*|\bgetBuiltinModule\s*\(\s*)["'`](?:node:)?vm["'`]/.test(text);
-  const code = vmLoaded || /\b(?:eval|Function|runInNewContext|runInThisContext|runInContext|compileFunction)\s*\(|\bnew\s+(?:vm\s*\.\s*)?Script\s*\(/.test(blank) ? text : blank;
+  const computedLoad = /\b(?:require|import)\s*\((?!\s*(?:"[^"\\\n]*"|'[^'\\\n]*'|`[^`\\$]*`)\s*\))|\bgetBuiltinModule\s*\((?!\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\))/.test(text);
+  // vm named as a string anywhere (an import specifier, an argument to any call such as a createRequire result) counts as loaded: whatever loads it runs the strings given to it.
+  const vmLoaded = computedLoad || /["'`](?:node:)?vm["'`]/.test(text);
+  // A call on a constructor member (Function reached as (function(){}).constructor(...)) runs a string as code too.
+  const code = vmLoaded || /\b(?:eval|Function|runInNewContext|runInThisContext|runInContext|compileFunction)\s*\(|\bnew\s+(?:vm\s*\.\s*)?Script\s*\(|(?:\.|\])\s*constructor\s*\(/.test(blank) ? text : blank;
   // A bracket key counts only where the bracket itself is code, so the same text inside a string is not a use. The string spans come from reading the text again.
   const spans: SpanNote[] = [];
   const again = codeOnly(text, [], true, spans);
@@ -977,8 +979,9 @@ function loadsFileByBuiltin(text: string, blank: string): boolean {
     for (const m of text.matchAll(re)) if (!inString(m.index ?? 0)) return true;
     return false;
   };
-  if (/\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(code) || /(?<![\w$.])module\s*\.\s*(?:__proto__\s*\.\s*)?(?:constructor\s*\.\s*)?register\b|\b(?:main|mainModule)\s*\.\s*constructor\s*\.\s*register\b|\bgetPrototypeOf\s*\(\s*(?:module|require\s*\.\s*main|process\s*\.\s*mainModule)\s*\)\s*\.\s*constructor\s*\.\s*register\b|\brequire\s*\.\s*cache\s*\[[^\]]*\]\s*\.\s*constructor\s*\.\s*register\b/.test(code)) return true;
-  if (keyedAt(/\b(?:module|constructor)\s*(?:\.\s*constructor\s*)?\[\s*["'`](?:_load|register)["'`]\s*\]/g)) return true;
+  // Any constructor chain ending in register or _load is held unless it starts at this (this.constructor.register(this) is a class method); module itself too.
+  if (/(?<![\w$.])module\s*(?:\?\.|\.)\s*(?:__proto__\s*(?:\?\.|\.)\s*)?(?:_load|register)\b|(?:(?<!\bthis\??)(?:\?\.|\.)|(?<![\w$.?\s]))\s*constructor\s*(?:\?\.|\.)\s*(?:_load|register)\b/.test(code)) return true;
+  if (keyedAt(/\b(?:module|constructor)\s*(?:\.\s*constructor\s*)?\[\s*["'`](?:_load|register)["'`]\s*\]/g) || keyedAt(/\[\s*["'`]constructor["'`]\s*\]\s*(?:\?\.|\.)\s*(?:_load|register)\b/g)) return true;
   const nonLiteralLoad = /\b(?:require|import)\s*\(\s*[^"'`\s)]|\bgetBuiltinModule\s*\(/.test(blank);
   const literalNamed = (name: string): boolean => new RegExp(`(?:\\bfrom\\s*|\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*)["'\`](?:node:)?${name}["'\`]`).test(text);
   const named = (name: string): boolean => literalNamed(name) || (nonLiteralLoad && new RegExp(`["'\`](?:node:)?${name}["'\`]`).test(text));
@@ -1026,6 +1029,10 @@ function loadsFileByBuiltin(text: string, blank: string): boolean {
     for (const m of text.matchAll(new RegExp(String.raw`[(,]\s*([\w$]+)\s*,\s*["'\`](?:${keys})["'\`]\s*[,)]`, "g"))) if (names.has(m[1] ?? "") && !inString(m.index ?? 0) && !readOnly((m.index ?? 0) + 1, text)) return true;
     return false;
   };
+  // A name bound to module, module.constructor, require.main or process.mainModule (const M = module.constructor): its register and _load are the loader.
+  const selfNames = new Set<string>();
+  for (const m of code.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:\(\s*0\s*,\s*)?(?:module|require\s*\.\s*main|process\s*\.\s*mainModule)(?![\w$])/g)) selfNames.add(m[1] ?? "");
+  if (selfNames.size && (viaReceiver(selfNames, String.raw`(?:register|_load)\b`, CALL) || handedOff(selfNames, String.raw`(?:register|_load)`))) return true;
   if (named("cluster")) {
     const r = receivers("cluster");
     if (literalNamed("cluster") && (/\b(?:setupPrimary|setupMaster)\s*\(|\bsettings\s*\.\s*exec\b/.test(code) || /\bsettings\s*\[\s*["'`]exec["'`]\s*\]/.test(text))) return true;
