@@ -249,14 +249,20 @@ function endTick(t: string, i: number): number {
   }
   return -1;
 }
+// True when the last endBrace had to scan to the end of the text and no close was found in bash's reading (it may still have
+// returned dash's end): the cost of such a scan is the rest of the text, so callers count them.
+let braceRanToEnd = false;
 function endBrace(t: string, i: number, dq = false): number {
-  return bounded(() => endBraceCore(t, i, dq));
+  const state = { ran: false };
+  const r = bounded(() => endBraceCore(t, i, dq, state));
+  braceRanToEnd = state.ran;
+  return r;
 }
 // `dq`: the brace sits in double quotes, where a single quote is an ordinary character in dash and in bash's POSIX mode, and
 // a quote that pairs with the next one in bash. A bare `{` is counted by bash and not by dash. Where the two readings give a
 // different end, the span counts as not closed (the caller reads the line as unsure): a lone `'` with no partner is read
 // only one way, so it stays.
-function endBraceCore(t: string, i: number, dq: boolean): number {
+function endBraceCore(t: string, i: number, dq: boolean, state: { ran: boolean }): number {
   let d = 1;
   const kinds: boolean[] = []; // the open braces inside this span: true for a bare `{` (bash counts it, dash does not)
   let dashEnd = -1; // where dash would close the span: the `}` that matches the first bare `{`
@@ -293,6 +299,7 @@ function endBraceCore(t: string, i: number, dq: boolean): number {
       if (kinds.pop() && dashEnd < 0) dashEnd = j + 1;
     }
   }
+  state.ran = true;
   return dashEnd; // bash cannot close it: only dash's reading is left
 }
 // ANSI-C `$'..'` (i is the opening quote): the index of the closing quote; a backslash escapes the next character.
@@ -380,7 +387,7 @@ function skipHeredocs<H extends { delim: string; strip: boolean; quoted?: boolea
 
 // Replaces `${npm_package_config_x}` forms by their value. An expansion it cannot resolve makes the text unreadable
 // (null), or, when `loose`, is replaced by UNRESOLVED so that the commands around it can still be read.
-// A text with more unclosed `${` spans than this is read no further after them (each scan runs to the end of the text).
+// A text with more `${` spans than this that scan to the end of the text without closing is read no further: every file is read.
 const UNCLOSED_SPANS = 8;
 function subst(ctx: Ctx, body: string, loose = false): string | null {
   // A backslash in the tilde prefix (~\+/x, \~+/x) makes it a literal name: ./~+/x. Said here so the later scans see no backslash.
@@ -435,8 +442,12 @@ function subst(ctx: Ctx, body: string, loose = false): string | null {
           // A span that does not close (or that dash and bash would close in different places) swallows no more than its opening:
           // the commands after it are still read.
           const eb = endBrace(body, i + 2);
-          if (eb < 0 && ++unclosed > UNCLOSED_SPANS) i = body.length;
-          else i = eb < 0 ? i + 2 : eb;
+          if ((eb < 0 || braceRanToEnd) && ++unclosed > UNCLOSED_SPANS) {
+            // Too many scans to the end of the text: the rest is not read, so every file is.
+            ctx.widenInert = true;
+            widenAll(ctx);
+            i = body.length;
+          } else i = eb < 0 ? i + 2 : eb;
           continue;
         }
       } else {
@@ -5758,7 +5769,7 @@ function noteUnparsedMake(ctx: Ctx, text: string): void {
 // The logical lines of a body: what the shell reads as one command line. A newline inside quotes, a substitution or
 // after a backslash does not end one; a comment is dropped; the text of a heredoc is skipped up to its terminator.
 // An unclosed quote, substitution or heredoc takes the rest of the body.
-function logicalLines(text: string, heredocs?: string[]): string[] {
+function logicalLines(text: string, heredocs?: string[], capped?: { hit: boolean }): string[] {
   const out: string[] = [];
   // The line so far, as parts and its last 12 characters: indexing into a long string being appended to is quadratic.
   const parts: string[] = [];
@@ -5813,7 +5824,10 @@ function logicalLines(text: string, heredocs?: string[]): string[] {
     }
     if (c === "$" && text[i + 1] === "{") {
       const e = endBrace(text, i + 2);
-      span(e < 0 ? (++unclosed > UNCLOSED_SPANS ? text.length : i + 2) : e);
+      if ((e < 0 || braceRanToEnd) && ++unclosed > UNCLOSED_SPANS) {
+        if (capped) capped.hit = true;
+        span(text.length);
+      } else span(e < 0 ? i + 2 : e);
       continue;
     }
     if (c === "(" && text[i + 1] === "(" && (blank || /[;&|!{]\s*$|(?:^|[\s;&|(])(?:if|while|until|elif|then|do|else|time)\s*$/.test(tail))) { // `(( n <<= 1 ))`: arithmetic, not a heredoc
@@ -6233,7 +6247,9 @@ function unTick(body: string): string {
 // The commands of a line cut apart the way the shell reads them: quotes and backslashes tracked, each `$(...)` and backtick
 // body collected (and its place in the word marked), redirections and their operands left out. `unsure` is a quote or a
 // substitution that never closes.
-type StageFeed = { stages: StageWord[][]; feed: ([number, number] | null)[]; fed: boolean[]; fedUnres: boolean[]; bodies: string[]; unsure: boolean };
+// `bodyAt`: the stage each substitution body belongs to. `solo`: the stage runs on its own, unconditionally: no `|`, `||`, `&&` or `&`
+// next to it, and not in a group.
+type StageFeed = { stages: StageWord[][]; feed: ([number, number] | null)[]; fed: boolean[]; fedUnres: boolean[]; bodies: string[]; bodyAt: number[]; solo: boolean[]; unsure: boolean };
 function shellStages(line: string): StageFeed {
   const stages: StageWord[][] = [];
   const feed: ([number, number] | null)[] = []; // the stages (a range) whose output the stage reads, when it follows a pipe
@@ -6279,9 +6295,21 @@ function shellStages(line: string): StageFeed {
     uqBodies = [];
     uqNames = [];
   };
+  const bodyAt: number[] = [];
+  const stageBefore: string[] = [];
+  const stageAfter: string[] = [];
+  const stageGroup: boolean[] = [];
+  let opBefore = ";"; // the operator before the stage being read
+  const tag = (): void => {
+    while (bodyAt.length < bodies.length) bodyAt.push(stages.length);
+  };
   const endStage = (): void => {
     endWord();
+    tag();
     if (words.length) {
+      stageBefore.push(opBefore);
+      stageAfter.push(";");
+      stageGroup.push(groups.length > 0);
       stages.push(words);
       feed.push(nextFeed ?? (groups.length ? groups[groups.length - 1]!.feed : null));
       fed.push(nowFed);
@@ -6292,6 +6320,13 @@ function shellStages(line: string): StageFeed {
       nowFedUnres = false;
     }
     words = [];
+  };
+  // A separator: the stage before it is followed by `op`, the stage after it is preceded by it.
+  const sep = (op: string): void => {
+    const n = stages.length;
+    endStage();
+    if (stages.length > n) stageAfter[stages.length - 1] = op;
+    opBefore = op;
   };
   const take = (i: number, tick: boolean, quoted = false): number => {
     const e = tick ? endTick(line, i) : endParen(line, i + 2);
@@ -6447,7 +6482,7 @@ function shellStages(line: string): StageFeed {
       continue;
     }
     if (c === "\n" && pend.length) {
-      endStage();
+      sep(";");
       i = skipHeredocs(line, i + 1, pend, (text, h) => {
         if (!nestedBodies(text, bodies, 0, true)) unsure = true;
         if (/[$`]/.test(text) && h.stage < fedUnres.length) fedUnres[h.stage] = true;
@@ -6456,7 +6491,7 @@ function shellStages(line: string): StageFeed {
       continue;
     }
     if (c === "|" && line[i + 1] !== "|" && line[i - 1] !== "|") {
-      endStage();
+      sep("|");
       nextFeed = lastRange;
       i += line[i + 1] === "&" ? 2 : 1;
       continue;
@@ -6471,6 +6506,10 @@ function shellStages(line: string): StageFeed {
         const inner = inner0;
         const had = bodies.length;
         if (!nestedBodies(inner, bodies, 0, false)) unsure = true;
+        tag();
+        stageBefore.push(opBefore);
+        stageAfter.push(";");
+        stageGroup.push(groups.length > 0);
         stages.push([{ t: "((", sub: false, bad: false, v: false, n: [], ar: bodies.slice(had).some((b) => !digitsSub(b)), an: inner.match(/[A-Za-z_]\w*/g) ?? [], uq: [], un: [] }]);
         feed.push(null);
         fed.push(false);
@@ -6496,7 +6535,7 @@ function shellStages(line: string): StageFeed {
       continue;
     }
     if (c === "|" || c === ";" || c === "\n" || (c === "&" && line[i + 1] !== ">")) {
-      endStage();
+      sep(c === "|" ? "||" : c === "&" ? (line[i + 1] === "&" || line[i - 1] === "&" ? "&&" : "&") : ";");
       i++;
       continue;
     }
@@ -6515,7 +6554,8 @@ function shellStages(line: string): StageFeed {
     i++;
   }
   endStage();
-  return { stages, feed, fed, fedUnres, bodies, unsure };
+  const solo = stages.map((_, k) => stageBefore[k] === ";" && stageAfter[k] === ";" && stageGroup[k] === false);
+  return { stages, feed, fed, fedUnres, bodies, bodyAt, solo, unsure };
 }
 
 // The flags of an interpreter that carry its program text (`-e`) or take a separate value, and the ones of a shell.
@@ -6541,20 +6581,34 @@ function benignSub(b: string): boolean {
 }
 // Output that is digits by construction: a name or a version printed into arithmetic is a variable that is evaluated in
 // turn (`uname -s` printing Darwin reads $Darwin), so only counts and numbers are exempt there.
-const DIGITS_CMD = /^(?:nproc(?: --all)?|getconf _?NPROCESSORS_[A-Z]+|getconf (?:PAGE_?SIZE|ARG_MAX|LONG_BIT)|sysctl -n hw\.(?:ncpu|logicalcpu|physicalcpu|activecpu|availcpu|memsize|pagesize|cpufrequency|l[123]dcachesize|cachelinesize)|id -[ug]|node -p ['"]process\.versions\.(?:node\.split\(['"]\.['"]\)\[0\]|modules)['"])$/;
-// The first fields of the kernel release (`5.15.0-91`, `24.1.0`) are digits: the kernel's version, which no package sets. Only the
-// dotted fields are taken, so the output is a number and never a name that a variable of the package could hold.
-const KERNEL_FIELD = /^uname -r\s*\|\s*cut -d\s*['"]?\.['"]?\s+-f\s*[123]$/;
-const COUNT_STAGE = /^(?:wc -[lcw]|grep -[A-Za-z]*c[A-Za-z]*(?: [^|;&<>()`$]*)?)$/;
+const DIGITS_CMD = /^(?:nproc(?: --all)?|getconf _?NPROCESSORS_[A-Z]+|getconf (?:PAGE_?SIZE|ARG_MAX|LONG_BIT)|sysctl -n hw\.(?:ncpu|logicalcpu|physicalcpu|activecpu|availcpu|memsize|pagesize|cpufrequency|l[123]dcachesize|cachelinesize)|id -[ug]|tput (?:cols|lines)|git rev-list --count [A-Za-z0-9_./@^~-]+|node -p ['"]process\.versions\.(?:node\.split\(['"]\.['"]\)\[0\]|modules)['"])$/;
+// The first two fields of the kernel release (`5.15`, `24.1`) are digits: the kernel's version, which no package sets. Only the first
+// two dotted fields are taken: a third can be `0-91-generic`, which is a name that arithmetic would read as a variable.
+const KERNEL_FIELD = /^uname -r\s*\|\s*cut -d\s*['"]?\.['"]?\s+-f\s*[12]$/;
+// Version numbers: `node -v` prints `v` and digits, `npm -v` digits; cut by dots and with the `v` removed they are digits.
+const VERSION_STAGE = "(?:cut -d\\s*['\"]?\\.['\"]?\\s+-f\\s*[1-3]|tr -d\\s+['\"]?v['\"]?|tr \\.\\s+['\"] ['\"])";
+const NODE_VERSION = new RegExp(`^node (?:-v|--version)(?: \\| ${VERSION_STAGE})+$`);
+const NPM_VERSION = new RegExp(`^npm (?:-v|--version)(?: \\| ${VERSION_STAGE})*$`);
+const REMOVES_V = /\| tr -d\s+['"]?v['"]?(?: |$)/;
+// A word with no glob, quote or operator character, that is not an option.
+const PLAIN_WORD = "[^\\s*?\\[\\]\\\\|;&<>()`$'\"=-][^\\s*?\\[\\]\\\\|;&<>()`$'\"]*";
+// `grep -c` prints a count, and with other flags (-H, -l, -r, --label) or file operands a name: only `grep -c PATTERN` on standard
+// input is taken. `wc` prints a count; with a file operand it prints the name too, so only standard input.
+const GREP_COUNT_STDIN = new RegExp(`^grep -c (?:${PLAIN_WORD}|'[^']*'|"[^"$\`\\\\]*")$`);
+const WC_COUNT = new RegExp(`^wc -[lcw](?: < ${PLAIN_WORD})?$`);
+const WC_STDIN = /^wc -[lcw]$/;
 function digitsSub(b: string): boolean {
   const t = b.trim().replace(/\s*2>\/dev\/null/g, "");
-  if (DIGITS_CMD.test(t)) return true;
+  if (DIGITS_CMD.test(t) || KERNEL_FIELD.test(t) || NPM_VERSION.test(t) || GREP_COUNT_STDIN.test(t) || WC_COUNT.test(t)) return true;
+  if (NODE_VERSION.test(t) && REMOVES_V.test(t)) return true;
   if (/[;&\n`$()<>]/.test(t.replace(/\|\|/g, ""))) return false;
   return t.split("||").every((alt) => {
     const a = alt.trim();
-    if (DIGITS_CMD.test(a) || DATE_SUB.test(a) || BENIGN_ARITH_SUB.test(a) || KERNEL_FIELD.test(a)) return true;
+    if (DIGITS_CMD.test(a) || DATE_SUB.test(a) || BENIGN_ARITH_SUB.test(a) || KERNEL_FIELD.test(a) || GREP_COUNT_STDIN.test(a) || WC_COUNT.test(a)) return true;
+    if (NPM_VERSION.test(a) || (NODE_VERSION.test(a) && REMOVES_V.test(a))) return true;
+    // A counting stage at the end of a pipeline prints a number whatever the stages before it print.
     const last = a.split("|").pop()!.trim();
-    return COUNT_STAGE.test(last);
+    return WC_STDIN.test(last) || GREP_COUNT_STDIN.test(last);
   });
 }
 const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[smrpio])?|arch|getconf (?:_?NPROCESSORS_[A-Z]+|PAGE_?SIZE|ARG_MAX|LONG_BIT)|sysctl -n (?:hw\.(?:ncpu|logicalcpu|physicalcpu|activecpu|availcpu|memsize|pagesize|cpufrequency|l[123]dcachesize|cachelinesize))|node (?:-v|--version))$/;
@@ -6576,17 +6630,18 @@ const SAFE_FLAG_SUB: Record<string, RegExp> = {
 // evaluates a substituted value (arithmetic, a name operand, `hash -p`). Everything else about the line is left alone.
 // The names of variables that hold evaluable text: a set, or the chain of an enclosing line's own (not a copy of it).
 type HotLookup = { has(x: string): boolean };
-type Hazard = { hit: boolean; inert: boolean; tainted: Set<string>; hot: Set<string>; cleared: Set<string> };
+type Hazard = { hit: boolean; inert: boolean; tainted: Set<string>; hot: Set<string>; cleared: Set<string>; blocks: number };
 // Programs that run what their arguments name: one bound by `hash -p` to such a path runs a package file given as an argument.
 const SYSTEM_RUNNER = /^(?:sh|bash|dash|zsh|ksh|ash|csh|tcsh|fish|node|nodejs|bun|deno|python[0-9.]*|py|perl|ruby|php|lua|env|xargs|busybox|find|awk|gawk|nawk|sed|make|gmake|npm|npx|pnpm|yarn|bunx|corepack|timeout|nohup|nice|sudo|time|exec|command|eval|source|script|expect|osascript|ssh|su|git|tar|zip|unzip|cpio|rsync|curl|wget)$/;
-function stageHazard(line: string, depth: number, inherited?: Set<string>, arithOnly = false, carry?: HotLookup, parsed?: StageFeed): Hazard {
-  const { stages, feed, fed, fedUnres, bodies, unsure } = parsed ?? shellStages(line);
+// `blocks0`: how many if/while/for/case/function blocks the line starts inside (from the lines before it).
+function stageHazard(line: string, depth: number, inherited?: Set<string>, arithOnly = false, carry?: HotLookup, parsed?: StageFeed, blocks0 = 0): Hazard {
+  const { stages, feed, fed, fedUnres, bodies, bodyAt, solo, unsure } = parsed ?? shellStages(line);
   const tainted = new Set<string>(inherited);
   // The variables that may hold output of unknown commands, or text that runs a substitution when evaluated: the ones that
   // matter where a value is evaluated (arithmetic, a name operand). `carry` holds those from earlier lines of the body.
   const hot = new Set<string>();
   const cleared = new Set<string>(); // names a plain assignment overwrote: whatever an earlier line put in them is gone
-  if (unsure) return { hit: !arithOnly, inert: !arithOnly, tainted, hot, cleared }; // variables set from a substitution earlier on the line
+  if (unsure) return { hit: !arithOnly, inert: !arithOnly, tainted, hot, cleared, blocks: blocks0 }; // variables set from a substitution earlier on the line
   let hit = false;
   let inert = false;
   const widen = (wide: boolean): void => {
@@ -6606,11 +6661,32 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
     cleared.add(n);
   };
   const lookup: HotLookup = { has: isHot };
-  // An assignment that is not an append sets the name from its value alone.
-  const assign = (w: StageWord): void => {
+  // An assignment that holds evaluable text makes the name hot. One that is not an append sets the name from its value alone, but
+  // only where it surely runs and lasts: a stage on its own at the top level, not in a branch, loop, function or group.
+  const assign = (w: StageWord, surely: boolean): void => {
     const n = assignName(w);
     if (hotW(w) || armed(w)) setHot(n);
-    else if (!/^[A-Za-z_]\w*\+=/.test(w.t)) unsetHot(n);
+    else if (surely && !/^[A-Za-z_]\w*\+=/.test(w.t)) unsetHot(n);
+  };
+  let blocks = blocks0;
+  // The substitution bodies of each stage: read when the stage is reached, with the variables as they are then.
+  const byStage: string[][] = [];
+  const spare: string[] = [];
+  bodies.forEach((b, k) => {
+    const at = bodyAt[k] ?? stages.length;
+    if (at >= stages.length) spare.push(b);
+    else (byStage[at] ??= []).push(b);
+  });
+  const readBodies = (list: string[] | undefined): void => {
+    if (!list || list.length === 0) return;
+    if (depth >= 6) {
+      if (!arithOnly) widen(true);
+      return;
+    }
+    for (const b of list) {
+      const r = stageHazard(b, depth + 1, tainted, arithOnly, lookup);
+      if (r.hit) widen(r.inert);
+    }
   };
   const hotW = (w: StageWord): boolean => w.bad || (w.v && w.n.some(isHot));
   const assignName = (w: StageWord): string => w.t.slice(0, w.t.indexOf("=")).replace(/\+$/, "");
@@ -6618,12 +6694,20 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
   const splits = (w: StageWord): boolean => w.uq.some((b) => !(BENIGN_SUB.test(b.trim()) || DATE_SUB.test(b.trim()))) || w.un.some((x) => tainted.has(x));
   const holdsUnresolved = (st: StageWord[]): boolean => st.some((w) => w.sub || w.v);
   stages.forEach((words, at) => {
+    readBodies(byStage[at]);
+    // Whether this stage surely runs: on its own, outside any block. A block opens at its first word and closes at its last.
+    const first = words[0]?.t ?? "";
+    const opens = /^(?:if|while|until|for|case|select|function|\{)$/.test(first);
+    const surely = solo[at] === true && blocks === 0 && !opens;
+    if (opens) blocks++;
+    else if (/^(?:fi|done|esac|\})$/.test(first) && blocks > 0) blocks--;
+    const assigned: StageWord[] = [];
     let h = 0;
     while (h < words.length) {
       const w = words[h]!;
       if (ASSIGN.test(w.t) || STAGE_KEYWORD.test(w.t)) {
         if (ASSIGN.test(w.t) && (taints(w) || armed(w))) tainted.add(assignName(w));
-        if (ASSIGN.test(w.t)) assign(w);
+        if (ASSIGN.test(w.t)) assigned.push(w);
         h++;
       } else if (!w.sub && !w.v && STAGE_PREFIX.test(binName(w.t))) {
         const pre = binName(w.t);
@@ -6638,6 +6722,8 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
       } else break;
     }
     const head = words[h];
+    // An assignment with no command after it is a command of its own; with one it is only the environment of that command.
+    for (const w of assigned) assign(w, surely && !head);
     // Arithmetic evaluates a substituted value, and a value like a[$(cmd)] runs the command.
     if (words.some((w) => w.ar || w.an.some(isHot))) widen(true);
     if (!head) return; // only assignments: what their substitutions hold is read as bodies
@@ -6662,7 +6748,7 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
       if (/^(?:export|local|declare|typeset|readonly)$/.test(name)) {
         for (const w of rest) {
           if (ASSIGN.test(w.t) && (taints(w) || armed(w))) tainted.add(assignName(w));
-          if (ASSIGN.test(w.t)) assign(w);
+          if (ASSIGN.test(w.t)) assign(w, surely);
         }
       }
       // A substituted name or number is evaluated as arithmetic by these: a[$(cmd)] runs cmd.
@@ -6683,10 +6769,7 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
       const named = operands().some((w) => !ASSIGN.test(w.t) && hotW(w));
       if (/^(?:read|unset|declare|typeset|local|readonly|export)$/.test(name) && named) widen(true);
       if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && rest.some(hotW)) widen(true);
-      // A variable set from a substitution is evaluated as arithmetic when declared -i or unset by name: a[$(cmd)] runs cmd.
-      const namesTainted = operands().some((w) => isHot(w.t.replace(/=.*/, "")));
-      if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && namesTainted) widen(true);
-      if (name === "unset" && namesTainted) widen(true);
+      // `unset x` and `declare -i x` name the variable and do not evaluate its value: only a substituted name (`unset "$x"`) does.
       // `hash -p path name` binds name to the file the path names: a later bare `name` runs it, with the path as written or
       // substituted.
       if (name === "hash") {
@@ -6708,10 +6791,13 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
       }
       // read keeps what its input holds in its variables.
       if (name === "read") {
+        // What a body of digits fed it (`read a b <<< "$(node -v | tr . ' ')"`) holds no name.
+        const fedBodies = byStage[at] ?? [];
+        const digits = fedBodies.length > 0 && fedBodies.every(digitsSub);
         for (const w of operands()) {
           if (ASSIGN.test(w.t)) continue;
           tainted.add(w.t);
-          setHot(w.t);
+          if (!digits) setHot(w.t);
         }
       }
       // Only the name after -v is evaluated: the data arguments of printf are data, and after -- a -v is the format. The
@@ -6817,14 +6903,8 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
     };
     if (rest.some((w, k) => taints(w) && !exempt(w, rest[k - 1]))) widen(true);
   });
-  if (arithOnly) return { hit, inert, tainted, hot, cleared };
-  if (depth < 6) {
-    for (const body of bodies) {
-      const r = stageHazard(body, depth + 1, tainted, false, lookup);
-      if (r.hit) widen(r.inert);
-    }
-  } else if (bodies.length) widen(true);
-  return { hit, inert, tainted, hot, cleared };
+  readBodies(spare);
+  return { hit, inert, tainted, hot, cleared, blocks };
 }
 
 // A line the shell reader could not split (a pipe, a redirect, a subshell) that holds an expansion it could not resolve: each
@@ -6925,6 +7005,17 @@ function heredocHazardAt(ctx: Ctx, text: string): void {
   widenAll(ctx);
 }
 
+// A line with a word that opens or closes a block (if, while, until, for, case, select, function, fi, done, esac, a brace).
+const BLOCK_WORD = /(?:^|[\s;&|(])(?:if|while|until|for|case|select|function|fi|done|esac|[{}])(?=[\s;&|)}]|$)/;
+function blockEnd(line: string, blocks: number): number {
+  let n = blocks;
+  for (const stage of shellStages(line).stages) {
+    const first = stage[0]?.t ?? "";
+    if (/^(?:if|while|until|for|case|select|function|\{)$/.test(first)) n++;
+    else if (/^(?:fi|done|esac|\})$/.test(first) && n > 0) n--;
+  }
+  return n;
+}
 // A line that can put a value in a variable: an assignment, a declaration, a loop or a read.
 const SETS_VAR = /(?:^|[\s;&|(])(?:[A-Za-z_]\w*\+?=|(?:export|local|declare|typeset|readonly|read|for|printf)\s)/;
 const ARITH_WORDS = /\$\(\(|(?:^|[\s;&|(])(?:declare|typeset|local|readonly|export|unset|read|hash|printf|test|let|eval|\[\[|\[)\s/;
@@ -6975,17 +7066,28 @@ function readParts(ctx: Ctx, body: string): void {
     return;
   }
   const hds: string[] = [];
-  const lines = logicalLines(body, hds);
+  const capped = { hit: false };
+  const lines = logicalLines(body, hds, capped);
+  if (capped.hit) {
+    // Every file is read, so reading the lines adds nothing.
+    ctx.widenInert = true;
+    widenAll(ctx);
+    return;
+  }
   // An unquoted heredoc expands its text: a substitution in it runs.
   for (const text of hds) heredocHazard(ctx, text);
   // A variable set from a substitution on one line keeps what it printed on the lines after it.
   const carry = new Set<string>();
+  let blocks = 0; // the if/while/for/case/function blocks the line is inside, from the lines before it
   for (const line of lines) {
     if (ctx.hold) return;
-    if (lines.length > 1 && SETS_VAR.test(line) && (carry.size > 0 || /[$`]/.test(line))) {
-      const r = stageHazard(line, 0, undefined, true, carry);
-      r.cleared.forEach((x) => carry.delete(x));
-      r.hot.forEach((x) => carry.add(x));
+    if (lines.length > 1) {
+      if (SETS_VAR.test(line) && (carry.size > 0 || /[$`]/.test(line))) {
+        const r = stageHazard(line, 0, undefined, true, carry, undefined, blocks);
+        r.cleared.forEach((x) => carry.delete(x));
+        r.hot.forEach((x) => carry.add(x));
+        blocks = r.blocks;
+      } else if (BLOCK_WORD.test(line)) blocks = blockEnd(line, blocks);
     }
     const whole = subst(ctx, line);
     if (whole !== null && splitCommands(ctx, whole)) {

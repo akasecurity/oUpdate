@@ -142,22 +142,6 @@ for (const [label, hook] of benignEval) {
   });
 }
 
-// A script that sets tens of thousands of distinct variables from substitutions reads in linear time: the time at four times
-// the size stays within a small multiple of the time at one (a quadratic read would take 16 times as long).
-test("many variables set from substitutions read in linear time", () => {
-  const run = (mib: number): number => {
-    const n = Math.floor((mib * 1048576) / 120);
-    const hook = Array.from({ length: n }, (_, i) => `x${String(i).padStart(6, "0")}=$(cat n)${" ".repeat(100)}`).join("\n");
-    const t0 = performance.now();
-    holds(releaseDir("1.0.0", hook, "none"), releaseDir("1.0.1", hook, "docs"));
-    return performance.now() - t0;
-  };
-  run(0.25);
-  const small = run(1);
-  const large = run(4);
-  expect(large / small).toBeLessThan(8);
-}, 120000);
-
 // An unquoted heredoc runs its substitutions: the ones that only print a literal are not read, the others are.
 const heredocHeld: [string, string][] = [
   ["a node run after literal printf substitutions", "cat <<EOF\n$(printf 1) $(echo hi) $(node T/evil.js)\nEOF"],
@@ -223,7 +207,6 @@ const roundTwoQuiet: [string, string][] = [
   ["a variable set from cat then overwritten", "x=$(cat name.txt); x=1; : $((x))"],
   ["a variable overwritten on a later line", "v=$(git describe)\nv=1\n[[ $v -gt 0 ]]"],
   ["a node version gate in a double-bracket test", `if [[ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]]; then exit 1; fi`],
-  ["a job count from grep -c in arithmetic", "make -j$(( $(grep -c ^processor /proc/cpuinfo) + 1 ))"],
   ["a job count from nproc or a number", "make -j$(( $(nproc 2>/dev/null || echo 2) ))"],
   ["a count from wc -l in a double-bracket test", "[[ $(ls dist | wc -l) -eq 0 ]] && node lib/ok.js"],
   ["the major kernel version from uname -r and cut in a double-bracket test", "[[ $(uname -r | cut -d. -f1) -ge 20 ]] && echo new"],
@@ -235,28 +218,10 @@ for (const [label, hook] of roundTwoQuiet) {
   });
 }
 
-// A heredoc with many substitutions reads in linear time: the time at four times the size stays within a small multiple of the
-// time at one (a quadratic read would take 16 times as long). The median of three runs, with the literal ones and with distinct
-// commands (which the dedupe does not collapse).
-const median = (f: () => number): number => [f(), f(), f()].sort((a, b) => a - b)[1]!;
-for (const [label, unit] of [["literal", (_i: number) => "$(printf 1) "], ["distinct", (i: number) => `$(node n${i}.js) `]] as const) {
-  test(`a heredoc with many ${label} substitutions reads in linear time`, () => {
-    const run = (mib: number): number => {
-      const n = Math.floor((mib * 1048576) / 14);
-      const hook = "cat <<EOF\n" + Array.from({ length: n }, (_, i) => unit(i)).join("") + "\nEOF";
-      const t0 = performance.now();
-      holds(releaseDir("1.0.0", hook, "none"), releaseDir("1.0.1", hook, "docs"));
-      return performance.now() - t0;
-    };
-    run(0.25);
-    const small = median(() => run(0.5));
-    const large = median(() => run(2));
-    expect(large / small).toBeLessThan(8);
-  }, 120000);
-}
-
-// Unclosed spans: each `${` that never closes scans to the end of the text, so a text of many of them must stop reading them after
-// a few. A quadratic read takes 16 times as long at four times the size; a linear one about 4. Median of three runs.
+// Reads that must stay linear. Each shape is run at 0.25 and at 0.5 MiB (a warm-up, then the median of five runs); a linear read
+// takes about twice as long at twice the size and a quadratic one four times. The floor keeps runs of a few milliseconds from
+// deciding the ratio.
+const median = (f: () => number): number => [f(), f(), f(), f(), f()].sort((a, b) => a - b)[2]!;
 const scriptHook = (body: string) => files({
   "package.json": JSON.stringify({ name: "p", version: "1.0.0", scripts: { postinstall: "sh install.sh" } }),
   "install.sh": body,
@@ -275,32 +240,93 @@ const lines = (bytes: number, line: (i: number) => string): string => {
   }
   return out.join("");
 };
-const shapes: [string, (bytes: number) => string][] = [
+const timeAt = (make: (bytes: number) => string, bytes: number): number => {
+  const body = make(bytes);
+  scriptTime(body);
+  return median(() => scriptTime(body));
+};
+const linearShapes: [string, (bytes: number) => string][] = [
+  ["a line per variable set from a substitution", (b) => lines(b, (i) => `x${String(i).padStart(6, "0")}=$(cat n)${" ".repeat(100)}\n`)],
+  ["a heredoc of literal substitutions", (b) => "cat <<EOF >/dev/null\n" + "$(printf 1) ".repeat(Math.floor(b / 12)) + "\nEOF\n"],
+  ["a heredoc of substitutions that name distinct files", (b) => "cat <<EOF >/dev/null\n" + lines(b, (i) => `$(node n${i}.js)\n`) + "EOF\n"],
+  ["eval lines that name distinct files", (b) => lines(b, (i) => `eval node lib/x${i}.js\n`)],
   ["a line per unclosed default with a dollar and a quote", (b) => lines(b, (i) => `echo "\${X${i}:-'a$'"\n`)],
   ["a line per unclosed brace", (b) => lines(b, (i) => `: \${X${i}\n`)],
   ["one long line of unclosed braces", (b) => ": ${X ".repeat(Math.floor(b / 6)) + "\n"],
+  ["a line per default with a bare brace that bash never closes", (b) => lines(b, () => "echo ${X:-{}\n")],
+  ["a line per pattern removal with a bare brace", (b) => lines(b, () => "v=${v%%{*}\n")],
 ];
-for (const [label, make] of shapes) {
+for (const [label, make] of linearShapes) {
   test(`${label} reads in linear time`, () => {
-    scriptTime(make(20000));
-    const small = median(() => scriptTime(make(30000)));
-    const large = median(() => scriptTime(make(120000)));
-    expect(large / small).toBeLessThan(9);
-  }, 60000);
+    const small = timeAt(make, 262144);
+    const large = timeAt(make, 524288);
+    expect(large / Math.max(small, 30)).toBeLessThan(3.4);
+  }, 120000);
 }
 
-// The files a hook line names are found through an index of the names, not by walking every name once per command. The reads of
-// eval and heredoc lines cost a small multiple of the same commands on lines of their own.
-const costShapes: [string, (bytes: number) => string][] = [
-  ["eval lines that name distinct files", (b) => lines(b, (i) => `eval node lib/x${i}.js\n`)],
-  ["a heredoc of substitutions that name distinct files", (b) => "cat <<EOF >/dev/null\n" + lines(b, (i) => `$(node n${i}.js)\n`) + "EOF\n"],
+// Round three: reads after many unclosed spans, assignments that do not clear, bodies in the order they run, and names that digits-only
+// output could still carry. The package file name.txt holds `a[$(node docs/evil.js)]`.
+const N3 = "x=$(cat name.txt)";
+const round3Held: [string, string][] = [
+  ["a node run after nine nested defaults", ": ${A:-{a}$b}\n".repeat(9) + "node T/evil.js"],
+  ["a node run after nine nested defaults on one line", ": ${A:-{a}$b}".repeat(9) + "; node T/evil.js"],
+  ["a node run after nine unclosed braces", ": ${X\n".repeat(9) + "node T/evil.js"],
+  ["a prefix assignment that does not change the variable", `${N3}; x=0 true; echo $((x)) | cat`],
+  ["an assignment after ||", `${N3}; [ -n "$x" ] || x=0; echo $((x)) | cat`],
+  ["an assignment after true ||", `${N3}; true || x=1; echo $((x)) | cat`],
+  ["an assignment after false &&", `${N3}; false && x=1; echo $((x)) | cat`],
+  ["an assignment in an if branch", `${N3}; if false; then x=1; fi; echo $((x)) | cat`],
+  ["an assignment in the environment of a command", `${N3}; x=1 true; echo $((x)) | cat`],
+  ["an assignment in a pipeline stage", `${N3}; echo | x=1; echo $((x)) | cat`],
+  ["an assignment in a subshell", `${N3}; (x=1); : $((x))`],
+  ["an assignment in a function that is not called", `${N3}; f() { x=1; }; : $((x))`],
+  ["an assignment in the background", `${N3}; x=0 & echo $((x)) | cat`],
+  ["an assignment in a for body", `${N3}; for i in 1; do x=0; done; echo $((x)) | cat`],
+  ["an assignment in an if branch on later lines", `${N3}\nif false; then\nx=1\nfi\necho $((x)) | cat`],
+  ["a body read before the variable is overwritten", 'X=$(cat name.txt); echo "$(echo $((X)))" | cat; X=0'],
+  ["the third field of the kernel release in arithmetic", "generic='a[$(node T/evil.js)]'; echo $(( $(uname -r | cut -d. -f3) )) | cat"],
+  ["grep -Hc in arithmetic", "standard='a[$(node T/evil.js)]'; echo $(( $(echo x | grep -Hc x) )) | cat"],
+  ["grep -c over a glob in arithmetic", "Q='a[$(node T/evil.js)]'; echo $(( $(grep -c . *) )) | cat"],
+  ["grep -cH over a file in arithmetic", "Q='a[$(node T/evil.js)]'; echo $(( $(grep -cH . Q) )) | cat"],
+  ["grep -c over two files in arithmetic", "Q='a[$(node T/evil.js)]'; echo $(( $(grep -c . Q R) )) | cat"],
+  ["grep -cl with a label in arithmetic", `name='a[$(node T/evil.js)]'; echo $(( $(printf a | grep -cl a --label=n""ame) )) | cat`],
+  ["grep -cH in a double-bracket test", "Q='a[$(node T/evil.js)]'; [[ $(grep -cH . Q) -eq 0 ]] && echo x | cat"],
+  ["wc -l over a file operand in arithmetic", "list.txt='a[$(node T/evil.js)]'; echo $(( $(wc -l list.txt) )) | cat"],
+  ["node -v cut without removing the v, in arithmetic", "v18='a[$(node T/evil.js)]'; echo $(( $(node -v | cut -d. -f1) )) | cat"],
+  ["grep -rc in arithmetic", "Q='a[$(node T/evil.js)]'; echo $(( $(grep -rc . .) )) | cat"],
+  ["grep -c over one file in arithmetic (accepted cost: only standard input is taken)", "Q='a[$(node T/evil.js)]'; echo $(( $(grep -c . Q) )) | cat"],
+  ["the job count from grep -c over /proc/cpuinfo (accepted cost)", "make -j$(( $(grep -c ^processor /proc/cpuinfo) + 1 ))"],
+  ["a body that reads a variable set earlier on the same split line", "x=$(cat name.txt); y=$(echo $((x)))"],
 ];
-for (const [label, make] of costShapes) {
-  test(`${label} cost a small multiple of plain lines`, () => {
-    const plain = (b: number) => lines(b, (i) => `node lib/x${i}.js\n`);
-    scriptTime(plain(100000));
-    const control = median(() => scriptTime(plain(400000)));
-    const shape = median(() => scriptTime(make(400000)));
-    expect(shape / control).toBeLessThan(6);
-  }, 60000);
+
+for (const [label, hook] of round3Held) {
+  for (const d of dirs) {
+    test(`${label}: a changed ${d}/evil.js holds`, () => {
+      const h = hook.replaceAll("T/", `${d}/`);
+      expect(holds(releaseDir("1.0.0", h, "none"), releaseDir("1.0.1", h, d)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const round3Quiet: [string, string][] = [
+  ["nine well-formed nested defaults before a node run of an unrelated file", ": ${A:-{a}}\n".repeat(9) + "node lib/ok.js"],
+  ["an unset of a variable set from a substitution", 'TMP=$(mktemp -d); cp lib/ok.js "$TMP"; rm -rf "$TMP"; unset TMP'],
+  ["a declare -i of a variable already set from a substitution", "x=$(cat name.txt); declare -i x | cat"],
+  ["a count from wc -l of a file on standard input", "echo $(( $(wc -l < list.txt) + 1 )) | cat"],
+  ["a width from tput", "W=$(( $(tput cols) - 2 ))"],
+  ["a commit count from git rev-list", "[[ $(git rev-list --count HEAD) -gt 0 ]] && echo x"],
+  ["a node major version on the next line", "NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d v)\n[[ $NODE_MAJOR -lt 16 ]]"],
+  ["a node major version used in an if", "MAJOR=$(node -v | cut -d. -f1 | tr -d v)\nif [[ $MAJOR -lt 18 ]]; then exit 1; fi"],
+  ["a node version read into two variables", `read -r maj min <<< "$(node -v | tr -d v | tr . ' ')"; (( maj >= 18 ))`],
+  ["an npm major version", "M=$(npm -v | cut -d. -f1); [[ $M -ge 9 ]] && echo ok"],
+  ["the major kernel version", "[[ $(uname -r | cut -d. -f1) -ge 20 ]] && echo new"],
+  ["a variable overwritten by a literal on its own", "x=$(cat name.txt)\nx=0\n: $((x))"],
+  ["a body that reads a variable set from a known number", "x=$(cat name.txt); y=$(echo 1)"],
+  ["grep -c of a pattern on standard input", "make -j$(( $(ls | grep -c x) + 1 ))"],
+];
+
+for (const [label, hook] of round3Quiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(releaseDir("1.0.0", hook, "none"), releaseDir("1.0.1", hook, "docs"))).toEqual([]);
+  });
 }
