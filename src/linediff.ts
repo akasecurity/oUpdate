@@ -104,14 +104,23 @@ function tokenDiff(oldLine: string, newLine: string): string | undefined {
 const QUOTE_NOTE = " [lines below are exact text as JSON strings, to show a CR or trailing whitespace]";
 const needsQuote = (l: string) => l.includes("\r") || /[ \t]$/.test(l);
 
-export function renderLineDiff(before: string | undefined, after: string | undefined, getOps?: () => Op[] | undefined): string {
-  if (before !== undefined && after !== undefined && before !== after && (after === before.replaceAll("\n", "\r\n") || before === after.replaceAll("\n", "\r\n"))) {
+/** True when the two texts differ only by every line ending being converted between LF and CRLF. Counts newlines first, so it builds a copy only when the lengths fit. */
+export function lineEndingsOnly(before: string, after: string): boolean {
+  if (before === after) return false;
+  const [lf, other] = before.length <= after.length ? [before, after] : [after, before];
+  let n = 0;
+  for (let i = lf.indexOf("\n"); i >= 0; i = lf.indexOf("\n", i + 1)) n++;
+  return n > 0 && other.length === lf.length + n && other === lf.replaceAll("\n", "\r\n");
+}
+
+export function renderLineDiff(before: string | undefined, after: string | undefined, getOps?: (a: string[], b: string[]) => Op[] | undefined): string {
+  if (before !== undefined && after !== undefined && lineEndingsOnly(before, after)) {
     return "[line endings only: every line converted between CRLF and LF]\n";
   }
   const split = (s: string | undefined) => (s === undefined ? [] : s.split("\n"));
   const oldLines = split(before);
   const newLines = split(after);
-  const ops = getOps ? getOps() : diffSeq(oldLines, newLines); // a caller that also needs the ops passes one memoized call
+  const ops = getOps ? getOps(oldLines, newLines) : diffSeq(oldLines, newLines); // a caller that also needs the ops passes one memoized call
   if (!ops) {
     // Too many edits to order: show the whole new version. Dropping lines both versions hold would hide a
     // reorder (an activation line moved above its payload); the review's size holds bound the length.

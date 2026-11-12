@@ -13,7 +13,7 @@ import { installView, otherInstallEntry, prepareInert } from "./install-closure.
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
 import { newFindings, type Finding } from "./adapters/scanner/types.ts";
-import { diffSeq, renderLineDiff, type Op } from "./linediff.ts";
+import { diffSeq, lineEndingsOnly, renderLineDiff, type Op } from "./linediff.ts";
 
 export type LayerName = "cooldown" | "advisory" | "prepass" | "scan" | "reviewer" | "gate";
 export const LAYERS: LayerName[] = ["cooldown", "advisory", "prepass", "scan", "reviewer", "gate"];
@@ -220,8 +220,12 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
   const bt = text(before);
   const at = text(after);
   // The ordered diff is computed once for the rendering and for the definitions listed after it.
+  // A whole-file line-ending conversion has every line changed: it is named, not diffed, and no definitions are listed.
   let ops: { v: Op[] | undefined } | undefined;
-  const getOps = bt !== undefined && at !== undefined ? () => (ops ??= { v: diffSeq(bt.split("\n"), at.split("\n")) }).v : undefined;
+  const getOps =
+    bt !== undefined && at !== undefined
+      ? (a?: string[], b?: string[]): Op[] | undefined => (ops ??= { v: lineEndingsOnly(bt, at) ? undefined : diffSeq(a ?? bt.split("\n"), b ?? at.split("\n")) }).v
+      : undefined;
   const out = [head, renderLineDiff(bt, at, getOps)];
   if (getOps && at !== undefined && (state === "changed" || state === "loaded by code")) {
     let c = after && blobDefsCache.get(after);
@@ -251,7 +255,8 @@ const BLOB_LINE_MAX = 20_000; // a longer line is shown as its head and tail wit
 const BLOB_TOTAL_MAX = 60_000; // past this, the remaining lines are a length and sha256 only
 const blobDefsCache = new WeakMap<Uint8Array, { before: Uint8Array | undefined; out: { text: string; cut: boolean } | undefined }>();
 
-const IDENT = /[\p{L}_$][\p{L}\p{N}_$]*/gu;
+// An identifier: ID_Start, then ID_Continue: letters, digits, combining marks, connector punctuation (U+203F) and the joiners U+200C and U+200D.
+const IDENT = /[\p{L}_$][\p{L}\p{N}\p{M}\p{Pc}_$\u200C\u200D]*/gu;
 
 /** The names an encoded run of BLOB_RUN or more characters is assigned to on this line (`D = "<run>"`, `o.D = "<run>"`). */
 function encodedRunLead(l: string): string[] {
@@ -264,7 +269,7 @@ function encodedRunLead(l: string): string[] {
       continue;
     }
     if (start >= 0 && i - start >= BLOB_RUN && found.length < 16) {
-      const lead = /([\p{L}_$][\p{L}\p{N}_$]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
+      const lead = /([\p{L}_$][\p{L}\p{N}\p{M}\p{Pc}_$\u200C\u200D]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
       if (lead) found.push(lead[1]!);
     }
     start = -1;
@@ -283,7 +288,7 @@ function hasLongLine(s: string): boolean {
   return false;
 }
 
-function unchangedBlobDefs(after: string, getOps: () => Op[] | undefined): { text: string; cut: boolean } | undefined {
+function unchangedBlobDefs(after: string, getOps: (a?: string[], b?: string[]) => Op[] | undefined): { text: string; cut: boolean } | undefined {
   if (!hasLongLine(after)) return undefined;
   const ops = getOps();
   if (!ops) return undefined;
@@ -2884,6 +2889,8 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           else if (scope === "priority") note = `; priority files only, ${leftOut(seen)} file(s) not reviewed`;
           else note = `; ${leftOut(seen)} file(s) not reviewed`;
         }
+        // A definition the diff cannot show whole is named in any hold that has another reason too: the stop must not lose either.
+        const cutNote = cutDefs.size ? `; definition too large to show in ${[...cutDefs].join(", ")}` : "";
         if (outOfTime) {
           // The parts left unread can carry the attack, so an APPROVE on the rest never lands.
           const seen = filesRead(chunks, texts.length);
@@ -2914,18 +2921,18 @@ export async function reviewUpdate(input: ReviewInput): Promise<ReviewResult> {
           // An unread file can carry the attack (xrpl 4.2.1 landed this way), so this APPROVE holds for a human.
           layers.push({ layer: "reviewer", verdict: "stop", detail: `${overFull}; ${input.reviewer.name} APPROVE on the priority files (${chunks.length} part(s))${note}; needs a human` });
         else if (badLinks.length && !flagged.length)
-          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: link target of ${badLinks.join(", ")} missing, outside the package, a directory, another link or binary; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
-        else if (cutDefs.size && !flagged.length)
-          // A definition the diff names but cannot show whole (too long, past the caps) can hold the payload: the APPROVE does not cover it.
-          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: definition too large to show in ${[...cutDefs].join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: link target of ${badLinks.join(", ")} missing, outside the package, a directory, another link or binary; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}${cutNote}; needs a human` });
         else if (rejected.length && !flagged.length)
-          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: parser rejected ${rejected.join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
-        else if (binaries.length && !flagged.length && waivedBinaries.length === binaries.length)
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: parser rejected ${rejected.join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}${cutNote}; needs a human` });
+        else if (binaries.length && !flagged.length && waivedBinaries.length === binaries.length && !cutDefs.size) // a cut definition is not covered by a waiver on the binaries
           // A person accepted each of these bytes for this release; a changed hash finds no waiver and holds.
           layers.push({ layer: "reviewer", verdict: "pass", detail: `${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; binary file(s) waived: ${waivedBinaries.map((b) => `${b.path} sha256 ${b.w.sha256} by ${b.w.who} at ${b.w.at}: ${b.w.reason}`).join("; ")}` });
         else if (binaries.length && !flagged.length)
           // The model saw these only as a hash, so its APPROVE does not cover them.
-          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: binary file(s) ${binaries.join(", ")}; ${binaries.map((b) => { const bytes = artifacts!.new.get(b); return `${b} sha256 ${bytes ? sha256Hex(bytes) : "-"}`; }).join(", ")} for ${input.eco} ${input.name}@${input.to}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: binary file(s) ${binaries.join(", ")}; ${binaries.map((b) => { const bytes = artifacts!.new.get(b); return `${b} sha256 ${bytes ? sha256Hex(bytes) : "-"}`; }).join(", ")} for ${input.eco} ${input.name}@${input.to}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}${cutNote}; needs a human` });
+        else if (cutDefs.size && !flagged.length)
+          // A definition the diff names but cannot show whole (too long, past the caps) can hold the payload: the APPROVE does not cover it.
+          layers.push({ layer: "reviewer", verdict: "stop", detail: `not model-reviewable: definition too large to show in ${[...cutDefs].join(", ")}; ${input.reviewer.name} APPROVE on ${chunks.length} part(s)${note}; needs a human` });
         else
           layers.push(
             flagged.length
