@@ -511,7 +511,9 @@ const setLines: [string, string][] = [
   ["printf -v then an arithmetic command", `printf -v X '%s' "${U}"; (( X )) | cat`],
   ["printf -v then arithmetic expansion", `printf -v X '%s' "${U}"; echo $(( X )) | cat`],
   ["printf -v then a numeric test", `printf -v X '%s' "${U}"; [[ $X -eq 0 ]] 2>/dev/null`],
+  ["printf -v then declare -i", `printf -v X '%s' "${U}"; declare -i X | cat`],
   ["read then an arithmetic command", "echo $(date); read X; (( X )) | cat"],
+  ["read then declare -i", "echo $(date); read X; declare -i X | cat"],
 ];
 
 for (const [label, hook] of setLines) {
@@ -544,6 +546,7 @@ const dateLines: [string, string][] = [
   ["let on a variable set from a substitution", `printf -v X '%s' "${U}"; let X | cat`],
   ["let on an expression naming such a variable", `printf -v X '%s' "${U}"; let "X + 1" | cat`],
   ["a bare name in a numeric test", `printf -v X '%s' "${U}"; [[ X -eq 0 ]] | cat`],
+  ["a bare name in a numeric test with -lt", `printf -v X '%s' "${U}"; [ X -lt 1 ] 2>/dev/null`],
   ["a bare name in a double-bracket numeric test with -lt", `printf -v X '%s' "${U}"; [[ X -lt 1 ]] 2>/dev/null`],
   ["an increment of such a variable", `printf -v X '%s' "${U}"; ((X++)) | cat`],
 ];

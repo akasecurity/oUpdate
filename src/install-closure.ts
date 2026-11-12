@@ -6194,7 +6194,7 @@ const PREFIX_VALUE_FLAG: Record<string, RegExp> = {
 };
 const STAGE_KEYWORD = /^(?:\{|\}|!|if|then|elif|else|do|done|fi|while|until)$/;
 
-type StageWord = { t: string; sub: boolean; bad: boolean; v: boolean; n: string[]; ar: boolean; an: string[]; uq: string[]; un: string[] }; // sub: a command substitution; v: a variable or arithmetic expansion; n: the plain variable names in the word
+type StageWord = { t: string; sub: boolean; v: boolean; n: string[]; ar: boolean; an: string[]; uq: string[]; un: string[] }; // sub: a command substitution; v: a variable or arithmetic expansion; n: the plain variable names in the word
 
 // `text` with each command substitution replaced by a number, so what is left reads as arithmetic or not.
 function blankSubs(text: string): string {
@@ -6297,7 +6297,6 @@ function shellStagesAt(line: string): StageFeed {
   let cur = "";
   let inWord = false;
   let sub = false;
-  let bad = false; // a substitution whose output is not known to be a number or a plain name
   let v = false;
   let skip = false; // the next word is a redirection operand
   let unsure = false;
@@ -6308,11 +6307,10 @@ function shellStagesAt(line: string): StageFeed {
       skip = false;
       if (hereStr && (sub || v)) nowFedUnres = true;
       hereStr = false;
-    } else words.push({ t: cur, sub, bad, v, n: names, ar: arSub, an: arNames, uq: uqBodies, un: uqNames });
+    } else words.push({ t: cur, sub, v, n: names, ar: arSub, an: arNames, uq: uqBodies, un: uqNames });
     cur = "";
     inWord = false;
     sub = false;
-    bad = false;
     v = false;
     names = [];
     arSub = false;
@@ -6344,7 +6342,6 @@ function shellStagesAt(line: string): StageFeed {
     const text = tick ? unTick(line.slice(i + 1, e - 1)) : line.slice(i + 2, e - 1);
     bodies.push(text);
     if (!quoted) uqBodies.push(text);
-    if (!digitsSub(text)) bad = true;
     sub = true;
     inWord = true;
     cur += UNRESOLVED;
@@ -6362,9 +6359,8 @@ function shellStagesAt(line: string): StageFeed {
         return line.length;
       }
       const arith = line.slice(i + 3, e - 2);
-      const before = bodies.length;
       if (!nestedBodies(arith, bodies, 0, dq)) unsure = true;
-      if (bodies.slice(before).some((b) => !digitsSub(b))) arSub = true;
+      if (/\$\(|`/.test(arith)) arSub = true; // the raw text: a single-quoted substitution is evaluated too
       arNames.push(...(arith.match(/[A-Za-z_]\w*/g) ?? []));
       return e;
     }
@@ -6511,9 +6507,8 @@ function shellStagesAt(line: string): StageFeed {
       if (e > 0 && line[e - 2] === ")" && !/[;|&]/.test(blankSubs(inner0)) && !/[\w$)\]}]\s+[\w$({]/.test(blankSubs(inner0))) {
         endStage();
         const inner = inner0;
-        const had = bodies.length;
         if (!nestedBodies(inner, bodies, 0, false)) unsure = true;
-        stages.push([{ t: "((", sub: false, bad: false, v: false, n: [], ar: bodies.slice(had).some((b) => !digitsSub(b)), an: inner.match(/[A-Za-z_]\w*/g) ?? [], uq: [], un: [] }]);
+        stages.push([{ t: "((", sub: false, v: false, n: [], ar: /\$\(|`/.test(inner), an: inner.match(/[A-Za-z_]\w*/g) ?? [], uq: [], un: [] }]);
         feed.push(null);
         fed.push(false);
         fedUnres.push(false);
@@ -6581,44 +6576,6 @@ function benignSub(b: string): boolean {
   const t = b.trim();
   return BENIGN_SUB.test(t) || DATE_SUB.test(t) || BENIGN_ARITH_SUB.test(t);
 }
-// Output that is digits by construction: a name or a version printed into arithmetic is a variable that is evaluated in
-// turn (`uname -s` printing Darwin reads $Darwin), so only counts and numbers are exempt there.
-const DIGITS_CMD = /^(?:nproc(?: --all)?|getconf _?NPROCESSORS_[A-Z]+|getconf (?:PAGE_?SIZE|ARG_MAX|LONG_BIT)|sysctl -n hw\.(?:ncpu|logicalcpu|physicalcpu|activecpu|availcpu|memsize|pagesize|cpufrequency|l[123]dcachesize|cachelinesize)|id -[ug]|tput (?:cols|lines)|git rev-list --count [A-Za-z0-9_./@^~-]+|node -p ['"]process\.versions\.(?:node\.split\(['"]\.['"]\)\[0\]|modules)['"])$/;
-// The first two fields of the kernel release (`5.15`, `24.1`) are digits: the kernel's version, which no package sets. Only the first
-// two dotted fields are taken: a third can be `0-91-generic`, which is a name that arithmetic would read as a variable.
-const KERNEL_FIELD = /^uname -r\s*\|\s*cut -d\s*['"]?\.['"]?\s+-f\s*[12]$/;
-// Version numbers: `node -v` prints `v` and digits, `npm -v` digits; cut by dots and with the `v` removed they are digits.
-const VERSION_STAGE = "(?:cut -d\\s*['\"]?\\.['\"]?\\s+-f\\s*[1-3]|tr -d\\s+['\"]?v['\"]?|sed ['\"]s/v//['\"]|tr \\.\\s+['\"] ['\"])";
-const NODE_VERSION = new RegExp(`^node (?:-v|--version)(?: \\| ${VERSION_STAGE})+$`);
-const NPM_VERSION = new RegExp(`^npm (?:-v|--version)(?: \\| ${VERSION_STAGE})*$`);
-const REMOVES_V = /\| (?:tr -d\s+['"]?v['"]?|sed ['"]s\/v\/\/['"])(?: |$)/;
-// A word with no glob, quote or operator character, that is not an option.
-const PLAIN_WORD = "[^\\s*?\\[\\]\\\\|;&<>()`$'\"=-][^\\s*?\\[\\]\\\\|;&<>()`$'\"]*";
-// `grep -c` prints a count, and with other flags (-H, -l, -r, --label), a glob, a variable or two files a name: only `grep -c PATTERN`
-// on standard input, or with one literal file, is taken. `wc` prints a count; with a file operand it prints the name too, so only standard input.
-const GREP_COUNT_STDIN = new RegExp(`^grep -c (?:${PLAIN_WORD}|'[^']*'|"[^"$\`\\\\]*")$`);
-// With exactly one file operand that is a literal name (no glob, no variable, no substitution) it prints the count alone.
-const GREP_COUNT_FILE = new RegExp(`^grep -c (?:${PLAIN_WORD}|'[^']*'|"[^"$\`\\\\]*") ${PLAIN_WORD}$`);
-const WC_COUNT = new RegExp(`^wc -[lcw](?: < ${PLAIN_WORD})?$`);
-const WC_STDIN = /^wc -[lcw]$/;
-function digitsSub(b: string): boolean {
-  // `tr -d ' '` at the end only removes the padding some `wc` prints.
-  const t = b.trim().replace(/\s*2>\/dev\/null/g, "").replace(/\s*\|\s*tr -d\s+['"] ['"]\s*$/, "");
-  if (DIGITS_CMD.test(t) || KERNEL_FIELD.test(t) || NPM_VERSION.test(t) || GREP_COUNT_STDIN.test(t) || GREP_COUNT_FILE.test(t) || WC_COUNT.test(t)) return true;
-  if (NODE_VERSION.test(t) && REMOVES_V.test(t)) return true;
-  if (/[;&\n`$()<>]/.test(t.replace(/\|\|/g, ""))) return false;
-  return t.split("||").every((alt) => {
-    const a = alt.trim();
-    if (DIGITS_CMD.test(a) || DATE_SUB.test(a) || BENIGN_ARITH_SUB.test(a) || KERNEL_FIELD.test(a) || GREP_COUNT_STDIN.test(a) || GREP_COUNT_FILE.test(a) || WC_COUNT.test(a)) return true;
-    if (NPM_VERSION.test(a) || (NODE_VERSION.test(a) && REMOVES_V.test(a))) return true;
-    // A counting stage at the end of a pipeline prints a number, if the stages before it are plain commands: one that runs a file of
-    // the package (`node x.js | wc -l`) is not read as a count.
-    const stages = a.split("|").map((st) => st.trim());
-    const last = stages[stages.length - 1]!;
-    if (!WC_STDIN.test(last) && !GREP_COUNT_STDIN.test(last)) return false;
-    return stages.slice(0, -1).every((st) => PLAIN_CMDS.has(st.split(/\s+/, 1)[0]!));
-  });
-}
 const BENIGN_SUB = /^(?:nproc(?: --all)?|uname(?: -[smrpio])?|arch|getconf (?:_?NPROCESSORS_[A-Z]+|PAGE_?SIZE|ARG_MAX|LONG_BIT)|sysctl -n (?:hw\.(?:ncpu|logicalcpu|physicalcpu|activecpu|availcpu|memsize|pagesize|cpufrequency|l[123]dcachesize|cachelinesize))|node (?:-v|--version))$/;
 // Flags whose substituted value is a number or a target, not a program.
 const SAFE_FLAG_SUB: Record<string, RegExp> = {
@@ -6641,9 +6598,12 @@ type HotLookup = { has(x: string): boolean };
 type Hazard = { hit: boolean; inert: boolean; tainted: Set<string>; hot: Set<string> };
 // Programs that run what their arguments name: one bound by `hash -p` to such a path runs a package file given as an argument.
 const SYSTEM_RUNNER = /^(?:sh|bash|dash|zsh|ksh|ash|csh|tcsh|fish|node|nodejs|bun|deno|python[0-9.]*|py|perl|ruby|php|lua|env|xargs|busybox|find|awk|gawk|nawk|sed|make|gmake|npm|npx|pnpm|yarn|bunx|corepack|timeout|nohup|nice|sudo|time|exec|command|eval|source|script|expect|osascript|ssh|su|git|tar|zip|unzip|cpio|rsync|curl|wget)$/;
-function stageHazard(line: string, depth: number, inherited?: Set<string>, arithOnly = false, carry?: HotLookup, parsed?: StageFeed): Hazard {
+const NAMEREF_CAP = 4096; // namerefs one line may declare before the line is read as holding
+function stageHazard(line: string, depth: number, inherited?: HotLookup, arithOnly = false, carry?: HotLookup, parsed?: StageFeed): Hazard {
   const { stages, feed, fed, fedUnres, bodies, unsure } = parsed ?? shellStages(line);
-  const tainted = new Set<string>(inherited);
+  const tainted = new Set<string>(); // this line's own; the enclosing lines' are read through `inherited`, not copied
+  const isTainted = (x: string): boolean => tainted.has(x) || (inherited?.has(x) ?? false);
+  const taintedChain: HotLookup = { has: isTainted };
   // The variables that may hold output of unknown commands, or text that runs a substitution when evaluated: the ones that
   // matter where a value is evaluated (arithmetic, a name operand). `carry` holds those from earlier lines of the body.
   const hot = new Set<string>();
@@ -6654,7 +6614,7 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
     hit = true;
     if (wide) inert = true;
   };
-  const taints = (w: StageWord): boolean => w.sub || (w.v && w.n.some((x) => tainted.has(x) || (carry?.has(x) ?? false)));
+  const taints = (w: StageWord): boolean => w.sub || (w.v && w.n.some((x) => isTainted(x) || (carry?.has(x) ?? false)));
   // A value that holds the text of a substitution (`x='a[$(cmd)]'`) runs it when arithmetic evaluates the variable.
   const armed = (w: StageWord): boolean => /\$\(|`/.test(w.t);
   // A variable that is hot stays hot for the rest of the text: no assignment is taken to overwrite it, since where a line runs
@@ -6668,10 +6628,10 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
     if (hotW(w) || armed(w)) setHot(assignName(w));
   };
   const namerefs = new Set<string>(); // names declared with -n on the line: `unset` of one acts on what it points at
-  const hotW = (w: StageWord): boolean => w.bad || (w.v && w.n.some(isHot));
+  const hotW = (w: StageWord): boolean => w.sub || (w.v && w.n.some(isHot));
   const assignName = (w: StageWord): string => w.t.slice(0, w.t.indexOf("=")).replace(/\+$/, "");
   // An unquoted substitution or tainted variable splits into words: a second flag can come out of it.
-  const splits = (w: StageWord): boolean => w.uq.some((b) => !(BENIGN_SUB.test(b.trim()) || DATE_SUB.test(b.trim()))) || w.un.some((x) => tainted.has(x));
+  const splits = (w: StageWord): boolean => w.uq.some((b) => !(BENIGN_SUB.test(b.trim()) || DATE_SUB.test(b.trim()))) || w.un.some(isTainted);
   const holdsUnresolved = (st: StageWord[]): boolean => st.some((w) => w.sub || w.v);
   stages.forEach((words, at) => {
     let h = 0;
@@ -6723,7 +6683,7 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
       }
       // A substituted name or number is evaluated as arithmetic by these: a[$(cmd)] runs cmd.
       // The words of `read` that are names: not the values of -p -n -N -t -u -d -i -a.
-      const operands = (): StageWord[] => {
+      const readOperands = (): StageWord[] => {
         const out: StageWord[] = [];
         for (let k = 0; k < rest.length; k++) {
           const w = rest[k]!;
@@ -6736,6 +6696,8 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
         }
         return out;
       };
+      let operandList: StageWord[] | undefined; // read once per stage: a long declaration is not walked again for each rule
+      const operands = (): StageWord[] => (operandList ??= readOperands());
       const named = operands().some((w) => !ASSIGN.test(w.t) && hotW(w));
       if (/^(?:read|unset|declare|typeset|local|readonly|export)$/.test(name) && named) widen(true);
       if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && rest.some(hotW)) widen(true);
@@ -6743,7 +6705,12 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
       // nameref is unset through what it points at, which is evaluated: `unset x` of one holds, of a plain variable it does not.
       const namesTainted = operands().some((w) => isHot(w.t.replace(/=.*/, "")));
       if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && namesTainted) widen(true);
-      if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*n/.test(w.t))) for (const w of operands()) namerefs.add(w.t.replace(/=.*/, ""));
+      if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*n/.test(w.t))) {
+        // Past the cap the names are not kept one by one: the line holds.
+        const ops = operands();
+        if (namerefs.size + ops.length > NAMEREF_CAP) widen(true);
+        else for (const w of ops) namerefs.add(w.t.replace(/=.*/, ""));
+      }
       if (name === "unset" && operands().some((w) => namerefs.has(w.t) && isHot(w.t))) widen(true);
       // `hash -p path name` binds name to the file the path names: a later bare `name` runs it, with the path as written or
       // substituted.
@@ -6785,8 +6752,8 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
           }
         }
       }
-      // `[` and `test` evaluate a name after -v only; the integer comparisons evaluate their operands as arithmetic in `[[` only.
-      if (/^(?:\[|\[\[|test)$/.test(name) && (rest.some(hotW) || rest.some((w) => isHot(w.t))) && rest.some((w) => w.t === "-v" || (name === "[[" && /^-(?:eq|ne|lt|le|gt|ge)$/.test(w.t)))) widen(true);
+      // `[`, `[[` and `test` evaluate a name after -v; the integer comparisons evaluate their operands as arithmetic in `[[` and in zsh and ksh `[`.
+      if (/^(?:\[|\[\[|test)$/.test(name) && (rest.some(hotW) || rest.some((w) => isHot(w.t))) && rest.some((w) => w.t === "-v" || /^-(?:eq|ne|lt|le|gt|ge)$/.test(w.t))) widen(true);
       return;
     }
     // `let` evaluates the value of a variable as arithmetic.
@@ -6837,13 +6804,13 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
         // The words are joined and run as a line.
         if (rest.some(taints)) widen(true);
         else if (depth < 6) {
-          const r = stageHazard(rest.map((w) => w.t).join(" "), depth + 1, tainted, false, lookup);
+          const r = stageHazard(rest.map((w) => w.t).join(" "), depth + 1, taintedChain, false, lookup);
           if (r.hit) widen(r.inert);
         }
         return;
       }
       if (codeWord && !codeWord.sub && SHELL_RUNNER.test(name) && depth < 6) {
-        const r = stageHazard(codeWord.t, depth + 1, tainted, false, lookup);
+        const r = stageHazard(codeWord.t, depth + 1, taintedChain, false, lookup);
         if (r.hit) widen(r.inert);
       }
       if (codeFlag && rest.some(taints)) widen(true);
@@ -6879,7 +6846,7 @@ function stageHazard(line: string, depth: number, inherited?: Set<string>, arith
   // later than they appear (a function called after the variable is set, a later pass of a loop).
   if (depth < 6) {
     for (const body of bodies) {
-      const r = stageHazard(body, depth + 1, tainted, arithOnly, lookup);
+      const r = stageHazard(body, depth + 1, taintedChain, arithOnly, lookup);
       if (r.hit) widen(r.inert);
     }
   } else if (bodies.length && !arithOnly) widen(true);

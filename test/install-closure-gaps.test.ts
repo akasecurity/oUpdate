@@ -69,6 +69,7 @@ const releaseDir = (v: string, hook: string, changed: (typeof dirs)[number] | "n
   files({
     "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: hook } }),
     ...Object.fromEntries(dirs.map((d) => [`${d}/evil.js`, changed === d ? `console.log("evil ${v}")\n` : "console.log('evil')\n"])),
+    "name.txt": "a[$(node docs/evil.js)]\n", // the payload a substitution of `cat name.txt` prints
   });
 
 const named: [string, string][] = [
@@ -122,12 +123,6 @@ for (const [label, hook] of afterBrace) {
 
 // Ordinary hooks that evaluate nothing the package controls stay quiet.
 const benignEval: [string, string][] = [
-  ["a root check with id -u", 'if [ "$(id -u)" -eq 0 ]; then echo root; fi'],
-  ["a node version gate in a single-bracket test", `if [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then exit 1; fi`],
-  ["a job count from nproc in arithmetic", "make -j$(( $(nproc) + 1 ))"],
-  ["a timing line with date +%s in arithmetic", "S=$(date +%s); node lib/ok.js; echo $(( $(date +%s) - S ))"],
-  ["a variable set from printf of a number, used in arithmetic on the next line", "x=$(printf 1)\n: $((x+1))"],
-  ["a variable set from nproc, used in a test on the next line", 'N=$(nproc)\n[ "$N" -gt 4 ] && echo many'],
   ["an eval of a printf with a dotted number", 'eval "printf %s 1.0"'],
   ["an eval of a node run of an unrelated script", "eval node lib/ok.js"],
   ["an eval of an echo with a dotted word", "eval echo v1.2"],
@@ -203,10 +198,6 @@ const roundTwoQuiet: [string, string][] = [
   ["a double-quoted default of braces redirected", `echo "\${OPTS:-{}}" > opts.json`],
   ["a default of braces inside a substitution", `CFG=$(echo "\${npm_config_cfg:-{}}")`],
   ["a hash -p of echo with a dotted argument", "hash -p /bin/echo E; E v1.2"],
-  ["a node version gate in a double-bracket test", `if [[ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]]; then exit 1; fi`],
-  ["a job count from nproc or a number", "make -j$(( $(nproc 2>/dev/null || echo 2) ))"],
-  ["a count from wc -l in a double-bracket test", "[[ $(ls dist | wc -l) -eq 0 ]] && node lib/ok.js"],
-  ["the major kernel version from uname -r and cut in a double-bracket test", "[[ $(uname -r | cut -d. -f1) -ge 20 ]] && echo new"],
 ];
 
 for (const [label, hook] of roundTwoQuiet) {
@@ -215,32 +206,89 @@ for (const [label, hook] of roundTwoQuiet) {
   });
 }
 
-// Reads that must stay linear. Each shape is timed at 0.25, 0.5 and 1 MiB (a warm-up, then the median of three runs per size) and
-// the slope of a least-squares line through the points in log-log scale is taken: about 1 for a linear read and 2 for a quadratic
-// one. A run that is over the bound is tried again, twice, and passes if any try is under it: a slow host spoils a try, not a fit.
-const median = (f: () => number): number => [f(), f(), f()].sort((x, y) => x - y)[1]!;
-const scriptHook = (body: string) => files({
-  "package.json": JSON.stringify({ name: "p", version: "1.0.0", scripts: { postinstall: "sh install.sh" } }),
-  "install.sh": body,
-});
-const scriptTime = (body: string): number => {
-  const t0 = performance.now();
-  holds(scriptHook(body + "true\n"), scriptHook(body + "true \n"));
-  return performance.now() - t0;
-};
-const lines = (bytes: number, line: (i: number) => string): string => {
-  const out: string[] = [];
-  for (let n = 0, i = 0; n < bytes; i++) {
-    const l = line(i);
-    out.push(l);
-    n += l.length;
+// The cost of reading a substitution in arithmetic as code: any substitution in an arithmetic context holds, and a variable set from any
+// substitution is hot. These common forms hold although the output is a number (accepted; the same as the main rule).
+const acceptedHolds: [string, string][] = [
+  ["a single-bracket integer test of a substitution (zsh and ksh evaluate it)", "[ $(cat name.txt) -eq 0 ] && echo x"],
+  ["a root check with id -u", 'if [ "$(id -u)" -eq 0 ]; then echo root; fi'],
+  ["a node version gate in a single-bracket test", `if [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then exit 1; fi`],
+  ["a job count from nproc in arithmetic", "make -j$(( $(nproc) + 1 ))"],
+  ["a timing line with date +%s in arithmetic", "S=$(date +%s); node lib/ok.js; echo $(( $(date +%s) - S ))"],
+  ["a variable set from printf of a number, used in arithmetic on the next line", "x=$(printf 1)\n: $((x+1))"],
+  ["a variable set from nproc, used in a test on the next line", 'N=$(nproc)\n[ "$N" -gt 4 ] && echo many'],
+  ["a node version gate in a double-bracket test", `if [[ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]]; then exit 1; fi`],
+  ["a job count from nproc or a number", "make -j$(( $(nproc 2>/dev/null || echo 2) ))"],
+  ["a count from wc -l in a double-bracket test", "[[ $(ls dist | wc -l) -eq 0 ]] && node lib/ok.js"],
+  ["the major kernel version from uname -r and cut in a double-bracket test", "[[ $(uname -r | cut -d. -f1) -ge 20 ]] && echo new"],
+  ["a count from wc -l of a file on standard input", "echo $(( $(wc -l < list.txt) + 1 )) | cat"],
+  ["a width from tput", "W=$(( $(tput cols) - 2 ))"],
+  ["a commit count from git rev-list", "[[ $(git rev-list --count HEAD) -gt 0 ]] && echo x"],
+  ["a node major version on the next line", "NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d v)\n[[ $NODE_MAJOR -lt 16 ]]"],
+  ["a node major version used in an if", "MAJOR=$(node -v | cut -d. -f1 | tr -d v)\nif [[ $MAJOR -lt 18 ]]; then exit 1; fi"],
+  ["an npm major version", "M=$(npm -v | cut -d. -f1); [[ $M -ge 9 ]] && echo ok"],
+  ["the major kernel version", "[[ $(uname -r | cut -d. -f1) -ge 20 ]] && echo new"],
+  ["grep -c of a pattern on standard input", "make -j$(( $(ls | grep -c x) + 1 ))"],
+  ["the job count from grep -c over one literal file", "make -j$(( $(grep -c ^processor /proc/cpuinfo) + 1 ))"],
+  ["a node major version cut and sed on the next line", "NODE_MAJOR=$(node -v | cut -d. -f1 | sed 's/v//')\n[[ $NODE_MAJOR -lt 16 ]]"],
+];
+
+for (const [label, hook] of acceptedHolds) {
+  test(`${label} holds: a changed docs/evil.js is read`, () => {
+    expect(holds(releaseDir("1.0.0", hook, "none"), releaseDir("1.0.1", hook, "docs")).length).toBeGreaterThan(0);
+  });
+}
+
+// Round five: forms the digits-only allowlist let through. Any substitution in an arithmetic context holds, whatever the command.
+const round5Held: [string, string][] = [
+  ["a function named like an allowlisted command", "nproc() { echo s; }; s='a[$(node T/evil.js)]'; echo $(( $(nproc) )) | cat"],
+  ["an alias named like an allowlisted command", "alias nproc='echo s'; s='a[$(node T/evil.js)]'; echo $(( $(nproc) )) | cat"],
+  ["grep -c over a brace list that prints a name", "echo $(( $(grep -c . {name.txt,x}) )) | cat"],
+  ["grep -c with a brace list of options", "echo $(( $(grep -c {-H,x}) )) | cat"],
+  ["grep -c with a quoted option as the pattern", "echo $(( $(grep -c '-H' x) )) | cat"],
+  ["grep -c with a quoted option cluster as the pattern", "echo $(( $(grep -c '-Hex' x) )) | cat"],
+  ["grep -c with -l", "echo $(( $(grep -c -l . x) )) | cat"],
+  ["find -exec of a file of the package in a counting pipeline", "echo $(( $(find . -maxdepth 0 -exec node T/evil.js {} + | wc -l) )) | cat"],
+  ["tar -I of a file of the package in a counting pipeline", "echo $(( $(tar -I T/evil.sh -xf a.tar | wc -l) )) | cat"],
+  ["zip -TT of a file of the package in a counting pipeline", "echo $(( $(zip -qT -TT T/evil.sh a.zip | wc -l) )) | cat"],
+  ["rg --pre of a file of the package in a counting pipeline", "echo $(( $(rg --pre ./T/evil.sh x | wc -l) )) | cat"],
+  ["a single-quoted substitution in arithmetic expansion (bash 3.2 runs it)", "echo $(( '$(node T/evil.js)' )) | cat"],
+];
+
+for (const [label, hook] of round5Held) {
+  for (const d of dirs) {
+    test(`${label}: a changed ${d}/evil.js holds`, () => {
+      const h = hook.replaceAll("T/", `${d}/`);
+      expect(holds(releaseDir("1.0.0", h, "none"), releaseDir("1.0.1", h, d)).length).toBeGreaterThan(0);
+    });
   }
-  return out.join("");
+}
+
+// Reads that must stay linear. Each shape is timed at 0.25, 0.5, 1 and 2 MiB (a warm-up, then the median of three runs per size) and
+// the slope of a least-squares line through the points in log-log scale is taken: about 1 for a linear read and 2 for a quadratic
+// one. A slope over the bound is measured twice more and the median of the three is taken. Every run also checks the closure: a changed
+// file the hook never names is read only when the reader widens to every file, so a shape that main holds must hold at every size from
+// `heldFrom` up (a read that gave up early, or a false hold that made the timing pass, shows there), and the shapes the reader
+// does not widen on must stay quiet.
+const median = <T>(xs: T[], key: (x: T) => number): T => [...xs].sort((x, y) => key(x) - key(y))[Math.floor(xs.length / 2)]!;
+const perfRelease = (v: string, body: string, changed: boolean) => files({
+  "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: "sh install.sh" } }),
+  "install.sh": body + "true\n",
+  "lib/ok.js": "console.log('ok')\n",
+  "docs/evil.js": changed ? `console.log("evil ${v}")\n` : "console.log('evil')\n",
+});
+const scriptRun = (body: string): { ms: number; held: boolean } => {
+  const old = perfRelease("1.0.0", body, false);
+  const now = perfRelease("1.0.1", body, true);
+  const t0 = performance.now();
+  const found = holds(old, now);
+  return { ms: performance.now() - t0, held: found.length > 0 };
 };
-const timeAt = (make: (bytes: number) => string, bytes: number): number => {
+type Shape = [string, (bytes: number) => string, number];
+const timeAt = (make: (bytes: number) => string, bytes: number): { ms: number; held: boolean } => {
   const body = make(bytes);
-  scriptTime(body);
-  return median(() => scriptTime(body));
+  scriptRun(body);
+  const runs = [scriptRun(body), scriptRun(body), scriptRun(body)];
+  return { ms: median(runs, (r) => r.ms).ms, held: runs.every((r) => r.held) };
 };
 const slope = (points: [number, number][]): number => {
   const xs = points.map(([bytes]) => Math.log(bytes));
@@ -255,27 +303,51 @@ const slope = (points: [number, number][]): number => {
   });
   return num / den;
 };
-const linearShapes: [string, (bytes: number) => string][] = [
-  ["a line per variable set from a substitution", (b) => lines(b, (i) => `x${String(i).padStart(6, "0")}=$(cat n)${" ".repeat(100)}\n`)],
-  ["a heredoc of literal substitutions", (b) => "cat <<EOF >/dev/null\n" + "$(printf 1) ".repeat(Math.floor(b / 12)) + "\nEOF\n"],
-  ["a heredoc of substitutions that name distinct files", (b) => "cat <<EOF >/dev/null\n" + lines(b, (i) => `$(node n${i}.js)\n`) + "EOF\n"],
-  ["eval lines that name distinct files", (b) => lines(b, (i) => `eval node lib/x${i}.js\n`)],
-  ["a line per unclosed default with a dollar and a quote", (b) => lines(b, (i) => `echo "\${X${i}:-'a$'"\n`)],
-  ["a line per unclosed brace", (b) => lines(b, (i) => `: \${X${i}\n`)],
-  ["one long line of unclosed braces", (b) => ": ${X ".repeat(Math.floor(b / 6)) + "\n"],
-  ["a line per default with a bare brace that bash never closes", (b) => lines(b, () => "echo ${X:-{}\n")],
-  ["a line per pattern removal with a bare brace", (b) => lines(b, () => "v=${v%%{*}\n")],
-  ["one double-quoted string of defaults with a bare brace", (b) => 'echo "' + "${X:-{}".repeat(Math.floor(b / 7)) + '"\n'],
-  ["one unquoted heredoc of defaults with a bare brace", (b) => "cat <<EOF >/dev/null\n" + "${X:-{}".repeat(Math.floor(b / 7)) + "\nEOF\n"],
+const lines = (bytes: number, line: (i: number) => string): string => {
+  const out: string[] = [];
+  for (let n = 0, i = 0; n < bytes; i++) {
+    const l = line(i);
+    out.push(l);
+    n += l.length;
+  }
+  return out.join("");
+};
+// The third field is the size from which the shape holds (the reader gives up and reads every file on main and here; eval lines
+// are read one by one below 1 MiB).
+const linearShapes: Shape[] = [
+  ["a line per variable set from a substitution", (b) => lines(b, (i) => `x${String(i).padStart(6, "0")}=$(cat n)${" ".repeat(100)}\n`), 0],
+  ["a heredoc of literal substitutions", (b) => "cat <<EOF >/dev/null\n" + "$(printf 1) ".repeat(Math.floor(b / 12)) + "\nEOF\n", 0],
+  ["a heredoc of substitutions that name distinct files", (b) => "cat <<EOF >/dev/null\n" + lines(b, (i) => `$(node n${i}.js)\n`) + "EOF\n", 0],
+  ["eval lines that name distinct files", (b) => lines(b, (i) => `eval node lib/x${i}.js\n`), 1048576],
+  ["a line per unclosed default with a dollar and a quote", (b) => lines(b, (i) => `echo "\${X${i}:-'a$'"\n`), 0],
+  ["a line per unclosed brace", (b) => lines(b, (i) => `: \${X${i}\n`), 0],
+  ["one long line of unclosed braces", (b) => ": ${X ".repeat(Math.floor(b / 6)) + "\n", 0],
+  ["a line per default with a bare brace that bash never closes", (b) => lines(b, () => "echo ${X:-{}\n"), 0],
+  ["a line per pattern removal with a bare brace", (b) => lines(b, () => "v=${v%%{*}\n"), 0],
+  ["one double-quoted string of defaults with a bare brace", (b) => 'echo "' + "${X:-{}".repeat(Math.floor(b / 7)) + '"\n', 0],
+  ["one unquoted heredoc of defaults with a bare brace", (b) => "cat <<EOF >/dev/null\n" + "${X:-{}".repeat(Math.floor(b / 7)) + "\nEOF\n", 0],
+  ["one line of assignments from substitutions", (b) => Array.from({ length: Math.floor(b / 14) }, (_, i) => `x${i}=$(a)`).join(";") + "\n", 0],
+  ["one export of assignments from substitutions", (b) => "export " + Array.from({ length: Math.floor(b / 12) }, (_, i) => `x${i}=$(a)`).join(" ") + "\n", 0],
+  ["an unclosed substitution over a long run of spaces", (b) => "x=$(true" + " ".repeat(b) + "x)\n", 0],
+  ["one declare -n of many names", (b) => "declare -n " + Array.from({ length: Math.floor(b / 12) }, (_, i) => `r${i}=x${i}`).join(" ") + "\n", 0],
 ];
-for (const [label, make] of linearShapes) {
-  test(`${label} reads in linear time`, () => {
-    let best = Infinity;
-    for (let attempt = 0; attempt < 3 && best >= 1.4; attempt++) {
-      best = Math.min(best, slope([262144, 524288, 1048576].map((bytes): [number, number] => [bytes, timeAt(make, bytes)])));
+
+const PERF_SIZES = [262144, 524288, 1048576, 2097152];
+for (const [label, make, heldFrom] of linearShapes) {
+  test(`${label} reads in linear time and keeps the closure`, () => {
+    const slopes: number[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const points: [number, number][] = [];
+      for (const bytes of PERF_SIZES) {
+        const r = timeAt(make, bytes);
+        if (bytes >= heldFrom) expect(r.held).toBe(true);
+        points.push([bytes, r.ms]);
+      }
+      slopes.push(slope(points));
+      if (slopes[0]! < 1.4) break; // one clean fit is enough; a bad one is measured twice more
     }
-    expect(best).toBeLessThan(1.4);
-  }, 300000);
+    expect(median(slopes, (x) => x)).toBeLessThan(1.4);
+  }, 600000);
 }
 
 // Round three: reads after many unclosed spans, assignments that do not clear, bodies in the order they run, and names that digits-only
@@ -353,17 +425,7 @@ for (const [label, hook] of round3Held) {
 const round3Quiet: [string, string][] = [
   ["nine well-formed nested defaults before a node run of an unrelated file", ": ${A:-{a}}\n".repeat(9) + "node lib/ok.js"],
   ["an unset of a variable set from a substitution", 'TMP=$(mktemp -d); cp lib/ok.js "$TMP"; rm -rf "$TMP"; unset TMP'],
-  ["a count from wc -l of a file on standard input", "echo $(( $(wc -l < list.txt) + 1 )) | cat"],
-  ["a width from tput", "W=$(( $(tput cols) - 2 ))"],
-  ["a commit count from git rev-list", "[[ $(git rev-list --count HEAD) -gt 0 ]] && echo x"],
-  ["a node major version on the next line", "NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d v)\n[[ $NODE_MAJOR -lt 16 ]]"],
-  ["a node major version used in an if", "MAJOR=$(node -v | cut -d. -f1 | tr -d v)\nif [[ $MAJOR -lt 18 ]]; then exit 1; fi"],
-  ["an npm major version", "M=$(npm -v | cut -d. -f1); [[ $M -ge 9 ]] && echo ok"],
-  ["the major kernel version", "[[ $(uname -r | cut -d. -f1) -ge 20 ]] && echo new"],
   ["a body that reads a variable set from a known number", "x=$(cat name.txt); y=$(echo 1)"],
-  ["grep -c of a pattern on standard input", "make -j$(( $(ls | grep -c x) + 1 ))"],
-  ["the job count from grep -c over one literal file", "make -j$(( $(grep -c ^processor /proc/cpuinfo) + 1 ))"],
-  ["a node major version cut and sed on the next line", "NODE_MAJOR=$(node -v | cut -d. -f1 | sed 's/v//')\n[[ $NODE_MAJOR -lt 16 ]]"],
   ["a file count with the padding removed on the next line", "COUNT=$(ls dist | wc -l | tr -d ' ')\nif (( COUNT == 0 )); then node lib/ok.js; fi"],
 ];
 
