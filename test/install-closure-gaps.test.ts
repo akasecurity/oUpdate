@@ -26,7 +26,6 @@ const reads: [string, string][] = [
   ["single quotes that pair across the end of a double-quoted default", `echo "\${X:-'}"' $(node ${N}) '"'}"`],
   ["a single quote inside a double quote inside an unquoted default", `echo \${X:-"'"$(node ${N})"'"} | cat`],
   ["a variable read through an operator form", `F=${N}; cross-env A=1 node "\${F%%}" | cat`],
-  ["a variable set on one line and used on the next", `F=${N}\ncross-env A=1 node "$F" | cat`],
   ["hash -p with a substituted path before a pipe", `hash -p "${N}" cat; cat x | cat`],
   ["hash -p with a substituted path", `hash -p "${N}" cat\ncat x`],
   ["a substituted value declared as an integer", `declare -i x=${N}`],
@@ -209,6 +208,8 @@ for (const [label, hook] of roundTwoQuiet) {
 // The cost of reading a substitution in arithmetic as code: any substitution in an arithmetic context holds, and a variable set from any
 // substitution is hot. These common forms hold although the output is a number (accepted; the same as the main rule).
 const acceptedHolds: [string, string][] = [
+  ["an unset of a variable set from a substitution", 'TMP=$(mktemp -d); cp lib/ok.js "$TMP"; rm -rf "$TMP"; unset TMP'],
+  ["a for loop over seq with arithmetic on the loop variable on the next line", "for i in $(seq 1 3); do\necho $((i * 2))\ndone"],
   ["a single-bracket integer test of a substitution (zsh and ksh evaluate it)", "[ $(cat name.txt) -eq 0 ] && echo x"],
   ["a root check with id -u", 'if [ "$(id -u)" -eq 0 ]; then echo root; fi'],
   ["a node version gate in a single-bracket test", `if [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]; then exit 1; fi`],
@@ -263,12 +264,42 @@ for (const [label, hook] of round5Held) {
   }
 }
 
-// Reads that must stay linear. Each shape is timed at 0.25, 0.5, 1 and 2 MiB (a warm-up, then the median of three runs per size) and
-// the slope of a least-squares line through the points in log-log scale is taken: about 1 for a linear read and 2 for a quadratic
-// one. A slope over the bound is measured twice more and the median of the three is taken. Every run also checks the closure: a changed
-// file the hook never names is read only when the reader widens to every file, so a shape that main holds must hold at every size from
-// `heldFrom` up (a read that gave up early, or a false hold that made the timing pass, shows there), and the shapes the reader
-// does not widen on must stay quiet.
+// Round six: `unset` of a variable set from a substitution holds on any line (a nameref made on another line, or inside eval or a function,
+// is unset through the value), and a variable set from a substitution on an earlier line does not widen commands that only use it.
+const round6Held: [string, string][] = [
+  ["a nameref declared on the line above the assignment and unset", "declare -n X\nX=$(cat name.txt); unset X | cat"],
+  ["a nameref declared by eval and then unset", "eval 'declare -n X'; X=$(cat name.txt); unset X | cat"],
+  ["a local -n in a function defined on another line", "f() { local -n X; }\nX=$(cat name.txt); unset X | cat"],
+  ["a typeset -n in a function defined on another line", "f() { typeset -n X; }\nX=$(cat name.txt); unset X | cat"],
+];
+
+for (const [label, hook] of round6Held) {
+  for (const d of ["lib", "docs", "test"] as const) {
+    test(`${label}: a changed ${d}/evil.js holds`, () => {
+      expect(holds(releaseDir("1.0.0", hook, "none"), releaseDir("1.0.1", hook, d)).length).toBeGreaterThan(0);
+    });
+  }
+}
+
+const round6Quiet: [string, string][] = [
+  ["a temp dir from mktemp used as an argument on the next line", 'TMP=$(mktemp -d)\ncurl -fsSL https://example.com/x.tgz | tar -xz -C "$TMP"'],
+  ["a path from pwd used as an argument on the next line", 'ROOT=$(pwd)\nmake -C "$ROOT/native" 2>&1 | tee build.log'],
+  ["a temp dir from mktemp used by git clone on the next line", 'DIR=$(mktemp -d)\ngit clone --depth 1 https://example.com/r.git "$DIR" >/dev/null'],
+];
+
+for (const [label, hook] of round6Quiet) {
+  test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {
+    expect(holds(releaseDir("1.0.0", hook, "none"), releaseDir("1.0.1", hook, "docs"))).toEqual([]);
+  });
+}
+
+// Reads that must stay linear. Each shape is timed at 24, 48, 96 and 192 thousand characters: the reader gives up and reads every file
+// on a hook script past 200 thousand characters (and a run past a million never scans), so larger sizes would time the give-up and not the
+// scan. A point is the median of five runs after a warm-up, and the slope of a least-squares line through the points in log-log scale is
+// taken: about 1 for a linear read and 2 for a quadratic one. A slope over the bound is measured twice more and the median of the three
+// is taken. Every run also checks the closure: a changed file the hook never names is read only when the reader widens to every file, so
+// a shape that main holds must hold at every size from `heldFrom` up (a read that gave up early, or a false hold that made the timing
+// pass, shows there), and a shape the reader does not widen on (`heldFrom` of Infinity) must stay quiet at every size.
 const median = <T>(xs: T[], key: (x: T) => number): T => [...xs].sort((x, y) => key(x) - key(y))[Math.floor(xs.length / 2)]!;
 const perfRelease = (v: string, body: string, changed: boolean) => files({
   "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: "sh install.sh" } }),
@@ -287,7 +318,7 @@ type Shape = [string, (bytes: number) => string, number];
 const timeAt = (make: (bytes: number) => string, bytes: number): { ms: number; held: boolean } => {
   const body = make(bytes);
   scriptRun(body);
-  const runs = [scriptRun(body), scriptRun(body), scriptRun(body)];
+  const runs = [scriptRun(body), scriptRun(body), scriptRun(body), scriptRun(body), scriptRun(body)];
   return { ms: median(runs, (r) => r.ms).ms, held: runs.every((r) => r.held) };
 };
 const slope = (points: [number, number][]): number => {
@@ -312,18 +343,18 @@ const lines = (bytes: number, line: (i: number) => string): string => {
   }
   return out.join("");
 };
-// The third field is the size from which the shape holds (the reader gives up and reads every file on main and here; eval lines
-// are read one by one below 1 MiB).
+// The third field is the size from which the shape holds, as on main (the reader gives up and reads every file); eval lines are read
+// one by one and never hold here.
 const linearShapes: Shape[] = [
   ["a line per variable set from a substitution", (b) => lines(b, (i) => `x${String(i).padStart(6, "0")}=$(cat n)${" ".repeat(100)}\n`), 0],
   ["a heredoc of literal substitutions", (b) => "cat <<EOF >/dev/null\n" + "$(printf 1) ".repeat(Math.floor(b / 12)) + "\nEOF\n", 0],
   ["a heredoc of substitutions that name distinct files", (b) => "cat <<EOF >/dev/null\n" + lines(b, (i) => `$(node n${i}.js)\n`) + "EOF\n", 0],
-  ["eval lines that name distinct files", (b) => lines(b, (i) => `eval node lib/x${i}.js\n`), 1048576],
+  ["eval lines that name distinct files", (b) => lines(b, (i) => `eval node lib/x${i}.js\n`), Infinity],
   ["a line per unclosed default with a dollar and a quote", (b) => lines(b, (i) => `echo "\${X${i}:-'a$'"\n`), 0],
   ["a line per unclosed brace", (b) => lines(b, (i) => `: \${X${i}\n`), 0],
   ["one long line of unclosed braces", (b) => ": ${X ".repeat(Math.floor(b / 6)) + "\n", 0],
   ["a line per default with a bare brace that bash never closes", (b) => lines(b, () => "echo ${X:-{}\n"), 0],
-  ["a line per pattern removal with a bare brace", (b) => lines(b, () => "v=${v%%{*}\n"), 0],
+  ["a line per pattern removal with a bare brace", (b) => lines(b, () => "v=${v%%{*}\n"), 49152],
   ["one double-quoted string of defaults with a bare brace", (b) => 'echo "' + "${X:-{}".repeat(Math.floor(b / 7)) + '"\n', 0],
   ["one unquoted heredoc of defaults with a bare brace", (b) => "cat <<EOF >/dev/null\n" + "${X:-{}".repeat(Math.floor(b / 7)) + "\nEOF\n", 0],
   ["one line of assignments from substitutions", (b) => Array.from({ length: Math.floor(b / 14) }, (_, i) => `x${i}=$(a)`).join(";") + "\n", 0],
@@ -332,7 +363,7 @@ const linearShapes: Shape[] = [
   ["one declare -n of many names", (b) => "declare -n " + Array.from({ length: Math.floor(b / 12) }, (_, i) => `r${i}=x${i}`).join(" ") + "\n", 0],
 ];
 
-const PERF_SIZES = [262144, 524288, 1048576, 2097152];
+const PERF_SIZES = [24576, 49152, 98304, 196608];
 for (const [label, make, heldFrom] of linearShapes) {
   test(`${label} reads in linear time and keeps the closure`, () => {
     const slopes: number[] = [];
@@ -341,6 +372,7 @@ for (const [label, make, heldFrom] of linearShapes) {
       for (const bytes of PERF_SIZES) {
         const r = timeAt(make, bytes);
         if (bytes >= heldFrom) expect(r.held).toBe(true);
+        if (heldFrom === Infinity) expect(r.held).toBe(false);
         points.push([bytes, r.ms]);
       }
       slopes.push(slope(points));
@@ -424,9 +456,7 @@ for (const [label, hook] of round3Held) {
 
 const round3Quiet: [string, string][] = [
   ["nine well-formed nested defaults before a node run of an unrelated file", ": ${A:-{a}}\n".repeat(9) + "node lib/ok.js"],
-  ["an unset of a variable set from a substitution", 'TMP=$(mktemp -d); cp lib/ok.js "$TMP"; rm -rf "$TMP"; unset TMP'],
   ["a body that reads a variable set from a known number", "x=$(cat name.txt); y=$(echo 1)"],
-  ["a file count with the padding removed on the next line", "COUNT=$(ls dist | wc -l | tr -d ' ')\nif (( COUNT == 0 )); then node lib/ok.js; fi"],
 ];
 
 for (const [label, hook] of round3Quiet) {

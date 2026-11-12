@@ -511,6 +511,7 @@ const setLines: [string, string][] = [
   ["printf -v then an arithmetic command", `printf -v X '%s' "${U}"; (( X )) | cat`],
   ["printf -v then arithmetic expansion", `printf -v X '%s' "${U}"; echo $(( X )) | cat`],
   ["printf -v then a numeric test", `printf -v X '%s' "${U}"; [[ $X -eq 0 ]] 2>/dev/null`],
+  ["printf -v then unset", `printf -v X '%s' "${U}"; unset X | cat`],
   ["printf -v then declare -i", `printf -v X '%s' "${U}"; declare -i X | cat`],
   ["read then an arithmetic command", "echo $(date); read X; (( X )) | cat"],
   ["read then declare -i", "echo $(date); read X; declare -i X | cat"],

@@ -6598,7 +6598,6 @@ type HotLookup = { has(x: string): boolean };
 type Hazard = { hit: boolean; inert: boolean; tainted: Set<string>; hot: Set<string> };
 // Programs that run what their arguments name: one bound by `hash -p` to such a path runs a package file given as an argument.
 const SYSTEM_RUNNER = /^(?:sh|bash|dash|zsh|ksh|ash|csh|tcsh|fish|node|nodejs|bun|deno|python[0-9.]*|py|perl|ruby|php|lua|env|xargs|busybox|find|awk|gawk|nawk|sed|make|gmake|npm|npx|pnpm|yarn|bunx|corepack|timeout|nohup|nice|sudo|time|exec|command|eval|source|script|expect|osascript|ssh|su|git|tar|zip|unzip|cpio|rsync|curl|wget)$/;
-const NAMEREF_CAP = 4096; // namerefs one line may declare before the line is read as holding
 function stageHazard(line: string, depth: number, inherited?: HotLookup, arithOnly = false, carry?: HotLookup, parsed?: StageFeed): Hazard {
   const { stages, feed, fed, fedUnres, bodies, unsure } = parsed ?? shellStages(line);
   const tainted = new Set<string>(); // this line's own; the enclosing lines' are read through `inherited`, not copied
@@ -6614,7 +6613,7 @@ function stageHazard(line: string, depth: number, inherited?: HotLookup, arithOn
     hit = true;
     if (wide) inert = true;
   };
-  const taints = (w: StageWord): boolean => w.sub || (w.v && w.n.some((x) => isTainted(x) || (carry?.has(x) ?? false)));
+  const taints = (w: StageWord): boolean => w.sub || (w.v && w.n.some(isTainted)); // the line's own, as on main: earlier lines feed only the evaluation checks (isHot)
   // A value that holds the text of a substitution (`x='a[$(cmd)]'`) runs it when arithmetic evaluates the variable.
   const armed = (w: StageWord): boolean => /\$\(|`/.test(w.t);
   // A variable that is hot stays hot for the rest of the text: no assignment is taken to overwrite it, since where a line runs
@@ -6627,7 +6626,6 @@ function stageHazard(line: string, depth: number, inherited?: HotLookup, arithOn
   const assign = (w: StageWord): void => {
     if (hotW(w) || armed(w)) setHot(assignName(w));
   };
-  const namerefs = new Set<string>(); // names declared with -n on the line: `unset` of one acts on what it points at
   const hotW = (w: StageWord): boolean => w.sub || (w.v && w.n.some(isHot));
   const assignName = (w: StageWord): string => w.t.slice(0, w.t.indexOf("=")).replace(/\+$/, "");
   // An unquoted substitution or tainted variable splits into words: a second flag can come out of it.
@@ -6701,17 +6699,11 @@ function stageHazard(line: string, depth: number, inherited?: HotLookup, arithOn
       const named = operands().some((w) => !ASSIGN.test(w.t) && hotW(w));
       if (/^(?:read|unset|declare|typeset|local|readonly|export)$/.test(name) && named) widen(true);
       if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && rest.some(hotW)) widen(true);
-      // A variable set from a substitution is evaluated as arithmetic when declared -i (a later `x+=1` evaluates the old value). A
-      // nameref is unset through what it points at, which is evaluated: `unset x` of one holds, of a plain variable it does not.
+      // A variable set from a substitution is evaluated as arithmetic when declared -i or unset by name (a nameref is unset through what it
+      // points at; a later `x+=1` evaluates the old value): a[$(cmd)] runs cmd.
       const namesTainted = operands().some((w) => isHot(w.t.replace(/=.*/, "")));
       if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*i/.test(w.t)) && namesTainted) widen(true);
-      if (/^(?:declare|typeset|local)$/.test(name) && rest.some((w) => /^-[A-Za-z]*n/.test(w.t))) {
-        // Past the cap the names are not kept one by one: the line holds.
-        const ops = operands();
-        if (namerefs.size + ops.length > NAMEREF_CAP) widen(true);
-        else for (const w of ops) namerefs.add(w.t.replace(/=.*/, ""));
-      }
-      if (name === "unset" && operands().some((w) => namerefs.has(w.t) && isHot(w.t))) widen(true);
+      if (name === "unset" && namesTainted) widen(true);
       // `hash -p path name` binds name to the file the path names: a later bare `name` runs it, with the path as written or
       // substituted.
       if (name === "hash") {
