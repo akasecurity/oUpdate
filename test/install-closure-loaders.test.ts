@@ -146,8 +146,6 @@ const benign2: [string, string][] = [
   ["a copy from cluster settings", `const c = require("cluster"); const o = Object.assign({}, c.settings); console.log(o)`],
   ["a read of cluster settings by Reflect.get in console.log", `const c = require("cluster"); console.log(Reflect.get(c, "settings"))`],
   ["a message that holds module.constructor.register", `require("cluster"); console.log("module.constructor.register")`],
-  ["this.constructor.register beside a cluster load", `require("cluster"); class A { go() { this.constructor.register(this) } }`],
-  ["a property named module with a register method", `require("cluster"); app.module.register(x)`],
   ["a message that names module.register", `require("cluster"); throw new Error("module.register failed")`],
   ["a timer and a deprecation message that names m.register", `const m = require("module"); setTimeout(done, 10); log("m.register is deprecated")`],
   ["typeof a module member", `const m = require("module"); console.log(typeof m.register)`],
@@ -186,18 +184,22 @@ const shapes: [string, (n: number) => string][] = [
   ["brackets in a string beside cluster", (n) => `const c = require("cluster"); console.log("${'["'.repeat(n / 2)}")\n`],
   ["padding strings before a Reflect.get of _load", (n) => `const M = require("module");\n${'const pad = "xxxxxxxxxx";\n'.repeat(n / 25)}Reflect.get(M, "_load")(p)`],
   ["many settings hand-offs beside cluster", (n) => `const c = require("cluster"); ${"f(c.settings, 1);".repeat(n / 17)}`],
-  ["a long run of require.cache[ opens", (n) => `require("cluster"); ${"require.cache[".repeat(n / 14)}`],
+  ["a long run of require.cache[ opens (a guard: no rule reads this now)", (n) => `require("cluster"); ${"require.cache[".repeat(n / 14)}`],
   ["a long run of spaces beside cluster", (n) => `require("cluster"); ${" ".repeat(n)}`],
   ["a long run of line breaks beside cluster", (n) => `require("cluster");${"\n".repeat(n)}`],
   ["a long run of this-dot-constructor members", (n) => `require("cluster"); ${"this.constructor.".repeat(n / 17)}`],
   ["a long run of constructor members", (n) => `require("cluster"); ${"x.constructor.".repeat(n / 14)}`],
   ["many bound names beside module", (n) => `const a = require("module");\n${"const x = require(n);\n".repeat(n / 22)}`],
+  ["many bracket keys in strings after vm is loaded", (n) => `require("vm");${'f("module[\'_load\']");'.repeat(n / 22)}`],
+  ["a vm string on a long benign text", (n) => `const kind = "vm";\n${"a.b(c, d);\n".repeat(n / 11)}`],
+  ["many receivers bound to module", (n) => `${"const s = module;\n".repeat(n / 18)}${"o.register(1);".repeat(n / 14)}`],
+  ["many selfNames-like binds with long tails", (n) => `${"const s = module.exports.a.b.c;\n".repeat(n / 31)}`],
 ];
-// The same shape at 1 MB, 2 MB and 4 MB (times under 20 ms count as 20): the least-squares slope of log time against log size over the three points is about 1 for a linear read and
-// about 2 for a quadratic one. Observed slopes on the nine shapes run from 0.6 to 1.3; the bound leaves room for noise and is far below 2.
+// The same shape at 1 MB, 2 MB and 4 MB (times under 5 ms count as 5; a shape that reads faster than that at 1 MB starts from a larger size): the least-squares slope of log time against log size over the three points is about 1 for a linear read and
+// about 2 for a quadratic one. Observed slopes on these shapes run from 0.6 to 1.3; the bound leaves room for noise and is far below 2.
 const slopeOf = (sizes: number[], times: number[]): number => {
   const xs = sizes.map((n) => Math.log(n));
-  const ys = times.map((t) => Math.log(Math.max(t, 20)));
+  const ys = times.map((t) => Math.log(Math.max(t, 5)));
   const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
   const my = ys.reduce((a, b) => a + b, 0) / ys.length;
   let num = 0;
@@ -213,7 +215,10 @@ for (const [name, make] of shapes) {
     median3(() => make(1 << 18));
     // A slow machine inflates one reading: the bound has to fail on every attempt, as a quadratic read does.
     const slopes: number[] = [];
-    const sizes = [1 << 20, 1 << 21, 1 << 22];
+    // A time under the 5 ms floor hides growth: such a shape starts from a larger size, so the three points sit above the floor.
+    let base = 1 << 20;
+    while (base < 1 << 23 && median3(() => make(base)) < 5) base <<= 1;
+    const sizes = [base, base * 2, base * 4];
     for (let attempt = 0; attempt < 3; attempt++) {
       const slope = slopeOf(sizes, sizes.map((n) => median3(() => make(n))));
       slopes.push(slope);
@@ -451,5 +456,74 @@ for (const mod of ["_stream_duplex", "_stream_passthrough", "_stream_readable", 
   test(`a load of ${mod} stays static`, () => {
     for (const stmt of [`require("${mod}")`, `import "${mod}"`, `import { a } from "${mod}"`])
       expect(provablyStatic(`${stmt}\nexports.main = () => 1\n`)).toBe(true);
+  });
+}
+
+// Round 8: loader detection is a union, never narrower than the rules it replaced, plus every new rule.
+const heldAtLib = (hook: string) => held(hook);
+const round8Held: [string, string][] = [
+  ["this bound by call to module", `function f(p) { return this.constructor._load(p) } f.call(module, ${J})`],
+  ["this bound by bind to module", `function f(p) { return this.constructor._load(p) } f.bind(module)(${J})`],
+  ["this bound by Reflect.apply to module", `function f(p) { return this.constructor._load(p) } Reflect.apply(f, module, [${J}])`],
+  ["this on a function stored on module", `module.go = function (p) { return this.constructor._load(p) }; module.go(${J})`],
+  ["a $this arrow parameter", `(($this) => $this.constructor._load(${J}))(module)`],
+  ["a property named this", `const o = { this: module }; o.this.constructor._load(${J})`],
+  ["module held in a property, _load after a dot", `const deps = { module: module.constructor }; deps.module._load(${J})`],
+  ["constructor as a parameter", `function f(constructor, p) { return constructor._load(p) } f(module.constructor, ${J})`],
+  ["constructor after await", `async function f(p) { return await constructor._load(p) } f(${J})`],
+  ["constructor after typeof and a line break", `function f(p) { void\nconstructor._load(p) } f(${J})`],
+  ["constructor after a question mark", `const p = ${J}; ok ?constructor._load(p) : 0`],
+  ["a $constructor parameter", `(($constructor) => $constructor._load(${J}))(module.constructor)`],
+  ["a $module receiver", `const $module = module.constructor; $module._load(${J})`],
+  ["module.constructor.register behind a prototype", `const f = Object.getPrototypeOf(module); f.constructor.register(${JM})`],
+  ["node -e running a string with module.constructor._load", `require("child_process").execFileSync(process.execPath, ["-e", "module.constructor._load(require('path').resolve('lib/evil.js'))"])`],
+  ["node -e running a string with a required module", `require("child_process").execFileSync(process.execPath, ["-e", "const m=require('module');m._load(require('path').resolve('lib/evil.js'))"])`],
+  ["node --eval", `require("child_process").execFileSync(process.execPath, ["--eval", "require('module')._load(require('path').resolve('lib/evil.js'))"])`],
+  ["node -p", `require("child_process").execFileSync(process.execPath, ["-p", "require('module')._load(require('path').resolve('lib/evil.js'))"])`],
+  ["a data: import", `import("data:text/javascript,process.mainModule.constructor._load(process.cwd()+'/lib/evil.js')")`],
+  // Held on the earlier rule only because an unrelated cluster load was present: still held.
+  ["an object member bound to module.constructor", `require("cluster"); const o = { M: module.constructor }; o.M._load(${J})`],
+  ["a parameter bound to module.constructor", `require("cluster"); function f(M) { M._load(${J}) } f(module.constructor)`],
+  ["an array element bound to module.constructor", `require("cluster"); const [M] = [module.constructor]; M._load(${J})`],
+  ["a closure returning module.constructor", `require("cluster"); const get = () => module.constructor; get()._load(${J})`],
+  ["getBuiltinModule register", `require("cluster"); process.getBuiltinModule("module").register(${JM})`],
+  ["a later assignment of module.constructor", `require("cluster"); let M; M = module.constructor; M._load(${J})`],
+];
+for (const [name, hook] of round8Held) {
+  test(`round 8, held: ${name}`, () => {
+    expect(heldAtLib(hook)).toBe(true);
+  });
+}
+
+// Accepted costs. The first two rows ride along from the earlier rule: a literal cluster load and any register( in the text stays held, as before.
+// The rest are held by the new rules only: a local variable named module with a register method, a vm string, a constructor member called.
+const round8Accepted: [string, string][] = [
+  ["this.constructor.register beside a cluster load (also held before)", `require("cluster"); class A { go() { this.constructor.register(this) } }`],
+  ["a property named module with a register method (also held before)", `require("cluster"); app.module.register(x)`],
+  ["a local variable named module in a callback", `modules.forEach((module) => module.register(container))`],
+  ["a local variable named module in a loop", `for (const module of modules) module.register(app)`],
+  ["a vm string given to a log call beside a module name in a string", `require("cluster"); console.log("vm", "module.register")`],
+  ["an object method named constructor called beside a module name in a string", `require("cluster"); const o = { constructor() { return 1 } }; o.constructor(); console.log("module.register")`],
+  ["a vm string such as a platform name beside a module name in a string", `require("cluster"); const kind = "vm"; console.log("module.register is gone")`],
+];
+for (const [name, hook] of round8Accepted) {
+  test(`round 8, accepted cost, held: ${name}`, () => {
+    expect(held(hook)).toBe(true);
+  });
+}
+
+// Not held: a member of module.exports is not module.
+const round8Benign: [string, string][] = [
+  ["a register member of module.exports", `const api = module.exports; api.register = (server) => {}`],
+  ["a hapi style plugin with register attributes", `const plugin = module.exports = { register(server) {} }; plugin.register.attributes = { name: "x" }`],
+  ["a read of register through a name bound to module.exports", `require("cluster"); const M = module.exports; const r = M.register; console.log(r)`],
+  ["a read of filename through a name bound to module.exports", `require("cluster"); const M = module.exports; const r = M.filename; console.log(r)`],
+  ["this.constructor.register in a class method", `class A { static register(x) { return x } add() { return this.constructor.register(1) } } new A().add()`],
+];
+for (const [name, hook] of round8Benign) {
+  test(`round 8, benign hook is not widened: ${name}`, () => {
+    expect(held(hook)).toBe(false);
+    const t = classifyJs("h.js", `${hook}\n`);
+    expect([t.pkg, t.tests, t.flows]).toEqual([false, false, false]);
   });
 }
