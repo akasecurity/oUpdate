@@ -689,7 +689,9 @@ export async function reviewLayers(a: { old: ImageLayers; new: ImageLayers; newE
   extra.push(`FILES: ${counts.added} added, ${counts.changed} changed, ${counts.removed} removed; ${counts.owned} owned by upgraded packages, not shown`);
 
   const order = [...ranks.keys()].sort((x, y) => ranks.get(x)! - ranks.get(y)! || (x < y ? -1 : 1));
-  const cut = (only: string[]) => (only.length ? chunkDiff(oldF, newF, budget.chunkChars, only) : []);
+  // A definition a changed line uses that the diff cannot show whole (cut, hash only, past the caps) holds, as in a package review.
+  const cutDefs = new Set<string>();
+  const cut = (only: string[]) => (only.length ? chunkDiff(oldF, newF, budget.chunkChars, only, false, new Set<string>(), cutDefs) : []);
   let scope: Scope = "all";
   let parts = cut(order);
   let narrowed: string | undefined;
@@ -713,6 +715,7 @@ export async function reviewLayers(a: { old: ImageLayers; new: ImageLayers; newE
     }
   }
   if (scope !== "all") parts = parts.map((p) => `[${SCOPE_NOTE[scope].trim()}]\n${p}`);
+  if (cutDefs.size) hits.push(`not model-reviewable: definition too large to show in ${[...cutDefs].join(", ")}; needs a human`);
 
   const digests = new Set([...a.old.layers, ...a.new.layers].map((l) => l.digest));
   const read = store.fetched.length;

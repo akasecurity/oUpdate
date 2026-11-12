@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { chunkDiff, reviewUpdate } from "../src/review.ts";
+import { reviewLayers } from "../src/image-layers.ts";
+import { LayerStore, LIMITS } from "../src/oci-fs.ts";
 import type { FileMap } from "../src/prepass.ts";
+import type { ImageEvidence } from "../src/targets/broker/answer.ts";
+import { specLayers, withTmp } from "./oci-helpers.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const map = (o: Record<string, string>): FileMap => new Map(Object.entries(o).map(([k, v]) => [k, enc(v)]));
@@ -99,9 +103,11 @@ describe("an unchanged definition that holds an encoded run, named by a changed 
       run();
       return performance.now() - t0;
     };
-    const slow = time(mk("a".repeat(399) + '"'));
-    const control = time(mk("a".repeat(50) + '"'));
-    expect(slow).toBeLessThan(control * 6 + 50);
+    const slow = mk("a".repeat(399) + '"');
+    const control = mk("a".repeat(50) + '"');
+    // The ratio of two runs on one machine, best of three, so one noisy run does not fail it.
+    const ratios = [0, 1, 2].map(() => time(slow) / Math.max(1, time(control)));
+    expect(Math.min(...ratios)).toBeLessThan(6);
   });
 });
 
@@ -177,5 +183,114 @@ describe("a definition on a property, and one too large to show whole", () => {
     expect(l?.verdict).toBe("stop");
     expect(l?.detail).toContain("not model-reviewable: definition too large to show in index.js");
     expect(l?.detail).toContain("needs a human");
+  });
+});
+
+describe("only a used definition holds; a name the changed code does not use does not", () => {
+  const BIG = "A".repeat(30_000);
+  const pkg = JSON.stringify({ name: "p", version: "1.0.0", main: "index.js" });
+  const cutOf = (o: string, n: string, file = "index.js") => {
+    const cut = new Set<string>();
+    chunkDiff(map({ "package.json": pkg, [file]: o }), map({ "package.json": pkg, [file]: n }), 10_000_000, undefined, false, new Set(), cut);
+    return cut.size;
+  };
+
+  test("a parameter that shares the name is not a use; a real use of the name is", () => {
+    const o = `function unused(){const data="${BIG}";}\nfunction f(data){return 1;}\n`;
+    expect(cutOf(o, o.replace("return 1", "return 2"))).toBe(0);
+    expect(cutOf(o, `${o}function g(){return data;}\n`)).toBe(1);
+  });
+
+  test("an object key and a property read are not uses of a non-property definition", () => {
+    const o = `const D="${BIG}";\nconst o={D:1};\n`;
+    expect(cutOf(o, `${o}console.log(o.D);\n`)).toBe(0);
+    expect(cutOf(o, `${o}console.log(D);\n`)).toBe(1);
+  });
+
+  test("a property read is a use when a definition of the name is a property (a const control is not)", () => {
+    expect(cutOf(`o.D="${BIG}";\n`, `o.D="${BIG}";\nconsole.log(o.D);\n`)).toBe(1);
+    expect(cutOf(`const D="${BIG}";\n`, `const D="${BIG}";\nconsole.log(o.D);\n`)).toBe(0);
+  });
+
+  test("a name only in a comment or a string is not a use", () => {
+    const o = `const D="${BIG}";\nmodule.exports=1;\n`;
+    expect(cutOf(o, `${o}// D\n`)).toBe(0);
+    expect(cutOf(o, `${o}/* D */ x();\n`)).toBe(0);
+    expect(cutOf(o, `${o}console.log("D");\n`)).toBe(0);
+    expect(cutOf(o, `${o}console.log(\`D \${D}\`);\n`)).toBe(1);
+  });
+
+  test("nine unrelated functions that define x, and a changed identity function, hold nothing", () => {
+    const o = Array.from({ length: 9 }, (_, i) => `function f${i}(){const x="${"B".repeat(400)}";}`).join("\n") + "\n";
+    expect(cutOf(o, `${o}function identity(x){return x;}\n`)).toBe(0);
+    expect(cutOf(o, `${o}const g=(x)=>x+1;\n`)).toBe(0);
+    expect(cutOf(o, `${o}try{a()}catch(x){b(x)}\n`)).toBe(0);
+    expect(cutOf(o, `${o}function identity(y){return x;}\n`)).toBe(1);
+    expect(cutOf(o, `${o}function identity(y){};x;\n`)).toBe(1);
+  });
+
+  test("a minified blob named e, and a changed line with t.e, holds nothing; e itself does", () => {
+    const o = `var e="${"A".repeat(300_000)}";\nmodule.exports=1;\n`;
+    expect(cutOf(o, `${o}t.e=1;\n`)).toBe(0);
+    expect(cutOf(o, `${o}f(e);\n`)).toBe(1);
+  });
+
+  test("a regex literal or a division does not hide a use after it", () => {
+    const o = `const D="${BIG}";\nmodule.exports=1;\n`;
+    expect(cutOf(o, `${o}a=/\\//;eval(atob(D));\n`)).toBe(1);
+    expect(cutOf(o, `${o}a=b/c;eval(atob(D));\n`)).toBe(1);
+    expect(cutOf(o, `${o}a="it's";eval(atob(D));\n`)).toBe(1);
+  });
+
+  test("nine definitions of one used name hold (a known cost); a definition of 19,990 chars is shown whole and holds nothing", () => {
+    const nine = Array.from({ length: 9 }, () => `expected = "${"f".repeat(500)}"`).join("\n") + "\n";
+    expect(cutOf(nine, `${nine}assert f(x) == expected\n`, "tests/test_vectors.py")).toBe(1);
+    const near = `const D="${"A".repeat(19_990 - 11)}";\n`; // a 19,990-char line
+    expect(near.length - 1).toBe(19_990);
+    expect(cutOf(near, `${near}eval(D);\n`)).toBe(0);
+    const over = `const D="${"A".repeat(20_001)}";\n`;
+    expect(cutOf(over, `${over}eval(D);\n`)).toBe(1);
+  });
+
+  test("a line that defines several used names is listed once", () => {
+    const o = `const ${Array.from({ length: 8 }, (_, i) => `D${i}="${"A".repeat(400)}"`).join(",")};\r${"\x01".repeat(1_000_000)}\n`;
+    const out = chunkDiff(map({ "package.json": pkg, "index.js": o }), map({ "package.json": pkg, "index.js": `${o}void [${Array.from({ length: 8 }, (_, i) => `D${i}`).join(",")}];\n` }), 10_000_000).join("");
+    expect(out.split("chars, sha256").length - 1).toBe(1);
+    expect(out).toContain("(a definition of D0, D1, D2, D3, D4, D5, D6, D7)");
+    expect(out.slice(out.indexOf("[unchanged lines")).length).toBeLessThanOrEqual(60_000);
+  });
+
+  test("the review holds for a used cut definition, and a short definition with the same setup passes", async () => {
+    const run = async (def: string) => {
+      const ctx = `const D="${def}";\nmodule.exports=1;\n`;
+      const r = await reviewUpdate({
+        eco: "npm", name: "p", from: "1.0.0", to: "1.0.1",
+        registry: { latest: async () => undefined, publishedAt: async () => new Date("2020-01-01"), artifactUrls: async () => [] },
+        advisories: { query: async () => [] },
+        reviewer: { name: "fake", review: async () => "APPROVE\nno attack indicators found" },
+        cooldownDays: 1, now: new Date("2026-10-21T00:00:00Z"),
+        loadArtifacts: async () => ({ old: map({ "package.json": pkg, "index.js": ctx }), new: map({ "package.json": pkg, "index.js": `${ctx}f(D);\n` }) }),
+      });
+      return r.layers.find((x) => x.layer === "reviewer");
+    };
+    expect((await run("A".repeat(30_000)))?.detail).toContain("not model-reviewable: definition too large to show");
+    expect((await run("A".repeat(500)))?.verdict).toBe("pass");
+  });
+});
+
+describe("an image layer file with a used definition that is cut holds", () => {
+  const EV: ImageEvidence = { entrypoint: '["/app/server"]', cmd: "null", history: [] };
+  const review = (def: string) =>
+    withTmp(async (dir) => {
+      const before = { "app/index.js": `const D="${def}";\nmodule.exports=1;\n` };
+      const after = { "app/index.js": `const D="${def}";\nmodule.exports=1;\nf(D);\n` };
+      return reviewLayers({ old: specLayers(dir, "o", [before]), new: specLayers(dir, "n", [before, after]), newEvidence: EV, store: new LayerStore(dir, LIMITS) });
+    });
+
+  test("a 30,000-char definition used by the changed line is a hit; a short one is not", async () => {
+    expect((await review("A".repeat(30_000))).hits.some((h) => h.startsWith("not model-reviewable: definition too large to show in app/index.js"))).toBe(true);
+    const short = await review("A".repeat(500));
+    expect(short.hits.some((h) => h.includes("definition too large"))).toBe(false);
+    expect(short.parts.join("\n")).toContain("A".repeat(500));
   });
 });

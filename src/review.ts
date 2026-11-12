@@ -238,15 +238,23 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
 // (its `=` lines), so a line the diff already prints, or one that moved, is not listed twice; when the diff fell back to
 // the whole new version, nothing is listed. Runs are found by one character pass over unchanged lines of BLOB_RUN or
 // more characters; the number of lines, the length of each and the total shown are capped, and the result is cached per file pair.
-// Names are read from every added token except a property (`o.D`); a name in a comment or a string also lists its definition (cost only).
+// The listing is broad: every added token selects the definitions of that name (a comment, a string, a property too).
+// A definition that cannot be shown whole (cut, hash only, past the caps or the limit) holds the file only when a changed line
+// USES the name: comments, strings and regex literals do not count, nor a declaration or parameter name (a parameter shadows its own
+// function body), nor a `.name` property unless a definition of the name is itself a property. A name that a changed line
+// uses through another binding of the same spelling (an inner variable, a closure) still counts: that cost is not removable here.
 const BLOB_RUN = 400; // the pre-pass encoded-blob threshold
 const BLOB_DEFS_MAX = 8;
 const BLOB_LINE_MAX = 20_000; // a longer line is shown as its head and tail with its length and sha256
 const BLOB_TOTAL_MAX = 60_000; // past this, the remaining lines are a length and sha256 only
 const blobDefsCache = new WeakMap<Uint8Array, { before: Uint8Array | undefined; out: { text: string; cut: boolean } | undefined }>();
 
-function encodedRunLead(l: string): string[] {
-  const names: string[] = [];
+const IDENT = /[\p{L}_$][\p{L}\p{N}_$]*/gu;
+const IDENT_CH = /[\p{L}\p{N}_$]/u;
+
+/** The names an encoded run of BLOB_RUN or more characters is assigned to on this line (`D = "<run>"`), with whether the name is a property (`o.D = ...`). */
+function encodedRunLead(l: string): { name: string; prop: boolean }[] {
+  const found: { name: string; prop: boolean }[] = [];
   let start = -1;
   const isEnc = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 || c === 61 || c === 95 || c === 45;
   for (let i = 0; i <= l.length; i++) {
@@ -254,19 +262,166 @@ function encodedRunLead(l: string): string[] {
       if (start < 0) start = i;
       continue;
     }
-    if (start >= 0 && i - start >= BLOB_RUN && names.length < 16) {
-      const lead = /([\p{L}_$][\p{L}\p{N}_$]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
-      if (lead) names.push(lead[1]!);
+    if (start >= 0 && i - start >= BLOB_RUN && found.length < 16) {
+      const lead = /(\.\s*)?([\p{L}_$][\p{L}\p{N}_$]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
+      if (lead) found.push({ name: lead[2]!, prop: lead[1] !== undefined });
     }
     start = -1;
   }
-  return names;
+  return found;
+}
+
+/** The line with comments, string contents, template text (not its `${}` parts) and regex literals blanked to spaces, so indices still match. */
+function blankNonCode(l: string): string {
+  const n = l.length;
+  let out = "";
+  let last = ""; // the last significant character kept, to tell a regex literal from a division
+  let i = 0;
+  const blank = (to: number) => {
+    const j = Math.min(n, to);
+    out += " ".repeat(j - i);
+    i = j;
+  };
+  while (i < n) {
+    const c = l[i]!;
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < n && l[j] !== c) j += l[j] === "\\" ? 2 : 1;
+      blank(j + 1);
+      last = c;
+    } else if (c === "`") {
+      let j = i + 1;
+      out += " ";
+      i++;
+      while (j < n && l[j] !== "`") {
+        if (l[j] === "\\") j += 2;
+        else if (l[j] === "$" && l[j + 1] === "{") {
+          blank(j);
+          let depth = 0;
+          while (j < n) {
+            if (l[j] === "{") depth++;
+            else if (l[j] === "}" && --depth === 0) break;
+            j++;
+          }
+          out += l.slice(i, Math.min(n, j + 1));
+          i = Math.min(n, j + 1);
+          j = i;
+        } else j++;
+      }
+      blank(j + 1);
+      last = "`";
+    } else if (c === "/" && l[i + 1] === "/") blank(n);
+    else if (c === "/" && l[i + 1] === "*") {
+      const e = l.indexOf("*/", i + 2);
+      blank(e < 0 ? n : e + 2);
+    } else if (c === "/" && (last === "" || "(,=:[!&|?{};".includes(last))) {
+      let j = i + 1;
+      let cls = false;
+      while (j < n && (cls || l[j] !== "/")) {
+        if (l[j] === "\\") j++;
+        else if (l[j] === "[") cls = true;
+        else if (l[j] === "]") cls = false;
+        j++;
+      }
+      blank(j + 1);
+      last = "/";
+    } else {
+      out += c;
+      i++;
+      if (c !== " " && c !== "\t") last = c;
+    }
+  }
+  return out;
+}
+
+/** The end of a function body or arrow expression that starts at `from` (after the parameter list), on one line: the matching `}`, or the end of the expression. */
+function bodyEnd(code: string, from: number): number {
+  let p = from;
+  while (code[p] === " ") p++;
+  if (code[p] === "=" && code[p + 1] === ">") p += 2;
+  while (code[p] === " ") p++;
+  const block = code[p] === "{";
+  let depth = 0;
+  for (let q = p; q < code.length; q++) {
+    const c = code[q]!;
+    if (c === "{" || c === "(" || c === "[") depth++;
+    else if (c === "}" || c === ")" || c === "]") {
+      depth--;
+      if (block ? depth === 0 : depth < 0) return block ? q + 1 : q;
+    } else if (!block && depth === 0 && (c === "," || c === ";")) return q;
+  }
+  return code.length;
+}
+
+const DECL_WORDS = new Set(["const", "let", "var", "function", "class"]);
+
+/** Which of `names` a changed line uses (see the note above unchangedBlobDefs). `props` are names a definition of which is a property. */
+function narrowUses(lines: string[], names: Set<string>, props: Set<string>): Set<string> {
+  const used = new Set<string>();
+  for (const l of lines) {
+    if (used.size === names.size) break;
+    const code = blankNonCode(l);
+    const shadows: { names: Set<string>; from: number; to: number }[] = [];
+    for (const m of code.matchAll(/\bfunction\b\s*\*?\s*[\p{L}\p{N}_$]*\s*\(([^()]*)\)|\bcatch\s*\(([^()]*)\)|\(([^()]*)\)\s*=>|([\p{L}_$][\p{L}\p{N}_$]*)\s*=>/gu)) {
+      const list = m[1] ?? m[2] ?? m[3];
+      const bound = new Set<string>();
+      let from = m.index!;
+      let after = m.index! + m[0].length;
+      if (list !== undefined) {
+        const lo = m.index! + m[0].lastIndexOf("(") + 1;
+        for (const t of list.matchAll(IDENT)) {
+          const before = list.slice(0, t.index!).trimEnd();
+          const next = list.slice(t.index! + t[0].length).trimStart();
+          if ((before === "" || before.endsWith(",")) && (next === "" || next[0] === "," || next[0] === "=")) bound.add(t[0]);
+        }
+        from = lo;
+        after = lo + list.length + 1;
+      } else bound.add(m[4]!);
+      if (bound.size) shadows.push({ names: bound, from, to: bodyEnd(code, after) });
+    }
+    for (const m of code.matchAll(IDENT)) {
+      const tok = m[0];
+      if (!names.has(tok) || used.has(tok)) continue;
+      const at = m.index!;
+      let p = at - 1;
+      while (p >= 0 && code[p] === " ") p--;
+      const pc = p >= 0 ? code[p]! : "";
+      if (pc === "." && !(p >= 2 && code[p - 1] === "." && code[p - 2] === ".")) {
+        if (props.has(tok)) used.add(tok);
+        continue;
+      }
+      if (IDENT_CH.test(pc)) {
+        let q = p;
+        while (q >= 0 && IDENT_CH.test(code[q]!)) q--;
+        if (DECL_WORDS.has(code.slice(q + 1, p + 1))) continue;
+      }
+      let nx = at + tok.length;
+      while (nx < code.length && code[nx] === " ") nx++;
+      if (code[nx] === ":" && code[nx + 1] !== ":" && (pc === "{" || pc === ",")) continue; // an object key
+      if (shadows.some((s) => at >= s.from && at < s.to && s.names.has(tok))) continue;
+      used.add(tok);
+    }
+  }
+  return used;
+}
+
+/** True when some line is BLOB_RUN or more characters. */
+function hasLongLine(s: string): boolean {
+  for (let a = 0; a < s.length; ) {
+    let e = s.indexOf("\n", a);
+    if (e < 0) e = s.length;
+    if (e - a >= BLOB_RUN) return true;
+    a = e + 1;
+  }
+  return false;
 }
 
 function unchangedBlobDefs(before: string, after: string): { text: string; cut: boolean } | undefined {
+  if (!hasLongLine(after)) return undefined;
   const ops = diffSeq(before.split("\n"), after.split("\n"));
   if (!ops) return undefined;
   const defs = new Map<string, number[]>();
+  const props = new Set<string>();
   const added: { l: string; at: number }[] = [];
   const kept: string[] = [];
   let ni = 0;
@@ -275,9 +430,10 @@ function unchangedBlobDefs(before: string, after: string): { text: string; cut: 
     if (o.op === "+") added.push({ l: o.v, at: ni });
     else if (o.v.length >= BLOB_RUN) {
       kept[ni] = o.v;
-      for (const n of encodedRunLead(o.v)) {
-        const at = defs.get(n);
-        if (!at) defs.set(n, [ni]);
+      for (const { name, prop } of encodedRunLead(o.v)) {
+        if (prop) props.add(name);
+        const at = defs.get(name);
+        if (!at) defs.set(name, [ni]);
         else if (at[at.length - 1] !== ni) at.push(ni);
       }
     }
@@ -286,50 +442,74 @@ function unchangedBlobDefs(before: string, after: string): { text: string; cut: 
   if (!defs.size || !added.length) return undefined;
   const firstUse = new Map<string, number>();
   for (const { l, at } of added) {
-    for (const m of l.matchAll(/[\p{L}_$][\p{L}\p{N}_$]*/gu)) {
+    for (const m of l.matchAll(IDENT)) {
       const n = m[0];
-      if (!defs.has(n) || firstUse.has(n)) continue;
-      firstUse.set(n, at);
+      if (defs.has(n) && !firstUse.has(n)) firstUse.set(n, at);
     }
   }
   if (!firstUse.size) return undefined;
-  // Names in the order their first use appears; each name's definitions nearest-preceding first.
-  const picked: [string, number][] = [];
+  // Names in the order their first use appears; each name's definitions nearest-preceding first. A line that defines several used names is listed once.
+  const lineNames = new Map<number, string[]>();
   for (const [n, use] of [...firstUse].sort((a, b) => a[1] - b[1])) {
     const at = defs.get(n)!;
     const prior = at.filter((i) => i < use).reverse();
-    for (const i of [...prior, ...at.filter((i) => i >= use)]) picked.push([n, i]);
+    for (const i of [...prior, ...at.filter((i) => i >= use)]) {
+      const names = lineNames.get(i);
+      if (!names) lineNames.set(i, [n]);
+      else if (!names.includes(n)) names.push(n);
+    }
   }
   // Limits apply to the final text: a line is quoted first (each control character can grow to six), then its length,
-  // the label and the hash all count against the per-line and the total cap.
+  // the label and the hash all count against the per-line and the total cap. Only the capped head and tail are ever escaped.
   const header = "[unchanged lines that define a name the changed lines use, each holding an encoded run]\n";
   let out = header;
-  // A line cut to head and tail, shown as a hash, left past the cap or past the definition limit is not fully shown: the file is a hold for a human.
-  let cut = picked.length > BLOB_DEFS_MAX;
-  for (const [n, i] of picked.slice(0, BLOB_DEFS_MAX)) {
+  const notShown = new Set<string>(); // the names of a definition that is cut, hash only, left past the caps or past the limit
+  const entries = [...lineNames];
+  let stopped = false;
+  entries.forEach(([i, names], k) => {
+    if (stopped || k >= BLOB_DEFS_MAX) {
+      for (const n of names) notShown.add(n);
+      return;
+    }
     const l = kept[i]!;
-    const h = new Bun.CryptoHasher("sha256").update(l).digest("hex");
-    const meta = `[${l.length} chars, sha256 ${h}]`;
-    const prefix = `=${i + 1} (a definition of ${n}): `;
-    const quote = l.includes("\r") || /[ \t]$/.test(l);
-    const entry = (body: string) => `${prefix}${quote ? JSON.stringify(body) : body}\n`;
-    const limit = Math.min(BLOB_LINE_MAX, BLOB_TOTAL_MAX - out.length);
-    let e = entry(l);
-    for (let k = 1; e.length > limit && k > 1 / 64; k /= 2) {
-      cut = true;
-      const tail = Math.floor(2000 * k);
-      e = entry(`${l.slice(0, Math.floor((BLOB_LINE_MAX - 2000) * k))}…${l.slice(l.length - tail)} ${meta}`);
+    const hash = new Bun.CryptoHasher("sha256").update(l).digest("hex");
+    const meta = `[${l.length} chars, sha256 ${hash}]`;
+    const prefix = `=${i + 1} (a definition of ${names.join(", ")}): `;
+    const quote = l.includes("\r") || l[l.length - 1] === " " || l[l.length - 1] === "\t";
+    const render = (s: string) => (quote ? JSON.stringify(s) : s);
+    const limit = Math.min(BLOB_LINE_MAX, BLOB_TOTAL_MAX - out.length - prefix.length - 1);
+    let body: string | undefined;
+    let whole = true;
+    if (l.length + (quote ? 2 : 0) <= limit) {
+      body = render(l);
+      if (body.length > limit) body = undefined;
     }
-    if (e.length > limit) {
-      cut = true;
-      e = entry(meta);
+    if (body === undefined) {
+      for (let f = 1; f > 1 / 64; f /= 2) {
+        const headN = Math.floor((BLOB_LINE_MAX - 2000) * f);
+        const tailN = Math.floor(2000 * f);
+        const b = render(`${l.slice(0, headN)}…${l.slice(Math.max(headN, l.length - tailN))} ${meta}`);
+        if (b.length <= limit) {
+          body = b;
+          whole = headN + tailN >= l.length;
+          break;
+        }
+      }
     }
+    if (body === undefined) {
+      whole = false;
+      body = render(meta);
+    }
+    const e = `${prefix}${body}\n`;
     if (out.length + e.length > BLOB_TOTAL_MAX) {
-      cut = true;
-      break;
+      stopped = true;
+      for (const n of names) notShown.add(n);
+      return;
     }
     out += e;
-  }
+    if (!whole) for (const n of names) notShown.add(n);
+  });
+  const cut = notShown.size > 0 && narrowUses(added.map((a) => a.l), notShown, props).size > 0;
   return out === header && !cut ? undefined : { text: out === header ? "" : out, cut };
 }
 
