@@ -203,9 +203,6 @@ const roundTwoQuiet: [string, string][] = [
   ["a double-quoted default of braces redirected", `echo "\${OPTS:-{}}" > opts.json`],
   ["a default of braces inside a substitution", `CFG=$(echo "\${npm_config_cfg:-{}}")`],
   ["a hash -p of echo with a dotted argument", "hash -p /bin/echo E; E v1.2"],
-  ["a variable overwritten by a literal before arithmetic", "x='a[$(node docs/evil.js)]'; x=1; : $((x))"],
-  ["a variable set from cat then overwritten", "x=$(cat name.txt); x=1; : $((x))"],
-  ["a variable overwritten on a later line", "v=$(git describe)\nv=1\n[[ $v -gt 0 ]]"],
   ["a node version gate in a double-bracket test", `if [[ "$(node -p 'process.versions.node.split(".")[0]')" -lt 18 ]]; then exit 1; fi`],
   ["a job count from nproc or a number", "make -j$(( $(nproc 2>/dev/null || echo 2) ))"],
   ["a count from wc -l in a double-bracket test", "[[ $(ls dist | wc -l) -eq 0 ]] && node lib/ok.js"],
@@ -218,10 +215,10 @@ for (const [label, hook] of roundTwoQuiet) {
   });
 }
 
-// Reads that must stay linear. Each shape is run at 0.25 and at 0.5 MiB (a warm-up, then the median of five runs); a linear read
-// takes about twice as long at twice the size and a quadratic one four times. The floor keeps runs of a few milliseconds from
-// deciding the ratio.
-const median = (f: () => number): number => [f(), f(), f(), f(), f()].sort((a, b) => a - b)[2]!;
+// Reads that must stay linear. Each shape is timed at 0.25, 0.5 and 1 MiB (a warm-up, then the median of three runs per size) and
+// the slope of a least-squares line through the points in log-log scale is taken: about 1 for a linear read and 2 for a quadratic
+// one. A run that is over the bound is tried again, twice, and passes if any try is under it: a slow host spoils a try, not a fit.
+const median = (f: () => number): number => [f(), f(), f()].sort((x, y) => x - y)[1]!;
 const scriptHook = (body: string) => files({
   "package.json": JSON.stringify({ name: "p", version: "1.0.0", scripts: { postinstall: "sh install.sh" } }),
   "install.sh": body,
@@ -245,6 +242,19 @@ const timeAt = (make: (bytes: number) => string, bytes: number): number => {
   scriptTime(body);
   return median(() => scriptTime(body));
 };
+const slope = (points: [number, number][]): number => {
+  const xs = points.map(([bytes]) => Math.log(bytes));
+  const ys = points.map(([, ms]) => Math.log(Math.max(ms, 1)));
+  const mx = xs.reduce((x, y) => x + y, 0) / xs.length;
+  const my = ys.reduce((x, y) => x + y, 0) / ys.length;
+  let num = 0;
+  let den = 0;
+  xs.forEach((x, k) => {
+    num += (x - mx) * (ys[k]! - my);
+    den += (x - mx) * (x - mx);
+  });
+  return num / den;
+};
 const linearShapes: [string, (bytes: number) => string][] = [
   ["a line per variable set from a substitution", (b) => lines(b, (i) => `x${String(i).padStart(6, "0")}=$(cat n)${" ".repeat(100)}\n`)],
   ["a heredoc of literal substitutions", (b) => "cat <<EOF >/dev/null\n" + "$(printf 1) ".repeat(Math.floor(b / 12)) + "\nEOF\n"],
@@ -255,13 +265,17 @@ const linearShapes: [string, (bytes: number) => string][] = [
   ["one long line of unclosed braces", (b) => ": ${X ".repeat(Math.floor(b / 6)) + "\n"],
   ["a line per default with a bare brace that bash never closes", (b) => lines(b, () => "echo ${X:-{}\n")],
   ["a line per pattern removal with a bare brace", (b) => lines(b, () => "v=${v%%{*}\n")],
+  ["one double-quoted string of defaults with a bare brace", (b) => 'echo "' + "${X:-{}".repeat(Math.floor(b / 7)) + '"\n'],
+  ["one unquoted heredoc of defaults with a bare brace", (b) => "cat <<EOF >/dev/null\n" + "${X:-{}".repeat(Math.floor(b / 7)) + "\nEOF\n"],
 ];
 for (const [label, make] of linearShapes) {
   test(`${label} reads in linear time`, () => {
-    const small = timeAt(make, 262144);
-    const large = timeAt(make, 524288);
-    expect(large / Math.max(small, 30)).toBeLessThan(3.4);
-  }, 120000);
+    let best = Infinity;
+    for (let attempt = 0; attempt < 3 && best >= 1.4; attempt++) {
+      best = Math.min(best, slope([262144, 524288, 1048576].map((bytes): [number, number] => [bytes, timeAt(make, bytes)])));
+    }
+    expect(best).toBeLessThan(1.4);
+  }, 300000);
 }
 
 // Round three: reads after many unclosed spans, assignments that do not clear, bodies in the order they run, and names that digits-only
@@ -294,9 +308,37 @@ const round3Held: [string, string][] = [
   ["wc -l over a file operand in arithmetic", "list.txt='a[$(node T/evil.js)]'; echo $(( $(wc -l list.txt) )) | cat"],
   ["node -v cut without removing the v, in arithmetic", "v18='a[$(node T/evil.js)]'; echo $(( $(node -v | cut -d. -f1) )) | cat"],
   ["grep -rc in arithmetic", "Q='a[$(node T/evil.js)]'; echo $(( $(grep -rc . .) )) | cat"],
-  ["grep -c over one file in arithmetic (accepted cost: only standard input is taken)", "Q='a[$(node T/evil.js)]'; echo $(( $(grep -c . Q) )) | cat"],
-  ["the job count from grep -c over /proc/cpuinfo (accepted cost)", "make -j$(( $(grep -c ^processor /proc/cpuinfo) + 1 ))"],
+  ["grep -c over a variable operand in arithmetic", "f='a[$(node T/evil.js)]'; echo $(( $(grep -c . $f) )) | cat"],
+  ["grep -ci over a file in arithmetic (only -c is taken)", "i='a[$(node T/evil.js)]'; echo $(( $(grep -ci . i) )) | cat"],
+  ["a variable set on the line below the arithmetic that reads it", "x=$(cat name.txt)\necho $((x)) | cat; x=1"],
+  ["a body read on the line below the variable is set, then the variable reset", 'X=$(cat name.txt)\necho "$(echo $((X)))" | cat; X=0'],
   ["a body that reads a variable set earlier on the same split line", "x=$(cat name.txt); y=$(echo $((x)))"],
+  ["a variable overwritten by a literal before arithmetic (accepted cost: assignments never clear)", "x='a[$(node docs/evil.js)]'; x=1; : $((x))"],
+  ["a variable set from cat then overwritten (accepted cost)", "x=$(cat name.txt); x=1; : $((x))"],
+  ["a variable overwritten on a later line (accepted cost)", "v=$(git describe)\nv=1\n[[ $v -gt 0 ]]"],
+  ["a declare -i of a variable already set from a substitution (accepted cost)", "x=$(cat name.txt); declare -i x | cat"],
+  ["a node version read into two variables (accepted cost: read input is never taken as safe)", `read -r maj min <<< "$(node -v | tr -d v | tr . ' ')"; (( maj >= 18 ))`],
+  ["a nested if after then closes no outer block", `${N3}; if false; then if true; then :; fi; x=1; fi; echo $((x)) | cat`],
+  ["a brace group after then", `${N3}; if false; then { :; }; x=1; fi; echo $((x)) | cat`],
+  ["an else if", `${N3}; if :; then :; else if :; then :; fi; x=1; fi; echo $((x)) | cat`],
+  ["a case in a while", `${N3}; while false; do case a in a) :;; esac; x=1; done; echo $((x)) | cat`],
+  ["a for after then", `${N3}; if false; then for i in 1; do :; done; x=1; fi; echo $((x)) | cat`],
+  ["a while after then", `${N3}; if false; then while false; do :; done; x=1; fi; echo $((x)) | cat`],
+  ["declare -p with an assignment", `${N3}; declare -p x=1; echo $((x)) | cat`],
+  ["declare -f with an assignment", `${N3}; declare -f x=1; echo $((x)) | cat`],
+  ["a readonly name declared again", `${N3}; readonly x; declare x=1; echo $((x)) | cat`],
+  ["an assignment word before a body that reads the variable (accepted cost: no word order is modelled)", `${N3}; x=1 y=$(echo $((x)))`],
+  ["a function body read before the variable is set and called after", 'f() { echo "$(: $((X)))"; }; X=$(cat name.txt); f | cat'],
+  ["a loop body read before the variable is set on a later pass", 'for i in 1 2; do echo "$(: $((X)))"; X=$(cat name.txt); done | cat'],
+  ["declare -i then an append", `printf -v X '%s' "$(cat name.txt)"; declare -i X; X+=1 | cat`],
+  ["typeset -i after read then an append", "echo $(date); read X; typeset -i X; X+=0 | cat"],
+  ["a read with a number-only substitution in the prompt and a file as input", 'read -p "$(nproc)> " x < name.txt; echo $((x)) | cat'],
+  ["a read with a number-only substitution in the timeout and a file as input", "read -t $(nproc) x < name.txt; : $((x)) | cat"],
+  ["a local outside a function", `${N3}; local x=1; echo $((x)) | cat`],
+  ["a readonly variable assigned again", "bash -c 'readonly x=$(cat name.txt); x=1; echo $((x)) | cat'"],
+  ["a counting pipeline whose first stage runs a file", "echo $(( $(node T/evil.js | wc -l) )) | cat"],
+  ["a grep count whose first stage runs a file", "[[ $(sh T/evil.sh | grep -c ok) -eq 0 ]] && echo x | cat"],
+  ["an unset of a nameref", `printf -v X '%s' "$(cat name.txt)"; declare -n X; unset X | cat`],
 ];
 
 for (const [label, hook] of round3Held) {
@@ -311,18 +353,18 @@ for (const [label, hook] of round3Held) {
 const round3Quiet: [string, string][] = [
   ["nine well-formed nested defaults before a node run of an unrelated file", ": ${A:-{a}}\n".repeat(9) + "node lib/ok.js"],
   ["an unset of a variable set from a substitution", 'TMP=$(mktemp -d); cp lib/ok.js "$TMP"; rm -rf "$TMP"; unset TMP'],
-  ["a declare -i of a variable already set from a substitution", "x=$(cat name.txt); declare -i x | cat"],
   ["a count from wc -l of a file on standard input", "echo $(( $(wc -l < list.txt) + 1 )) | cat"],
   ["a width from tput", "W=$(( $(tput cols) - 2 ))"],
   ["a commit count from git rev-list", "[[ $(git rev-list --count HEAD) -gt 0 ]] && echo x"],
   ["a node major version on the next line", "NODE_MAJOR=$(node -v | cut -d. -f1 | tr -d v)\n[[ $NODE_MAJOR -lt 16 ]]"],
   ["a node major version used in an if", "MAJOR=$(node -v | cut -d. -f1 | tr -d v)\nif [[ $MAJOR -lt 18 ]]; then exit 1; fi"],
-  ["a node version read into two variables", `read -r maj min <<< "$(node -v | tr -d v | tr . ' ')"; (( maj >= 18 ))`],
   ["an npm major version", "M=$(npm -v | cut -d. -f1); [[ $M -ge 9 ]] && echo ok"],
   ["the major kernel version", "[[ $(uname -r | cut -d. -f1) -ge 20 ]] && echo new"],
-  ["a variable overwritten by a literal on its own", "x=$(cat name.txt)\nx=0\n: $((x))"],
   ["a body that reads a variable set from a known number", "x=$(cat name.txt); y=$(echo 1)"],
   ["grep -c of a pattern on standard input", "make -j$(( $(ls | grep -c x) + 1 ))"],
+  ["the job count from grep -c over one literal file", "make -j$(( $(grep -c ^processor /proc/cpuinfo) + 1 ))"],
+  ["a node major version cut and sed on the next line", "NODE_MAJOR=$(node -v | cut -d. -f1 | sed 's/v//')\n[[ $NODE_MAJOR -lt 16 ]]"],
+  ["a file count with the padding removed on the next line", "COUNT=$(ls dist | wc -l | tr -d ' ')\nif (( COUNT == 0 )); then node lib/ok.js; fi"],
 ];
 
 for (const [label, hook] of round3Quiet) {
