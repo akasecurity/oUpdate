@@ -32,15 +32,17 @@ function writeTree(dir: string, files: FileMap) {
 
 for (const id of readdirSync(work)) {
   try {
+  let wrote = false;
   for (const side of ["good", "bad"] as const) {
     const d = join(work, id, side);
     if (!existsSync(d)) continue;
-    const f = readdirSync(d).map((x) => join(d, x))[0];
+    const f = readdirSync(d).filter((x) => !/\.\d+\.[0-9a-z]+\.tmp$/.test(x)).map((x) => join(d, x))[0]; // a stale <zip>.<pid>.<x>.tmp is never a sample
     if (!f) continue;
     const files = id.startsWith("control-") || side === "good" ? await readArtifact(f) : await readSample(f, "infected", ecoFor(id));
     writeTree(join(work, id, `tree-${side}`), files);
+    wrote = true;
   }
-  console.log(`extracted ${id}`);
+  console.log(wrote ? `extracted ${id}` : `nothing to extract for ${id}`);
   } catch (e) {
     console.log(`extract failed ${id}: ${e instanceof Error ? e.message : String(e)}`);
   }

@@ -7,12 +7,29 @@
 //
 // usage: bun acceptance/run.ts [--reviewers <file | JSON array>] [--only <id,...>] [--layers <layer,...>]
 // --layers prepass,scan,reviewer,gate runs with no outside knowledge (no advisory, no cooldown).
-//          [--scanner <JSON>] [--work <dir>] [--offline] [--set core|extended|all]
+//          [--scanner <JSON>] [--work <dir>] [--offline] [--cache <dir>] [--prefetch] [--set core|extended|all]
 //   --set picks the cases (acceptance/sets.ts): core (default) is the published set scored
 //   against the bar; extended is the further real releases and their controls; all is both.
 //   --work keeps every downloaded artifact in <dir>/<id>/ (default ./acceptance-work);
-//   --offline reviews what is already in --work and downloads nothing, so a
+//   --offline reviews what is already in --work or --cache and downloads nothing, so a
 //   second machine can score its reviewers against the same bytes.
+//   --cache keeps the dataset samples (default ~/.cache/oupdate-acceptance/samples, as <dir>/<sha256>/<path key>/<zip>).
+//   Every datadog case pins the sha256 of its zip in cases.json (source.sha256), and a sample is used only when its bytes hash
+//   to the pin, from <work>/<id>/bad, the cache or a fetch (tried in that order; the fetch backs off on 403, 429 and 5xx). That is
+//   why the shared home default is safe: a hit cannot change the bytes a case reviews. A wrong, planted or truncated file is
+//   replaced by a fetch (offline: an error), and a case without a pin is refused. One line per case: sample <id>: work|cache|fetched sha256:<hex>.
+//   --prefetch fetches every dataset sample of the --set into the cache, one at a time, reports every failed id and exits nonzero
+//   if any failed, without a review; run it once before sharding a run so the shards do not hit the unauthenticated GitHub API
+//   limit. It cannot be combined with --offline. Add --verify-pins to fetch every sample fresh (the cache is not used) and
+//   compare it with its pin instead: one line per case, nonzero exit on any mismatch.
+//   The dataset path is part of the cache key, and <work>/<id>/.meta/dataset-path.txt records it for the work dir, so a path
+//   edited without its pin misses a warm cache or work dir and fails loudly on the fetch (a work zip with no marker, from an earlier
+//   version or by hand, is accepted: its hash pins it). A wrong zip in <work>/<id>/bad is renamed into <work>/<id>/.meta, not
+//   deleted. Every directory from the work dir or cache root down to the file must be a real directory: a symbolic link is never
+//   used. The review reads a private copy of the verified bytes, re-hashed just before the read.
+//   Time: one stateless rule. A request retries up to 4 attempts (2 s, 4 s and 8 s between), and the listing and the download of one
+//   sample share a hard budget of 60 s (monotonic clock), fresh for each sample. Nothing is remembered between samples: a lasting outage
+//   costs at most 60 s per sample (25 samples, at most 25 minutes) and a server that comes back is used by the next sample.
 // Results go to ./acceptance-results/<id>[-<reviewer>].json and summary.txt; summary.txt
 // ends with a scorecard per reviewer (acceptance/scorecard.ts) beside the published result.
 
@@ -27,6 +44,7 @@ import { osvFeed } from "../src/adapters/advisory/osv.ts";
 import { makeReviewer, validateReviewerSpec, type ReviewerSpec } from "../src/adapters/reviewer/spec.ts";
 import { makeScanner, parseScannerSpec } from "../src/adapters/scanner/spec.ts";
 import { get, JSON_TIMEOUT_MS } from "./http.ts";
+import { DEFAULT_CACHE, prefetchAll, readVerifiedSample, sampleZip, verifyPins } from "./samples.ts";
 import { scorecard, type ScoreRow } from "./scorecard.ts";
 import { layerLines } from "./summary.ts";
 import { inSet, parseSet, setCounts, type CaseSet } from "./sets.ts";
@@ -41,12 +59,11 @@ interface Case {
   name: string;
   good: string;
   bad: string;
-  source?: { type: "datadog"; path: string } | { type: "replay"; script: string } | { type: "synthetic"; generator: SyntheticKind | CorpusKind };
+  source?: { type: "datadog"; path: string; sha256?: string } | { type: "replay"; script: string } | { type: "synthetic"; generator: SyntheticKind | CorpusKind };
   window?: { published?: string; removed?: string };
   set?: CaseSet;
 }
 
-const DATASET_API = "https://api.github.com/repos/DataDog/malicious-software-packages-dataset/contents/samples";
 const DATASET_PASS = "infected"; // the dataset's published passphrase
 
 const argv = process.argv.slice(2);
@@ -55,6 +72,11 @@ const flag = (n: string) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const offline = argv.includes("--offline");
+const prefetch = argv.includes("--prefetch");
+const verifyPinsFlag = argv.includes("--verify-pins");
+if (prefetch && offline) throw new Error("--prefetch downloads, so it cannot be combined with --offline");
+if (verifyPinsFlag && !prefetch) throw new Error("--verify-pins goes with --prefetch");
+const cacheDir = resolve(flag("--cache") ?? DEFAULT_CACHE);
 const work = resolve(flag("--work") ?? "acceptance-work");
 const results = resolve("acceptance-results");
 mkdirSync(results, { recursive: true });
@@ -76,6 +98,18 @@ const allControls = JSON.parse(readFileSync(join(here, "controls.json"), "utf8")
 const cases = allCases.filter((c) => inSet(c, set) && (c.source?.type === "datadog" || c.source?.type === "synthetic"));
 const controls = allControls.filter((c) => inSet(c, set));
 const all = [...cases.map((c) => ({ c, malicious: true })), ...controls.map((c) => ({ c, malicious: false }))].filter(({ c }) => !only || only.includes(c.id));
+
+if (prefetch) {
+  const samples = all.filter(({ c, malicious }) => malicious && c.source?.type === "datadog").map(({ c }) => ({ id: c.id, path: (c.source as { type: "datadog"; path: string; sha256?: string }).path, sha256: (c.source as { sha256?: string }).sha256 }));
+  if (verifyPinsFlag) {
+    const bad = await verifyPins(samples);
+    console.log(`verify-pins: ${samples.length} dataset samples in set ${set}, ${samples.length - bad.length} match upstream, ${bad.length} failed${bad.length ? ` (${bad.join(", ")})` : ""}`);
+    process.exit(bad.length ? 1 : 0);
+  }
+  const failed = await prefetchAll(samples, cacheDir);
+  console.log(`prefetch: ${samples.length} dataset samples in set ${set}, ${samples.length - failed.length} in the cache, ${failed.length} failed${failed.length ? ` (${failed.join(", ")})` : ""}, cache ${cacheDir}`);
+  process.exit(failed.length ? 1 : 0);
+}
 
 const registries: Record<Ecosystem, Registry> = { npm: npmRegistry(), pypi: pypiRegistry() };
 
@@ -107,18 +141,10 @@ async function loadPair(c: Case, malicious: boolean): Promise<{ old: FileMap; ne
   let badMap: FileMap;
   let kind: "wheel" | "sdist" | "npm";
   if (malicious) {
-    let zip = onlyFile(join(dir, "bad"), "");
-    if (!zip) {
-      if (offline) throw new Error(`offline: no sample in ${dir}/bad`);
-      const src = c.source as { type: "datadog"; path: string };
-      const listing = JSON.parse(new TextDecoder().decode(await get(`${DATASET_API}/${src.path}`, { accept: "application/vnd.github+json", timeoutMs: JSON_TIMEOUT_MS }))) as { name: string; download_url: string }[];
-      const z = listing.find((x) => x.name.endsWith(".zip"));
-      if (!z) throw new Error(`no zip in dataset path ${src.path}`);
-      mkdirSync(join(dir, "bad"), { recursive: true });
-      zip = join(dir, "bad", z.name);
-      writeFileSync(zip, await get(z.download_url));
-    }
-    badMap = await readSample(zip, DATASET_PASS, c.eco);
+    const src = c.source as { type: "datadog"; path: string; sha256?: string };
+    const sample = await sampleZip({ id: c.id, path: src.path, sha256: src.sha256, workDir: work, cacheDir, offline });
+    console.log(`sample ${c.id}: ${sample.source} sha256:${sample.sha256}`);
+    badMap = await readVerifiedSample(sample, (zip) => readSample(zip, DATASET_PASS, c.eco));
   } else {
     kind = c.eco === "npm" ? "npm" : "wheel";
     const f = onlyFile(join(dir, "bad"), "") ?? (offline ? undefined : await fetchSide(c, c.bad, join(dir, "bad"), kind));
