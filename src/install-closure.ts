@@ -1211,9 +1211,31 @@ const TEMPLATE_LITERAL = /(?:[^`\\$\n]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*
 
 // A span of the kept text: a string (raw is its text) or text to blank when brackets are matched (a regular expression, template text).
 type SpanNote = { raw: string; at: number; len: number; mask?: boolean };
+// The char codes JavaScript's \s matches.
+function isSpaceCode(c: number): boolean {
+  if (c < 128) return c === 32 || (c >= 9 && c <= 13);
+  return c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
+}
+// The code is a word character, $, ) or ].
+function isOperandCode(c: number): boolean {
+  return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95 || c === 36 || c === 41 || c === 93;
+}
 function codeOnly(text: string, watch: string[] = [], keep = false, strings?: SpanNote[]): string | undefined {
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
+  // The last character of `out` that is not white space. Kept as the text grows: reading it back from `out` would flatten the string at every backtick.
+  let lastSig = -1; // its char code
+  // Text that holds a non-space character; white space alone is appended with `out +=` and leaves lastSig as it is.
+  const add = (s: string) => {
+    out += s;
+    for (let k = s.length - 1; k >= 0; k--) {
+      const code = s.charCodeAt(k);
+      if (!isSpaceCode(code)) {
+        lastSig = code;
+        return;
+      }
+    }
+  };
   let t1: Tok | undefined;
   let t2: Tok | undefined;
   let atLineStart = true; // only whitespace or comments since the last line break
@@ -1242,13 +1264,13 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
         // A template that opens here and holds no substitution is one plain string, whose escapes are read like a quoted one.
         if (text[st] === "`") strings?.push({ raw: text.slice(st + 1, i - 1), at: out.length, len: i - st });
         else strings?.push({ raw: "", at: out.length, len: i - st, mask: true });
-        out += keep ? text.slice(st, i) : '""';
+        add(keep ? text.slice(st, i) : '""');
         return true;
       } else if (c === "$" && text[i + 1] === "{") {
         i += 2;
         braces.push(true);
         strings?.push({ raw: "", at: out.length, len: i - st - 2, mask: true });
-        out += keep ? text.slice(st, i) : " `${";
+        add(keep ? text.slice(st, i) : " `${");
         opened = true;
         return true;
       }
@@ -1318,7 +1340,7 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
       if (text[i] !== c) return undefined;
       i++;
       strings?.push({ raw: text.slice(st + 1, i - 1), at: out.length, len: i - st });
-      out += keep ? text.slice(st, i) : '""';
+      add(keep ? text.slice(st, i) : '""');
       push("str", "");
     } else if (c === "`") {
       const st = i;
@@ -1326,12 +1348,12 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
       // A template made only of text and ${"literal"} is a plain string (require(`process`)). A tagged one is a call: not changed.
       TEMPLATE_LITERAL.lastIndex = i;
       const lit = TEMPLATE_LITERAL.exec(text);
-      if (lit && !/[\w$)\]]\s*$/.test(out)) {
+      if (lit && !isOperandCode(lastSig)) {
         const value = lit[0].slice(0, -1).replace(/\$\{\s*(?:"([^"]*)"|'([^']*)')\s*\}/g, (_m, a: string | undefined, b: string | undefined) => a ?? b ?? "");
         if (!/["\\\n\r\u2028\u2029]/.test(value)) {
           i += lit[0].length;
           strings?.push({ raw: value, at: out.length, len: value.length + 2 });
-          out += keep ? `"${value}"` : '""';
+          add(keep ? `"${value}"` : '""');
           push("str", "");
           continue;
         }
@@ -1364,13 +1386,13 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
       if (end >= 0) {
         if (keep) {
           strings?.push({ raw: "", at: out.length, len: end + 1 - i, mask: true });
-          out += text.slice(i, end + 1);
+          add(text.slice(i, end + 1));
         }
         i = end + 1;
-        if (!keep) out += "/0/"; // a body no identifier can match: a regex literal is never a name
+        if (!keep) add("/0/"); // a body no identifier can match: a regex literal is never a name
         push("regex", "");
       } else {
-        out += "/";
+        add("/");
         i++;
         push("punct", "/");
       }
@@ -1381,7 +1403,7 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
         const tpl = braces.pop();
         if (tpl) {
           i++;
-          out += "}";
+          add("}");
           if (!afterTemplate(i)) return undefined;
           continue;
         }
@@ -1412,7 +1434,7 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
         tok = c;
         push("punct", tok);
       }
-      out += tok;
+      add(tok);
       i += tok.length;
     }
   }

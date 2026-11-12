@@ -380,6 +380,24 @@ for (const [label, make] of a1) {
     for (let i = 1; i < sizes.length; i++) expect(grows(runs[i - 1]!.ms, runs[i]!.ms, sizes[i]! / sizes[i - 1]!)).toBe(true);
   }, 60_000);
 }
+// Quote characters, node: prefixes and backticks repeated: 0.125, 1 and 8 MB. Each size must stay within a small multiple of the same size of
+// plain statements, plus a floor that grows with the size, and must grow no faster than the size from one size to the next. A scan that
+// reads back over the text it has kept at every backtick takes seconds at 0.25 MB and minutes at 1 MB.
+test("repeated quotes, node: prefixes and backticks grow with the file from 0.125 to 8 MB", () => {
+  const body = (mb: number) => rep(mb, "\"node:'node:`node:", "", "\nexports.main = () => 1;");
+  const plain = (mb: number) => rep(mb, "const c = 1;\n", "", "\nexports.main = () => 1;");
+  let prev = 0;
+  let prevMb = 0;
+  for (const mb of [0.125, 1, 8]) {
+    const src = body(mb);
+    const ms = mb < 8 ? median(() => all(src).ms) : all(src).ms;
+    const control = all(plain(mb)).ms;
+    expect(ms).toBeLessThan(3 * control + 50 * mb);
+    if (prev > 0) expect(grows(prev, ms, mb / prevMb)).toBe(true);
+    prev = ms;
+    prevMb = mb;
+  }
+}, 60_000);
 test("many require calls hold from 0.25 to 8 MB and grow with the file", () => {
   const body = (mb: number) => rep(mb, `require("./lib/" + process.platform);\nrequire("./a.js");\n`);
   const small = median(() => all(body(0.25)).ms);
