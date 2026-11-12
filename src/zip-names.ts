@@ -654,13 +654,23 @@ export function zipNameNotes(path: string, listed: readonly string[], out: FileM
     else if (got.length !== e.content.length || Buffer.compare(got, e.content) !== 0) at("content zipfile reads differs from the extracted file", e.name);
   }
   // Against the unpacked tree, not the directory: a member bsdtar wrote under another name leaves its RECORD path empty.
-  // Both in NFD: bsdtar on macOS writes a zip's names decomposed.
+  // Normalized names are compared in NFD (bsdtar on macOS writes a zip's names decomposed) to tell the two holds apart.
   const tree = new Set([...out.keys()].map((k) => k.normalize("NFD")));
+  // A name the zip wrote counts as exact too (when the tree has that file): a host without name normalization installs it
+  // even where this extraction (macOS) holds it decomposed.
+  const exact = new Set([...out.keys(), ...entries.map((e) => writtenAt(e.name))]);
   const rec = wheelRecord(entries, (p) => (out.has(p) ? out.get(p) : byNfd.has(p.normalize("NFD")) ? out.get(byNfd.get(p.normalize("NFD"))!) : undefined));
   if (rec.bad) at(`the wheel RECORD cannot be read as pip reads it: ${rec.bad}`, "(archive)");
   // Each distinct path once; a RECORD over the cap holds, so no row past it goes unchecked.
   const distinct = [...new Set(rec.paths)];
   if (distinct.length > RECORD_CAP) at(`the wheel RECORD lists ${distinct.length} distinct paths, over the ${RECORD_CAP} that are checked`, "(archive)");
-  for (const p of distinct.slice(0, RECORD_CAP)) if (!tree.has(p.normalize("NFD"))) at("the wheel RECORD names it, the unpacked archive has no such file", p);
+  // A row that names no tree file as written holds. One that matches only after normalization names a file a host
+  // without name normalization does not have, so it holds with its own reason. An exact match stays quiet.
+  for (const p of distinct.slice(0, RECORD_CAP)) {
+    const inTree = tree.has(p.normalize("NFD"));
+    if (inTree && exact.has(p)) continue;
+    if (inTree) at("the wheel RECORD names it, the unpacked archive has a file of that name only after Unicode normalization", p);
+    else at("the wheel RECORD names it, the unpacked archive has no such file", p);
+  }
   return notes;
 }
