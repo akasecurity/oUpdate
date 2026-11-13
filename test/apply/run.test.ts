@@ -158,6 +158,33 @@ describe("stuck tracking in the run (port 04)", () => {
     expect(r.text).not.toContain("STUCK");
   });
 
+  describe("heldByDesign matches the exact name brew prints", () => {
+    const go = (names: string, entries: string[], seed: string) =>
+      run({ formulas: names, verbose: names.split(" ").map((n) => `${n} (1.0) < 1.1`).join("\n"), formulaTaps: Object.fromEntries(names.split(" ").map((n) => [n, "homebrew/core"])), upgradeRc: Object.fromEntries(names.split(" ").map((n) => [n, 1])), files: { [STATE]: seed } }, { cfg: { heldByDesign: entries, stuckAfter: 3 } });
+    test("a listed package is logged as held, never counted as stuck, and its old row clears; another keeps counting", async () => {
+      const r = await go("example/tap/head-tool other", ["example/tap/head-tool"], `brew${T}example/tap/head-tool=9.9${T}7${T}2026-10-01\nbrew${T}other=9.9${T}2${T}2026-10-20\n`);
+      expect(r.text).toContain("held by design (not counted as stuck): example/tap/head-tool=9.9");
+      expect(r.brew).not.toContain("head-tool=9.9(");
+      expect(r.brew).toContain("other=9.9(3 runs, since 2026-10-20)");
+      expect(r.files.get(STATE)).toBe(`brew${T}other=9.9${T}3${T}2026-10-20\n`);
+    });
+    test("a tap-qualified entry does not drop another tap's package of the same short name", async () => {
+      const r = await go("other/tap/head-tool", ["example/tap/head-tool"], "");
+      expect(r.text).not.toContain("held by design");
+      expect(r.files.get(STATE)).toBe(`brew${T}other/tap/head-tool=9.9${T}1${T}2026-10-22\n`);
+    });
+    test("a dry run tracks and logs nothing about it", async () => {
+      const r = await run({ formulas: "head-tool", verbose: "head-tool (1.0) < 1.1", formulaTaps: { "head-tool": "homebrew/core" } }, { cfg: { heldByDesign: ["head-tool"] }, dryRun: true });
+      expect(r.text).not.toContain("held by design");
+    });
+    test("a bare entry does not drop a tap-qualified package, only a bare name", async () => {
+      const q = await go("example/tap/head-tool", ["head-tool"], "");
+      expect(q.text).not.toContain("held by design");
+      const bare = await go("head-tool", ["head-tool"], "");
+      expect(bare.text).toContain("held by design (not counted as stuck): head-tool=9.9");
+      expect(bare.files.get(STATE) ?? "").not.toContain("head-tool");
+    });
+  });
   test("a cask that fails to upgrade is FAILED and counted toward stuck", async () => {
     const r = await run({ casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", upgradeRc: { "--cask --greedy app": 1 } });
     expect(r.brew).toMatch(/^ {2}brew: FAILED: app; .*casks FAILED: app; STUCK: app=9\.9\(1 runs, since 2026-10-22\)/);
