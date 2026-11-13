@@ -98,112 +98,451 @@ function rustSignals(oldFiles: FileMap, newFiles: FileMap, p: string): Signal[] 
 
 /** The custom build script a Cargo.toml names under [package] (`build = "<path>"`), relative to the crate; undefined for none or the default. */
 export function cargoBuildScript(toml: string | undefined): string | undefined {
-  const key = cargoBuildKey(toml);
+  const key = toml === undefined ? undefined : readCargoBuild(toml).key;
   return typeof key === "string" ? key : undefined;
 }
+
+/** What a Cargo.toml says under [package] build: the key (see below) and the list form, from one read of the text. */
+type CargoBuild = { key: string | false | undefined; list: string[] | undefined };
 
 /**
  * The [package] build key: the script path it names, false when it turns the build script off, undefined when absent
  * (or true: the crate root's build.rs).
  * A list of scripts (build = ["a.rs", "b.rs"], an unstable Cargo form) reads as undefined here, so the crate root's
- * build.rs is followed as usual; cargoBuildList reads the list and cargoListSignals raises a soft signal for it and for
+ * build.rs is followed as usual; the list form is read from the same result, and cargoListSignals raises a soft signal for it and for
  * each listed script that is added or changed.
  * Known limit: whether Cargo accepts a list, and which listed script runs, is not checked; every listed file is treated
  * as a script that runs.
+ * The manifest is read once and both forms are taken from that one result. The line reader runs only when the TOML parser
+ * refuses the text, or the manifest has so many keys and tables that the parser would be slow on it.
  */
-function cargoBuildKey(toml: string | undefined): string | false | undefined {
-  if (toml === undefined) return undefined;
-  try {
-    const build = (Bun.TOML.parse(toml) as { package?: { build?: unknown } }).package?.build;
-    return typeof build === "string" ? build.replace(/^\.\//, "") : build === false ? false : undefined;
-  } catch {
-    return cargoBuildKeyLines(toml);
+function readCargoBuild(toml: string): CargoBuild {
+  if (!parserIsSlow(toml)) {
+    try {
+      const build = (Bun.TOML.parse(toml) as { package?: { build?: unknown } }).package?.build;
+      return {
+        key: typeof build === "string" ? build.replace(/^\.\//, "") : build === false ? false : undefined,
+        list: Array.isArray(build) ? listEntries(flatStrings(build)) : undefined,
+      };
+    } catch {
+      // The parser refuses the text: the line reader below.
+    }
   }
+  return readCargoLines(toml);
 }
 
-/** The line reader behind cargoBuildKey, for a Cargo.toml the TOML parser refuses. */
-function cargoBuildKeyLines(toml: string): string | false | undefined {
-  let inPackage = false;
-  for (const raw of lines(toml)) {
-    const l = raw.replace(/\s#[\s\S]*$/, "").trim();
-    const sec = /^\[([^\]]+)\]$/.exec(l);
-    if (sec) { inPackage = sec[1]!.trim() === "package"; continue; }
-    if (!inPackage) continue;
-    if (/^build\s*=\s*false$/.test(l)) return false;
-    const m = /^build\s*=\s*(?:"([^"]+)"|'([^']+)')$/.exec(l);
-    if (m) return (m[1] ?? m[2])!.replace(/^\.\//, "");
+/** The TOML parser's time grows with the square of the keys and tables in one document (a manifest of 8,000 small tables
+ * takes about 0.1 s, of 130,000 about half a minute), not with its size: a manifest of one big string or array parses in
+ * a few milliseconds per megabyte. Each `=` and `[` counts as a key or table; text with more of them than this goes to
+ * the line reader. */
+const CARGO_PARSE_MARKS = 4096;
+function parserIsSlow(toml: string): boolean {
+  let marks = 0;
+  for (let i = 0; i < toml.length; i++) {
+    const c = toml.charCodeAt(i);
+    if ((c === 61 || c === 91) && ++marks > CARGO_PARSE_MARKS) return true;
   }
-  return undefined;
+  return false;
 }
 
-/** The strings of a TOML array, from just after its opening bracket to the closing one: basic and literal strings, comments
- * skipped, one pass. An unterminated string is dropped. */
-function tomlStringArray(src: string): string[] {
+/** The strings of a parsed array, nested arrays included (a string inside an inline table is no entry). */
+function flatStrings(a: unknown[]): string[] {
   const out: string[] = [];
-  const n = src.length;
-  let i = 0;
-  while (i < n) {
-    const c = src[i]!;
-    if (c === "]") break;
-    if (c === '"' || c === "'") {
-      let j = i + 1;
-      while (j < n && src[j] !== c && src[j] !== "\n") j += c === '"' && src[j] === "\\" ? 2 : 1;
-      if (src[j] === c) out.push(src.slice(i + 1, j));
-      i = j + 1;
-    } else if (c === "#") {
-      while (i < n && src[i] !== "\n") i++;
-    } else i++;
+  const todo: unknown[] = [a];
+  while (todo.length) {
+    const v = todo.pop();
+    if (typeof v === "string") out.push(v);
+    else if (Array.isArray(v)) for (let i = v.length - 1; i >= 0; i--) todo.push(v[i]);
   }
   return out;
 }
 
-const listEntry = (e: string) => e.trim().replace(/^\.\//, "");
+const ESCAPES: Record<string, string> = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", e: "\x1b", '"': '"', "\\": "\\" };
+/** A basic string's escapes, decoded; a bad escape stays as written. In a multi-line string a backslash at a line end
+ * also takes the whitespace after the break. */
+function unescapeBasic(s: string): string {
+  if (!s.includes("\\")) return s;
+  return s.replace(/\\[ \t]*\r?\n\s*|\\(u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2}|[\s\S])/g, (m, e: string | undefined) => {
+    if (e === undefined) return "";
+    if (e.length > 1) {
+      const cp = parseInt(e.slice(1), 16);
+      return cp > 0x10ffff || (cp >= 0xd800 && cp < 0xe000) ? m : String.fromCodePoint(cp);
+    }
+    return ESCAPES[e] ?? m;
+  });
+}
 
-/** The [package] build key when it is a list of scripts, the entries as written (a leading ./ removed); undefined when it
- * is not a list. Read with the TOML parser first, then a line reader for a Cargo.toml the parser refuses. */
-function cargoBuildList(toml: string | undefined): string[] | undefined {
-  if (toml === undefined) return undefined;
-  try {
-    const build = (Bun.TOML.parse(toml) as { package?: { build?: unknown } }).package?.build;
-    return Array.isArray(build) ? build.filter((e): e is string => typeof e === "string").map(listEntry) : undefined;
-  } catch {
-    return cargoBuildListLines(toml);
+/** Multi-line string delimiters (`"""`, `'''`) known to have no closing delimiter after them in the text being read: nothing
+ * later can close such a string either, so a later opener is not searched for a closer again. */
+type NoCloser = Set<string>;
+
+/** The end (just past the closing delimiter) of a multi-line string whose body starts at `from`; -1 when it runs on. */
+function multiEnd(s: string, from: number, q3: string): number {
+  const c = q3[0]!;
+  for (let i = from; i < s.length; i++) {
+    if (c === '"' && s[i] === "\\") i++;
+    else if (s.startsWith(q3, i)) {
+      let e = i + 3;
+      while (s[e] === c && e < i + 5) e++; // up to two quotes of the body may sit right before the closing three
+      return e;
+    }
+  }
+  return -1;
+}
+
+/** The TOML string that opens at `src[i]` (a quote): its value and the index after it. Undefined when it never closes (a
+ * one-line string ends at the line end; a multi-line one runs to the end of the text). `none` remembers a multi-line
+ * delimiter that found no closer, so a text of many unclosed openers is read in one pass. */
+function tomlString(src: string, i: number, none?: NoCloser): { value: string; end: number } | undefined {
+  const c = src[i]!;
+  const q3 = c.repeat(3);
+  if (src.startsWith(q3, i)) {
+    if (none?.has(q3)) return undefined;
+    const e = multiEnd(src, i + 3, q3);
+    if (e < 0) {
+      none?.add(q3);
+      return undefined;
+    }
+    let body = src.slice(i + 3, e - 3).replace(/^\r?\n/, "").replace(/\r\n/g, "\n");
+    if (c === '"') body = unescapeBasic(body);
+    return { value: body, end: e };
+  }
+  let j = i + 1;
+  while (j < src.length && src[j] !== c && src[j] !== "\n") j += c === '"' && src[j] === "\\" ? 2 : 1;
+  if (src[j] !== c) return undefined;
+  const body = src.slice(i + 1, j);
+  return { value: c === '"' ? unescapeBasic(body) : body, end: j + 1 };
+}
+
+/** A blank that is no line end: a space or tab, and the other whitespace a loose reader treats as a blank (form feed,
+ * vertical tab, a no-break space and the like). */
+const isBlank = (c: string | undefined) => c === " " || c === "\t" || (c !== undefined && c !== "\n" && c !== "\r" && c.trim() === "");
+const skipSpace = (s: string, i: number) => {
+  while (i < s.length && isBlank(s[i])) i++;
+  return i;
+};
+
+const BARE_KEY = /[A-Za-z0-9_-]+/y;
+/** A key path (`a`, `"a".b`, `a . 'b'`) at `s[i]`: its parts and the index after it. */
+function tomlKeyPath(s: string, i = 0, none?: NoCloser): { path: string[]; end: number } | undefined {
+  const path: string[] = [];
+  for (;;) {
+    i = skipSpace(s, i);
+    const c = s[i];
+    if (c === '"' || c === "'") {
+      const r = tomlString(s, i, none);
+      if (!r) return undefined;
+      path.push(r.value);
+      i = r.end;
+    } else {
+      BARE_KEY.lastIndex = i;
+      const m = BARE_KEY.exec(s);
+      if (!m) return undefined;
+      path.push(m[0]);
+      i += m[0].length;
+    }
+    i = skipSpace(s, i);
+    if (s[i] !== ".") return { path, end: i };
+    i++;
   }
 }
 
-function cargoBuildListLines(toml: string): string[] | undefined {
-  let inPackage = false;
-  const all = lines(toml);
-  for (let i = 0; i < all.length; i++) {
-    const l = all[i]!.replace(/\s#[\s\S]*$/, "").trim();
-    const sec = /^\[([^\]]+)\]$/.exec(l);
-    if (sec) { inPackage = sec[1]!.trim() === "package"; continue; }
-    if (!inPackage) continue;
-    const m = /^build\s*=\s*\[/.exec(l);
-    if (!m) continue;
+/** A line with its trailing comment cut (one-line strings kept whole). */
+function lineCode(line: string): string {
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (c === "#") return line.slice(0, i);
+    if (c === '"' || c === "'") {
+      i++;
+      while (i < line.length && line[i] !== c) i += c === '"' && line[i] === "\\" ? 2 : 1;
+    }
+  }
+  return line;
+}
+
+/** A line that starts a table: `[` or `[[` and a word that is no value (a bare key, not true, false, inf, nan). The same
+ * text inside an array can only be the entries of an array the file forgot to close. */
+const HEADER_LIKE = /\[\[?[ \t]*(?!(?:true|false|inf|nan)(?![A-Za-z0-9_-]))[A-Za-z_]/y;
+
+/** Where the package's build key gets a value: the span of text from the value on to its end. */
+type Span = { from: number; to: number };
+
+/**
+ * The spans of every value the text gives the package's build key, in file order, read in one pass over the text:
+ * `build = ..` under [package] (the header may be spaced, quoted or end in a comment), a dotted or quoted key
+ * (`package.build`, `"build"`) at the top, and `package = { build = .. }`. A header of an array of tables ([[bin]]) or any
+ * other table ends [package]. Values are skipped as TOML reads them, over lines: strings (multi-line ones whole),
+ * arrays and inline tables nest to any depth, comments are cut, so a line inside any of them is no table header and no
+ * key. An array the file never closes ends at a line that starts a table or a new key, and an inline table at a line that
+ * starts a table.
+ */
+function buildSpans(s: string): Span[] {
+  const out: Span[] = [];
+  const n = s.length;
+  const none: NoCloser = new Set();
+  const eol = (i: number) => {
+    const e = s.indexOf("\n", i);
+    return e < 0 ? n : e;
+  };
+  const skipBlank = (i: number) => {
+    for (;;) {
+      const c = s[i];
+      if (c === "\r" || c === "\n" || isBlank(c)) i++;
+      else if (c === "#") i = eol(i);
+      else return i;
+    }
+  };
+  const lineStart = (i: number) => {
+    let j = i;
+    while (j > 0 && isBlank(s[j - 1])) j--;
+    return j === 0 || s[j - 1] === "\n" ? j : -1;
+  };
+  /** The start of the line `i` begins when the text there is the end of a container that was left open, else -1. */
+  const leftOpen = (i: number, inArray: boolean) => {
+    const c = s[i]!;
+    const isHeader = c === "[" && ((HEADER_LIKE.lastIndex = i), HEADER_LIKE.test(s));
+    const isKey = inArray && !isHeader && c !== "[" && c !== "]" && c !== "{" && c !== "," && (() => {
+      const k = tomlKeyPath(s, i, none);
+      return !!k && s[skipSpace(s, k.end)] === "=" && s[skipSpace(s, k.end) + 1] !== "=";
+    })();
+    return isHeader || isKey ? lineStart(i) : -1;
+  };
+  type Entry = (path: string[], from: number, to: number) => void;
+  /** The end of the value at `start`, read with an explicit stack so nesting has no depth limit. A container left open ends
+   * at the line start that shows it. `entry` is told each key and value span of the outermost inline table. The stack is
+   * two flat arrays (container kind, and where its last element began), not an object per bracket, so a long run of
+   * brackets costs a few bytes each. */
+  const value = (start: number, entry?: Entry): number => {
+    let kinds = new Uint8Array(64); // 1: array, 2: inline table
+    let ats = new Int32Array(64);
+    let depth = 0;
+    let key: string[] | undefined; // the outermost inline table's key whose value is being read
+    let keyFrom = 0;
+    let i = start;
+    for (;;) {
+      // The value at i: a string or scalar gives its end; a container is opened and its elements read below.
+      const c = s[i];
+      let end = -1;
+      if (c === '"' || c === "'") {
+        const r = tomlString(s, i, none);
+        end = r ? r.end : s.startsWith(c.repeat(3), i) ? n : eol(i);
+      } else if (c === "[" || c === "{") {
+        if (depth === kinds.length) {
+          const k2 = new Uint8Array(depth * 2);
+          k2.set(kinds);
+          kinds = k2;
+          const a2 = new Int32Array(depth * 2);
+          a2.set(ats);
+          ats = a2;
+        }
+        kinds[depth] = c === "[" ? 1 : 2;
+        ats[depth++] = i;
+        i++;
+      } else {
+        // A number, boolean, date or junk: to the comma, bracket, brace, comment or line end.
+        let j = i;
+        while (j < n) {
+          const d = s[j];
+          if (d === "," || d === "]" || d === "}" || d === "#" || d === "\n") break;
+          j++;
+        }
+        end = j;
+      }
+      for (;;) {
+        if (end >= 0) {
+          // A value ended at `end`: hand it to the container it sits in.
+          if (depth === 0) return end;
+          if (depth === 1 && key) {
+            entry?.(key, keyFrom, end);
+            key = undefined;
+          }
+          const at = ats[depth - 1]!;
+          i = end > at ? end : at + 1;
+          end = -1;
+        }
+        i = skipBlank(i);
+        if (i >= n) return n;
+        const d = s[i]!;
+        const arr = kinds[depth - 1] === 1;
+        if (d === (arr ? "]" : "}")) {
+          depth--;
+          end = i + 1;
+          continue;
+        }
+        if (d === ",") {
+          i++;
+          continue;
+        }
+        const left = leftOpen(i, arr);
+        if (left >= 0) return left;
+        ats[depth - 1] = i;
+        if (arr) break; // an element: read its value
+        const k = tomlKeyPath(s, i, none);
+        const eq = k ? skipSpace(s, k.end) : -1;
+        if (!k || s[eq] !== "=") {
+          // Not an entry: past the junk to the next comma, brace or line end.
+          let j = i;
+          while (j < n && s[j] !== "," && s[j] !== "}" && s[j] !== "\n") j++;
+          i = j > i ? j : i + 1;
+          continue;
+        }
+        i = skipSpace(s, eq + 1);
+        if (depth === 1) {
+          key = k.path;
+          keyFrom = i;
+        }
+        break;
+      }
+    }
+  };
+
+  // Where the keys read now belong: the top of the file, the [package] table, or any other table (or an array of tables).
+  // Kept as a kind so no key line copies the table's path, which can have any number of parts.
+  const ROOT = 0, PACKAGE = 1, OTHER = 2;
+  let section = ROOT;
+  let i = 0;
+  while (i < n) {
+    i = skipBlank(i);
+    if (i >= n) break;
+    if (s[i] === "[") {
+      const e = eol(i);
+      const code = lineCode(s.slice(i, e)).trim();
+      if (code.startsWith("[[")) section = OTHER;
+      else if (code.endsWith("]")) {
+        const inner = code.slice(1, -1);
+        const k = tomlKeyPath(inner);
+        const named = k && k.end >= inner.trimEnd().length ? k.path : undefined;
+        section = named?.length === 1 && named[0] === "package" ? PACKAGE : OTHER;
+      }
+      i = e;
+      continue;
+    }
+    const k = tomlKeyPath(s, i, none);
+    const eq = k ? skipSpace(s, k.end) : -1;
+    if (!k || s[eq] !== "=") {
+      i = eol(i);
+      continue;
+    }
+    const from = skipSpace(s, eq + 1);
+    const p = k.path;
+    if ((section === PACKAGE && p.length === 1 && p[0] === "build") || (section === ROOT && p.length === 2 && p[0] === "package" && p[1] === "build")) {
+      i = value(from);
+      out.push({ from, to: i });
+    } else if (section === ROOT && p.length === 1 && p[0] === "package" && s[from] === "{") {
+      // package = { name = "x", build = .. }: the inline table may run over lines.
+      i = value(from, (p, a, b) => {
+        if (p.length === 1 && p[0] === "build") out.push({ from: a, to: b });
+      });
+    } else i = value(from);
+    if (i > 0 && s[i - 1] !== "\n") i = eol(i);
+  }
+  return out;
+}
+
+/** The line reader: the build key and list from the text, for a Cargo.toml the TOML parser refuses or would be slow on. */
+function readCargoLines(toml: string): CargoBuild {
+  let key: string | false | undefined;
+  let list: string[] | undefined;
+  for (const sp of buildSpans(toml)) {
+    const v = toml.slice(sp.from, sp.to).trim();
+    if (key === undefined) {
+      if (v === "false") key = false;
+      else if (v[0] === '"' || v[0] === "'") {
+        const r = tomlString(v, 0);
+        if (r && r.end === v.length) key = r.value.replace(/^\.\//, "");
+      }
+    }
     // The array may run over several lines: read from the bracket to its close.
-    const first = all[i]!;
-    const rest = first.slice(first.indexOf("[", first.indexOf("build")) + 1);
-    return tomlStringArray([rest, ...all.slice(i + 1)].join("\n")).map(listEntry);
+    if (list === undefined && v[0] === "[") list = listEntries(tomlStringArray(v.slice(1)));
   }
-  return undefined;
+  return { key, list };
 }
+
+/** The strings of a TOML array, from just after its opening bracket to the closing one: basic and literal strings (escapes
+ * decoded, multi-line strings whole), nested arrays' strings too, comments skipped, one pass. An unterminated string is
+ * dropped. An array the file never closes ends where a new key or table header starts (a bare word before `=`, a quoted
+ * key before `=`, a `[name]` or `[[name]]` line), so strings of later keys are not read as entries. */
+function tomlStringArray(src: string): string[] {
+  const out: string[] = [];
+  const none: NoCloser = new Set();
+  const n = src.length;
+  let i = 0;
+  let lineStart = true;
+  let depth = 0; // nested arrays
+  let braces = 0; // inline tables: their strings are keys and values, no entries
+  while (i < n) {
+    const c = src[i]!;
+    if (c === "]") {
+      if (depth === 0) break;
+      depth--;
+      i++;
+    } else if (c === "\n") {
+      lineStart = true;
+      i++;
+    } else if (/\s/.test(c)) i++;
+    else {
+      const atStart = lineStart;
+      lineStart = false;
+      if (c === '"' || c === "'") {
+        const q3 = c.repeat(3);
+        const s = tomlString(src, i, none);
+        if (!s) {
+          // Unterminated: a multi-line opener is skipped (nothing after it closes it), a one-line string runs to the line end.
+          if (src.startsWith(q3, i)) i += 3;
+          else {
+            const e = src.indexOf("\n", i);
+            i = e < 0 ? n : e;
+          }
+          continue;
+        }
+        const after = skipSpace(src, s.end);
+        if (braces === 0 && (src[after] === "=" || src[after] === ".")) break; // a quoted key, not an entry
+        if (braces === 0) out.push(s.value);
+        i = s.end;
+      } else if (c === "#") {
+        while (i < n && src[i] !== "\n") i++;
+      } else if (c === "[" && atStart && ((HEADER_LIKE.lastIndex = i), HEADER_LIKE.test(src))) {
+        break; // a table header at a line start
+      } else if (c === "[") {
+        depth++;
+        i++;
+      } else if (c === "{") {
+        braces++;
+        i++;
+      } else if (c === "}") {
+        if (braces > 0) braces--;
+        i++;
+      } else if (c === "," || c === "=") i++;
+      else {
+        // A bare token: a number or boolean entry, or a bare key that starts the next assignment.
+        let j = i;
+        while (j < n && !/[\s,\][{}#"'=]/.test(src[j]!)) j++;
+        if (braces === 0 && src[skipSpace(src, j)] === "=") break;
+        i = j > i ? j : i + 1;
+      }
+    }
+  }
+  return out;
+}
+
+/** Every entry as the file writes it and, where it differs, with its spaces trimmed (a leading ./ removed from both). */
+const listEntries = (all: string[]) => [...new Set(all.flatMap((e) => [e.replace(/^\.\//, ""), e.trim().replace(/^\.\//, "")]))];
 
 /**
  * Soft signals for a list-form build key. One on the manifest when the list is new or its entries changed (provided a
  * listed file ships), and one per listed script that is added (not named by the old manifest, or not in the old files) or
  * changed. A listed build.rs is read on its own path, as the string form is.
  */
-function cargoListSignals(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged: (path: string) => boolean): Signal[] {
-  const list = cargoBuildList(text(newFiles, p));
+function cargoListSignals(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged: (path: string) => boolean, built: Built): Signal[] {
+  const list = built(newFiles, p)?.list;
   if (!list?.length) return [];
-  const oldToml = text(oldFiles, p);
+  const old = built(oldFiles, p);
   const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
   const norm = (e: string) => posix.normalize(dir + e);
   const paths = [...new Set(list.map(norm))].filter((sp) => newFiles.has(sp));
   if (!paths.length) return [];
-  const oldList = cargoBuildList(oldToml);
-  const oldScript = cargoBuildScript(oldToml);
+  const oldList = old?.list;
+  const oldScript = typeof old?.key === "string" ? old.key : undefined;
   const oldNamed = new Set([...(oldList ?? []), ...(oldScript !== undefined ? [oldScript] : [])].map(norm));
   const out: Signal[] = [];
   const key = (l: string[]) => [...new Set(l.map(norm))].sort().join("\n");
@@ -226,7 +565,25 @@ function cargoListSignals(oldFiles: FileMap, newFiles: FileMap, p: string, uncha
 /** Per release: `seen`, the signal already reported for each build script path (one per path, however many manifests
  * name it, and a build.rs read on its own path counts); `same`, each path's old-versus-new byte comparison, made once
  * however many manifests share the script. */
-type CargoState = { seen: Map<string, Signal>; same: Map<string, boolean> };
+type CargoState = { seen: Map<string, Signal>; same: Map<string, boolean>; byText: Map<string, CargoBuild>; byPath: Map<FileMap, Map<string, CargoBuild | undefined>> };
+/** A manifest's build key and list, each manifest text read once per release: by path on each side, and by text, so the
+ * same manifest under many paths is read once too. */
+type Built = (files: FileMap, p: string) => CargoBuild | undefined;
+function builtReader(st: CargoState): Built {
+  return (files, p) => {
+    let paths = st.byPath.get(files);
+    if (!paths) st.byPath.set(files, (paths = new Map()));
+    if (paths.has(p)) return paths.get(p);
+    const t = text(files, p);
+    let b: CargoBuild | undefined;
+    if (t !== undefined) {
+      b = st.byText.get(t);
+      if (!b) st.byText.set(t, (b = readCargoBuild(t)));
+    }
+    paths.set(p, b);
+    return b;
+  };
+}
 /** One signal per script path. A script that is new to one manifest and changed under another is reported as added
  * (it now runs where it did not): the added signal takes the place of the changed one, where that was reported. */
 function oncePerPath(st: CargoState, sig: Signal | undefined): Signal[] {
@@ -245,13 +602,15 @@ function cargoSignals(oldFiles: FileMap, newFiles: FileMap, p: string, st: Cargo
     if (v === undefined) st.same.set(path, (v = sameBytes(oldFiles.get(path), newFiles.get(path))));
     return v;
   };
-  return [oncePerPath(st, cargoSignal(oldFiles, newFiles, p, unchanged)), ...cargoListSignals(oldFiles, newFiles, p, unchanged).map((s) => oncePerPath(st, s))].flat();
+  const built = builtReader(st);
+  return [oncePerPath(st, cargoSignal(oldFiles, newFiles, p, unchanged, built)), ...cargoListSignals(oldFiles, newFiles, p, unchanged, built).map((s) => oncePerPath(st, s))].flat();
 }
-function cargoSignal(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged: (path: string) => boolean): Signal | undefined {
-  const key = cargoBuildKey(text(newFiles, p));
+function cargoSignal(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged: (path: string) => boolean, built: Built): Signal | undefined {
+  const key = built(newFiles, p)?.key;
   if (key === false) return undefined;
-  const oldToml = text(oldFiles, p);
-  const oldKey = cargoBuildKey(oldToml);
+  const old = built(oldFiles, p);
+  const oldPresent = old !== undefined; // false when the old manifest is absent or over the size cap
+  const oldKey = old?.key;
   const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/") + 1) : "";
   const root = posix.normalize(dir + "build.rs");
   const runsRoot = (k: string | false | undefined) => k === undefined || (typeof k === "string" && posix.normalize(dir + k) === root);
@@ -259,7 +618,7 @@ function cargoSignal(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged:
     // The crate root's build.rs runs. A new one is raised on its own path; one the old manifest turned off, or passed over
     // for another script, starts running now: added, and said to be changed too when it is (in place of the changed signal
     // its own path raises).
-    if (oldToml === undefined || runsRoot(oldKey) || !newFiles.has(root)) return undefined;
+    if (!oldPresent || runsRoot(oldKey) || !newFiles.has(root)) return undefined;
     const changed = !unchanged(root);
     if (changed && !oldFiles.has(root)) return undefined;
     const why = oldKey === false ? "no longer turns the build script off" : "no longer names another build script";
@@ -268,7 +627,7 @@ function cargoSignal(oldFiles: FileMap, newFiles: FileMap, p: string, unchanged:
   const sp = posix.normalize(dir + key!);
   if (!newFiles.has(sp)) return undefined;
   // Compared as normalized paths: "./gen.rs" and "gen.rs" are the same script.
-  const oldScript = cargoBuildScript(oldToml);
+  const oldScript = typeof old?.key === "string" ? old.key : undefined;
   const named = oldScript !== undefined && posix.normalize(dir + oldScript) === sp;
   const prev = oldFiles.get(sp);
   // A build.rs is read on its own path (a new or changed one is raised there). Followed from here: a script under another
@@ -574,7 +933,7 @@ function workflowSignals(oldFiles: FileMap, newFiles: FileMap, p: string): Signa
 /** Soft signals for a new or changed build.rs (or Cargo.toml custom build script), Go generate / cgo, and workflow permission or trigger changes. Never hard. */
 export function ecosystemSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   const out: Signal[] = [];
-  const cargoState: CargoState = { seen: new Map(), same: new Map() };
+  const cargoState: CargoState = { seen: new Map(), same: new Map(), byText: new Map(), byPath: new Map() };
   for (const p of newFiles.keys()) {
     if (isRustBuildScript(p)) out.push(...rustSignals(oldFiles, newFiles, p).flatMap((s) => oncePerPath(cargoState, s)));
     else if (base(p) === "Cargo.toml") out.push(...cargoSignals(oldFiles, newFiles, p, cargoState));
