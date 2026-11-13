@@ -76,6 +76,8 @@ interface Ctx {
   scripts: Record<string, string>;
   seen: Set<string>;
   scanned: Set<string>;
+  // The quoted and operand tokens of each scanned file, read once.
+  literals?: Map<string, { quoted: string[]; operand: string[] }>;
   // Files scanned while a gyp command was the caller: a file the hook walk scanned first is scanned again under gyp, so the files it reaches count as gyp files too.
   gypScanned: Set<string>;
   ranSh: Set<string>;
@@ -758,12 +760,7 @@ function decodeJsString(raw: string): string | undefined {
 }
 
 function followLoads(ctx: Ctx, key: string, text: string): void {
-  try {
-    followLoadsScan(ctx, key, text);
-  } catch {
-    scannerFaults++;
-    fail(ctx, "scanner fault");
-  }
+  budgeted(text.length, () => followLoadsScan(ctx, key, text), () => fail(ctx, "scanner fault"));
 }
 function followLoadsScan(ctx: Ctx, key: string, text: string): void {
   for (const m of (codeOnly(text, [], true) ?? text).matchAll(new RegExp(LITERAL_LOAD.source, "g"))) {
@@ -1325,14 +1322,20 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
   // The end of a regular expression body that starts after the / at "at", or -1.
   const regexEnd = (at: number): number => {
     let cls = false;
-    for (let j = at + 1; j < n && !eol(text[j]); j++) {
-      const d = text[j]!;
-      if (d === "\\") j++;
-      else if (d === "[") cls = true;
-      else if (d === "]") cls = false;
-      else if (d === "/" && !cls) return j;
+    let j = at + 1;
+    // The look-ahead reads to the end of the line when no closing slash is found, once per slash: every character it reads is charged.
+    try {
+      for (; j < n && !eol(text[j]); j++) {
+        const d = text[j]!;
+        if (d === "\\") j++;
+        else if (d === "[") cls = true;
+        else if (d === "]") cls = false;
+        else if (d === "/" && !cls) return j;
+      }
+      return -1;
+    } finally {
+      jsStep(j - at);
     }
-    return -1;
   };
   // A span ends in a name or a number. The keyword exclusion is defense in depth: a keyword is also in "danger", so a span
   // ending in one is already refused.
@@ -1361,7 +1364,12 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
     return KEYWORD_MAYBE.has(t1.t) ? "amb" : "div";
   };
   if (text.startsWith("#!")) while (i < n && !eol(text[i])) i++;
+  let stepAt = 0;
   while (i < n) {
+    // Every character the loop passes, inside a string, template, comment or regular expression too, is charged.
+    jsStep(i - stepAt + 1);
+    stepAt = i;
+    jsStep();
     const c = text[i]!;
     if (/\s/.test(c)) {
       out += c;
@@ -1477,6 +1485,7 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
       i += tok.length;
     }
   }
+  jsStep(n - stepAt);
   // An open template interpolation or brace at the end is a file Bun rejects: not static, like any unterminated span.
   if (braces.length > 0) return undefined;
   return out;
@@ -1562,6 +1571,7 @@ function codeBefore(code: string, at: number, len: number): string {
 function prevTok(code: string, at: number): [string, number] {
   let q = at;
   while (q > 0 && /\s/.test(code[q - 1]!)) q--;
+  jsStep(at - q + 1);
   if (q === 0) return ["", 0];
   const word = /[A-Za-z_$][\w$]*$|\d[\w.]*$/.exec(code.slice(Math.max(0, q - 64), q));
   if (word) return [word[0], q - word[0].length];
@@ -2327,12 +2337,7 @@ export function scannerFaultCount(): number {
   return scannerFaults;
 }
 export function provablyStatic(source: string): boolean {
-  try {
-    return provablyStaticScan(source);
-  } catch {
-    scannerFaults++;
-    return false;
-  }
+  return budgeted(source.length, () => provablyStaticScan(source), () => false);
 }
 function provablyStaticScan(source: string): boolean {
   if (source.includes(REMOVED)) return false;
@@ -2407,26 +2412,36 @@ function scanJs(ctx: Ctx, key: string): void {
   }
   ctx.scanned.add(key);
   followLoads(ctx, key, text);
-  // The precise walk above is the whole surface only when the file cannot name another path.
-  if (!provablyStatic(text)) widenJs(ctx, key, text);
-  // npm_package_json is the path of this package's manifest, not a config key.
-  const body = stripPkgJsonEnv(text);
-  if (!body.includes("npm_package_")) return;
-  const re = new RegExp(PLAIN_REQUIRE.source, "g");
-  const keys: string[] = [];
-  for (const m of text.matchAll(re)) keys.push(m[1] || m[3] || "");
-  if (body.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "").includes("npm_package_")) {
-    fail(ctx, "unresolved: manifest");
-    return;
+  // The precise walk above is the whole surface only when the file cannot name another path. A scan that runs out of budget still gets the
+  // manifest check below (it is what holds a file that names the package's own config) before the failure goes on to the entry above.
+  let outOfBudget: ScanBudgetError | undefined;
+  try {
+    if (!provablyStatic(text)) widenJs(ctx, key, text);
+  } catch (e) {
+    if (!(e instanceof ScanBudgetError)) throw e;
+    outOfBudget = e;
   }
+  const refs = manifestRefs(ctx, text);
+  if (refs === undefined) fail(ctx, "unresolved: manifest");
+  else for (const val of refs) addRef(ctx, val);
+  if (outOfBudget) throw outOfBudget;
+}
+
+// What a file's reads of the package's own config name: the values it resolves to, or undefined when one cannot be resolved (the file is held).
+// npm_package_json is the path of this package's manifest, not a config key.
+function manifestRefs(ctx: Ctx, text: string): string[] | undefined {
+  const body = stripPkgJsonEnv(text);
+  if (!body.includes("npm_package_")) return [];
+  const keys: string[] = [];
+  for (const m of text.matchAll(new RegExp(PLAIN_REQUIRE.source, "g"))) keys.push(m[1] || m[3] || "");
+  if (body.replace(new RegExp(PLAIN_REQUIRE.source, "g"), "").includes("npm_package_")) return undefined;
+  const refs: string[] = [];
   for (const keyName of keys) {
     const val = configVal(ctx, keyName);
-    if (val === undefined || !TOKEN.test(val) || val.split("/").includes("..")) {
-      fail(ctx, "unresolved: manifest");
-      return;
-    }
-    addRef(ctx, val);
+    if (val === undefined || !TOKEN.test(val) || val.split("/").includes("..")) return undefined;
+    refs.push(val);
   }
+  return refs;
 }
 
 function addLogical(ctx: Ctx, logical: string): void {
@@ -2703,9 +2718,24 @@ function addScannedLiterals(ctx: Ctx): void {
   const keys = [...ctx.scanned];
   for (const key of keys) {
     if (ctx.hold) return;
-    const text = dec.decode(ctx.bytes.get(key));
-    for (const tok of quotedTokens(text)) addLiteralToken(ctx, tok);
-    for (const tok of operandTokens(text)) addLiteralToken(ctx, tok, true);
+    // A file's literals are read once, under an allowance of its own (it is not the file being scanned), and kept for the next widen step.
+    let lits = ctx.literals?.get(key);
+    if (!lits) {
+      const text = dec.decode(ctx.bytes.get(key));
+      const read = budgeted<{ quoted: string[]; operand: string[] } | undefined>(text.length, () => {
+        jsStep(text.length);
+        return { quoted: quotedTokens(text), operand: operandTokens(text) };
+      }, () => undefined);
+      // A file whose literals could not be read is held, and not remembered as having none.
+      if (!read) {
+        fail(ctx, "scanner fault");
+        return;
+      }
+      lits = read;
+      (ctx.literals ??= new Map()).set(key, lits);
+    }
+    for (const tok of lits.quoted) addLiteralToken(ctx, tok);
+    for (const tok of lits.operand) addLiteralToken(ctx, tok, true);
   }
 }
 
@@ -2747,12 +2777,7 @@ function narrowWiden(ctx: Ctx, fromKey: string): void {
 }
 
 function widenJs(ctx: Ctx, key: string, text: string): void {
-  try {
-    widenJsScan(ctx, key, text);
-  } catch {
-    scannerFaults++;
-    widenEvery(ctx);
-  }
+  budgeted(text.length, () => widenJsScan(ctx, key, text), () => fail(ctx, "scanner fault"));
 }
 function addSameDirIf(ctx: Ctx, key: string, tier: JsTier): void {
   if (tier.pkg || tier.dirs.length === 0 || tier.same) addSameDir(ctx, key);
@@ -2816,12 +2841,7 @@ function endsInPathCall(before: string, names: { mods: Set<string>; fns: Set<str
   return m[2] !== undefined ? names.mods.has(m[1]!) : names.fns.has(m[1]!);
 }
 export function processHazard(source: string): boolean {
-  try {
-    return processHazardScan(source);
-  } catch {
-    scannerFaults++;
-    return true;
-  }
+  return budgeted(source.length, () => processHazardScan(source), () => true);
 }
 function processHazardScan(source: string): boolean {
   // Comments out first (strings kept) so the alias statements can be read, then strings out so no word inside a message counts.
@@ -2912,12 +2932,7 @@ function steeringKey(code: string): boolean {
 const CALL_OK = new Set(["require", "fs", "path", "readFileSync", "readFile", "open", "__dirname", "__filename", "join", "resolve", "toString", "String", "utf8", "posix"]);
 // `text` is comment-free; `source` is the file's own text for the checks that need it (a template literal is not a directive).
 export function hasUnbounded(text: string, source: string): boolean {
-  try {
-    return hasUnboundedScan(text, source);
-  } catch {
-    scannerFaults++;
-    return true;
-  }
+  return budgeted(source.length, () => hasUnboundedScan(text, source), () => true);
 }
 function hasUnboundedScan(text: string, source: string): boolean {
   if (processHazard(source)) return true;
@@ -2959,18 +2974,69 @@ function hasUnboundedScan(text: string, source: string): boolean {
 // Takes the file's own source: the hazard check reads the raw text (a template literal is not a directive, which the comment-free
 // text below cannot tell), and the load scan reads the comment-free text, so a comment inside an eval argument cannot end its
 // argument list early. Unreadable text stays raw.
-export function classifyJs(fromKey: string, source: string): JsTier {
-  try {
-    return classifyJsScan(fromKey, source);
-  } catch {
-    scannerFaults++;
-    return { all: true, pkg: true, tests: true, flows: true, same: false, dirs: [], lits: [] };
-  } finally {
-    // The indexes belong to this file's texts; a large one is not kept for the next.
-    dropParenIndexes();
-    moduleNamesText = undefined;
-    moduleNames = undefined;
+// One file's scan has a step budget: a count of the loop turns and characters its readers walk, so the answer is the same on every machine. The
+// readers charge it (the code reader for every character it passes, argsOf and splitTop for the span they read, the call loops one per call);
+// past it the scan throws to the top of the entry, and the entry answers closed (every kind held, the fault counted once), so a pathological
+// file is held, never skipped, and never stalls the sweep. Every entry that scans a file's text (classifyJs, provablyStatic, followLoads,
+// widenJs, processHazard, hasUnbounded) runs under it, each with its own allowance (see budgeted).
+const SCAN_STEPS_PER_CHAR = 200;
+const SCAN_STEPS_BASE = 5_000_000;
+let jsStepsOverride: number | undefined;
+/** A test sets the limit; undefined puts the size-based one back. */
+export function setJsScanSteps(n: number | undefined): void {
+  jsStepsOverride = n;
+}
+class ScanBudgetError extends Error {}
+let jsActive = false;
+let jsSteps = 0;
+let jsLimit = Infinity;
+function jsStep(n = 1): void {
+  if ((jsSteps += n) > jsLimit) throw new ScanBudgetError("js scan budget");
+}
+function budgeted<T>(len: number, run: () => T, closed: () => T): T {
+  const outer = !jsActive;
+  const allowance = jsStepsOverride ?? SCAN_STEPS_PER_CHAR * len + SCAN_STEPS_BASE;
+  // An entry inside another reads its own text (the outer one may be a short manifest that follows a load into a large file): it has its own
+  // allowance, and what it spends is not charged to the outer entry, which is restored when it returns. So every entry has one allowance of its
+  // own, and one file's total is bounded by the number of entries it runs (about six), not by one shared budget. A test's fixed limit is shared.
+  const outerSteps = jsSteps;
+  const outerLimit = jsLimit;
+  if (outer) jsActive = true;
+  if (outer || jsStepsOverride === undefined) {
+    jsSteps = 0;
+    jsLimit = allowance;
   }
+  try {
+    const r = run();
+    jsStep(0);
+    return r;
+  } catch (e) {
+    // Inside another entry the scan stops at once: this entry takes its own closed action (the hold or widening a failed scan of this file
+    // leaves, so a file reached from another file's scan holds as it did without a budget), and the outer one answers and counts the fault, so
+    // the result is never narrower than either.
+    if (!outer && e instanceof ScanBudgetError) {
+      closed();
+      throw e;
+    }
+    scannerFaults++;
+    return closed();
+  } finally {
+    if (outer) {
+      jsActive = false;
+      jsSteps = 0;
+      jsLimit = Infinity;
+      // The indexes and the loader names belong to this file's texts; a large one is not kept for the next scan, so an answer never depends on what ran before.
+      dropParenIndexes();
+      moduleNamesText = undefined;
+      moduleNames = undefined;
+    } else if (jsStepsOverride === undefined) {
+      jsSteps = outerSteps;
+      jsLimit = outerLimit;
+    }
+  }
+}
+export function classifyJs(fromKey: string, source: string): JsTier {
+  return budgeted(source.length, () => classifyJsScan(fromKey, source), () => ({ all: true, pkg: true, tests: true, flows: true, same: false, dirs: [], lits: [] }));
 }
 function classifyJsScan(fromKey: string, source: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
@@ -3003,6 +3069,7 @@ const handedOnReadBudget = (len: number): number => 6 * len + 1_000_000;
 function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   const names = new Set(["require", ...aliases]);
   for (const m of text.matchAll(/(?<![\w$.])[A-Za-z_$][\w$]*(?![\w$])/g)) {
+    jsStep();
     const name = m[0];
     if (!names.has(name)) continue;
     const at = m.index ?? 0;
@@ -3028,6 +3095,7 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   let readKept = 0;
   let readFlat = 0;
   for (const m of keptKeys.matchAll(/(?<![\w$.])(?:Reflect|Object)\s*\.\s*\w+\s*\(/g)) {
+    jsStep();
     const args = argsOf(keptKeys, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) return true;
     readKept += args.length;
@@ -3040,6 +3108,7 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   // The scan leaves a lone backtick where a template opens a substitution; read as a space the brackets balance.
   const flat = text.replace(/`/g, " ");
   for (const m of flat.matchAll(/(?<![\w$.])(?:Reflect|Object)\s*\.\s*(get|getOwnPropertyDescriptors?|entries|values|assign|fromEntries|getOwnPropertyNames|ownKeys)\s*\(/g)) {
+    jsStep();
     const args = argsOf(flat, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) return true;
     readFlat += args.length;
@@ -3102,6 +3171,7 @@ function mentionsModule(expr: string, text: string): boolean {
   // The names bound to the loader are read from the whole text once, not once per call that asks.
   if (moduleNamesText !== text || !moduleNames) {
     moduleNames = new Set(["module", "require"]);
+    jsStep(text.length); // charged once per file, not once per call
     for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:module|require)(?![\w$])(?!\s*\()(?!\s*\.\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\b)/g)) moduleNames.add(m[1]!);
     moduleNamesText = text;
   }
@@ -3109,6 +3179,7 @@ function mentionsModule(expr: string, text: string): boolean {
   // The text is already blanked by the scan: strings are text and a key before a colon is a name of data, not a reference.
   const code = expr;
   for (const name of names) {
+    jsStep(code.length + 1); // one pass over the expression per name
     const n = name.replace(/\$/g, "\\$");
     for (const m of code.matchAll(new RegExp(`(?<![\\w$.])${n}(?![\\w$])(?!\\s*\\()(?!\\s*\\.\\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\\b)`, "g"))) {
       const k = m.index ?? 0;
@@ -3205,6 +3276,7 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
   const rootBases = fromKey === "package.json" || !fromKey.includes("/") ? [fromKey] : [fromKey, "package.json"];
   // One pass over every call, whatever it is called through, keeps a file with thousands of aliases linear.
   for (const m of text.matchAll(/(?<![\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    jsStep();
     const callee = m[1]!;
     if (!callers.has(callee)) continue;
     // After a dot a require( is a member call (module.require, require.main.require, module.parent.require, m.require, an object
@@ -3274,6 +3346,7 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
     return inits.length ? inits.flatMap((init) => vectorOf(init.trim(), depth + 1)) : [t];
   };
   for (const m of text.matchAll(/(?<![\w$])(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\(/g)) {
+    jsStep();
     const args = argsOf(text, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) continue;
     const list = splitTop(args, ",");
@@ -3387,6 +3460,7 @@ function runnerFolds(text: string): boolean {
   const cp = new Set(["child_process", "cp"]);
   for (const m of text.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"](?:node:)?child_process['"]\s*\)/g)) cp.add(m[1]!);
   for (const m of text.matchAll(/(?<![\w$])(execSync|spawnSync|exec|spawn|execFileSync|execFile|fork)\s*\(/g)) {
+    jsStep();
     const at = m.index ?? 0;
     // A member call counts only on child_process or a name bound to it: /re/.exec(s) and db.exec(sql) are not runs.
     const recv = /([A-Za-z_$][\w$]*)\s*\.\s*$/.exec(text.slice(Math.max(0, at - 60), at));
@@ -3639,6 +3713,7 @@ function constPartsWiden(text: string): boolean {
     return i;
   };
   for (let m = TOK.exec(text); m; TOK.lastIndex = pos, m = TOK.exec(text)) {
+    jsStep();
     if (spent > budget) return true;
     const t = m[0];
     const at = m.index;
@@ -5206,9 +5281,11 @@ function statementStart(text: string, at: number): { from: number; overflow: boo
 function loaderNames(text: string): string[] {
   const id = "[A-Za-z_$][\\w$]*";
   const names = new Set<string>();
+  jsStep(text.length);
   for (const m of text.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*(?:module\\s*\\.\\s*)?require\\b(?!\\s*\\()(?!\\s*\\.\\s*(?!bind\\b))`, "g"))) names.add(m[1]!);
   // name = ...createRequire(...): walk back from each call to the start of its statement, whatever the length of what lies between.
   for (const maker of createRequireNames(text)) {
+    jsStep(text.length); // one whole-text scan per createRequire alias
     for (const m of text.matchAll(new RegExp(`(?<![\\w$])${maker.replace(/\$/g, "\\$")}\\s*\\(`, "g"))) {
       const { from, overflow } = statementStart(text, m.index ?? 0);
       const stmt = text.slice(from, m.index ?? 0);
@@ -5219,6 +5296,7 @@ function loaderNames(text: string): string[] {
   }
   // name = other: one scan builds the edges, then three rounds walk them, so a thousand aliases cost one pass.
   const edges = new Map<string, string[]>();
+  jsStep(text.length);
   for (const m of text.matchAll(new RegExp(`(?<![\\w$.])(${id})\\s*=\\s*(${id})(?![\\w$])(?!\\s*[(.])`, "g"))) {
     const list = edges.get(m[2]!);
     if (list) list.push(m[1]!);
@@ -5899,6 +5977,7 @@ function strLit(expr: string): string | undefined {
 }
 
 function splitTop(src: string, sep: "," | "+"): string[] {
+  jsStep(src.length + 1);
   const out: string[] = [];
   let cur = "";
   let depth = 0;
@@ -5948,16 +6027,23 @@ function firstArg(args: string): string {
 function argsOf(text: string, paren: number): string | undefined {
   if (text[paren] !== "(") return undefined;
   if (text.length >= ARGS_INDEX_FROM) {
+    // A long text is read through an index once its reads have added up to its length, and by a scan before that. The charge is the same either
+    // way (the span returned, one step for an unclosed group), so the answer never depends on whether an index was there; the scans a text gets
+    // before it is indexed are bounded by its length.
     const index = indexedClose(text);
     if (index) {
       const close = index[paren + 1]!;
+      jsStep(close < 0 ? 1 : close - paren + 1);
       return close < 0 ? undefined : text.slice(paren + 1, close);
     }
     const found = argsScan(text, paren);
+    jsStep(found === undefined ? 1 : found.length + 2);
     noteRead(text, found === undefined ? text.length - paren : found.length + 2);
     return found;
   }
-  return argsScan(text, paren);
+  const found = argsScan(text, paren);
+  jsStep(found === undefined ? text.length - paren : found.length + 2);
+  return found;
 }
 function argsScan(text: string, paren: number): string | undefined {
   let depth = 0;
@@ -6068,6 +6154,7 @@ function buildParenClose(text: string): Int32Array {
 }
 
 function matchCall(expr: string): { callee: string; args: string } | undefined {
+  jsStep(expr.length + 1);
   const t = expr.trim();
   let quote: string | null = null;
   let depth = 0;
@@ -6407,6 +6494,11 @@ function scanAdded(ctx: Ctx, key: string): void {
     return;
   }
   const text = dec.decode(ctx.bytes.get(key));
+  // A file that is not JavaScript is read under an allowance of its own: it is not charged to the JavaScript file whose scan reached it.
+  budgeted(text.length, () => scanAddedOther(ctx, key, base, text), () => fail(ctx, "scanner fault"));
+}
+
+function scanAddedOther(ctx: Ctx, key: string, base: string, text: string): void {
   if (/\.py$/i.test(base)) {
     ctx.scanned.add(key);
     followPyImports(ctx, key, text);
