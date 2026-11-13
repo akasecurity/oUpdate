@@ -206,3 +206,31 @@ describe("prepass carries the dependency signals as soft, never hard", () => {
     expect(r.soft.find((s) => s.kind === "dependency-lookalike")?.detail).toContain("requests");
   });
 });
+
+describe("a new npm dependency with a major of 90 to 999 raises the high-floor signal (soft)", () => {
+  const manifest = (deps: Record<string, string>) => new Map([["package.json", new TextEncoder().encode(JSON.stringify({ name: "p", version: "1.0.0", dependencies: deps }))]]);
+  const high = (oldDeps: Record<string, string>, newDeps: Record<string, string>) => dependencySignals("npm", manifest(oldDeps), manifest(newDeps)).filter((s) => s.kind === "dependency-high-floor");
+  test("the corpus case carries it, as a soft signal and no hard one", () => {
+    const p = corpusPair("npm-dependency-confusion-internal-name");
+    const r = prepass("npm", p.old, p.new);
+    expect(r.hard).toEqual([]);
+    expect(r.soft.find((s) => s.kind === "dependency-high-floor")?.detail).toContain("@acme-internal/auth-core asks for version ^99.0.0");
+  });
+  test("the edges: 89 and 1000 and a calendar version are quiet, 90 and 999 raise it", () => {
+    expect(high({}, { a: "^89.0.0" })).toEqual([]);
+    expect(high({}, { a: "^1000.0.0" })).toEqual([]);
+    expect(high({}, { a: "^2026.1.0" })).toEqual([]);
+    expect(high({}, { a: "90.0.0" })).toHaveLength(1);
+    expect(high({}, { a: "~999.1.0" })).toHaveLength(1);
+    expect(high({}, { a: ">=99.0.0" })).toHaveLength(1);
+  });
+  test("only a name the release adds: a dependency the old release had, or one with no version string, stays quiet", () => {
+    expect(high({ a: "^99.0.0" }, { a: "^99.0.0" })).toEqual([]);
+    expect(high({ a: "^1.0.0" }, { a: "^99.0.0" })).toEqual([]);
+    expect(high({}, { a: "latest", b: "^1.2.3" })).toEqual([]);
+  });
+  test("PyPI is not read", () => {
+    const f = (t: string) => new Map([["requirements.txt", new TextEncoder().encode(t)]]);
+    expect(dependencySignals("pypi", f(""), f("a==99.0.0\n")).filter((s) => s.kind === "dependency-high-floor")).toEqual([]);
+  });
+});

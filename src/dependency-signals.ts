@@ -66,6 +66,26 @@ export function stripHashComments(text: string, o: { tomlLiteral: boolean } = { 
 }
 const quoted = (block: string) => [...block.matchAll(/["']([^"'\n]+)["']/g)].map((m) => reqName(m[1]!));
 
+/** The version each npm dependency name asks for, from the manifest as text. */
+function npmSpecs(bytes: Uint8Array | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!bytes) return out;
+  try {
+    const pj = JSON.parse(dec.decode(bytes)) as Record<string, unknown>;
+    for (const f of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+      const b = pj?.[f];
+      if (b && typeof b === "object" && !Array.isArray(b)) for (const [k, v] of Object.entries(b)) if (typeof v === "string") out.set(k, v);
+    }
+  } catch { /* an unreadable manifest adds no names */ }
+  return out;
+}
+
+/** A first version number whose major is 90 to 999: the pattern of a dependency-confusion release, never a normal floor (calendar versions are 4 digits). */
+const highMajor = (spec: string) => {
+  const m = /\d+/.exec(spec);
+  return !!m && Number(m[0]) >= 90 && Number(m[0]) < 1000;
+};
+
 function npmNames(bytes: Uint8Array | undefined): Set<string> {
   const out = new Set<string>();
   if (!bytes) return out;
@@ -120,7 +140,7 @@ const PYPI_MANIFEST = (p: string) =>
 
 /**
  * Soft signals for dependency names the new release declares and the old one did not:
- * `dependency-added` for each manifest that gains a name, and `dependency-lookalike` for a new name that is one edit from a
+ * `dependency-added` for each manifest that gains a name, `dependency-high-floor` for a new npm name that asks for a major of 90 to 999, and `dependency-lookalike` for a new name that is one edit from a
  * popular package. A manifest with no old copy counts all its names as new.
  */
 export function dependencySignals(eco: Ecosystem, oldFiles: FileMap, newFiles: FileMap): Signal[] {
@@ -132,6 +152,13 @@ export function dependencySignals(eco: Ecosystem, oldFiles: FileMap, newFiles: F
     const added = [...names(p, newFiles)].filter((n) => !before.has(norm(eco, n)));
     if (!added.length) continue;
     out.push({ kind: "dependency-added", path: p, detail: `new dependency name(s): ${added.slice(0, 8).join(", ").slice(0, 160)}` });
+    if (eco === "npm") {
+      const specs = npmSpecs(newFiles.get(p));
+      for (const n of added) {
+        const spec = specs.get(n);
+        if (spec && highMajor(spec)) out.push({ kind: "dependency-high-floor", path: p, detail: `new dependency ${n.slice(0, 80)} asks for version ${spec.slice(0, 40)}: a major this high is the dependency-confusion pattern (an internal name made to win over its private registry), not a normal release` });
+      }
+    }
     for (const n of added) {
       const like = lookalikeOf(eco, n);
       if (like) out.push({ kind: "dependency-lookalike", path: p, detail: `new dependency ${n.slice(0, 80)} is one edit from the popular package ${like}` });
