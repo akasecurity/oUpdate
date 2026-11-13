@@ -13,7 +13,7 @@ import { installView, otherInstallEntry, prepareInert } from "./install-closure.
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
 import { newFindings, type Finding } from "./adapters/scanner/types.ts";
-import { diffSeq, lineEndingsOnly, renderLineDiff, type Op } from "./linediff.ts";
+import { diffSeq, lineEndingsOnly, renderLineDiff, shiftContext, type Op } from "./linediff.ts";
 
 export type LayerName = "cooldown" | "advisory" | "prepass" | "scan" | "reviewer" | "gate";
 export const LAYERS: LayerName[] = ["cooldown", "advisory", "prepass", "scan", "reviewer", "gate"];
@@ -224,7 +224,16 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
   let ops: { v: Op[] | undefined } | undefined;
   const getOps =
     bt !== undefined && at !== undefined
-      ? (a?: string[], b?: string[]): Op[] | undefined => (ops ??= { v: lineEndingsOnly(bt, at) ? undefined : diffSeq(a ?? bt.split("\n"), b ?? at.split("\n")) }).v
+      ? (a?: string[], b?: string[]): Op[] | undefined =>
+          (ops ??= {
+            v: lineEndingsOnly(bt, at)
+              ? undefined
+              : (() => {
+                  const [x, y] = [a ?? bt.split("\n"), b ?? at.split("\n")];
+                  const d = diffSeq(x, y);
+                  return d && shiftContext(x, y, d, path.endsWith(".py"));
+                })(),
+          }).v
       : undefined;
   const out = [head, renderLineDiff(bt, at, getOps)];
   if (getOps && at !== undefined && (state === "changed" || state === "loaded by code")) {

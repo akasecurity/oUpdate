@@ -157,3 +157,88 @@ export function renderLineDiff(before: string | undefined, after: string | undef
   }
   return out;
 }
+
+// The lexical context each line starts in: code, or inside a block comment, a template literal (with the depth of its
+// `${` holes), a string continued over a line end, or a Python triple-quoted string. One light pass over the text; a
+// regex literal is guessed from the character before the slash. A misread is not a way to hide a line: a line is
+// shown as changed when its start context differs between the two versions, and both versions are read the same way.
+export function lineStates(lines: string[], py = false): string[] {
+  const out: string[] = [];
+  const stack: string[] = []; // "/*", "`", "${" (a code hole inside a template), '"""', "'''", or a quote kept over a line end
+  let prev = ""; // the last significant character of code
+  for (const line of lines) {
+    out.push(stack.join(" "));
+    let i = 0;
+    const top = () => stack[stack.length - 1];
+    while (i < line.length) {
+      const t = top();
+      const c = line[i]!;
+      if (t === "/*") {
+        if (c === "*" && line[i + 1] === "/") { stack.pop(); i += 2; prev = ")"; } else i++;
+      } else if (t === "`") {
+        if (c === "\\") i += 2;
+        else if (c === "`") { stack.pop(); i++; prev = ")"; }
+        else if (c === "$" && line[i + 1] === "{") { stack.push("${"); i += 2; prev = "{"; }
+        else i++;
+      } else if (t === '"""' || t === "'''") {
+        if (c === "\\") i += 2;
+        else if (line.startsWith(t, i)) { stack.pop(); i += 3; prev = ")"; }
+        else i++;
+      } else if (t === '"' || t === "'") {
+        if (c === "\\") i += 2;
+        else if (c === t) { stack.pop(); i++; prev = ")"; }
+        else i++;
+      } else {
+        // code (the top of the stack is empty or a template hole)
+        if (c === "/" && line[i + 1] === "*") { stack.push("/*"); i += 2; }
+        else if (c === "/" && line[i + 1] === "/" && !py) break;
+        else if (c === "#" && py) break;
+        else if (c === "`") { stack.push("`"); i++; }
+        else if (py && (line.startsWith('"""', i) || line.startsWith("'''", i))) { stack.push(line.slice(i, i + 3)); i += 3; }
+        else if (c === '"' || c === "'") { stack.push(c); i++; }
+        else if (c === "}" && t === "${") { stack.pop(); i++; }
+        else if (c === "/" && !py && (prev === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev))) {
+          // a regex literal: to the closing slash on this line, a class kept whole
+          let j = i + 1;
+          let cls = false;
+          while (j < line.length && (cls || line[j] !== "/")) {
+            if (line[j] === "\\") j++;
+            else if (line[j] === "[") cls = true;
+            else if (line[j] === "]") cls = false;
+            j++;
+          }
+          i = j + 1;
+          prev = ")";
+        } else {
+          if (!/\s/.test(c)) prev = c;
+          i++;
+        }
+      }
+    }
+    // a single-quoted string ends at the line end unless a backslash continues it
+    while ((top() === '"' || top() === "'") && !line.endsWith("\\")) stack.pop();
+  }
+  return out;
+}
+
+// A line both versions hold is not shown by the diff, but its meaning changed when it went from a comment, a template or a
+// string to code (or back): removing `/*` and `*/` turns the lines between them into code. Such a line is shown as removed and added.
+export function shiftContext(a: string[], b: string[], ops: Op[], py = false): Op[] {
+  if (!ops.some((o) => o.op !== "=")) return ops;
+  const sa = lineStates(a, py);
+  const sb = lineStates(b, py);
+  const out: Op[] = [];
+  let oi = 0;
+  let ni = 0;
+  for (const o of ops) {
+    if (o.op === "-") { oi++; out.push(o); }
+    else if (o.op === "+") { ni++; out.push(o); }
+    else {
+      if (sa[oi] !== sb[ni]) out.push({ op: "-", v: o.v }, { op: "+", v: o.v });
+      else out.push(o);
+      oi++;
+      ni++;
+    }
+  }
+  return out;
+}
