@@ -10,8 +10,11 @@ export interface ExecResult {
   timedOut?: boolean;
 }
 
-/** force: starts even while oupdate is stopping (a release check's owed after, run from the stop tasks). */
-export type Exec = (argv: string[], opts?: { env?: Record<string, string>; timeoutMs?: number; cwd?: string; stdin?: string; force?: boolean }) => Promise<ExecResult>;
+/**
+ * force: starts even while oupdate is stopping (a release check's owed after, run from the stop tasks). soft: a timeout is
+ * returned (timedOut) for the caller to record, not a stop of the phase.
+ */
+export type Exec = (argv: string[], opts?: { env?: Record<string, string>; timeoutMs?: number; cwd?: string; stdin?: string; force?: boolean; soft?: boolean }) => Promise<ExecResult>;
 
 /** After SIGTERM to a timed-out command's process group, SIGKILL follows this much later. */
 export const KILL_GRACE_MS = 2000;
@@ -27,6 +30,74 @@ function killGroup(pid: number, sig: NodeJS.Signals) {
     process.kill(-pid, sig);
   } catch {
     // already gone
+  }
+}
+
+const pidAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+const groupAlive = (pid: number) => pidAlive(-pid);
+
+/** One process: pid, parent, start time and full command line (ps -ww, so the command is never cut short). */
+interface PsRow {
+  pid: number;
+  ppid: number;
+  started: string;
+  cmd: string;
+}
+
+function psRows(extra: string[] = []): PsRow[] {
+  // LC_ALL=C: lstart's month and day names are English whatever the user's locale, so the pattern below always matches.
+  const r = Bun.spawnSync(["ps", "-ww", ...(extra.length ? extra : ["-ax"]), "-o", "pid=,ppid=,lstart=,command="], { env: { ...process.env, LC_ALL: "C" } });
+  return new TextDecoder().decode(r.stdout).split("\n").flatMap((l) => {
+    const m = l.match(/^\s*(\d+)\s+(\d+)\s+(\w{3} \w{3}\s+\d+ \d\d:\d\d:\d\d \d{4})\s+(.*)$/);
+    return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), started: m[3]!, cmd: m[4]! }] : [];
+  });
+}
+
+/**
+ * Every descendant of `root` (children, grandchildren, and any that left the process group) with its start time and command line,
+ * from one ps snapshot taken before the kill: a helper that escaped the group (a sandbox helper under brew) is still a descendant
+ * then. Only taken while `root` is still a child of this process: if it already exited and was reaped, its pid may be reused and
+ * its "children" are not ours to kill.
+ */
+export function snapshotTree(root: number, parent = process.pid): { pid: number; started: string; cmd: string }[] {
+  try {
+    const rows = psRows();
+    if (!rows.some((r) => r.pid === root && r.ppid === parent)) return [];
+    const out: { pid: number; started: string; cmd: string }[] = [];
+    const seen = new Set<number>([root]);
+    for (let frontier = [root]; frontier.length; ) {
+      const next: number[] = [];
+      for (const row of rows) {
+        if (frontier.includes(row.ppid) && !seen.has(row.pid)) {
+          seen.add(row.pid);
+          out.push({ pid: row.pid, started: row.started, cmd: row.cmd });
+          next.push(row.pid);
+        }
+      }
+      frontier = next;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** SIGKILL to each snapshotted pid whose start time and command line are still exactly what they were (a reused pid is left alone). */
+export function killTree(tree: { pid: number; started: string; cmd: string }[]) {
+  for (const t of tree) {
+    try {
+      const now = psRows(["-p", String(t.pid)]).find((r) => r.pid === t.pid);
+      if (now && now.started === t.started && now.cmd === t.cmd) process.kill(t.pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
   }
 }
 
@@ -136,15 +207,28 @@ export const realExec: Exec = async (argv, opts = {}) => {
   const why = await Promise.race([finished, timeout]);
   clearTimeout(timer);
   if (why === "timeout") {
+    const tree = snapshotTree(pid);
     killGroup(pid, "SIGTERM");
     // Not unref'd: oupdate stays up for the grace so the SIGKILL is sent. The group stays listed
     // until then: a grandchild may still be running.
-    setTimeout(() => {
-      killGroup(pid, "SIGKILL");
-      live.delete(pid);
-    }, KILL_GRACE_MS);
+    if (!opts.soft) {
+      setTimeout(() => {
+        killGroup(pid, "SIGKILL");
+        killTree(tree);
+        live.delete(pid);
+      }, KILL_GRACE_MS);
+    }
     void outR.cancel().catch(() => {});
     void errR.cancel().catch(() => {});
+    if (opts.soft) {
+      // The caller goes on to start another command: wait for the kill to finish first, so a killed brew no longer holds its lock.
+      await new Promise((r) => setTimeout(r, KILL_GRACE_MS));
+      killGroup(pid, "SIGKILL");
+      killTree(tree);
+      live.delete(pid);
+      // Confirm the exit (bounded: 1 s): the group and each killed pid are gone, so the next brew does not meet their lock.
+      for (let i = 0; i < 50 && (groupAlive(pid) || tree.some((t) => pidAlive(t.pid))); i++) await new Promise((r) => setTimeout(r, 20));
+    }
     return { rc: 124, out: text(out), err: text(err), timedOut: true };
   }
   live.delete(pid);

@@ -241,6 +241,13 @@ describe("release checks in the run", () => {
     expect(r.brew).toContain("gadget not upgraded, no check");
     expect(r.files.has(PENDING)).toBe(false);
   });
+  test("an upgrade that hits the per-package time box stays FAILED with its after step owed", async () => {
+    const r = await rcRun({ script: { timeout: ["brew upgrade example/tap/gadget"] } });
+    expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", "svcctl on"]);
+    expect(r.brew).toContain("FAILED: gadget");
+    expect(r.res.log.some((l) => l.includes("TIMEOUT after 500 ms: brew upgrade example/tap/gadget"))).toBe(true);
+    expect(r.files.has(PENDING)).toBe(false);
+  });
   test("a brew upgrade that exits 0 without changing the version: no check, no rollback, notified, after runs, the record removed", async () => {
     const r = await rcRun({ check: { "1.2.0": [1, 1] }, answer: (l) => (l === "brew upgrade example/tap/gadget" ? { rc: 0, out: "", err: "" } : undefined) });
     expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", "svcctl on"]);

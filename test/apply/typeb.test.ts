@@ -114,6 +114,19 @@ describe("typeBUpgrades", () => {
       expect(notices.at(-1)).toContain(`tap changed after review (${reason}`);
     });
   }
+  test("skip: a package the caller marks as not tried is not reviewed or upgraded, and the next one still is", async () => {
+    // Mutant caught: the skip check deleted from typeBUpgrades (the package was reviewed and upgraded anyway).
+    const fx = fixture();
+    const { o } = opts();
+    const upgrades: string[] = [];
+    const asked: string[] = [];
+    const run = await typeBUpgrades(fx.env, scripted([], APPROVE).r, [{ pkg: "tool", tap: TAP }, { pkg: "tool", tap: TAP }], {
+      ...o, dryRun: false, upgrade: async (n) => (upgrades.push(n), 0), skip: (n) => (asked.push(n), asked.length === 1),
+    });
+    expect(asked).toEqual([`${TAP}/tool`, `${TAP}/tool`]);
+    expect(upgrades).toEqual([`${TAP}/tool`]);
+    expect(run.log).toContain("  tool: not tried — the upgrade time box stopped this run's upgrades");
+  });
   test("off-tap: an outdated off-tap dependency → not upgraded, named", async () => {
     const { run, upgrades, notices } = await upgradeRun({ deps: "openssl@3 evil/tap/libx", outdated: { "evil/tap/libx": "evil/tap/libx\n" } }, scripted([], APPROVE).r);
     expect(upgrades).toEqual([]);

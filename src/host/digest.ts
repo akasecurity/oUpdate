@@ -103,6 +103,7 @@ const PARTS: Part[] = [
   },
   { re: /^casks need sudo:(.*)$/, on: (m, o) => void o.waiting.push(...words(m[1]!).map((n) => (SAFE_NAME.test(n) ? `${n}: run \`brew upgrade --cask ${n}\` in a terminal where sudo works` : `${one(n)}: it needs sudo; ${BY_HAND}`))) },
   { re: /^casks held \(running\):(.*)$/, on: (m, o) => void o.held.push(...each(m[1]!, (n) => `${n}: it is running; the next run tries again`)) },
+  { re: /^upgrades stopped by the time box, waiting for the next run:(.*)$/, on: (m, o) => void o.held.push(...each(m[1]!, (n) => `${n}: not tried, an earlier upgrade hit the time limit; the next run tries again`)) },
   { re: /^casks deferred:(.*)$/, on: (m, o) => void o.held.push(...each(m[1]!, (n) => `${n}: left for the end of the run and not tried (a step stopped first); the next run tries again`)) },
   {
     re: /^(?:casks )?FAILED:(.*)$/,

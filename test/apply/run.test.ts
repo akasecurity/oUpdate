@@ -299,6 +299,71 @@ describe("a cask with a running process is deferred (oupdate#4)", () => {
   });
 });
 
+describe("the per-package upgrade time box", () => {
+  const three = { formulas: "pa pb pc", verbose: "pa (1.0) < 1.1\npb (1.0) < 1.1\npc (1.0) < 1.1", formulaTaps: { pa: "homebrew/core", pb: "homebrew/core", pc: "homebrew/core" } };
+  test("each upgrade's duration is logged, so the limit can be set from measured runs", async () => {
+    const r = await run({ ...three });
+    expect(r.log.some((l) => /^ {2}upgrade pa: \d+ s$/.test(l))).toBe(true);
+    const capped = await run({ ...three, timeout: ["brew upgrade pa"] });
+    expect(capped.log.some((l) => /^ {2}upgrade pa: \d+ s$/.test(l))).toBe(false);
+  });
+  test("a package that hits the cap is FAILED and the next one is upgraded", async () => {
+    const r = await run({ ...three, timeout: ["brew upgrade pa"] });
+    expect(r.calls).toContain("brew upgrade pb");
+    expect(r.calls).toContain("brew upgrade pc");
+    expect(r.brew).toContain("FAILED: pa");
+    expect(r.brew).toContain("upgraded: pb pc");
+    expect(r.log).toContain("  TIMEOUT after 500 ms: brew upgrade pa — killed with the processes seen under it; skipped, the run goes on");
+    expect(r.brew).not.toContain("time box");
+  });
+  test("two caps in a row stop the upgrades: the rest are waiting, reported apart from FAILED, and never tried", async () => {
+    const r = await run({ ...three, timeout: ["brew upgrade pa", "brew upgrade pb"] });
+    expect(r.calls).not.toContain("brew upgrade pc");
+    expect(r.brew).toContain("FAILED: pa pb");
+    expect(r.brew).not.toMatch(/FAILED: [^;]*pc/);
+    expect(r.brew).toContain("upgrades stopped by the time box, waiting for the next run: pc");
+    expect(r.log.some((l) => l.includes("2 brew upgrades in a row hit the 500 ms time box"))).toBe(true);
+  });
+  test("a success between two caps resets the count", async () => {
+    const r = await run({ ...three, formulas: "pa pb pc pd", verbose: `${three.verbose}\npd (1.0) < 1.1`, formulaTaps: { ...three.formulaTaps, pd: "homebrew/core" }, timeout: ["brew upgrade pa", "brew upgrade pc"] });
+    expect(r.calls).toContain("brew upgrade pd");
+    expect(r.brew).not.toContain("time box");
+  });
+  describe("Type B upgrades take part in the breaker", () => {
+    const mixed = { files: { [APPROVED]: `example/wm${T}*${T}2026-09-28${T}fixture\n` }, formulas: "pa wm wn", verbose: "pa (1.0) < 1.1\nexample/wm/wm (0.1.0) < 0.2.0\nexample/wm/wn (0.1.0) < 0.2.0", formulaTaps: { pa: "homebrew/core", wm: "example/wm", wn: "example/wm" } };
+    test("two caps, then a Type B formula is not tried and is listed as waiting", async () => {
+      const r = await run({ ...mixed, formulas: "pa pb wm", verbose: "pa (1.0) < 1.1\npb (1.0) < 1.1\nexample/wm/wm (0.1.0) < 0.2.0", formulaTaps: { pa: "homebrew/core", pb: "homebrew/core", wm: "example/wm" }, timeout: ["brew upgrade pa", "brew upgrade pb"] }, { cfg: { approvedTapsFile: APPROVED } });
+      expect(r.calls.some((c) => c.startsWith("brew upgrade example/wm/wm"))).toBe(false);
+      expect(r.brew).toContain("waiting for the next run: wm");
+      expect(r.brew).not.toMatch(/FAILED: [^;]*wm/);
+    });
+    test("a Type B cap, then a success, then a cask cap does not trip the breaker: the next cask is still tried", async () => {
+      // Mutant caught: no count reset after a Type B success or a cask success (the second cap would be the second in a row and cb skipped).
+      const r = await run({ ...mixed, casks: "ca cb", caskTaps: { ca: "homebrew/cask", cb: "homebrew/cask" }, verbose: `${mixed.verbose}\nca (1) != 2\ncb (1) != 2`, timeout: ["brew upgrade example/wm/wm", "brew upgrade --cask --greedy ca"] }, { cfg: { approvedTapsFile: APPROVED } });
+      expect(r.calls).toContain("brew upgrade example/wm/wn");
+      expect(r.calls).toContain("brew upgrade --cask --greedy cb");
+      expect(r.brew).not.toContain("time box");
+    });
+    test("a Type A cap, then a Type B success, then a Type B cap does not trip the breaker: the next Type B is still tried", async () => {
+      const r = await run({ ...mixed, formulas: "pa wm wn wo", verbose: `${mixed.verbose}\nexample/wm/wo (0.1.0) < 0.2.0`, formulaTaps: { ...mixed.formulaTaps, wo: "example/wm" }, timeout: ["brew upgrade pa", "brew upgrade example/wm/wn"] }, { cfg: { approvedTapsFile: APPROVED } });
+      expect(r.calls).toContain("brew upgrade example/wm/wm");
+      expect(r.calls).toContain("brew upgrade example/wm/wo");
+      expect(r.brew).not.toContain("time box");
+    });
+  });
+  test("a cask success between two cask caps resets the count: the cask after is still tried", async () => {
+    const r = await run({ casks: "ca cb cc cd", caskTaps: { ca: "homebrew/cask", cb: "homebrew/cask", cc: "homebrew/cask", cd: "homebrew/cask" }, verbose: "ca (1) != 2\ncb (1) != 2\ncc (1) != 2\ncd (1) != 2", timeout: ["brew upgrade --cask --greedy ca", "brew upgrade --cask --greedy cc"] });
+    expect(r.calls).toContain("brew upgrade --cask --greedy cd");
+    expect(r.brew).not.toContain("time box");
+  });
+  test("a cask upgrade that hits the cap is a cask FAILED, and the breaker skips the casks after two", async () => {
+    const r = await run({ casks: "ca cb cc", caskTaps: { ca: "homebrew/cask", cb: "homebrew/cask", cc: "homebrew/cask" }, verbose: "ca (1) != 2\ncb (1) != 2\ncc (1) != 2", timeout: ["brew upgrade --cask --greedy ca", "brew upgrade --cask --greedy cb"] });
+    expect(r.brew).toContain("casks FAILED: ca cb");
+    expect(r.calls).not.toContain("brew upgrade --cask --greedy cc");
+    expect(r.brew).toContain("waiting for the next run: cc");
+  });
+});
+
 describe("service restarts and the phase order (port 07)", () => {
   const SVC = {
     name: "svc", waiter: "/conf.test/svc-waiter.sh", holdFile: "/state.test/svc-hold", quarantineFile: "/state.test/svc-quarantine",
@@ -419,7 +484,7 @@ describe("the run: failures, timeouts and the summary", () => {
   test("a timeout marks the brew phase failed and the run goes on: later steps, npm, summary, rc 1", async () => {
     const r = await run({ ...BREW, formulas: "good-a", timeout: ["brew upgrade good-a"] });
     expect(r.brew).toMatch(/^ {2}brew: FAILED: good-a; /);
-    expect(r.log.some((l) => l.startsWith("  TIMEOUT after 1000 ms: brew upgrade good-a — killed; brew phase FAILED (good-a)"))).toBe(true);
+    expect(r.log).toContain("  TIMEOUT after 500 ms: brew upgrade good-a — killed with the processes seen under it; skipped, the run goes on");
     expect(r.calls.some((c) => c.startsWith("brew linkage"))).toBe(true);
     expect(r.calls).toContain("npm outdated -g --json");
     expect(r.summary).toContain("=== hosta summary ===");

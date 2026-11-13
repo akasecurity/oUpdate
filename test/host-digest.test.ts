@@ -144,6 +144,7 @@ describe("renderDigest: summary parts", () => {
     ["a plain brew flag", "brew", "FLAGGED (see notifications)", "brew: the review held something this run"],
     ["the runtime's own package held", "brew", "upgraded: jq; HELD: bun (runs under it)", "bun: the updater runs under it"],
     ["casks left untried", "brew", "casks deferred: firefox zoom", "zoom: left for the end of the run and not tried"],
+    ["upgrades stopped by the time box", "brew", "FAILED: pa pb; upgrades stopped by the time box, waiting for the next run: pc pd", "pc: not tried, an earlier upgrade hit the time limit; the next run tries again"],
     ["a failed stale handoff", "brew", "nothing to update; svc stale — FAILED: /x/waiter missing, nothing will restart it", "svc: still runs an old version; FAILED: /x/waiter missing"],
   ];
   for (const [what, lane, line, expected] of cases) {
