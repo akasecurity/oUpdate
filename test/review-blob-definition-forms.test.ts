@@ -73,6 +73,18 @@ function mainNames(l: string): string[] {
   return found;
 }
 
+// A seeded generator over the full 32 bits (mulberry32): rnd(n) is uniform on 0..n-1.
+const makeRng = (seed: number) => {
+  let a = seed >>> 0;
+  return (n: number) => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return Math.floor((((t ^ (t >>> 14)) >>> 0) / 4294967296) * n);
+  };
+};
+
 describe("the selection is main's plus extra names, never fewer", () => {
   const cutDiff = (def: string, use: string) => {
     const cut = new Set<string>();
@@ -99,21 +111,6 @@ describe("the selection is main's plus extra names, never fewer", () => {
     expect(diff(`const u="data:image/png;base64,${B}";`, `const m = "image png base64 charset utf";`)).not.toContain(B);
     expect(diff(`var a=1;function D(){return "${B}"}`, "var from = 1; var as = 2; var of = 3; async function f(){ await g(); }")).not.toContain(B);
   });
-  test("differential: on a generated corpus the names are a superset of main's", () => {
-    let seed = 7;
-    const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
-    const words = ["default", "pass", "done", "then", "is", "None", "status", "from", "static", "D", "exports", "const", "function"];
-    const wrap = ["", "(", "Buffer.from(", "[", "{k:", "()=>", "return "];
-    for (let n = 0; n < 400; n++) {
-      let line = "";
-      for (let d = 0, k = rnd(41); d < k; d++) line += `"${"x".repeat(400 + rnd(5))}",`;
-      const name = rnd(3) === 0 ? words[rnd(words.length)]! : "N".repeat(1 + rnd(90));
-      line += `${rnd(2) ? "const " : ""}${rnd(2) ? "o." : ""}${name} = ${wrap[rnd(wrap.length)]}"${B}"`;
-      const got = new Set(encodedRunNames(line));
-      for (const x of mainNames(line)) expect(got.has(x), `${x} in ${line.slice(0, 60)}`).toBe(true);
-    }
-  });
-
   test("a $-prefixed name does not hide the plain name's definition (JS and shell)", () => {
     const big = "A".repeat(30_000);
     const cut = new Set<string>();
@@ -134,20 +131,61 @@ describe("the selection is main's plus extra names, never fewer", () => {
     expect(cutDiff(`const o={k:1,D:"${big}"};`, "eval(D);")).toBe(1);
   });
 
-  test("differential on selected definitions: every definition main selects is listed on head", () => {
-    let seed = 11;
-    const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
-    const names = ["D", "$D", "$$D", "PAYLOAD", "$PAYLOAD", "default", "pass", "status"];
-    for (let n = 0; n < 300; n++) {
-      const defs = Array.from({ length: 1 + rnd(4) }, (_, i) => ({ name: names[rnd(names.length)]!, run: String.fromCharCode(65 + i).repeat(450) + i }));
-      const lines = defs.map((d) => `${rnd(2) ? "const " : ""}${d.name} = ${["", "(", "Buffer.from(", "["][rnd(4)]}"${d.run}"`);
-      const used = names.filter(() => rnd(3) === 0);
-      const out = diff(lines.join("\n"), `use(${used.join(",")});`);
-      // main's rule: a line is selected when its defined name, or a used token stripped of its leading $, is that name
+  test("the generator draws every value, uniformly enough, with no overflow", () => {
+    const rnd = makeRng(1);
+    const first = Array.from({ length: 50 }, () => rnd(8));
+    expect(new Set(first).size).toBeGreaterThanOrEqual(6);
+    const counts = new Array(8).fill(0);
+    for (let i = 0; i < 8000; i++) counts[rnd(8)]++;
+    for (const c of counts) expect(c).toBeGreaterThan(800);
+  });
+
+  test("the comma cut keeps a name in a call, a list and a parameter list", () => {
+    const big = "A".repeat(30_000);
+    expect(cutDiff(`function D(a, b) { return "${big}" }`, "eval(D());")).toBe(1);
+    expect(cutDiff(`D = f(x, "${big}");`, "eval(D);")).toBe(1);
+    expect(cutDiff(`D = [x, "${big}"];`, "eval(D);")).toBe(1);
+    expect(cutDiff(`const pre=1, D = f(x, "${big}");`, "pre++;")).toBe(0);
+  });
+
+  test("differential on selected definitions: a definition is listed when the name it binds is used, and not otherwise", () => {
+    const rnd = makeRng(11);
+    const names = ["D", "$D", "$$D", "PAYLOAD", "$PAYLOAD", "default", "pass", "done"];
+    const forms = [
+      (n: string, r: string) => `const ${n} = "${r}"`,
+      (n: string, r: string) => `${n} = ("${r}")`,
+      (n: string, r: string) => `const ${n} = Buffer.from("${r}")`,
+      (n: string, r: string) => `const pre=1, ${n} = "${r}"`,
+      (n: string, r: string) => `${n} = f(x, "${r}")`,
+      (n: string, r: string) => `${n} = [x, "${r}"]`,
+      (n: string, r: string) => `function ${n}(a, b) { return "${r}" }`,
+      (n: string, r: string) => `const o = {k: 1, ${n}: "${r}"}`,
+      (n: string, r: string) => `/* pre */ ${n} = "${r}"`,
+    ];
+    const seenName = new Set<string>();
+    const seenForm = new Set<number>();
+    for (let n = 0; n < 400; n++) {
+      const defs = Array.from({ length: 1 + rnd(4) }, (_, i) => ({ name: names[rnd(names.length)]!, f: rnd(forms.length), run: String.fromCharCode(65 + i).repeat(450) + i }));
+      for (const d of defs) { seenName.add(d.name); seenForm.add(d.f); }
+      const used = [...names, "pre"].filter(() => rnd(3) === 0);
+      const out = diff(defs.map((d) => forms[d.f]!(d.name, d.run)).join(";\n"), `use(${used.join(",")});`);
       for (const d of defs) {
-        const mainSelects = used.some((u) => u === d.name || u.replace(/^\$+/, "") === d.name);
-        if (mainSelects) expect(out, `${d.name} used ${used}`).toContain(d.run);
+        const bound = used.some((u) => u === d.name || u.replace(/^\$+/, "") === d.name);
+        const clash = defs.some((e) => e !== d && e.name === d.name);
+        if (bound) expect(out, `${d.name} form ${d.f} used ${used}`).toContain(d.run);
+        else if (!clash && !used.includes("pre")) expect(out, `${d.name} form ${d.f} used ${used}`).not.toContain(d.run);
       }
     }
+    // The same for a hold: a definition too long to show whole holds the file exactly when its name is used.
+    for (let n = 0; n < 120; n++) {
+      const d = { name: names[rnd(names.length)]!, f: rnd(forms.length) };
+      const used = [...names].filter(() => rnd(3) === 0);
+      const cut = new Set<string>();
+      diff(forms[d.f]!(d.name, "A".repeat(30_000)), `use(${used.join(",")});`, "index.js", cut);
+      const bound = used.some((u) => u === d.name || u.replace(/^\$+/, "") === d.name);
+      expect(cut.size, `${d.name} form ${d.f} used ${used}`).toBe(bound ? 1 : 0);
+    }
+    expect(seenName.size).toBe(names.length);
+    expect(seenForm.size).toBe(forms.length);
   });
 });
