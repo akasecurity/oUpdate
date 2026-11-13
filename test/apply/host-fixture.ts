@@ -168,6 +168,7 @@ export function testConfig(over: Partial<ApplyConfig> = {}): ApplyConfig {
     hostPrefixes: [],
     pinRoots: [],
     caskExclude: [],
+    inPlaceCasks: [],
     stuckAfter: 1,
     sensitive: DEFAULTS.sensitive,
     deferred: [],
