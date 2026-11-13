@@ -52,6 +52,8 @@ interface Out {
   up: Record<string, string[]>;
   updated: string[];
   held: string[];
+  /** Formulas the summary says the review could not read; listed as held unless a Type B flag already names them. */
+  unreadable: string[];
   waiting: string[];
   notes: string[];
   /** The brew core said only "FLAGGED": shown when nothing else explains the hold. */
@@ -104,6 +106,8 @@ const PARTS: Part[] = [
   { re: /^casks need sudo:(.*)$/, on: (m, o) => void o.waiting.push(...words(m[1]!).map((n) => (SAFE_NAME.test(n) ? `${n}: run \`brew upgrade --cask ${n}\` in a terminal where sudo works` : `${one(n)}: it needs sudo; ${BY_HAND}`))) },
   { re: /^casks held \(running\):(.*)$/, on: (m, o) => void o.held.push(...each(m[1]!, (n) => `${n}: it is running; the next run tries again`)) },
   { re: /^upgrades stopped by the time box, waiting for the next run:(.*)$/, on: (m, o) => void o.held.push(...each(m[1]!, (n) => `${n}: not tried, an earlier upgrade hit the time limit; the next run tries again`)) },
+  // Listed by readDigest after the Type B flags, so a formula the flag notice already names is shown once.
+  { re: /^held, reviewer cannot read the formula:(.*)$/, on: (m, o) => void o.unreadable.push(...words(m[1]!).map(one)) },
   { re: /^casks deferred:(.*)$/, on: (m, o) => void o.held.push(...each(m[1]!, (n) => `${n}: left for the end of the run and not tried (a step stopped first); the next run tries again`)) },
   {
     re: /^(?:casks )?FAILED:(.*)$/,
@@ -295,7 +299,7 @@ export function renderDigest(a: DigestInput): string {
   }
   const dry = lines[at]!.includes("dry-run");
   const body = lines.slice(0, at);
-  const o: Out = { up: {}, updated: [], held: [], waiting: [], notes: [], apps: new Set(), failed: new Set() };
+  const o: Out = { up: {}, updated: [], held: [], unreadable: [], waiting: [], notes: [], apps: new Set(), failed: new Set() };
   const heldNames = new Set<string>();
   const run = readRunBlock(lines, at, { host: a.host, end: (l) => /^=== /.test(l) });
 
@@ -318,6 +322,7 @@ export function renderDigest(a: DigestInput): string {
 
   // Every lane line, a repeated one too: a hold is never hidden by a later line.
   for (const { lane, text } of run.lanes) readLine(text, lane, o);
+  for (const n of new Set(o.unreadable)) if (!heldNames.has(n) && !heldNames.has(n.split("/").at(-1)!)) o.held.push(`${n}: held, the reviewer cannot read the formula; it needs a manual look`);
   // A line of the block that is no lane line (a hold text that broke across lines): shown, never dropped.
   for (const l of run.other) o.waiting.push(`unrecognized: ${one(l)}`);
 

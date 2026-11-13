@@ -414,16 +414,26 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   await step("brew", "stuck tracking", async () => {
     if (dryRun || b.noBrew) return;
     const q = await x([cfg.brew, "outdated", "--json=v2", "--greedy-auto-updates", ...(b.fetchHead ? ["--fetch-HEAD"] : [])]);
-    const all = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld()) : undefined;
-    if (all === undefined) {
+    const formulae = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld(), "formulae") : undefined;
+    const casks = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld(), "casks") : undefined;
+    if (formulae === undefined || casks === undefined) {
       await brewFailed("pending-query");
       return;
     }
     // Held on purpose (apply.heldByDesign): reported here, never tracked, so never counted as stuck. An exact match on the whole name
     // brew prints: a tap-qualified entry matches only that tap's package, a bare entry only a bare (core) name.
-    const design = all.filter((item) => cfg.heldByDesign.includes(item.slice(0, item.indexOf("="))));
+    const nameOf = (item: string) => item.slice(0, item.indexOf("="));
+    const byDesign = (item: string) => cfg.heldByDesign.includes(nameOf(item));
+    const design = [...formulae, ...casks].filter(byDesign);
     if (design.length) log.push(`  held by design (not counted as stuck): ${design.join(" ")}`);
-    const s = track("brew", all.filter((item) => !design.includes(item)));
+    // Waiting on something outside the update, not failing: a cask with a process running from it (it goes when the process
+    // ends), a formula the review cannot read. Reported in the summary and logged here; never counted as stuck. An exact match
+    // on the name brew prints, and a cask only against the running casks, a formula only against the unreadable formulas.
+    const waitingFormula = (item: string) => b.unreadable.includes(nameOf(item));
+    const waitingCask = (item: string) => b.casksRunning.includes(nameOf(item));
+    const waiting = [...formulae.filter((i) => !byDesign(i) && waitingFormula(i)), ...casks.filter((i) => !byDesign(i) && waitingCask(i))];
+    if (waiting.length) log.push(`  waiting, not stuck (a process is running from it, or the reviewer cannot read the formula): ${waiting.join(" ")}`);
+    const s = track("brew", [...formulae.filter((i) => !byDesign(i) && !waitingFormula(i)), ...casks.filter((i) => !byDesign(i) && !waitingCask(i))]);
     if (s !== undefined) b.stuck = s;
   });
 

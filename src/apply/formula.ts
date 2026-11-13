@@ -69,6 +69,8 @@ export interface FormulaReviewResult {
   log: string[];
   pin?: TapPin;
   reason?: string;
+  /** Held by a gate before any reviewer call because the installed formula text was read but yields no url; never set for a failed command or a missing revision, nor from any model text. */
+  unreadable?: true;
 }
 
 export const SURFACE_TAIL = `This is an UPSTREAM-repo tap: the diff sections after the formula are the release's supply-chain surface (build and install scripts, manifests, lockfiles, CI/release workflows, packaging, new executables). Other source files are not shown on purpose. Besides the indicators listed after the diff, also FLAG, quoting the line:
@@ -129,10 +131,10 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
       log.push(`${a.pkg}: the notice could not be sent`);
     }
   };
-  const gate = async (reason: string): Promise<FormulaReviewResult> => {
+  const gate = async (reason: string, unreadable = false): Promise<FormulaReviewResult> => {
     log.push(`${a.pkg}: ${reason} — FLAG`);
     await send(`⚠️ <b>${a.host} Type B FLAG — ${a.pkg} (formula)</b>\n${reason}\nUpgrade: ${upgrade}\nLog: ${a.logFile ?? "-"}`);
-    return { rc: 1, calls: 0, log, reason };
+    return { rc: 1, calls: 0, log, reason, ...(unreadable ? { unreadable: true as const } : {}) };
   };
 
   const info = await env.brewInfo(`${a.tap}/${a.pkg}`);
@@ -201,13 +203,13 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
   // Artifact kind and source repo, against every top-level url of the installed formula.
   const oldUrls = oldText ? formulaUrls(oldText) : [];
   if (a.artifact === "prebuilt") {
-    if (!oldUrls.length) return gate("cannot establish the installed artifact kind (no installed formula revision to compare) — manual review");
+    if (!oldUrls.length) return gate("cannot establish the installed artifact kind (no installed formula revision to compare) — manual review", oldText !== "");
     const src = oldUrls.find((u) => artifactKind(u) === "source");
     if (src) return gate(`artifact kind changed source→prebuilt — manual review (installed formula had ${src})`);
   }
   // An installed formula whose url cannot be read (an odd shape: a constant, a method call, a url only in a resource block)
   // leaves the source repo unchecked: held, never reviewed on the new url alone. No installed text at all is not this case.
-  if (a.newUrl && oldText && !oldUrls.length) return gate("cannot read the installed formula's url — manual review");
+  if (a.newUrl && oldText && !oldUrls.length) return gate("cannot read the installed formula's url — manual review", true);
   if (oldUrls.length && a.newUrl) {
     const origins = [...new Set(oldUrls.map(urlOrigin))];
     const now = urlOrigin(a.newUrl);
