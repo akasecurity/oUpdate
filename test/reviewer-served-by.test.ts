@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { openaiReviewer } from "../src/adapters/reviewer/openai.ts";
+import { DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE, openaiReviewer } from "../src/adapters/reviewer/openai.ts";
 
 const server = Bun.serve({
   port: 0,
@@ -59,5 +59,32 @@ describe("openaiReviewer served-by", () => {
     expect(r.lastServedBy?.()).toBe("m1");
     await expect(r.review("fail")).rejects.toThrow();
     expect(r.lastServedBy?.()).toBeUndefined();
+  });
+});
+
+describe("openaiReviewer request defaults", () => {
+  const sent: Record<string, unknown>[] = [];
+  const echo = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      sent.push((await req.json()) as Record<string, unknown>);
+      return Response.json({ choices: [{ message: { content: "APPROVE\nok" } }] });
+    },
+  });
+  afterAll(() => echo.stop(true));
+  const url = `http://127.0.0.1:${echo.port}`;
+
+  test("a review asks for the default max_tokens and temperature", async () => {
+    sent.length = 0;
+    await openaiReviewer({ name: "l", baseUrls: [url], model: "m", retryDelaysMs: [] }).review("x");
+    expect(sent[0]).toMatchObject({ max_tokens: DEFAULT_MAX_TOKENS, temperature: DEFAULT_TEMPERATURE });
+    expect(DEFAULT_MAX_TOKENS).toBe(4096);
+    expect(DEFAULT_TEMPERATURE).toBe(0);
+  });
+
+  test("maxTokens replaces the default, and an extraBody temperature replaces the temperature", async () => {
+    sent.length = 0;
+    await openaiReviewer({ name: "l", baseUrls: [url], model: "m", retryDelaysMs: [], maxTokens: 12000, extraBody: { temperature: 0.5 } }).review("x");
+    expect(sent[0]).toMatchObject({ max_tokens: 12000, temperature: 0.5 });
   });
 });

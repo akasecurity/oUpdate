@@ -17,3 +17,6 @@ email	scripts/release.ts
 email	eval/limits/stamp.test.ts
 secret-assignment	eval/limits/stamp.test.ts
 email	test/fixtures/publisher/packument.json
+# the Cargo "build" key (build is also a host name): ports of public PRs 213 and 214
+host-quoted	src/ecosystem-signals.ts
+host-quoted	test/install-closure-loader-noext.test.ts

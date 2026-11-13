@@ -567,7 +567,9 @@ export async function casksSection(rt: RunCtx) {
       const room = (await x([cfg.brew, "--caskroom"])).out.trim();
       const maps = room.startsWith("/") ? await lsofMaps({ exec: x } as KegEnv, cfg.lsof, log) : undefined;
       const pids = maps === undefined ? [] : caskRunning(maps, room, cask, apps);
-      if (pids.length) {
+      const inPlace = pids.length > 0 && named(cfg.inPlaceCasks, cask);
+      if (inPlace) log.push(`  ${cask}: in-place upgrade (inPlaceCasks) — pid ${pids.join(" ")} keep running the old build until restarted`);
+      if (pids.length && !inPlace) {
         log.push(`  ${cask}: deferred — a process is running from it (pid ${pids.join(" ")}); retried next run`);
         b.casksRunning.push(cask);
         continue;

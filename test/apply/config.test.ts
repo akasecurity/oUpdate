@@ -10,7 +10,7 @@ describe("parseApplyConfig", () => {
     const c = parseApplyConfig(cfg({ stateDir: "/state.test" }), "hosta");
     expect(c).toMatchObject({
       host: "hosta", stateDir: "/state.test", brew: "brew", npm: "npm", lsof: DEFAULTS.lsof, officialTaps: DEFAULTS.officialTaps,
-      typeBTaps: [], pinRoots: [], caskExclude: [], stuckAfter: 3, deferred: [], timeoutMs: DEFAULTS.timeoutMs,
+      typeBTaps: [], pinRoots: [], caskExclude: [], inPlaceCasks: [], stuckAfter: 3, deferred: [], timeoutMs: DEFAULTS.timeoutMs,
     });
     expect(c.reviewer).toBeUndefined();
     expect(c.notify).toBeUndefined();
@@ -40,7 +40,7 @@ describe("parseApplyConfig", () => {
   test("everything host-specific is read from the file", () => {
     const c = parseApplyConfig(cfg({
       host: "hostn", stateDir: "/state.test", npm: null, typeBTaps: ["Example/Svc"], approvedTapsFile: "/conf.test/taps.tsv",
-      pinRoots: ["/repos.test"], caskExclude: ["big"], stuckAfter: 5, deferred: [SVC],
+      pinRoots: ["/repos.test"], caskExclude: ["big"], inPlaceCasks: ["tool"], stuckAfter: 5, deferred: [SVC],
       restartHelper: { path: "/usr/local/sbin/helper.test", packages: ["svc"], detached: ["net"] },
       notify: ["send-notice", "--to", "ops"], reviewer: { type: "command", name: "r", argv: ["review-cmd"] }, timeoutMs: 1000,
     }), "hosta");
@@ -92,6 +92,7 @@ describe("parseApplyConfig", () => {
     ["no stateDir", cfg({}), /stateDir is required/],
     ["a relative path", cfg({ stateDir: "state" }), /absolute path/],
     ["an unknown key", cfg({ stateDir: "/s", caskExclud: [] }), /unknown key caskExclud/],
+    ["a wrong type", cfg({ stateDir: "/s", inPlaceCasks: "tool" }), /array of non-empty strings/],
     ["a wrong type", cfg({ stateDir: "/s", caskExclude: "big" }), /array of non-empty strings/],
     ["a zero threshold", cfg({ stateDir: "/s", stuckAfter: 0 }), /positive integer/],
     ["an incomplete deferred service", cfg({ stateDir: "/s", deferred: [{ name: "svc" }] }), /deferred\[0\]\.waiter is required/],

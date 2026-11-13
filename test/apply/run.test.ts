@@ -235,6 +235,13 @@ describe("a cask with a running process is deferred (oupdate#4)", () => {
     expect(r.brew).toContain("casks upgraded: other");
     expect(r.files.get("/state.test/pending-state.tsv")).toContain(`brew${T}app=9.9${T}1${T}2026-10-22`);
   });
+  test("a cask in inPlaceCasks is upgraded despite a running process, and the pids on the old build are logged", async () => {
+    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] }, { cfg: { inPlaceCasks: ["app"] } });
+    expect(r.calls).toContain("brew upgrade --cask --greedy app");
+    expect(r.text).toContain("app: in-place upgrade (inPlaceCasks) — pid 55 keep running the old build");
+    expect(r.brew).not.toContain("casks held (running): app");
+    expect(r.brew).toContain("casks upgraded: app");
+  });
 });
 
 describe("service restarts and the phase order (port 07)", () => {
