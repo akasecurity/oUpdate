@@ -65,6 +65,8 @@ export async function staleKegStep(rt: RunCtx): Promise<void> {
       return [n, mine.length ? `owner restart for the release check: ${mine.map((q) => q.label).join(" ")}` : ""].filter(Boolean).join(", ");
     },
     releaseRacks: racks,
+    // Only what brew upgraded unchecked this run, whatever came after (a planned one held or failed is an ordinary package).
+    leavePkgs: new Set([...rt.rcUnchecked].filter(([, u]) => u.ran).map(([f]) => f)),
     trackStuck: (still) => track("stale-keg", still) ?? [],
     log,
   });

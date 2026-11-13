@@ -43,6 +43,12 @@ export interface ReleaseCheck {
    * when a LaunchAgent plist does, else system/<label>. Not running or not found is a restart failure.
    */
   owners?: string[];
+  /**
+   * An owner launchd does not have loaded (left unserved on purpose): "hold" (default) holds the
+   * formula as for an owner not running; "upgrade" upgrades it with no before, check or after, as
+   * nothing runs from it. Only when every owner is unloaded; one loaded with no pid still holds.
+   */
+  ownerUnloaded?: "hold" | "upgrade";
 }
 
 export interface ApplyConfig {
@@ -253,7 +259,7 @@ function staleOwner(v: unknown, i: number): StaleOwner {
   };
 }
 
-const CHECK_KEYS = ["formula", "command", "retries", "timeoutSec", "before", "after", "runAs", "owners"];
+const CHECK_KEYS = ["formula", "command", "retries", "timeoutSec", "before", "after", "runAs", "owners", "ownerUnloaded"];
 
 function releaseCheck(v: unknown, i: number, seen: Set<string>): ReleaseCheck {
   const where = `apply.releaseChecks[${i}]`;
@@ -277,7 +283,10 @@ function releaseCheck(v: unknown, i: number, seen: Set<string>): ReleaseCheck {
   const runAs = str(v, "runAs", where);
   const owners = list(v, "owners", where, true);
   if (runAs !== undefined && !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(runAs)) throw new Error(`${where}.runAs must be a user name`);
-  return { formula, command: [...command], retries, timeoutSec, ...(before ? { before: [...before] } : {}), ...(after ? { after: [...after] } : {}), ...(runAs ? { runAs } : {}), ...(owners ? { owners: [...owners] } : {}) };
+  if (v.ownerUnloaded !== undefined && v.ownerUnloaded !== "hold" && v.ownerUnloaded !== "upgrade") throw new Error(`${where}.ownerUnloaded must be "hold" or "upgrade"`);
+  if (v.ownerUnloaded !== undefined && !owners) throw new Error(`${where}.ownerUnloaded needs owners`);
+  return { formula, command: [...command], retries, timeoutSec, ...(before ? { before: [...before] } : {}), ...(after ? { after: [...after] } : {}), ...(runAs ? { runAs } : {}), ...(owners ? { owners: [...owners] } : {}),
+    ...(v.ownerUnloaded === "upgrade" ? { ownerUnloaded: "upgrade" as const } : {}) };
 }
 
 /** Parses the config file's text, ${NAME} read from env; `host` is the fallback when the file names none. */

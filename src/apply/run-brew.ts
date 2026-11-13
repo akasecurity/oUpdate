@@ -3,7 +3,7 @@
 
 import { join } from "node:path";
 import { appBundleUpgrade, realAppNet } from "./appbundle.ts";
-import type { ApplyConfig } from "./config.ts";
+import type { ApplyConfig, ReleaseCheck } from "./config.ts";
 import type { Exec } from "./exec.ts";
 import { gkCheck, gkRelease, gkSnapshot, realGates, type GkEnv, type GkOptions } from "./gatekeeper.ts";
 import { caskRunning, lsofMaps, type KegEnv } from "./kegs.ts";
@@ -13,7 +13,7 @@ import { loadApprovedTaps, outdatedVersions, tapIn } from "./taps.ts";
 import { reviewedVersion, typeAReview, versionMismatch } from "./typea.ts";
 import type { TypeBRun } from "./typeb.ts";
 import { handoff } from "./waiter.ts";
-import { ownersNotRunning } from "./run-release.ts";
+import { formulaPids, ownersNotRunning } from "./run-release.ts";
 import { type GkOps, type RunCtx, words, uniq, last, named, holdRunningBun, PKG_NAME, DECLARED_DEPS } from "./run-ctx.ts";
 
 /** The real Gatekeeper env, or undefined when brew cannot say where the Caskroom and prefix are. */
@@ -95,7 +95,7 @@ export function assembleBrew(rt: RunCtx): string {
 }
 
 export async function brewSection(rt: RunCtx) {
-  const { opts, dryRun, host, r, tb, log, b, brewHeld, x, notify, step, tbEnv, tbOpts, brewFailed, rcEnv, rcPending, rcBroken, gatedOutdated, cfg, fs } = rt;
+  const { opts, dryRun, host, r, tb, log, b, brewHeld, x, notify, step, tbEnv, tbOpts, brewFailed, rcEnv, rcPending, rcBroken, rcUnchecked, gatedOutdated, cfg, fs } = rt;
   log.push("", "--- brew ---");
   const v = await x([cfg.brew, "--version"]);
   if (v.rc === 127) {
@@ -229,14 +229,17 @@ export async function brewSection(rt: RunCtx) {
       }
       // The check needs its owner restarted onto the new version: one not running means the check can
       // never run, so nothing is upgraded (and the keg is left alone).
-      const down = rc.owners?.length ? await ownersNotRunning(rt, rc.owners) : [];
-      if (down.length) {
-        log.push(`  holding ${f} (release check: its owner ${down.join(" ")} is not running — not upgraded, its keg is untouched)`);
-        b.rcNotes.push(`${f} not upgraded, owner ${down.join(" ")} not running`);
-        b.failed.push(`release-check:${f}`);
-        b.flagged = true;
-        await notify(`⚠️ <b>${host} release check ${f}: held, not upgraded</b>\nOwner ${down.join(" ")} is not running, so the check could not run.\nLog: ${cfg.logFile ?? "-"}`);
-        b.rcHeldNames.push(n);
+      const why = await uncheckedBlock(rt, f, rc);
+      if (why === "") {
+        log.push(dryRun
+          ? `  dry-run: release check ${f}: its owner ${rc.owners!.join(" ")} is not loaded and nothing runs from it (ownerUnloaded: upgrade) — would upgrade with no before, check or after`
+          : `  release check ${f}: its owner ${rc.owners!.join(" ")} is not loaded and nothing runs from it (ownerUnloaded: upgrade) — no check this run, asked again right before the upgrade`);
+        rcUnchecked.set(f, { owners: [...rc.owners!], name: n });
+        keep.push(n);
+        continue;
+      }
+      if (why) {
+        await ownerHold(rt, n, f, why);
         continue;
       }
       keep.push(n);
@@ -384,6 +387,7 @@ export async function brewSection(rt: RunCtx) {
           break;
         }
         const code = await upgradeFormula(rt, pkg);
+        if (code === "held") continue;
         if (code !== 0) await brewFailed(pkg);
         else if (await versionHeld(rt, pkg, reviewedVersion(pkg, verbose), (await brewView(rt.rcEnv.exec, cfg.brew, pkg))?.current)) b.upgraded.push(pkg);
       }
@@ -479,9 +483,62 @@ async function versionHeld(rt: RunCtx, pkg: string, reviewed: string | undefined
   return false;
 }
 
-/** A formula upgrade; one with a release check records its previous keg first and runs its before. */
-async function upgradeFormula(rt: RunCtx, full: string): Promise<number> {
+/**
+ * Why a gated formula may not be upgraded with no check now: "" when every owner is positively unloaded
+ * (ownerUnloaded: upgrade) and a complete lsof shows nothing on any keg of the formula; undefined when
+ * every owner runs (the check runs as usual); otherwise the hold's reason.
+ */
+async function uncheckedBlock(rt: RunCtx, f: string, rc: ReleaseCheck): Promise<string | undefined> {
+  if (!rc.owners?.length) return undefined;
+  if (rc.ownerUnloaded !== "upgrade") {
+    const downs = await ownersNotRunning(rt, rc.owners);
+    return downs.length ? `its owner ${downs.map((d) => d.label).join(" ")} is not running` : undefined;
+  }
+  // The process scan first, then the owner probes, so the probes are the last thing before the upgrade.
+  const pids = await formulaPids(rt, f);
+  const downs = await ownersNotRunning(rt, rc.owners, true);
+  if (!downs.length) return undefined;
+  const down = downs.map((d) => d.label).join(" ");
+  // Each owner as it was found: positively unloaded ("not loaded"), or anything else ("not running").
+  const each = downs.map((d) => `${d.label} ${d.unloaded ? "is not loaded" : "is not running"}`).join(", ");
+  if (downs.length !== rc.owners.length) return `its owner ${each} (the others run)`;
+  if (!downs.every((d) => d.unloaded)) return `its owner ${each}`;
+  if ("why" in pids) return `its owner ${down} is not loaded, but ${pids.why}`;
+  if (pids.pids.length) return `its owner ${down} is not loaded, but pid ${pids.pids.join(" ")} runs from it`;
+  return "";
+}
+
+/** A gated formula held because its check could not run: not upgraded, FAILED, notified, out of stuck. */
+async function ownerHold(rt: RunCtx, n: string, f: string, why: string): Promise<void> {
+  const { log, b, notify, host, cfg } = rt;
+  log.push(`  holding ${f} (release check: ${why} — not upgraded, its keg is untouched)`);
+  const said = why.replace(/^its /, "");
+  b.rcNotes.push(`${f} not upgraded, ${said.replace(/ is not running$/, " not running")}`);
+  b.failed.push(`release-check:${f}`);
+  b.flagged = true;
+  await notify(`⚠️ <b>${host} release check ${f}: held, not upgraded</b>\n${said[0]!.toUpperCase()}${said.slice(1)}, so the check could not run.\nLog: ${cfg.logFile ?? "-"}`);
+  b.rcHeldNames.push(n);
+}
+
+/** A formula upgrade; one with a release check records its previous keg first and runs its before. "held": not upgraded on purpose (said). */
+async function upgradeFormula(rt: RunCtx, full: string): Promise<number | "held"> {
   const { now, log, stamp, b, x, installEnv, rcEnv, rcPending, rcThisRun, oweAfter, cfg } = rt;
+  const unchecked = rt.rcUnchecked.get(last(full));
+  if (unchecked) {
+    // Asked again right before the upgrade (a review can take minutes): any change holds it, as before this check existed.
+    const why = await uncheckedBlock(rt, last(full), findCheck(cfg.releaseChecks, full)!);
+    if (why !== "") {
+      rt.rcUnchecked.delete(last(full));
+      await ownerHold(rt, unchecked.name, last(full), why ?? `its owner ${unchecked.owners.join(" ")} runs now, though it was not loaded when this run planned`);
+      return "held";
+    }
+    const code = (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true })).rc;
+    // The summary note is the restart step's, once the upgrade is counted (a Type A version mismatch is not); the
+    // stale-keg step leaves it alone once brew ran it, whatever comes after.
+    if (code === 0) unchecked.ran = true;
+    if (code === 0) log.push(`  release check ${last(full)}: brew upgrade done with no check — its owner ${unchecked.owners.join(" ")} is not loaded; not restarted`);
+    return code;
+  }
   const rc = findCheck(cfg.releaseChecks, full);
   if (!rc) return (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true })).rc;
   const f = last(full);

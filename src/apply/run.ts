@@ -280,6 +280,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   const rcBroken: string[] = [];
   for (const p of await loadPending(rcEnv, log, rcBroken, (cfg.releaseChecks ?? []).map((c) => shortName(c.formula)))) rcPending.set(p.formula, p);
   const rcThisRun = new Set<string>();
+  const rcUnchecked = new Map<string, { owners: string[]; name: string; ran?: boolean }>();
   const rcJobs = new Map<string, QueuedOwner[]>();
   const st: RunState = { rcScanned: false, rcUnresolved: new Set(), rcScannedRacks: new Map(), waiterDeferred: "", owners: { note: "", busy: new Set(), failed: new Set() } };
   /** Owner jobs by target, the later ones added. */
@@ -363,7 +364,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
 
   const rt: RunCtx = {
     opts, cfg, fs, exec, dryRun, now, host, r, tb, log, stamp, b, brewHeld, x, notify, step, tbEnv, tbOpts, brewFailed, quarantined, installEnv,
-    rcEnv, rcPending, rcBroken, rcThisRun, rcJobs, mergeOwners, rcStopOff, stoppingNow, afterOwed, oweAfter, expectedKeg, retiredFor, gatedOutdated,
+    rcEnv, rcPending, rcBroken, rcThisRun, rcUnchecked, rcJobs, mergeOwners, rcStopOff, stoppingNow, afterOwed, oweAfter, expectedKeg, retiredFor, gatedOutdated,
     ownerLock, clock, restartOpts, waiterEnv, kegEnv, ownerHanded, track, recoverTo, releaseRacks, npmFailed, st,
   };
 
@@ -394,9 +395,16 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   // Run for whatever was upgraded, even when the brew step stopped part-way.
   await step("brew", "relink and restart", async () => {
     if (dryRun || !b.upgraded.length) return;
+    // Counted upgraded (a Type A version mismatch is not): its summary note, before anything here can fail.
+    for (const n of b.upgraded) {
+      if (!rcUnchecked.has(last(n))) continue;
+      log.push(`restart: ${last(n)} not restarted — upgraded unchecked, its owner is not loaded`);
+      b.rcNotes.push(`${last(n)} upgraded unchecked, owner not loaded`);
+    }
     const rl = await relinkUpgraded(kegEnv, b.upgraded, { brew: cfg.brew, log });
     b.relinkNote = rl.note;
-    await restartUpgraded({ exec: x, exists: fs.exists, spawnDetached: fs.spawnDetached, home: fs.home, uid: fs.uid }, b.upgraded, { ...restartOpts, into: b.restarted });
+    // A formula upgraded unchecked (its owner unloaded on purpose) is never restarted: no kickstart, helper or owner command.
+    await restartUpgraded({ exec: x, exists: fs.exists, spawnDetached: fs.spawnDetached, home: fs.home, uid: fs.uid }, b.upgraded.filter((n) => !rcUnchecked.has(last(n))), { ...restartOpts, into: b.restarted });
     if (b.restarted.length) log.push(`restarted: ${b.restarted.join(" ")}`);
   });
   await step("brew", "cleanup", async () => {
