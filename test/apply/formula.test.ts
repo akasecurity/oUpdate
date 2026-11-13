@@ -158,6 +158,22 @@ describe("formulaReview", () => {
     expect(v).toMatchObject({ rc: 1, calls: 0 });
     expect(v.reason).toStartWith("cannot establish the installed artifact kind");
   });
+  test("Mc the urls given as constants are read, so a prebuilt update is reviewed, not held", async () => {
+    const v = await review({ oldUrl: `const:${PREBUILT("1.0")}`, newUrl: `const:${PREBUILT("1.1")}` });
+    expect(v.rc).toBe(0);
+  });
+  test("Mc an old formula whose constant url is source, new prebuilt → source→prebuilt FLAG", async () => {
+    const v = await review({ oldUrl: `const:${SOURCE("1.0")}` });
+    expect(v.reason).toStartWith("artifact kind changed source→prebuilt");
+  });
+  test("Md an installed formula whose url cannot be read (the constant is assigned twice) → FLAG, not a review on the new url alone", async () => {
+    const v = await review({ oldUrl: `const:${SOURCE("1.0")}`, oldExtra: `  SOURCE_URL = "https://other.example/x.tgz"`, newUrl: SOURCE("1.1"), artifact: "source" });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toBe("cannot read the installed formula's url — manual review");
+  });
+  test("Md no installed formula at all (no receipt revision) with a source artifact still goes to the reviewer", async () => {
+    expect((await review({ receipt: "none", oldUrl: SOURCE("1.0"), newUrl: SOURCE("1.1"), artifact: "source" })).rc).toBe(0);
+  });
   test("Mb an old formula with a source url in an on_arm block → source→prebuilt FLAG", async () => {
     const v = await review({ oldExtra: `  on_arm do\n    url "${SOURCE("1.0")}"\n  end` });
     expect(v.reason).toStartWith("artifact kind changed source→prebuilt");

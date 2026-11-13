@@ -8,22 +8,56 @@
  */
 export function formulaUrls(text: string): string[] {
   const opens = (l: string) => /(^|\s)do(\s*\|[^|]*\|)?\s*$/.test(l);
-  const out: string[] = [];
+  const lines = text.split("\n");
+  const out: (string | { name: string; at: number })[] = [];
+  // A url given as a constant (`url SOURCE_URL`) resolves only when the constant is simple: its name occurs once in the
+  // whole formula (apart from `url NAME` lines), as one plain single-line quoted literal at the class body's indent
+  // (no backslash, no #, no method call or continuation), assigned before the url line. A formula with a heredoc or
+  // =begin block resolves no constant. If any `url CONST` line does not resolve, the formula has no urls at all,
+  // so an unresolved url cannot hide behind a resolved one.
+  const noConsts = lines.some((l) => l.startsWith("=begin")) || /<<[~-]?["']?[A-Za-z_]/.test(text);
+  const assigned = new Map<string, { at: number; value: string }>();
   let skip = 0;
-  for (const l of text.split("\n")) {
+  let unresolved = false;
+  lines.forEach((l, at) => {
     if (skip > 0) {
       if (opens(l)) skip++;
       else if (/^\s*end(\s|$)/.test(l)) skip--;
-      continue;
+      return;
     }
     if (/^\s*(resource|patch|head|livecheck)([\s(]|$)/.test(l) && opens(l)) {
       skip = 1;
-      continue;
+      return;
+    }
+    const c = l.match(/^ {2}([A-Z][A-Z0-9_]*) = (["'])([^"'\\#]*)\2(?:\.freeze)?\s*$/);
+    if (c) {
+      const next = lines.slice(at + 1).find((n) => n.trim() !== "")?.trimStart() ?? "";
+      if (!next.startsWith(".") && !next.startsWith("&.")) assigned.set(c[1]!, { at, value: c[3]! });
     }
     const m = l.match(/^\s*url[\s(]+["']([^"']*)["']/);
-    if (m?.[1]) out.push(m[1]);
+    if (m) {
+      if (m[1]) out.push(m[1]);
+      return;
+    }
+    const k = l.match(/^\s*url[\s(]+([A-Z][A-Za-z0-9_]*)(.*)$/);
+    if (k) {
+      if (/^\s*(?:[),#]|$)/.test(k[2]!)) out.push({ name: k[1]!, at });
+      else unresolved = true;
+    }
+  });
+  const urls: string[] = [];
+  for (const u of out) {
+    if (typeof u === "string") {
+      urls.push(u);
+      continue;
+    }
+    const a = assigned.get(u.name);
+    const body = lines.filter((l) => !new RegExp(`^\\s*url[\\s(]+${u.name}(?![A-Za-z0-9_])`).test(l)).join("\n");
+    const once = (body.match(new RegExp(`(?<![A-Za-z0-9_])${u.name}(?![A-Za-z0-9_])`, "g")) ?? []).length === 1;
+    if (noConsts || !a || a.at > u.at || !once) unresolved = true;
+    else urls.push(a.value);
   }
-  return out;
+  return unresolved ? [] : urls;
 }
 
 /** Where a url's bytes come from: github.com/<owner>/<repo> for GitHub, else <host>/<first path segment>. */

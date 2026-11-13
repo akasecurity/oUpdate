@@ -15,9 +15,11 @@ const root = mkdtempSync(join(tmpdir(), "oupdate-tap-"));
 /** Call from afterAll in each test file that builds fixtures. */
 export const cleanupFixtures = () => rmSync(root, { recursive: true, force: true });
 
+/** A url written with the "const:" prefix is given as a constant (`SOURCE_URL = "..."` then `url SOURCE_URL`). */
+const urlLine = (url: string) => (url.startsWith("const:") ? `SOURCE_URL = "${url.slice(6)}".freeze\n  url SOURCE_URL` : `url "${url}"`);
 export const rb = (url: string, version: string, extra = "") => `class Tool < Formula
   desc "tool"
-  url "${url}"
+  ${urlLine(url)}
   version "${version}"
   sha256 "${version === "1.0" ? "a".repeat(64) : "b".repeat(64)}"
 ${extra}
