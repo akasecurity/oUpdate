@@ -2968,7 +2968,11 @@ export type Outcome = "stopped" | "held-human" | "error" | "passed";
 
 /** How a review ended: a detection stopped it, only "too large for model review", "not model-reviewable" or a spent read time budget held it for a human, a layer errored, or it passed through. */
 export function classifyOutcome(r: ReviewResult): Outcome {
-  if (r.layers.some((l) => l.verdict === "stop" && !isHumanHold(l))) return "stopped";
+  const errored = r.layers.some((l) => l.verdict === "error");
+  // Advisory and cooldown never read the code. Beside a layer that errored (a load error: nothing read the release), such a stop is
+  // no detection of this release's code, so it is not "stopped"; a malicious-package entry still is.
+  const readsNothing = (l: LayerVerdict) => (l.layer === "advisory" && !r.malicious?.length) || l.layer === "cooldown";
+  if (r.layers.some((l) => l.verdict === "stop" && !isHumanHold(l) && !(errored && readsNothing(l)))) return "stopped";
   // A layer that errored may have hidden a stop: the hold for a limit never outranks it.
   if (r.layers.some((l) => l.verdict === "error")) return "error";
   if (r.layers.some(isHumanHold)) return "held-human";
