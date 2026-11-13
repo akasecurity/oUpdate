@@ -264,7 +264,7 @@ const BLOB_NAMES_PER_RUN = 3;
 // Words that are no name in the window before a run (the extra names only: the selection of `NAME = "<run>"` above reads every name): reserved words,
 // words that start a value or an access, and the words of a data URI or an inline map (`data:image/png;base64,`).
 const NOT_A_NAME = new Set(("break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof let new null return super switch this throw true try typeof var void while with yield " +
-  "def lambda and or not is elif pass raise global nonlocal None True False del except then fi done esac from static as of async await get set " +
+  "def lambda and or not is elif raise global nonlocal None True False del except from static as of async await get set " +
   "base64 data image png jpeg jpg gif webp svg xml charset utf application json octet stream text plain html font woff woff2 ttf otf wasm javascript css audio video mp3 mp4 mpeg ogg zip pdf").split(" "));
 
 /** The names an encoded run of BLOB_RUN or more characters is assigned to on this line (`D = "<run>"`, `o.D = "<run>"`). */
@@ -302,15 +302,30 @@ function windowRunNames(l: string): string[] {
       // Comments are blanked, then the statement is cut at its last `;` and at its last `,` outside any bracket (`const a=1,D=("<run>")`).
       let lead = l.slice(Math.max(0, start - BLOB_LEAD), start).replace(/\/\*[^]*?\*\//g, " ");
       lead = lead.slice(lead.lastIndexOf(";") + 1);
-      for (let k = lead.length - 1, depth = 0; k >= 0; k--) {
-        const c = lead[k]!;
-        if (c === ")" || c === "]" || c === "}") depth++;
-        else if (c === "(" || c === "[" || c === "{") depth--;
-        else if (c === "," && depth <= 0) {
-          lead = lead.slice(k + 1);
+      // Read forward, a comma is the end of the part only at bracket depth 0 (a closing bracket with no opener in the window counts for nothing):
+      // `a=1,D=("<run>")` ends at the comma, `D=f(x,"<run>")` and `function D(a,b){return "<run>"}` do not.
+      for (let k = 0, depth = 0, cutAt = -1; k <= lead.length; k++) {
+        if (k === lead.length) {
+          if (cutAt >= 0) lead = lead.slice(cutAt + 1);
           break;
         }
+        const c = lead[k]!;
+        if (c === "(" || c === "[" || c === "{") depth++;
+        else if ((c === ")" || c === "]" || c === "}") && depth > 0) depth--;
+        else if (c === "," && depth === 0) cutAt = k;
       }
+      // A group that is closed before the run (the parameters of `function D(a, b) {`) names nothing that binds the run: blank it.
+      const open: number[] = [];
+      const chars = [...lead];
+      for (let k = 0; k < chars.length; k++) {
+        const c = chars[k]!;
+        if (c === "(" || c === "[" || c === "{") open.push(k);
+        else if ((c === ")" || c === "]" || c === "}") && open.length) {
+          const o = open.pop()!;
+          if (c === ")") for (let j = o + 1; j < k; j++) chars[j] = " ";
+        }
+      }
+      lead = chars.join("");
       const names: string[] = [];
       for (const m of lead.matchAll(IDENT)) {
         const a = lead[m.index! - 1];

@@ -146,11 +146,15 @@ describe("the selection is main's plus extra names, never fewer", () => {
     expect(cutDiff(`D = f(x, "${big}");`, "eval(D);")).toBe(1);
     expect(cutDiff(`D = [x, "${big}"];`, "eval(D);")).toBe(1);
     expect(cutDiff(`const pre=1, D = f(x, "${big}");`, "pre++;")).toBe(0);
+    // Controls: the parameters of a function are not names that bind its return value.
+    expect(cutDiff(`e.exports=function(e,t,n){return"${big}"}`, "use(t);")).toBe(0);
+    expect(cutDiff(`function D(a, b) { return "${big}" }`, "use(a);")).toBe(0);
   });
 
   test("differential on selected definitions: a definition is listed when the name it binds is used, and not otherwise", () => {
     const rnd = makeRng(11);
-    const names = ["D", "$D", "$$D", "PAYLOAD", "$PAYLOAD", "default", "pass", "done"];
+    // Names an extra rule can select: a reserved word (default) is selected by the plain form only, which the rows above cover.
+    const names = ["D", "$D", "$$D", "PAYLOAD", "$PAYLOAD", "pass", "done", "then"];
     const forms = [
       (n: string, r: string) => `const ${n} = "${r}"`,
       (n: string, r: string) => `${n} = ("${r}")`,
