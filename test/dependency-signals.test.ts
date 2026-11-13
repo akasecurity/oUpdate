@@ -207,29 +207,49 @@ describe("prepass carries the dependency signals as soft, never hard", () => {
   });
 });
 
-describe("a new npm dependency with a major of 90 to 999 raises the high-floor signal (soft)", () => {
-  const manifest = (deps: Record<string, string>) => new Map([["package.json", new TextEncoder().encode(JSON.stringify({ name: "p", version: "1.0.0", dependencies: deps }))]]);
-  const high = (oldDeps: Record<string, string>, newDeps: Record<string, string>) => dependencySignals("npm", manifest(oldDeps), manifest(newDeps)).filter((s) => s.kind === "dependency-high-floor");
+describe("a new npm dependency with a lower bound of major 90 to 999 raises one soft high-floor signal", () => {
+  const manifest = (o: Record<string, unknown>) => new Map([["package.json", new TextEncoder().encode(JSON.stringify({ name: "p", version: "1.0.0", ...o }))]]);
+  const sig = (oldM: Record<string, unknown>, newM: Record<string, unknown>) => dependencySignals("npm", manifest(oldM), manifest(newM)).filter((s) => s.kind === "dependency-high-floor");
+  const hit = (spec: unknown) => sig({}, { dependencies: { a: spec } }).length === 1;
   test("the corpus case carries it, as a soft signal and no hard one", () => {
     const p = corpusPair("npm-dependency-confusion-internal-name");
     const r = prepass("npm", p.old, p.new);
     expect(r.hard).toEqual([]);
-    expect(r.soft.find((s) => s.kind === "dependency-high-floor")?.detail).toContain("@acme-internal/auth-core asks for version ^99.0.0");
+    const d = r.soft.find((s) => s.kind === "dependency-high-floor")?.detail ?? "";
+    expect(d).toContain("@acme-internal/auth-core@^99.0.0");
+    expect(d).not.toContain("not a normal release");
   });
-  test("the edges: 89 and 1000 and a calendar version are quiet, 90 and 999 raise it", () => {
-    expect(high({}, { a: "^89.0.0" })).toEqual([]);
-    expect(high({}, { a: "^1000.0.0" })).toEqual([]);
-    expect(high({}, { a: "^2026.1.0" })).toEqual([]);
-    expect(high({}, { a: "90.0.0" })).toHaveLength(1);
-    expect(high({}, { a: "~999.1.0" })).toHaveLength(1);
-    expect(high({}, { a: ">=99.0.0" })).toHaveLength(1);
+  test("range shapes that raise it", () => {
+    for (const v of ["^99.0.0", "~99.1.0", ">=99.0.0", ">99", "=99.0.0", "v99.0.0", "99.x", "99", "99.0.0", "90.0.0", "999.9.9", "^99.0.0-beta.1", "^1.0.0 || ^99.0.0", "npm:lib1@^99.0.0", ">=1.0.0 || 99.x"]) expect([v, hit(v)]).toEqual([v, true]);
   });
-  test("only a name the release adds: a dependency the old release had, or one with no version string, stays quiet", () => {
-    expect(high({ a: "^99.0.0" }, { a: "^99.0.0" })).toEqual([]);
-    expect(high({ a: "^1.0.0" }, { a: "^99.0.0" })).toEqual([]);
-    expect(high({}, { a: "latest", b: "^1.2.3" })).toEqual([]);
+  test("shapes that stay quiet: edges, calendar versions, upper bounds, URLs, git, files, aliases whose name has digits, tags", () => {
+    for (const v of ["^89.0.0", "^1000.0.0", "^2026.1.0", "<100", "<=99.9.9", ">=1.0.0 <100", "1.0.0 - 99.0.0", "release-99", "git+https://example.com/99/pkg.git", "https://example.com/99/pkg.tgz", "file:../99/pkg", "link:../99", "workspace:^99.0.0", "npm:lib99@^1.0.0", "npm:@s/lib99", "https://192.168.1.5/pkg-99.tgz", "user/repo#904c1e7", "github:user/99", "git+ssh://git@example.com/a/b.git#99", "latest", "*", "", "^1.0.0"]) expect([v, hit(v)]).toEqual([v, false]);
   });
-  test("PyPI is not read", () => {
+  test("a non-string version is no version", () => {
+    expect(hit(99)).toBe(false);
+    expect(hit(null)).toBe(false);
+    expect(hit({ x: "^99.0.0" })).toBe(false);
+  });
+  test("a name in a runtime section counts if any of its versions is high; the same name in peerDependencies as * does not erase it", () => {
+    expect(sig({}, { dependencies: { a: "^99.0.0" }, peerDependencies: { a: "*" } })).toHaveLength(1);
+    expect(sig({}, { peerDependencies: { a: "^99.0.0" } })).toHaveLength(1);
+    expect(sig({}, { optionalDependencies: { a: "^99.0.0" } })).toHaveLength(1);
+    expect(sig({}, { devDependencies: { a: "^99.0.0" } })).toEqual([]);
+  });
+  test("a name any old section declared is not new: a devDependency moved into dependencies stays quiet", () => {
+    expect(sig({ devDependencies: { a: "^99.0.0" } }, { dependencies: { a: "^99.0.0" } })).toEqual([]);
+    expect(sig({ dependencies: { a: "^99.0.0" } }, { dependencies: { a: "^99.0.0" } })).toEqual([]);
+    expect(sig({ dependencies: { a: "^1.0.0" } }, { dependencies: { a: "^99.0.0" } })).toEqual([]);
+  });
+  test("many new names make one signal: the count and the first five, capped", () => {
+    const deps = Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`dep-${i}-${"x".repeat(100)}`, "^99.0.0"]));
+    const s = sig({}, { dependencies: deps });
+    expect(s).toHaveLength(1);
+    expect(s[0]!.detail.length).toBeLessThanOrEqual(900);
+    expect(s[0]!.detail).toContain("5000 new dependencies ask");
+    expect(s[0]!.detail).toContain("4995 more");
+  });
+  test("PyPI is not read (guard: passes on main too)", () => {
     const f = (t: string) => new Map([["requirements.txt", new TextEncoder().encode(t)]]);
     expect(dependencySignals("pypi", f(""), f("a==99.0.0\n")).filter((s) => s.kind === "dependency-high-floor")).toEqual([]);
   });

@@ -16,7 +16,7 @@ import type { Registry } from "../../src/adapters/ecosystem/types.ts";
 import type { Forge } from "../../src/adapters/forge/types.ts";
 import { CASES as FC_CASES, type Case, type Pkg } from "../2026-10-28-function-color-postinstall-hidden-download/cases.ts";
 import { parseReadBudget, readScope, scopeNote, wilson, type Scope } from "./stats.ts";
-import { MORE_CLEAN } from "./clean-cases.ts";
+import { MORE_CLEAN, HIGH_MAJOR_CLEAN } from "./clean-cases.ts";
 import { HELDOUT } from "./heldout-cases.ts";
 import { GAP } from "./gap-cases.ts";
 import { evasionReport, writeEvasions } from "./evasions.ts";
@@ -33,7 +33,7 @@ export const CASES: LimitCase[] = FC_CASES.filter((c) => c.kind === "attack").ma
 const GAP_IDS = new Set(GAP.map((c) => c.id));
 
 /** Clean cases (the control and the look-alikes the reviewer should let land): a hold here is a false hold. */
-export const CLEAN: Case[] = [...FC_CASES.filter((c) => c.expect === "land"), ...MORE_CLEAN, ...INSTALL_CLEAN];
+export const CLEAN: Case[] = [...FC_CASES.filter((c) => c.expect === "land"), ...MORE_CLEAN, ...HIGH_MAJOR_CLEAN, ...INSTALL_CLEAN];
 
 /** Releases held by policy are reported apart from false holds: an install script that downloads a binary (held with the reason in the hold text so the user can approve it), and the pre-pass install-script hard signal on package.json, which holds the release; the reviewer still runs and its verdict is the one counted. */
 export const POLICY_HOLD = new Set(["lookalike-prebuilt-update", "clean-funding-notice"]);

@@ -66,25 +66,42 @@ export function stripHashComments(text: string, o: { tomlLiteral: boolean } = { 
 }
 const quoted = (block: string) => [...block.matchAll(/["']([^"'\n]+)["']/g)].map((m) => reqName(m[1]!));
 
-/** The version each npm dependency name asks for, from the manifest as text. */
-function npmSpecs(bytes: Uint8Array | undefined): Map<string, string> {
-  const out = new Map<string, string>();
+const RUNTIME_SECTIONS = ["dependencies", "optionalDependencies", "peerDependencies"];
+const ALL_SECTIONS = [...RUNTIME_SECTIONS, "devDependencies"];
+
+/** Every version string each npm dependency name asks for in the given sections, as text (a non-string value is no version). */
+function npmSpecs(bytes: Uint8Array | undefined, sections: string[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
   if (!bytes) return out;
   try {
     const pj = JSON.parse(dec.decode(bytes)) as Record<string, unknown>;
-    for (const f of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+    for (const f of sections) {
       const b = pj?.[f];
-      if (b && typeof b === "object" && !Array.isArray(b)) for (const [k, v] of Object.entries(b)) if (typeof v === "string") out.set(k, v);
+      if (b && typeof b === "object" && !Array.isArray(b)) for (const [k, v] of Object.entries(b)) out.set(k, [...(out.get(k) ?? []), ...(typeof v === "string" ? [v] : [])]);
     }
   } catch { /* an unreadable manifest adds no names */ }
   return out;
 }
 
-/** A first version number whose major is 90 to 999: the pattern of a dependency-confusion release, never a normal floor (calendar versions are 4 digits). */
-const highMajor = (spec: string) => {
-  const m = /\d+/.exec(spec);
-  return !!m && Number(m[0]) >= 90 && Number(m[0]) < 1000;
-};
+// A lower bound: an optional ^ ~ >= > = v, then a major with optional minor and patch (a number, x, X or *), then an optional pre-release or build.
+const LOWER_BOUND = /^(?:\^|~|>=|>|=)?v?(\d+)(?:\.(?:\d+|[xX*])){0,2}(?:[-+][0-9A-Za-z.+-]*)?$/;
+/** True when a version string is a registry range with a lower bound whose major is 90 to 999 (a dependency-confusion release, never a normal floor; calendar versions are 4 digits). A URL, git, file, link or workspace spec, a GitHub shorthand, and an upper bound alone ("<100") never count; an npm: alias is read after its last "@"; each "||" alternative is tested. */
+export function highMajorFloor(spec: string): boolean {
+  let s = spec.trim();
+  if (s.startsWith("npm:")) {
+    const at = s.lastIndexOf("@");
+    if (at <= 3) return false;
+    s = s.slice(at + 1).trim();
+  }
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(s) || /^(?:\.|\/|~\/)/.test(s) || /^[\w.-]+\/[\w.-]+(?:#.*)?$/.test(s)) return false;
+  return s.split("||").some((alt) => {
+    const hyphen = alt.split(/\s+-\s+/);
+    return (hyphen.length > 1 ? hyphen.slice(0, 1) : alt.trim().split(/\s+/)).some((tok) => {
+      const m = LOWER_BOUND.exec(tok);
+      return !!m && Number(m[1]) >= 90 && Number(m[1]) < 1000;
+    });
+  });
+}
 
 function npmNames(bytes: Uint8Array | undefined): Set<string> {
   const out = new Set<string>();
@@ -153,11 +170,14 @@ export function dependencySignals(eco: Ecosystem, oldFiles: FileMap, newFiles: F
     if (!added.length) continue;
     out.push({ kind: "dependency-added", path: p, detail: `new dependency name(s): ${added.slice(0, 8).join(", ").slice(0, 160)}` });
     if (eco === "npm") {
-      const specs = npmSpecs(newFiles.get(p));
-      for (const n of added) {
-        const spec = specs.get(n);
-        if (spec && highMajor(spec)) out.push({ kind: "dependency-high-floor", path: p, detail: `new dependency ${n.slice(0, 80)} asks for version ${spec.slice(0, 40)}: a major this high is the dependency-confusion pattern (an internal name made to win over its private registry), not a normal release` });
-      }
+      // A name an old section (devDependencies too) already declared is no new dependency; only the runtime sections of the new release are read.
+      const oldAny = npmSpecs(oldFiles.get(p), ALL_SECTIONS);
+      const specs = npmSpecs(newFiles.get(p), RUNTIME_SECTIONS);
+      const high = added.flatMap((n) => {
+        const hit = !oldAny.has(n) && (specs.get(n) ?? []).find(highMajorFloor);
+        return hit ? [`${n.slice(0, 60)}@${hit.slice(0, 40)}`] : [];
+      });
+      if (high.length) out.push({ kind: "dependency-high-floor", path: p, detail: `${high.length} new ${high.length === 1 ? "dependency asks" : "dependencies ask"} for a very high version (${high.slice(0, 5).join(", ")}${high.length > 5 ? `, ${high.length - 5} more` : ""}), for a name the old release did not depend on; a very high major is a dependency-confusion pattern, so check that the real public releases of the name reach that major`.slice(0, 900) });
     }
     for (const n of added) {
       const like = lookalikeOf(eco, n);
