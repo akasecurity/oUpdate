@@ -286,7 +286,7 @@ function encodedRunLead(l: string): string[] {
   return found;
 }
 
-/** Extra names, added to the ones above and never instead of them: the names in the statement before each run (back to the last `;`, at most BLOB_LEAD characters) that bind or wrap it
+/** Extra names, added to the ones above and never instead of them: the names in the statement before each run (back to the last `;` or the last `,` outside brackets, comments blanked, at most BLOB_LEAD characters) that bind or wrap it
  *  (`D = Buffer.from("<run>")`, `function D() { return "<run>" }`, `{ D: "<run>" }`, `D = ["<run>"]`), the 3 nearest. */
 function windowRunNames(l: string): string[] {
   const found: string[] = [];
@@ -299,8 +299,18 @@ function windowRunNames(l: string): string[] {
       continue;
     }
     if (start >= 0 && i - start >= BLOB_RUN && runs++ < BLOB_EXTRA_RUNS) {
-      let lead = l.slice(Math.max(0, start - BLOB_LEAD), start);
+      // Comments are blanked, then the statement is cut at its last `;` and at its last `,` outside any bracket (`const a=1,D=("<run>")`).
+      let lead = l.slice(Math.max(0, start - BLOB_LEAD), start).replace(/\/\*[^]*?\*\//g, " ");
       lead = lead.slice(lead.lastIndexOf(";") + 1);
+      for (let k = lead.length - 1, depth = 0; k >= 0; k--) {
+        const c = lead[k]!;
+        if (c === ")" || c === "]" || c === "}") depth++;
+        else if (c === "(" || c === "[" || c === "{") depth--;
+        else if (c === "," && depth <= 0) {
+          lead = lead.slice(k + 1);
+          break;
+        }
+      }
       const names: string[] = [];
       for (const m of lead.matchAll(IDENT)) {
         const a = lead[m.index! - 1];
@@ -359,8 +369,8 @@ function unchangedBlobDefs(after: string, getOps: (a?: string[], b?: string[]) =
   for (const { l, at } of added) {
     for (const m of l.matchAll(IDENT)) {
       // A shell or PHP variable `$D` names the definition `D`: leading `$` signs are dropped unless the name itself is defined with them.
-      const n = defs.has(m[0]) ? m[0] : m[0].replace(/^\$+/, "");
-      if (defs.has(n) && !firstUse.has(n)) firstUse.set(n, at);
+      // Both the token and its stripped form select their definitions: a name defined with the `$` (`$D`) does not hide `D`.
+      for (const n of new Set([m[0], m[0].replace(/^\$+/, "")])) if (defs.has(n) && !firstUse.has(n)) firstUse.set(n, at);
     }
   }
   if (!firstUse.size) return undefined;

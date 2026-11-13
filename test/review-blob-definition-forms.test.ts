@@ -113,4 +113,41 @@ describe("the selection is main's plus extra names, never fewer", () => {
       for (const x of mainNames(line)) expect(got.has(x), `${x} in ${line.slice(0, 60)}`).toBe(true);
     }
   });
+
+  test("a $-prefixed name does not hide the plain name's definition (JS and shell)", () => {
+    const big = "A".repeat(30_000);
+    const cut = new Set<string>();
+    diff(`const D="${big}";\nconst $D=("${"B".repeat(450)}");`, "eval($D)", "index.js", cut);
+    expect([...cut]).toEqual(["index.js"]);
+    const cut2 = new Set<string>();
+    const b64 = "Q".repeat(30_000);
+    diff(`PAYLOAD="${b64}"\necho $PAYLOAD "${"R".repeat(450)}"`, "echo $PAYLOAD | base64 -d | sh", "run.sh", cut2);
+    expect([...cut2]).toEqual(["run.sh"]);
+  });
+
+  test("controls: a comma declaration or a comment beside the definition selects nothing", () => {
+    const big = "A".repeat(30_000);
+    expect(cutDiff(`const status=1,D=("${big}");`, "status++;")).toBe(0);
+    expect(cutDiff(`/* status */ const D=("${big}");`, "status++;")).toBe(0);
+    expect(cutDiff(`const status=1,D=("${big}");`, "eval(D);")).toBe(1);
+    expect(cutDiff(`f(a,b),D=("${big}");`, "eval(D);")).toBe(1);
+    expect(cutDiff(`const o={k:1,D:"${big}"};`, "eval(D);")).toBe(1);
+  });
+
+  test("differential on selected definitions: every definition main selects is listed on head", () => {
+    let seed = 11;
+    const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
+    const names = ["D", "$D", "$$D", "PAYLOAD", "$PAYLOAD", "default", "pass", "status"];
+    for (let n = 0; n < 300; n++) {
+      const defs = Array.from({ length: 1 + rnd(4) }, (_, i) => ({ name: names[rnd(names.length)]!, run: String.fromCharCode(65 + i).repeat(450) + i }));
+      const lines = defs.map((d) => `${rnd(2) ? "const " : ""}${d.name} = ${["", "(", "Buffer.from(", "["][rnd(4)]}"${d.run}"`);
+      const used = names.filter(() => rnd(3) === 0);
+      const out = diff(lines.join("\n"), `use(${used.join(",")});`);
+      // main's rule: a line is selected when its defined name, or a used token stripped of its leading $, is that name
+      for (const d of defs) {
+        const mainSelects = used.some((u) => u === d.name || u.replace(/^\$+/, "") === d.name);
+        if (mainSelects) expect(out, `${d.name} used ${used}`).toContain(d.run);
+      }
+    }
+  });
 });
