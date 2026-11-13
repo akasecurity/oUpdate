@@ -2769,7 +2769,10 @@ function addScannedLiterals(ctx: Ctx): void {
       const text = dec.decode(ctx.bytes.get(key));
       const read = budgeted<{ quoted: string[]; operand: string[] } | undefined>(text.length, () => {
         jsStep(text.length);
-        return { quoted: quotedTokens(text), operand: operandTokens(text) };
+        const quoted = quotedTokens(text);
+        const commands: string[] = [];
+        const operand = operandTokens(text, commands);
+        return { quoted, operand: [...operand, ...commands] };
       }, () => undefined);
       // A file whose literals could not be read is held, and not remembered as having none.
       if (!read) {
@@ -6270,6 +6273,128 @@ function quotedTokens(text: string): string[] {
   return out;
 }
 
+// A command string the code executes (the first argument of exec / execSync / execFile / spawn, or the argument after "-c" in the
+// args array of a shell; see operandTokens) that runs node names the files it runs. Its words are read as a shell does (quotes group and
+// are removed); each command of it (split at `;` `&` `&&` `||` `|` `(` `)`) is read when node is at command position: its first word,
+// after env assignments (X=1), `env`, `npx` or `exec`, or a path ending in /node. A shell at that position with -c (`sh -c '...'`)
+// is read again on its argument. Then the value of -r / --require (spaced or with `=`) and the script are files node resolves from
+// the working directory, as is an --import / --loader value that has an extension (those resolve no other). A known value flag's
+// value is skipped; -e / -p / --eval / --print end the read (their argument is code), as does `-` (stdin); after `--` the next word
+// is the script. After a flag this reader does not know (it may take a value), every later word is a candidate script: wider, never
+// a guess. A relative path (`./evil`, `lib/x`, `./build.config`) is named from the working directory only; a bare name (`build`) as
+// the args-array form names it: build.js (a unique name anywhere) and what node resolves from the working directory.
+const NODE_VALUE_FLAGS = new Set(["-C", "--conditions", "--env-file", "--env-file-if-exists", "--title", "--experimental-default-type", "--input-type",
+  "--max-old-space-size", "--max-semi-space-size", "--stack-size", "--inspect-port", "--redirect-warnings", "--diagnostic-dir", "--report-dir", "--report-filename",
+  "--cpu-prof-dir", "--heap-prof-dir", "--dns-result-order", "--unhandled-rejections", "--trace-event-categories", "--icu-data-dir", "--openssl-config",
+  "--disable-warning", "--test-reporter", "--test-reporter-destination", "--watch-path"]);
+const NODE_FLAGS = new Set(["-v", "--version", "-h", "--help", "-c", "--check", "-i", "--interactive", "--inspect", "--inspect-brk", "--watch", "--test",
+  "--enable-source-maps", "--expose-gc", "--no-warnings", "--no-deprecation", "--trace-warnings", "--trace-deprecation", "--throw-deprecation",
+  "--preserve-symlinks", "--preserve-symlinks-main", "--abort-on-uncaught-exception", "--pending-deprecation", "--trace-uncaught", "--trace-exit",
+  "--experimental-vm-modules", "--experimental-modules", "--experimental-strip-types", "--no-experimental-fetch",
+  "--use-strict", "--frozen-intrinsics", "--zero-fill-buffers", "--cpu-prof", "--heap-prof", "--prof", "--tls-min-v1.2", "--harmony",
+  "--openssl-legacy-provider", "--expose-internals", "--allow-natives-syntax", "--jitless"]);
+const SHELL_PROGRAMS = new Set(["sh", "bash", "zsh", "dash"]);
+// A shell's words: quotes group and are removed, an operator outside quotes is a word of its own (op: true); a quoted `;` is a plain
+// word. One pass over the text.
+function commandWords(raw: string): { text: string; op: boolean }[] {
+  const words: { text: string; op: boolean }[] = [];
+  let w = "";
+  let has = false;
+  let i = 0;
+  const n = raw.length;
+  const flush = (): void => {
+    if (has) words.push({ text: w, op: false });
+    w = "";
+    has = false;
+  };
+  while (i < n) {
+    const c = raw[i]!;
+    if (c === "'" || c === '"') {
+      const e = raw.indexOf(c, i + 1);
+      const end = e < 0 ? n : e;
+      w += raw.slice(i + 1, end);
+      has = true;
+      i = end + 1;
+    } else if (/\s/.test(c)) {
+      flush();
+      i++;
+    } else if (c === ";" || c === "|" || c === "&" || c === "(" || c === ")") {
+      flush();
+      const two = (c === "|" || c === "&") && raw[i + 1] === c;
+      words.push({ text: two ? c + c : c, op: true });
+      i += two ? 2 : 1;
+    } else {
+      w += c;
+      has = true;
+      i++;
+    }
+  }
+  flush();
+  return words;
+}
+function commandTokens(raw: string, out: string[], depth = 0): void {
+  jsStep(raw.length);
+  const read = commandWords(raw);
+  const words = read.map((x) => x.text);
+  const cwd = (w: string): void => {
+    let t = w;
+    while (t.startsWith("./")) t = t.slice(2);
+    if (t.length >= 3 && !t.startsWith("/") && !/(^|\/)\.\.?(\/|$)/.test(t) && /^[A-Za-z0-9_@+][A-Za-z0-9_@+./-]*$/.test(t)) out.push(CWD_MARK + t);
+  };
+  // A module path (-r): relative from the working directory. A bare name is a package specifier: named from the working directory
+  // only, never as a stem anywhere (docs/dotenv.js).
+  const required = (w: string | undefined): void => {
+    if (w !== undefined && w !== "") cwd(w);
+  };
+  // An ES module path (--import, --loader): resolved as written, so only one with an extension names a file.
+  const imported = (w: string | undefined): void => {
+    if (w !== undefined && (w.startsWith(".") || w.includes("/")) && /\.[A-Za-z0-9]+$/.test(w.slice(w.lastIndexOf("/") + 1))) cwd(w);
+  };
+  // As the args-array form reads a script (operandTokens): a bare name is name.js and the name from the working directory.
+  const script = (w: string): void => {
+    if (w.startsWith("/")) out.push(w);
+    else if (w.startsWith(".") || w.includes("/") || w.includes(".")) cwd(w);
+    else if (w !== "") {
+      out.push(`${w}.js`);
+      cwd(w);
+    }
+  };
+  let at = 0;
+  while (at < words.length) {
+    let end = at;
+    while (end < words.length && !read[end]!.op) end++;
+    let k = at;
+    while (k < end && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]!) || /^(?:env|npx|exec)$/.test(words[k]!))) k++;
+    if (k < end && SHELL_PROGRAMS.has(programName(words[k]!)) && words[k + 1] === "-c" && k + 2 < end && depth < 4) commandTokens(words[k + 2]!, out, depth + 1);
+    else if (k < end && NODE_PROGRAMS.has(programName(words[k]!))) {
+      let wide = false;
+      for (let j = k + 1; j < end; j++) {
+        const w = words[j]!;
+        const eq = w.indexOf("=");
+        const flag = w.startsWith("-") && eq > 0 ? w.slice(0, eq) : w;
+        const value = w.startsWith("-") && eq > 0 ? w.slice(eq + 1) : undefined;
+        // -e / -p, alone or in a cluster of short flags (two linear tests: one pattern for it backtracks on a long word).
+        if ((/^-[A-Za-z]+$/.test(flag) && /[ep]/.test(flag)) || flag === "--eval" || flag === "--print" || w === "-") break;
+        if (w === "--") {
+          if (j + 1 < end) script(words[j + 1]!);
+          break;
+        }
+        if (/^(?:-r|--require)$/.test(flag)) required(value ?? words[++j]);
+        else if (/^(?:--import|--loader|--experimental-loader)$/.test(flag)) imported(value ?? words[++j]);
+        else if (NODE_VALUE_FLAGS.has(flag)) {
+          if (value === undefined) j++;
+        } else if (w.startsWith("-")) {
+          if (!NODE_FLAGS.has(flag)) wide = true;
+        } else {
+          script(w);
+          if (!wide) break;
+        }
+      }
+    }
+    at = end + 1;
+  }
+}
+
 // Basename -> files, and extension-less stem -> files, built once per file map so a scan of many quoted tokens stays linear.
 const NAME_INDEX = new WeakMap<Map<string, string>, { names: Map<string, string[]>; stems: Map<string, string[]> }>();
 function nameIndex(logicalMap: Map<string, string>): { names: Map<string, string[]>; stems: Map<string, string[]> } {
@@ -6315,9 +6440,14 @@ const PROGRAM_WORDS = new Set(["node", "nodejs", "npm", "npx", "yarn", "pnpm", "
  * a `.join(` closes. Only these name a file by a bare stem: `"evil"` in `path.join(dir, "evil")`. A word in a log line, an event
  * name or a require specifier (a package or built-in module name, never a file of the package) is not one. One forward pass, linear in the text.
  */
-function operandTokens(text: string): string[] {
+// A call whose first argument, a string, is a shell command (exec, execSync; execFile and spawn run one with shell: true).
+const SHELL_STRING_CALLS = new Set(["exec", "execSync", "execFile", "execFileSync", "spawn", "spawnSync"]);
+// commands (when given) takes the files named by the command strings the code executes (see commandTokens): the first argument of a
+// SHELL_STRING_CALLS call, and the argument after "-c" in the args array of a call whose program is a shell. Both are read here, at
+// real call syntax, never from text inside another string.
+function operandTokens(text: string, commands?: string[]): string[] {
   const out: string[] = [];
-  type Frame = { open: string; callee: string; pending: string[]; extra: string[]; lit: number; litMark: number; quiet: boolean; node: boolean; plain: boolean };
+  type Frame = { open: string; callee: string; pending: string[]; extra: string[]; lit: number; litMark: number; quiet: boolean; node: boolean; plain: boolean; args: number; prev?: string; shell?: 1 | 2 };
   // A word joins a frame's pending list, or its extra list: the words only a node command's args array adds (flag stems, working-directory
   // names, script stems beyond the first word). The extra list is kept apart so pending stays the plain word list and its first word
   // is still the command word. The frame remembers whether any word names node, and whether any is not a subscript key,
@@ -6354,6 +6484,21 @@ function operandTokens(text: string): string[] {
         j++;
       }
       const top = stack[stack.length - 1];
+      if (commands && plain && top && j < n && text[j] === c && j - i - 1 <= 512) {
+        const raw = text.slice(i + 1, j);
+        const caller = stack[stack.length - 2];
+        if (top.open === "(" && SHELL_STRING_CALLS.has(top.callee) && top.args === 0 && top.prev === undefined && top.pending.length === 0) commandTokens(raw, commands);
+        else if (top.open === "[" && top.shell !== 2 && caller?.open === "(" && COMMAND_CALLS.has(caller.callee) && caller.pending[0] !== undefined
+          && SHELL_PROGRAMS.has(programName(caller.pending[0]))) {
+          // After -c the shell takes options (-e, -c again, --) up to its first word that is not one: that is the command. The strings
+          // after the command are its positional parameters ($0, $1, ...), never commands.
+          if (top.shell === 1 && !raw.startsWith("-")) {
+            commandTokens(raw, commands);
+            top.shell = 2;
+          } else if (raw === "-c") top.shell = 1;
+        }
+        top.prev = raw;
+      }
       if (plain && top && j < n && text[j] === c && j - i - 1 <= 512) {
         for (const tok of text.slice(i + 1, j).split(/\s+/)) {
           if (!tok) continue;
@@ -6374,6 +6519,7 @@ function operandTokens(text: string): string[] {
     if (c === "," || c === ";" || c === ":") {
       // The end of a flag's value. A value that is an expression (not a string) took operands from inner path calls: they go.
       const top = stack[stack.length - 1];
+      if (top && c === ",") top.args++;
       if (top && c === "," && top.lit === 1) top.lit = 2;
       else if (top) {
         if (top.lit === 2) out.length = top.litMark;
@@ -6398,7 +6544,7 @@ function operandTokens(text: string): string[] {
       const quiet = !PATH_CALLS.has(callee) && !body && (LITERAL_PATH_CALLS.has(callee) || (!!up && up.quiet));
       // A `[` that follows a value (`process.env["NODE"]`) is a subscript, not an array: its words pass up like a group's, except in a command, where the key is read as a stem and is no args array.
       const subscript = c === "[" && /[\w$)\]]/.test(text[k] ?? "") && !/(?:^|[^\w$])(?:return|yield|await|typeof|case|of|in|else|do|void|delete|new|throw)$/.test(text.slice(Math.max(0, k - 6), k + 1));
-      stack.push({ open: subscript ? "s" : c, callee, pending: [], extra: [], lit: 0, litMark: 0, quiet, node: false, plain: false });
+      stack.push({ open: subscript ? "s" : c, callee, pending: [], extra: [], lit: 0, litMark: 0, quiet, node: false, plain: false, args: 0 });
       i++;
       continue;
     }
@@ -6491,7 +6637,10 @@ function settled(ctx: Ctx, key: string | undefined): boolean {
 function addLiteralToken(ctx: Ctx, token: string, operand = false): void {
   if (token.startsWith(CWD_MARK)) {
     const w = token.slice(1);
-    if (w.length >= 3 && /^[A-Za-z0-9_@+-]+$/.test(w) && !ctx.hold && findFile(ctx, w) !== undefined) addLogical(ctx, w);
+    // A bare word, or a path from the working directory (a relative path in a command string), never one leaving it.
+    if (w.length >= 3 && /^[A-Za-z0-9_@+][A-Za-z0-9_@+./-]*$/.test(w) && !/(^|\/)\.\.?(\/|$)/.test(w) && !ctx.hold) {
+      if (findFile(ctx, w) !== undefined) addLogical(ctx, w);
+    }
     return;
   }
   let t = token.replace(/\/{2,}/g, "/").replace(/^~(?:[+-]\d*|\d+)\/+/, "");
