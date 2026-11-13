@@ -2965,6 +2965,11 @@ export function classifyJs(fromKey: string, source: string): JsTier {
   } catch {
     scannerFaults++;
     return { all: true, pkg: true, tests: true, flows: true, same: false, dirs: [], lits: [] };
+  } finally {
+    // The indexes belong to this file's texts; a large one is not kept for the next.
+    dropParenIndexes();
+    moduleNamesText = undefined;
+    moduleNames = undefined;
   }
 }
 function classifyJsScan(fromKey: string, source: string): JsTier {
@@ -2993,6 +2998,8 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
 // module wrapper. module.require and createRequire(...) results count when they are not called on the spot.
 // `r = `, `const r = `, `export const r = `, `const a = 1, r = ` before a createRequire call (optionally through a member chain).
 const BOUND_STMT = /^\s*(?:export\s+)?(?:(?:const|let|var)\s+(?:[A-Za-z_$][\w$]*\s*(?:=\s*[^,;()[\]{}]*)?,\s*)*)?[A-Za-z_$][\w$]*\s*=\s*(?:[\w$]+\s*\.\s*)*$/;
+// Plain calls read their arguments once per loop, so the read is at most the text; nesting reads the same text once per level.
+const handedOnReadBudget = (len: number): number => 6 * len + 1_000_000;
 function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   const names = new Set(["require", ...aliases]);
   for (const m of text.matchAll(/(?<![\w$.])[A-Za-z_$][\w$]*(?![\w$])/g)) {
@@ -3015,9 +3022,16 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   // A computed member key (module["require"], module[`require`]) is a name, not text.
   if (computedRequire(keptKeys)) return true;
   // Reflect.get(module, "require"), Object.getOwnPropertyDescriptor(module, "require"): the loader read by a string key through a call.
+  // Every call's arguments are read in full, so nested calls (f(Reflect.get(Reflect.get(...)))) read the same text once per level. The characters
+  // read are counted for each of the two reads below, against one budget sized from the text: past the budget the file is held as a handed-on loader (it can only widen), so one file costs a bounded read.
+  const budget = handedOnReadBudget(Math.max(text.length, keptKeys.length));
+  let readKept = 0;
+  let readFlat = 0;
   for (const m of keptKeys.matchAll(/(?<![\w$.])(?:Reflect|Object)\s*\.\s*\w+\s*\(/g)) {
     const args = argsOf(keptKeys, (m.index ?? 0) + m[0].length - 1);
     if (args === undefined) return true;
+    readKept += args.length;
+    if (readKept > budget) return true;
     const list = splitTop(args, ",");
     if (list.slice(1).some((a) => /^\s*(["'`])require\1\s*$/.test(a))) return true;
   }
@@ -3027,7 +3041,10 @@ function handedOn(text: string, aliases: string[], keptKeys = ""): boolean {
   const flat = text.replace(/`/g, " ");
   for (const m of flat.matchAll(/(?<![\w$.])(?:Reflect|Object)\s*\.\s*(get|getOwnPropertyDescriptors?|entries|values|assign|fromEntries|getOwnPropertyNames|ownKeys)\s*\(/g)) {
     const args = argsOf(flat, (m.index ?? 0) + m[0].length - 1);
-    if (args === undefined || splitTop(args, ",").some((a) => mentionsModule(a, flat))) return true;
+    if (args === undefined) return true;
+    readFlat += args.length;
+    if (readFlat > budget) return true;
+    if (splitTop(args, ",").some((a) => mentionsModule(a, flat))) return true;
   }
   // module.require handed on (a bare mention, .bind(...)).
   for (const m of text.matchAll(/(?<![\w$.])module\s*\.\s*require\b(?!\s*\()/g)) if (!/^\s*\.\s*(?:paths|cache)\b/.test(text.slice((m.index ?? 0) + m[0].length, (m.index ?? 0) + m[0].length + 12))) return true;
@@ -3079,9 +3096,16 @@ function keyInPattern(text: string, end: number): boolean {
 }
 // The expression names module, require, require.main, module.parent or a name assigned from one of them (module.exports, require.cache and
 // the like are not the loader).
+let moduleNamesText: string | undefined;
+let moduleNames: Set<string> | undefined;
 function mentionsModule(expr: string, text: string): boolean {
-  const names = new Set(["module", "require"]);
-  for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:module|require)(?![\w$])(?!\s*\()(?!\s*\.\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\b)/g)) names.add(m[1]!);
+  // The names bound to the loader are read from the whole text once, not once per call that asks.
+  if (moduleNamesText !== text || !moduleNames) {
+    moduleNames = new Set(["module", "require"]);
+    for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:module|require)(?![\w$])(?!\s*\()(?!\s*\.\s*(?:exports|cache|extensions|resolve|paths|id|filename|loaded)\b)/g)) moduleNames.add(m[1]!);
+    moduleNamesText = text;
+  }
+  const names = moduleNames;
   // The text is already blanked by the scan: strings are text and a key before a colon is a name of data, not a reference.
   const code = expr;
   for (const name of names) {
@@ -5923,6 +5947,19 @@ function firstArg(args: string): string {
 
 function argsOf(text: string, paren: number): string | undefined {
   if (text[paren] !== "(") return undefined;
+  if (text.length >= ARGS_INDEX_FROM) {
+    const index = indexedClose(text);
+    if (index) {
+      const close = index[paren + 1]!;
+      return close < 0 ? undefined : text.slice(paren + 1, close);
+    }
+    const found = argsScan(text, paren);
+    noteRead(text, found === undefined ? text.length - paren : found.length + 2);
+    return found;
+  }
+  return argsScan(text, paren);
+}
+function argsScan(text: string, paren: number): string | undefined {
   let depth = 0;
   let quote: string | null = null;
   for (let i = paren; i < text.length; i++) {
@@ -5946,6 +5983,88 @@ function argsOf(text: string, paren: number): string | undefined {
     }
   }
   return undefined;
+}
+// A long text that is read again and again is indexed: close[i] is where the group that is open at i (read with strings skipped) closes, or -1
+// when it never does. A call then reads its arguments in constant time, so thousands of unclosed or nested calls in one file cost one pass, not
+// one pass each. A text is indexed only once the reads it has had add up to more than its length (a text read once or twice, such as the long
+// argument being decoded, is scanned and never indexed), so a temporary text cannot push the file's own index out; the indexes kept are capped
+// by their total length, and all of them are dropped at the end of each file.
+const ARGS_INDEX_FROM = 2048;
+const INDEX_CHARS_MAX = 16_000_000;
+const NOTE_CHARS_MAX = 64_000_000;
+// Both tables are keyed by the string itself: a lookup hashes it once (the hash stays with the string) and compares content only against an equal
+// hash, so the several same-length copies of one file the scan builds (strings blanked, backticks turned to spaces) are never compared character
+// by character. The newest entry is last; the oldest go first when a cap is passed.
+const parenIndexes = new Map<string, Int32Array>();
+const readNotes = new Map<string, number>(); // the characters scanned in a text that has no index yet
+let indexedChars = 0;
+let notedChars = 0;
+function dropParenIndexes(): void {
+  parenIndexes.clear();
+  readNotes.clear();
+  indexedChars = 0;
+  notedChars = 0;
+}
+function indexedClose(text: string): Int32Array | undefined {
+  const close = parenIndexes.get(text);
+  if (close) {
+    parenIndexes.delete(text);
+    parenIndexes.set(text, close); // the newest
+  }
+  return close;
+}
+// A scan of `chars` characters of `text` was made without an index: once such reads exceed the text's length, the text gets one.
+function noteRead(text: string, chars: number): void {
+  const before = readNotes.get(text);
+  const spent = (before ?? 0) + chars;
+  if (before === undefined) notedChars += text.length;
+  readNotes.delete(text);
+  if (spent <= text.length || text.length > INDEX_CHARS_MAX) {
+    readNotes.set(text, spent);
+    while (notedChars > NOTE_CHARS_MAX) {
+      const oldest = readNotes.keys().next().value as string;
+      readNotes.delete(oldest);
+      notedChars -= oldest.length;
+    }
+    return;
+  }
+  notedChars -= text.length;
+  while (parenIndexes.size > 0 && indexedChars + text.length > INDEX_CHARS_MAX) {
+    const oldest = parenIndexes.keys().next().value as string;
+    parenIndexes.delete(oldest);
+    indexedChars -= oldest.length;
+  }
+  parenIndexes.set(text, buildParenClose(text));
+  indexedChars += text.length;
+}
+let parenIndexed = 0;
+/** Characters indexed so far (the work of the argument index), for tests. */
+export function argsIndexedChars(): number {
+  return parenIndexed;
+}
+function buildParenClose(text: string): Int32Array {
+  const n = text.length;
+  parenIndexed += n;
+  const close = new Int32Array(n + 1);
+  close[n] = -1;
+  // Next unescaped quote of each kind at or after the position being read (-1 when none). A backslash run of odd length escapes the next character.
+  const next = { "'": -1, '"': -1, "`": -1 };
+  for (let i = n - 1; i >= 0; i--) {
+    const c = text.charCodeAt(i);
+    if (c === 39 || c === 34 || c === 96) {
+      const q = text[i] as "'" | '"' | "`";
+      const end = next[q];
+      close[i] = end < 0 ? -1 : close[end + 1]!;
+      let run = 0;
+      while (i - 1 - run >= 0 && text.charCodeAt(i - 1 - run) === 92) run++;
+      if (run % 2 === 0) next[q] = i;
+    } else if (c === 41) close[i] = i;
+    else if (c === 40) {
+      const m = close[i + 1]!;
+      close[i] = m < 0 ? -1 : close[m + 1]!;
+    } else close[i] = close[i + 1]!;
+  }
+  return close;
 }
 
 function matchCall(expr: string): { callee: string; args: string } | undefined {
