@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chunkDiff } from "../src/review.ts";
+import { chunkDiff, encodedRunNames } from "../src/review.ts";
 import type { FileMap } from "../src/prepass.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -51,5 +51,66 @@ describe("a definition of a used name that is not NAME = \"run\" is listed too",
 
   test("the form NAME = \"run\" still lists as before", () => {
     expect(diff(`const D="${B}";`)).toContain("(a definition of D)");
+  });
+});
+
+// Main's selection, kept as it was: the plain form NAME = "<run>", at most 16 names per line.
+function mainNames(l: string): string[] {
+  const found: string[] = [];
+  let start = -1;
+  const isEnc = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 || c === 61 || c === 95 || c === 45;
+  for (let i = 0; i <= l.length; i++) {
+    if (i < l.length && isEnc(l.charCodeAt(i))) {
+      if (start < 0) start = i;
+      continue;
+    }
+    if (start >= 0 && i - start >= 400 && found.length < 16) {
+      const lead = /([\p{L}_$][\p{L}\p{N}\p{M}\p{Pc}_$\u200C\u200D]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
+      if (lead) found.push(lead[1]!);
+    }
+    start = -1;
+  }
+  return found;
+}
+
+describe("the selection is main's plus extra names, never fewer", () => {
+  const cutDiff = (def: string, use: string) => {
+    const cut = new Set<string>();
+    diff(def, use, "index.js", cut);
+    return cut.size;
+  };
+  const big = "A".repeat(30_000);
+  test("names main selected still hold when cut: a property named default, a 65-character name, pass, done, a 78-character name", () => {
+    expect(cutDiff(`o.default = "${big}"; `, "eval(o.default)")).toBe(1);
+    expect(cutDiff(`const ${"D".repeat(65)} = "${big}";`, `eval(${"D".repeat(65)})`)).toBe(1);
+    expect(cutDiff(`const ${"D".repeat(78)} = "${big}";`, `eval(${"D".repeat(78)})`)).toBe(1);
+    expect(cutDiff(`const pass="${big}";`, "eval(pass)")).toBe(1);
+    expect(cutDiff(`exports.default="${big}";`, "eval(exports.default)")).toBe(1);
+    expect(cutDiff(`done="${big}"`, "eval($done)")).toBe(1);
+  });
+  test("16 decoy runs that bind no name before D do not hide D", () => {
+    const decoys = Array.from({ length: 16 }, (_, i) => `"${String.fromCharCode(66 + (i % 20)).repeat(450)}${i}"`).join(",");
+    const def = `const a=[${decoys}];const q=[${decoys}]; const D="${B}";`;
+    expect(diff(def, "eval(D)")).toContain("(a definition of");
+    expect(diff(`x=[${decoys},D="${B}"]`, "eval(D)")).toContain(B);
+  });
+  test("controls: an unrelated name before the statement, and a data URI, select nothing", () => {
+    expect(diff(`const status=1;const D="${B}";`, "status++;")).not.toContain(B);
+    expect(diff(`const u="data:image/png;base64,${B}";`, `const m = "image png base64 charset utf";`)).not.toContain(B);
+    expect(diff(`var a=1;function D(){return "${B}"}`, "var from = 1; var as = 2; var of = 3; async function f(){ await g(); }")).not.toContain(B);
+  });
+  test("differential: on a generated corpus the names are a superset of main's", () => {
+    let seed = 7;
+    const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
+    const words = ["default", "pass", "done", "then", "is", "None", "status", "from", "static", "D", "exports", "const", "function"];
+    const wrap = ["", "(", "Buffer.from(", "[", "{k:", "()=>", "return "];
+    for (let n = 0; n < 400; n++) {
+      let line = "";
+      for (let d = 0, k = rnd(41); d < k; d++) line += `"${"x".repeat(400 + rnd(5))}",`;
+      const name = rnd(3) === 0 ? words[rnd(words.length)]! : "N".repeat(1 + rnd(90));
+      line += `${rnd(2) ? "const " : ""}${rnd(2) ? "o." : ""}${name} = ${wrap[rnd(wrap.length)]}"${B}"`;
+      const got = new Set(encodedRunNames(line));
+      for (const x of mainNames(line)) expect(got.has(x), `${x} in ${line.slice(0, 60)}`).toBe(true);
+    }
   });
 });
