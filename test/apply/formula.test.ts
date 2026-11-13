@@ -2,21 +2,21 @@
 // case, brew faked through FormulaEnv. The package is example/tool/tool (the source fixture's
 // own tap is renamed).
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FORMULA_TAIL, SURFACE_TAIL, formulaReview, VERDICT_CONTRACT, type FormulaEnv } from "../../src/apply/formula.ts";
 import { scripted } from "./helpers.ts";
-import { APPROVE, cleanupFixtures, fixture, git, OFFICIAL, OTHER, PREBUILT, SOURCE, TAP, type Fx } from "./tap-fixture.ts";
+import { APPROVE, cleanupFixtures, fixture, git, OFFICIAL, OTHER, PREBUILT, rb, SOURCE, TAP, type Fx } from "./tap-fixture.ts";
 
 afterAll(cleanupFixtures);
 
-async function review(f: Fx = {}, answers: string[] = [], fallback = APPROVE) {
+async function review(f: Fx = {}, answers: string[] = [], fallback = APPROVE, over: { newUrl?: string } = {}) {
   const fx = fixture(f);
   const { r, prompts } = scripted(answers, fallback);
   const notices: string[] = [];
   const res = await formulaReview(fx.env, r, {
     pkg: "tool", tap: TAP, oldVer: "1.0", newVer: "1.1", artifact: f.artifact ?? "prebuilt", tapDir: fx.tap, head: fx.head,
-    newUrl: f.newUrl ?? PREBUILT("1.1"), officialTaps: OFFICIAL, host: "fixture", notify: (t) => void notices.push(t),
+    newUrl: f.newUrl ?? PREBUILT("1.1"), officialTaps: OFFICIAL, host: "fixture", notify: (t) => void notices.push(t), ...over,
   });
   return { ...res, prompts, notices, fx };
 }
@@ -174,6 +174,154 @@ describe("formulaReview", () => {
   }
   test("Md no installed formula at all (no receipt revision) with a source artifact still goes to the reviewer", async () => {
     expect((await review({ receipt: "none", oldUrl: SOURCE("1.0"), newUrl: SOURCE("1.1"), artifact: "source" })).rc).toBe(0);
+  });
+  // The tap moved the formula file after the installed revision: the old text is read from where it was.
+  const moved = (t: string) => {
+    mkdirSync(join(t, "Formula/t"), { recursive: true });
+    renameSync(join(t, "Formula/tool.rb"), join(t, "Formula/t/tool.rb"));
+  };
+  test("Me a formula file the tap moved to a subdirectory: the installed text is read from its old path, so the source repo is still checked", async () => {
+    const v = await review({ oldUrl: SOURCE("1.0"), newUrl: "https://evil.example.com/tool/1.1/tool-1.1.tar.gz", artifact: "source", after: moved, rbPath: "Formula/t/tool.rb" });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toStartWith("source repo changed:");
+  });
+  test("Me a moved prebuilt formula from the same repo: its installed text is recovered, so it is reviewed (with none it would be held)", async () => {
+    const v = await review({ after: moved, rbPath: "Formula/t/tool.rb" });
+    expect(v).toMatchObject({ rc: 0, calls: 1 });
+  });
+  // Where the installed file was, at the installed revision (`before` moves it there; the new formula is at Formula/tool.rb).
+  const wasAt = (path: string) => (t: string) => {
+    mkdirSync(join(t, path.split("/").slice(0, -1).join("/") || "."), { recursive: true });
+    renameSync(join(t, "Formula/tool.rb"), join(t, path));
+  };
+  /** A tap whose formulas all lived in `dir` ("" for the tap root) at the installed revision, tool.rb at `dir`/`sub`. */
+  const layout = (dir: string, sub = "") => (t: string) => {
+    const to = (f: string) => join(t, dir, f === "tool.rb" ? sub : "", f);
+    mkdirSync(join(t, dir, sub), { recursive: true });
+    renameSync(join(t, "Formula/tool.rb"), to("tool.rb"));
+    if (dir !== "Formula") renameSync(join(t, "Formula/helper.rb"), to("helper.rb"));
+  };
+  for (const [dir, sub] of [["HomebrewFormula", ""], ["HomebrewFormula", "t"], ["", ""], ["Formula", "t"]] as const) {
+    test(`Me the installed formula was at ${[dir, sub, "tool.rb"].filter(Boolean).join("/")}, brew's formula directory then: found, a prebuilt from the same repo is reviewed`, async () => {
+      expect(await review({ before: layout(dir, sub) })).toMatchObject({ rc: 0, calls: 1 });
+    });
+  }
+  test("Me a tool.rb in HomebrewFormula/ while Formula/ existed (brew never read it): not counted, held", async () => {
+    const v = await review({ before: wasAt("HomebrewFormula/tool.rb") });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toContain("(no single tool.rb there)");
+  });
+  test("Me a decoy tool.rb in HomebrewFormula/ while Formula/ held the real one: the decoy counts nothing, the real one is compared", async () => {
+    const decoy = (t: string) => {
+      mkdirSync(join(t, "HomebrewFormula"), { recursive: true });
+      writeFileSync(join(t, "HomebrewFormula/tool.rb"), rb("https://evil.example.com/tool/1.0/tool-1.0.tar.gz", "1.0"));
+    };
+    const v = await review({ oldUrl: SOURCE("1.0"), newUrl: SOURCE("1.1"), artifact: "source", before: decoy, after: moved, rbPath: "Formula/t/tool.rb" });
+    expect(v).toMatchObject({ rc: 0, calls: 1 });
+  });
+  test("Me git show of the file found fails: held, with its own reason", async () => {
+    const fx = fixture({ after: moved, rbPath: "Formula/t/tool.rb" });
+    const { r } = scripted([], APPROVE);
+    const env: FormulaEnv = { ...fx.env, git: async (d, args) => (args[0] === "show" && args[1] === `${fx.oldRev}:Formula/tool.rb` ? { rc: 128, out: "" } : fx.env.git(d, args)) };
+    const v = await formulaReview(env, r, { pkg: "tool", tap: TAP, oldVer: "1.0", newVer: "1.1", artifact: "prebuilt", tapDir: fx.tap, head: fx.head, newUrl: PREBUILT("1.1"), officialTaps: OFFICIAL, host: "fixture", notify: () => {} });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toBe(`cannot read the installed formula at its tap revision ${fx.oldRev.slice(0, 12)} (git show of Formula/tool.rb failed) — manual review`);
+  });
+  test("Me the installed formula was at cmd/tool.rb (not a formula directory): not found → FLAG", async () => {
+    const v = await review({ before: wasAt("cmd/tool.rb") });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toStartWith("cannot read the installed formula at its tap revision");
+  });
+  test("Me no file of that name at the installed revision (renamed to another name): FLAG", async () => {
+    const v = await review({ before: wasAt("Formula/tool-old.rb") });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toStartWith("cannot read the installed formula at its tap revision");
+  });
+  test("Me a decoy second tool.rb under a non-ASCII directory at the installed revision is listed (ls-tree -z): no single file, held", async () => {
+    const decoy = (t: string) => {
+      mkdirSync(join(t, "Formula/é"), { recursive: true });
+      writeFileSync(join(t, "Formula/é/tool.rb"), rb("https://evil.example.com/tool/1.0/tool-1.0.tar.gz", "1.0"));
+    };
+    const v = await review({ oldUrl: SOURCE("1.0"), newUrl: "https://evil.example.com/tool/1.1/tool-1.1.tar.gz", artifact: "source", before: decoy, after: moved, rbPath: "Formula/t/tool.rb" });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toContain("(no single tool.rb there)");
+  });
+  test("Me a file only ending in the name (Formula/a/xtool.rb) is not the formula: none found, held", async () => {
+    const v = await review({ before: wasAt("Formula/a/xtool.rb") });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toContain("(no single tool.rb there)");
+  });
+  test("Me a real move from HomebrewFormula/ (the formula directory then) into Formula/: the deleted file is in a formula directory, reviewed", async () => {
+    const back = (t: string) => void git(t, "rm", "-q", "HomebrewFormula/tool.rb");
+    const v = await review({ before: layout("HomebrewFormula"), after: back });
+    expect(v).toMatchObject({ rc: 0, calls: 1 });
+    expect(git(v.fx.tap, "diff", "--name-status", "--no-renames", `${v.fx.oldRev}..${v.fx.head}`).out).toContain("D\tHomebrewFormula/tool.rb");
+  });
+  test("Me a real move of a root tool.rb into Formula/ while Formula/ existed (brew read Formula/, not the root): held", async () => {
+    const back = (t: string) => void git(t, "rm", "-q", "tool.rb");
+    const v = await review({ before: wasAt("tool.rb"), after: back });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toContain("(no single tool.rb there)");
+  });
+  test("Me a real move of a root-only tap's tool.rb into Formula/: found at the root, then the deleted root file is a tap support change (listed with --no-renames): held", async () => {
+    const back = (t: string) => void git(t, "rm", "-q", "tool.rb");
+    const v = await review({ before: layout(""), after: back });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toStartWith("tap support files changed — manual review: ");
+    expect(v.reason).toContain("tool.rb");
+  });
+  test("Me git cannot list the installed revision (ls-tree fails): FLAG", async () => {
+    const fx = fixture({ after: moved, rbPath: "Formula/t/tool.rb" });
+    const { r } = scripted([], APPROVE);
+    const env: FormulaEnv = { ...fx.env, git: async (d, args) => (args.includes("ls-tree") ? { rc: 128, out: "" } : fx.env.git(d, args)) };
+    const v = await formulaReview(env, r, { pkg: "tool", tap: TAP, oldVer: "1.0", newVer: "1.1", artifact: "prebuilt", tapDir: fx.tap, head: fx.head, newUrl: PREBUILT("1.1"), officialTaps: OFFICIAL, host: "fixture", notify: () => {} });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toMatch(/^cannot list the tap at revision [0-9a-f]{12} — manual review$/);
+  });
+  test("Me the receipt revision exists but holds no single file of that name (two, here) → FLAG, no reviewer call, counted toward stuck", async () => {
+    // At the old revision Formula/tool.rb and Formula/a/tool.rb both exist; brew now reads Formula/t/tool.rb.
+    const twin = (t: string) => {
+      mkdirSync(join(t, "Formula/a"), { recursive: true });
+      writeFileSync(join(t, "Formula/a/tool.rb"), readFileSync(join(t, "Formula/tool.rb"), "utf8"));
+    };
+    const v = await review({ oldUrl: SOURCE("1.0"), newUrl: "https://evil.example.com/tool/1.1/tool-1.1.tar.gz", artifact: "source", before: twin, after: moved, rbPath: "Formula/t/tool.rb" });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toStartWith("cannot read the installed formula at its tap revision");
+    // Counted toward stuck: no installed text was read.
+    expect(v.unreadable).toBeUndefined();
+  });
+  test("Mf brew info gives no stable url: the new formula's own urls are compared, so a changed source repo is caught", async () => {
+    const v = await review({ oldUrl: SOURCE("1.0"), newUrl: "https://evil.example.com/tool/1.1/tool-1.1.tar.gz", artifact: "source" }, [], APPROVE, { newUrl: "" });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toStartWith("source repo changed:");
+  });
+  test("Mf no stable url and none readable in the new formula → FLAG, no reviewer call, counted toward stuck", async () => {
+    const v = await review({ oldUrl: SOURCE("1.0"), newUrl: "raw:url url_for_release", artifact: "source" }, [], APPROVE, { newUrl: "" });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toBe("cannot read the new formula's url — manual review");
+    expect(v.unreadable).toBeUndefined();
+  });
+  test("Mf no stable url, an allowed on_arm url then a changed-origin on_intel url in the new formula: every url is compared, held", async () => {
+    const intel = `  on_intel do\n    url "https://evil.example.com/tool/1.1/tool-1.1.tar.gz"\n  end`;
+    const v = await review({ oldUrl: SOURCE("1.0"), newUrl: SOURCE("1.1"), newExtra: `  on_arm do\n    url "${SOURCE("1.1")}"\n  end\n${intel}`, artifact: "source" }, [], APPROVE, { newUrl: "" });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toStartWith("source repo changed:");
+    expect(v.reason).toContain("evil.example.com");
+  });
+  test("Md no stable url and an installed url that cannot be read: held (before, with no stable url it went to the reviewer)", async () => {
+    const v = await review({ oldUrl: "const:" + SOURCE("1.0"), newUrl: SOURCE("1.1"), artifact: "source" }, [], APPROVE, { newUrl: "" });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toBe("cannot read the installed formula's url — manual review");
+    expect(v.unreadable).toBe(true);
+  });
+  test("Mg prebuilt whose installed formula exists but its url cannot be read: says so, not 'no installed formula revision'", async () => {
+    const v = await review({ oldUrl: "raw:url url_for_release" });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toBe("cannot read the installed formula's url — manual review");
+    expect(v.unreadable).toBe(true);
+  });
+  test("Mg prebuilt with no receipt revision names that reason", async () => {
+    expect((await review({ receipt: "none" })).reason).toBe("cannot establish the installed artifact kind (the install receipt for 1.0 records no tap revision) — manual review");
   });
   test("Mb an old formula with a source url in an on_arm block → source→prebuilt FLAG", async () => {
     const v = await review({ oldExtra: `  on_arm do\n    url "${SOURCE("1.0")}"\n  end` });

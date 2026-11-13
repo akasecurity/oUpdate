@@ -174,10 +174,29 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
     wholeNote = `the receipt's tap revision ${oldRev.slice(0, 12)} is not in the local tap clone`;
   } else {
     fdiff = (await env.git(a.tapDir, ["diff", `${oldRev}..${a.head}`, "--", rbPath])).out;
-    const shown = await env.git(a.tapDir, ["show", `${oldRev}:${rbPath}`]);
-    oldText = shown.rc === 0 ? shown.out : "";
+    // The installed text at its revision. A file the tap moved since is read from where it was: the one file of the
+    // same name where brew loaded formulas at that revision: Formula/ (any depth) if it existed, else
+    // HomebrewFormula/ (any depth), else the tap root. A file anywhere else was never what brew read.
+    let shown = await env.git(a.tapDir, ["show", `${oldRev}:${rbPath}`]);
+    if (shown.rc !== 0) {
+      const base = rbPath.split("/").at(-1)!;
+      const rev = oldRev.slice(0, 12);
+      // NUL-separated (-z lists every path as it is, never quoted), so a path with non-ASCII characters is never dropped.
+      const tree = await env.git(a.tapDir, ["ls-tree", "-r", "-z", "--name-only", oldRev]);
+      // The revision is there but the installed text is not: never reviewed without it (its url and deps go unchecked).
+      // An ordinary hold, counted toward stuck: no installed text was read (see unreadable), and it may persist.
+      if (tree.rc !== 0) return gate(`cannot list the tap at revision ${rev} — manual review`);
+      const files = tree.out.split("\0").filter(Boolean);
+      const dir = ["Formula/", "HomebrewFormula/"].find((d) => files.some((f) => f.startsWith(d)));
+      const was = files.filter((f) => (dir ? f.startsWith(dir) && f.endsWith(`/${base}`) : f === base));
+      if (was.length !== 1) return gate(`cannot read the installed formula at its tap revision ${rev} (no single ${base} there) — manual review`);
+      shown = await env.git(a.tapDir, ["show", `${oldRev}:${was[0]}`]);
+      if (shown.rc !== 0) return gate(`cannot read the installed formula at its tap revision ${rev} (git show of ${was[0]} failed) — manual review`);
+    }
+    oldText = shown.out;
     if (!fdiff) wholeNote = `the formula file shows no change between ${oldRev.slice(0, 12)} and the current tap checkout`;
-    const names = await env.git(a.tapDir, ["diff", "--name-only", `${oldRev}..${a.head}`]);
+    // Every path, a rename's source too (not left to rename detection or the user's diff.renames).
+    const names = await env.git(a.tapDir, ["diff", "--no-renames", "--name-only", `${oldRev}..${a.head}`]);
     const changed = names.out.split("\n").filter(Boolean);
     if (a.upstream) {
       const g = await gatherSurface(env.git, a.tapDir, oldRev, a.head);
@@ -203,17 +222,24 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
   // Artifact kind and source repo, against every top-level url of the installed formula.
   const oldUrls = oldText ? formulaUrls(oldText) : [];
   if (a.artifact === "prebuilt") {
-    if (!oldUrls.length) return gate("cannot establish the installed artifact kind (no installed formula revision to compare) — manual review", oldText !== "");
+    if (!oldUrls.length) {
+      if (oldText) return gate("cannot read the installed formula's url — manual review", true);
+      return gate(`cannot establish the installed artifact kind (${wholeNote || "no installed formula text to compare"}) — manual review`);
+    }
     const src = oldUrls.find((u) => artifactKind(u) === "source");
     if (src) return gate(`artifact kind changed source→prebuilt — manual review (installed formula had ${src})`);
   }
   // An installed formula whose url cannot be read (an odd shape: a constant, a method call, a url only in a resource block)
   // leaves the source repo unchecked: held, never reviewed on the new url alone. No installed text at all is not this case.
-  if (a.newUrl && oldText && !oldUrls.length) return gate("cannot read the installed formula's url — manual review", true);
-  if (oldUrls.length && a.newUrl) {
+  if (oldText && !oldUrls.length) return gate("cannot read the installed formula's url — manual review", true);
+  if (oldUrls.length) {
+    // The new url brew reports, else every top-level url of the new formula text; none readable is held.
+    const newUrls = a.newUrl ? [a.newUrl] : formulaUrls(ftext);
+    // An ordinary hold, counted toward stuck: it is the new formula's url, not the installed text, that cannot be read.
+    if (!newUrls.length) return gate("cannot read the new formula's url — manual review");
     const origins = [...new Set(oldUrls.map(urlOrigin))];
-    const now = urlOrigin(a.newUrl);
-    if (!origins.includes(now)) return gate(`source repo changed: ${origins.join(" ")} → ${now} — manual review`);
+    const moved = [...new Set(newUrls.map(urlOrigin))].filter((o) => !origins.includes(o));
+    if (moved.length) return gate(`source repo changed: ${origins.join(" ")} → ${moved.join(" ")} — manual review`);
   }
 
   // New dependencies outside the official taps. The old set is by full name (a bare name is
