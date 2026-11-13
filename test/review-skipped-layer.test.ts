@@ -44,3 +44,14 @@ test("a layer that errored is never read as a hold for a limit: the error ranks 
   expect(classifyOutcome(mk(["scan", "error", "scanner crashed"], limit))).toBe("error");
   expect(classifyOutcome(mk(["scan", "error", "scanner crashed"], ["prepass", "stop", "install script"], limit))).toBe("stopped");
 });
+
+test("a stop from advisory or cooldown beside a layer that errored is an error, not stopped; a malicious entry or a code-layer stop still stops", () => {
+  const mk = (layers: [LayerName, "pass" | "stop" | "error", string][], malicious?: string[]): ReviewResult => ({ eco: "npm", name: "p", from: "1", to: "2", decision: "hold", malicious, layers: layers.map(([layer, verdict, detail]) => ({ layer, verdict, detail })) });
+  const adv: [LayerName, "stop", string] = ["advisory", "stop", "introduces: GHSA-x (high): a vulnerability"];
+  const load: [LayerName, "error", string] = ["prepass", "error", "could not load the artifact"];
+  expect(classifyOutcome(mk([adv]))).toBe("stopped");
+  expect(classifyOutcome(mk([adv, load]))).toBe("error");
+  expect(classifyOutcome(mk([["cooldown", "stop", "published 1 day ago"], load]))).toBe("error");
+  expect(classifyOutcome(mk([adv, load], ["MAL-1"]))).toBe("stopped");
+  expect(classifyOutcome(mk([adv, load, ["reviewer", "stop", "FLAG: install hook posts credentials"]]))).toBe("stopped");
+});
