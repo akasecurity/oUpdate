@@ -84,27 +84,46 @@ function npmSpecs(bytes: Uint8Array | undefined, sections: string[]): Map<string
 }
 
 // A lower bound: an optional ^ ~ >= > = v, then a major with optional minor and patch (a number, x, X or *), then an optional pre-release or build.
-const LOWER_BOUND = /^(?:\^|~|>=|>|=)?v?(\d+)(?:\.(?:\d+|[xX*])){0,2}(?:[-+][0-9A-Za-z.+-]*)?$/;
-/** True when a version string is a registry range with a lower bound whose major is 90 to 999 (a dependency-confusion release, never a normal floor; calendar versions are 4 digits). A URL, git, file, link or workspace spec, a GitHub shorthand, and an upper bound alone ("<100") never count; an npm: alias is read after its last "@"; each "||" alternative is tested. */
-export function highMajorFloor(spec: string): boolean {
-  // A real range is far shorter: cutting first keeps the reading linear on a manifest that is only capped by the artifact limits.
-  let s = spec.slice(0, 256).trim();
+const LOWER_BOUND = /^(?:\^|~>|~|>=|>|=)?v?(\d+)(?:\.(?:\d+|[xX*])){0,2}(?:[-+][0-9A-Za-z.+-]*)?$/;
+const isSpace = (c: number) => c === 32 || (c >= 9 && c <= 13);
+
+/** The spec with every whitespace run (npm reads any run as one) made one space, read in one linear pass with no regex, and cut at 256 characters on a token boundary: a token the cut would split, or one longer than 256 itself, is dropped whole, so a partial number is never read. */
+function collapsed(spec: string): string {
+  const toks: string[] = [];
+  let len = 0, start = -1;
+  for (let i = 0; i <= spec.length; i++) {
+    const sp = i === spec.length || isSpace(spec.charCodeAt(i));
+    if (!sp) { if (start < 0) start = i; if (i - start >= 256) return toks.join(" "); continue; }
+    if (start < 0) continue;
+    const tok = spec.slice(start, i);
+    start = -1;
+    if (len + tok.length + (toks.length ? 1 : 0) > 256) return toks.join(" ");
+    len += tok.length + (toks.length ? 1 : 0);
+    toks.push(tok);
+  }
+  return toks.join(" ");
+}
+
+/** The "||" alternative of a version string that is a registry range with a lower bound of major 90 to 999 (a dependency-confusion release, never a normal floor; calendar versions are 4 digits), or undefined. A URL, git, file, link or workspace spec, a GitHub shorthand and an upper bound alone ("<100") never count; an npm: alias is read after its last "@"; each alternative is tested. */
+export function highFloorAlt(spec: string): string | undefined {
+  let s = collapsed(spec);
   if (s.startsWith("npm:")) {
     const at = s.lastIndexOf("@");
-    if (at <= 3) return false;
+    if (at <= 3) return undefined;
     s = s.slice(at + 1).trim();
   }
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(s) || /^(?:\.|\/|~\/)/.test(s) || /^[\w.-]+\/[\w.-]+(?:#.*)?$/.test(s)) return false;
-  return s.split("||").some((raw) => {
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(s) || /^(?:\.|\/|~\/)/.test(s) || /^[\w.-]+\/[\w.-]+(?:#.*)?$/.test(s)) return undefined;
+  return s.split("||").map((raw) => raw.trim()).find((alt) => {
     // An operator written apart from its number ("< 99", ">= 99.0.0") is joined to it, so an upper bound never reads as a lower one.
-    const alt = raw.trim().replace(/(<=|>=|<|>|=|\^|~)\s+/g, "$1");
-    const hyphen = alt.split(/\s+-\s+/);
-    return (hyphen.length > 1 ? hyphen.slice(0, 1) : alt.split(/\s+/)).some((tok) => {
+    const joined = alt.replace(/(<=|>=|<|>|=|\^|~>|~) /g, "$1");
+    const hyphen = joined.split(" - ");
+    return (hyphen.length > 1 ? hyphen.slice(0, 1) : joined.split(" ")).some((tok) => {
       const m = LOWER_BOUND.exec(tok);
       return !!m && Number(m[1]) >= 90 && Number(m[1]) < 1000;
     });
   });
 }
+const highMajorFloor = (spec: string) => highFloorAlt(spec) !== undefined;
 
 function npmNames(bytes: Uint8Array | undefined): Set<string> {
   const out = new Set<string>();
@@ -170,17 +189,19 @@ export function dependencySignals(eco: Ecosystem, oldFiles: FileMap, newFiles: F
   for (const p of [...newFiles.keys()].filter(isManifest)) {
     const before = new Set([...names(p, oldFiles)].map((n) => norm(eco, n)));
     const added = [...names(p, newFiles)].filter((n) => !before.has(norm(eco, n)));
-    if (!added.length) continue;
-    out.push({ kind: "dependency-added", path: p, detail: `new dependency name(s): ${added.slice(0, 8).join(", ").slice(0, 160)}` });
+    if (added.length) out.push({ kind: "dependency-added", path: p, detail: `new dependency name(s): ${added.slice(0, 8).join(", ").slice(0, 160)}` });
     if (eco === "npm") {
-      // A name an old section (devDependencies too) already asked for at a high floor is not new news; only the runtime sections of the new release are read.
+      // A name that asks for a high floor now and no old version of it, in any section (devDependencies too), did: a new name or a raised floor. Only the runtime sections of the new release are read.
       const oldAny = npmSpecs(oldFiles.get(p), ALL_SECTIONS);
       const specs = npmSpecs(newFiles.get(p), RUNTIME_SECTIONS);
-      const high = added.flatMap((n) => {
-        const hit = !(oldAny.get(n) ?? []).some(highMajorFloor) && (specs.get(n) ?? []).find(highMajorFloor);
-        return hit ? [`${n.slice(0, 60)}@${hit.slice(0, 40)}`] : [];
-      });
-      if (high.length) out.push({ kind: "dependency-high-floor", path: p, detail: `${high.length} new ${high.length === 1 ? "dependency asks" : "dependencies ask"} for a very high version (${high.slice(0, 5).join(", ")}${high.length > 5 ? `, ${high.length - 5} more` : ""}), for a name the old release did not depend on; a very high major is a dependency-confusion pattern, so check that the real public releases of the name reach that major`.slice(0, 900) });
+      const high: string[] = [];
+      for (const [n, vs] of specs) {
+        const alt = vs.map(highFloorAlt).find((a) => a !== undefined);
+        if (alt === undefined || (oldAny.get(n) ?? []).some(highMajorFloor)) continue;
+        const was = oldAny.get(n)?.[0];
+        high.push(was === undefined ? `${n.slice(0, 60)}@${alt.slice(0, 40)}` : `${n.slice(0, 60)} (was ${collapsed(was).slice(0, 40)}, now ${alt.slice(0, 40)})`);
+      }
+      if (high.length) out.push({ kind: "dependency-high-floor", path: p, detail: `${high.length} ${high.length === 1 ? "dependency asks" : "dependencies ask"} for a very high version (${high.slice(0, 5).join(", ")}${high.length > 5 ? `, ${high.length - 5} more` : ""}); a very high major is a dependency-confusion pattern, so check that the real public releases of the name reach that major`.slice(0, 900) });
     }
     for (const n of added) {
       const like = lookalikeOf(eco, n);
