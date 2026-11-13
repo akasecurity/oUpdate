@@ -87,16 +87,19 @@ function npmSpecs(bytes: Uint8Array | undefined, sections: string[]): Map<string
 const LOWER_BOUND = /^(?:\^|~|>=|>|=)?v?(\d+)(?:\.(?:\d+|[xX*])){0,2}(?:[-+][0-9A-Za-z.+-]*)?$/;
 /** True when a version string is a registry range with a lower bound whose major is 90 to 999 (a dependency-confusion release, never a normal floor; calendar versions are 4 digits). A URL, git, file, link or workspace spec, a GitHub shorthand, and an upper bound alone ("<100") never count; an npm: alias is read after its last "@"; each "||" alternative is tested. */
 export function highMajorFloor(spec: string): boolean {
-  let s = spec.trim();
+  // A real range is far shorter: cutting first keeps the reading linear on a manifest that is only capped by the artifact limits.
+  let s = spec.slice(0, 256).trim();
   if (s.startsWith("npm:")) {
     const at = s.lastIndexOf("@");
     if (at <= 3) return false;
     s = s.slice(at + 1).trim();
   }
   if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(s) || /^(?:\.|\/|~\/)/.test(s) || /^[\w.-]+\/[\w.-]+(?:#.*)?$/.test(s)) return false;
-  return s.split("||").some((alt) => {
+  return s.split("||").some((raw) => {
+    // An operator written apart from its number ("< 99", ">= 99.0.0") is joined to it, so an upper bound never reads as a lower one.
+    const alt = raw.trim().replace(/(<=|>=|<|>|=|\^|~)\s+/g, "$1");
     const hyphen = alt.split(/\s+-\s+/);
-    return (hyphen.length > 1 ? hyphen.slice(0, 1) : alt.trim().split(/\s+/)).some((tok) => {
+    return (hyphen.length > 1 ? hyphen.slice(0, 1) : alt.split(/\s+/)).some((tok) => {
       const m = LOWER_BOUND.exec(tok);
       return !!m && Number(m[1]) >= 90 && Number(m[1]) < 1000;
     });
@@ -170,11 +173,11 @@ export function dependencySignals(eco: Ecosystem, oldFiles: FileMap, newFiles: F
     if (!added.length) continue;
     out.push({ kind: "dependency-added", path: p, detail: `new dependency name(s): ${added.slice(0, 8).join(", ").slice(0, 160)}` });
     if (eco === "npm") {
-      // A name an old section (devDependencies too) already declared is no new dependency; only the runtime sections of the new release are read.
+      // A name an old section (devDependencies too) already asked for at a high floor is not new news; only the runtime sections of the new release are read.
       const oldAny = npmSpecs(oldFiles.get(p), ALL_SECTIONS);
       const specs = npmSpecs(newFiles.get(p), RUNTIME_SECTIONS);
       const high = added.flatMap((n) => {
-        const hit = !oldAny.has(n) && (specs.get(n) ?? []).find(highMajorFloor);
+        const hit = !(oldAny.get(n) ?? []).some(highMajorFloor) && (specs.get(n) ?? []).find(highMajorFloor);
         return hit ? [`${n.slice(0, 60)}@${hit.slice(0, 40)}`] : [];
       });
       if (high.length) out.push({ kind: "dependency-high-floor", path: p, detail: `${high.length} new ${high.length === 1 ? "dependency asks" : "dependencies ask"} for a very high version (${high.slice(0, 5).join(", ")}${high.length > 5 ? `, ${high.length - 5} more` : ""}), for a name the old release did not depend on; a very high major is a dependency-confusion pattern, so check that the real public releases of the name reach that major`.slice(0, 900) });

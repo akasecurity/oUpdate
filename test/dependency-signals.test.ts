@@ -220,10 +220,10 @@ describe("a new npm dependency with a lower bound of major 90 to 999 raises one 
     expect(d).not.toContain("not a normal release");
   });
   test("range shapes that raise it", () => {
-    for (const v of ["^99.0.0", "~99.1.0", ">=99.0.0", ">99", "=99.0.0", "v99.0.0", "99.x", "99", "99.0.0", "90.0.0", "999.9.9", "^99.0.0-beta.1", "^1.0.0 || ^99.0.0", "npm:lib1@^99.0.0", ">=1.0.0 || 99.x"]) expect([v, hit(v)]).toEqual([v, true]);
+    for (const v of ["^99.0.0", "~99.1.0", ">=99.0.0", ">99", "=99.0.0", "v99.0.0", "99.x", "99", "99.0.0", "90.0.0", "999.9.9", "^99.0.0-beta.1", "^1.0.0 || ^99.0.0", "npm:lib1@^99.0.0", ">=1.0.0 || 99.x", "^1.0.0 || 99.0.0 - 120.0.0", ">= 99.0.0", "^ 99.0.0", "<100 || >= 99"]) expect([v, hit(v)]).toEqual([v, true]);
   });
   test("shapes that stay quiet: edges, calendar versions, upper bounds, URLs, git, files, aliases whose name has digits, tags", () => {
-    for (const v of ["^89.0.0", "^1000.0.0", "^2026.1.0", "<100", "<=99.9.9", ">=1.0.0 <100", "1.0.0 - 99.0.0", "release-99", "git+https://example.com/99/pkg.git", "https://example.com/99/pkg.tgz", "file:../99/pkg", "link:../99", "workspace:^99.0.0", "npm:lib99@^1.0.0", "npm:@s/lib99", "https://192.168.1.5/pkg-99.tgz", "user/repo#904c1e7", "github:user/99", "git+ssh://git@example.com/a/b.git#99", "latest", "*", "", "^1.0.0"]) expect([v, hit(v)]).toEqual([v, false]);
+    for (const v of ["^89.0.0", "^1000.0.0", "^2026.1.0", "<100", "<=99.9.9", "< 99", "<= 99.0.0", ">=1.0.0 < 100", ">=1.0.0 <= 99.9.9", "^1.0.0 || < 100", ">=1.0.0 <100", "1.0.0 - 99.0.0", "release-99", "git+https://example.com/99/pkg.git", "https://example.com/99/pkg.tgz", "file:../99/pkg", "link:../99", "workspace:^99.0.0", "npm:lib99@^1.0.0", "npm:@s/lib99", "https://192.168.1.5/pkg-99.tgz", "user/repo#904c1e7", "github:user/99", "git+ssh://git@example.com/a/b.git#99", "latest", "*", "", "^1.0.0"]) expect([v, hit(v)]).toEqual([v, false]);
   });
   test("a non-string version is no version", () => {
     expect(hit(99)).toBe(false);
@@ -236,8 +236,9 @@ describe("a new npm dependency with a lower bound of major 90 to 999 raises one 
     expect(sig({}, { optionalDependencies: { a: "^99.0.0" } })).toHaveLength(1);
     expect(sig({}, { devDependencies: { a: "^99.0.0" } })).toEqual([]);
   });
-  test("a name any old section declared is not new: a devDependency moved into dependencies stays quiet", () => {
+  test("a name an old section already asked for at a high floor is not news (a devDependency moved into dependencies at the same floor stays quiet); a jump from a low one signals", () => {
     expect(sig({ devDependencies: { a: "^99.0.0" } }, { dependencies: { a: "^99.0.0" } })).toEqual([]);
+    expect(sig({ devDependencies: { a: "^1.0.0" } }, { dependencies: { a: "^99.0.0" } })).toHaveLength(1);
     expect(sig({ dependencies: { a: "^99.0.0" } }, { dependencies: { a: "^99.0.0" } })).toEqual([]);
     expect(sig({ dependencies: { a: "^1.0.0" } }, { dependencies: { a: "^99.0.0" } })).toEqual([]);
   });
@@ -248,6 +249,12 @@ describe("a new npm dependency with a lower bound of major 90 to 999 raises one 
     expect(s[0]!.detail.length).toBeLessThanOrEqual(900);
     expect(s[0]!.detail).toContain("5000 new dependencies ask");
     expect(s[0]!.detail).toContain("4995 more");
+  });
+  test("a version string of 1 MB of spaces is cut and read in linear time", () => {
+    const t = performance.now();
+    expect(hit("1" + " ".repeat(1_000_000) + "2")).toBe(false);
+    expect(hit("^99.0.0" + " ".repeat(1_000_000))).toBe(true);
+    expect(performance.now() - t).toBeLessThan(500);
   });
   test("PyPI is not read (guard: passes on main too)", () => {
     const f = (t: string) => new Map([["requirements.txt", new TextEncoder().encode(t)]]);
