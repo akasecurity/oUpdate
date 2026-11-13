@@ -205,6 +205,9 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
     const src = oldUrls.find((u) => artifactKind(u) === "source");
     if (src) return gate(`artifact kind changed source→prebuilt — manual review (installed formula had ${src})`);
   }
+  // An installed formula whose url cannot be read (an odd shape: a constant, a method call, a url only in a resource block)
+  // leaves the source repo unchecked: held, never reviewed on the new url alone. No installed text at all is not this case.
+  if (a.newUrl && oldText && !oldUrls.length) return gate("cannot read the installed formula's url — manual review");
   if (oldUrls.length && a.newUrl) {
     const origins = [...new Set(oldUrls.map(urlOrigin))];
     const now = urlOrigin(a.newUrl);
