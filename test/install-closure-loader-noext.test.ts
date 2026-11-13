@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { installView } from "../src/install-closure.ts";
 import { prepass, type FileMap } from "../src/prepass.ts";
 
@@ -224,6 +224,151 @@ test("the arguments of a spawned command are not same-stem paths", () => {
   expect(held(root("1.0.0"), root("1.0.1"))).toBe(true);
 });
 
+// The hook runs from scripts/, so the package root is no sibling of it: a root file is reached only by the script a spawn names.
+const scriptsHook = (hook: string, v: string, changed = "evil.js", extra: Record<string, string> = {}) => ({
+  "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: "node scripts/h.js" } }),
+  "scripts/h.js": hook,
+  "b.js": "1\n",
+  ...extra,
+  [changed]: `//${v}\n`,
+});
+
+test("flags before the script, and a path or .exe or ternary command, still hold the changed file", () => {
+  const CPR = `require("child_process")`;
+  for (const hook of [
+    `${CPR}.spawn("node", ["-r", "./evil", "b.js"]);\n`,
+    `${CPR}.spawn("node", ["--no-warnings", "evil"]);\n`,
+    `${CPR}.spawn("node", ["--no-warnings", "--no-deprecation", "evil"]);\n`,
+    `${CPR}.spawn("/usr/bin/node", ["evil"]);\n`,
+    `${CPR}.spawn("node.exe", ["evil"]);\n`,
+    `const c = Math.random() > 0.5; ${CPR}.spawn(c ? "node.exe" : "node", ["evil"]);\n`,
+    `const c = Math.random() > 0.5; ${CPR}.spawn(c ? "nodejs.exe" : "/opt/x/node", ["evil"]);\n`,
+  ]) {
+    const files = (v: string) => scriptsHook(hook, v, "docs/evil.js");
+    expect(held(files("1.0.0"), files("1.0.1"))).toBe(true);
+  }
+});
+
+// Words in the options object after the args array (a stdio array of quoted words) must not move the command word out of its place:
+// a program named node is still the node whose script is the next word, and lib/node.js holds as it did before.
+test("a node command with an options object of quoted words still holds a changed file named node.js", () => {
+  const CPR = `require("child_process")`;
+  const stdio = (n: number) => `[${["ignore", "inherit", "inherit", "pipe"].slice(0, n).map((w) => `"${w}"`).join(", ")}]`;
+  const hooks = [
+    // Three and four quoted words in the options (two are not held, before or now), then a flag before the script, an env array, a shell option beside the array,
+    // and a ternary command.
+    ...[3, 4].map((n) => `${CPR}.spawn("node", ["--no-warnings", "build"], { stdio: ${stdio(n)} });\n`),
+    ...[3, 4].map((n) => `${CPR}.spawn("node", ["build"], { stdio: ${stdio(n)} });\n`),
+    ...[3, 4].map((n) => `${CPR}.spawnSync("node", ["build"], { stdio: ${stdio(n)} });\n`),
+    `${CPR}.spawn("node", ["build"], { env: ["a", "b", "c"] });\n`,
+    `${CPR}.spawn("node", ["build"], { stdio: ${stdio(3)}, shell: "sh" });\n`,
+    `const c = Math.random() > 0.5; ${CPR}.spawn(c ? "npm" : "node", ["build"], { stdio: ${stdio(3)} });\n`,
+    `const c = Math.random() > 0.5; ${CPR}.spawn(c ? "node" : "npm", ["build"], { stdio: ${stdio(4)} });\n`,
+  ];
+  for (const hook of hooks) {
+    const files = (v: string) => scriptsHook(hook, v, "lib/node.js");
+    expect(held(files("1.0.0"), files("1.0.1"))).toBe(true);
+  }
+});
+
+test("flags and program commands stay quiet when no same-stem file changed", () => {
+  for (const hook of [
+    `require("child_process").spawn("node", ["index"]);\n`,
+    `require("child_process").spawn("node", ["--no-warnings", "index"]);\n`,
+    `require("child_process").spawn("/usr/bin/node", ["index"]);\n`,
+    `require("child_process").spawn("npm", ["install"]);\n`,
+    `require("child_process").spawn("sh", ["-c", "test"]);\n`,
+    `require("child_process").spawn("node.exe", ["-v"]);\n`,
+  ]) {
+    const files = (v: string) => rootHook(hook, v, "lib/index.js", { "index.js": "module.exports = 1;\n", "docs/test.js": "//" });
+    expect(held(files("1.0.0"), files("1.0.1"))).toBe(false);
+  }
+});
+
+// node resolves a bare script from the working directory: the file, .js, .json, .node or a directory's index.js.
+test("a bare script a node command runs holds the file node resolves it to", () => {
+  const hook = `require("child_process").spawn("node", ["evil"]);\n`;
+  for (const changed of ["evil.node", "evil/index.js", "evil.js"]) {
+    const files = (v: string) => scriptsHook(hook, v, changed);
+    expect(held(files("1.0.0"), files("1.0.1"))).toBe(true);
+  }
+  const elsewhere = (v: string) => scriptsHook(hook, v, "lib/evil/index.js");
+  expect(held(elsewhere("1.0.0"), elsewhere("1.0.1"))).toBe(false);
+});
+
+// A subscript key is not the args array. Each of these also reads a hook that is not provably static, so only the spawn reaches the file.
+test("a subscript in the command is not the args array", () => {
+  for (const cmd of [`process.env["NODE"] ?? "node"`, `cmds["node"]`, `process.env["npm_node_execpath"] || "node"`, `process.env["NODE"]`, `cmds["nodejs"]`]) {
+    const hook = `const cmds = {}; require("child_process").spawn(${cmd}, ["evil"]);\n`;
+    const files = (v: string) => scriptsHook(hook, v, "docs/evil.js");
+    expect(held(files("1.0.0"), files("1.0.1"))).toBe(true);
+  }
+});
+
+// The shapes below were held before the node-args change, so the change must still hold them. The prefix makes the hook not provably static,
+// and b.js does not change, so the file is reached only through the later spawn.
+test("a program word spelled as a path, a subscript key or a leading flag still names the file it did", () => {
+  const cases: [string, string][] = [
+    [`require("child_process").spawn("./make")`, "docs/make.js"],
+    [`require("child_process").spawn("../make")`, "docs/make.js"],
+    [`require("child_process").spawn(process.env["evil"])`, "docs/evil.js"],
+    [`require("child_process").spawn(bins["evil"])`, "docs/evil.js"],
+    [`require("child_process").spawnSync(process.execPath, argv["evil"])`, "docs/evil.js"],
+    [`require("child_process").execFile(process.execPath, ARGS["evil"])`, "docs/evil.js"],
+    [`require("child_process").spawn("node", ["-v", "evil"])`, "docs/-v.js"],
+    [`require("child_process").spawn("node", ["--evil"])`, "docs/--evil.js"],
+    [`export default ["..", "evil"].join("/")`, "evil.js"],
+    [`if (x) ["..", "docs", "evil"].join("/")`, "docs/evil.js"],
+  ];
+  for (const [body, changed] of cases) {
+    const hook = nonStaticHook(`const bins = {}, argv = {}, ARGS = {}; ${body};`);
+    const files = (v: string) => rootHook(hook, v, changed);
+    expect(held(files("1.0.0"), files("1.0.1"))).toBe(true);
+  }
+});
+
+test("fork takes a module path, so a program name there is a file name", () => {
+  for (const name of ["make", "tar"]) {
+    const hook = `require("child_process").fork("${name}");\n`;
+    const files = (v: string) => rootHook(hook, v, `docs/${name}.js`);
+    expect(held(files("1.0.0"), files("1.0.1"))).toBe(true);
+  }
+});
+
+test("a function body under run( or import( is code: its join arrays name files", () => {
+  const hook = nonStaticHook(`require("node:test").run(() => { require.main.require(["..", "docs", "evil"].join("/")); });`);
+  const files = (v: string) => release(v, hook, { "docs/evil.js": "//" });
+  expect(held(files("1.0.0"), files("1.0.1"))).toBe(true);
+});
+
+// Time of one installView over a hook; the best of three runs.
+const holdTime = (hook: string): number => {
+  let best = Infinity;
+  for (let r = 0; r < 3; r++) {
+    const t = performance.now();
+    held(rootHook(hook, "1.0.0", "docs/evil.js"), rootHook(hook, "1.0.1", "docs/evil.js"));
+    best = Math.min(best, performance.now() - t);
+  }
+  return best;
+};
+
+// Every array a command call closes once looked through all the words before it for node: time grew with words times arrays.
+test("many args arrays or object literals in one command call scan in linear time", () => {
+  const shapes: [string, (n: number) => string, number][] = [
+    ["objects and empty arrays after a custom command", (n) => `require("child_process").spawn("custom", ${'{x:"evil"},[],'.repeat(n)} () => {});\n`, 1],
+    ["as many words as empty arrays", (n) => `require("child_process").spawn("a", ${`"${"a ".repeat(200)}", `.repeat(n / 200)}${"[],".repeat(n)} 0);\n`, 4],
+  ];
+  for (const [name, hook, scale] of shapes) {
+    const t4 = holdTime(hook(4000 / scale));
+    const t8 = holdTime(hook(8000 / scale));
+    const t16 = holdTime(hook(16000 / scale));
+    const label = `${name}: ${t4.toFixed(0)} / ${t8.toFixed(0)} / ${t16.toFixed(0)} ms at size 1x / 2x / 4x`;
+    expect(`${label}: ${t16 < 3000}`).toBe(`${label}: true`);
+    // 4x the size: linear is about 4x, quadratic about 16x.
+    expect(`${label}: ${t16 / Math.max(t4, 25) < 9}`).toBe(`${label}: true`);
+  }
+}, 120_000);
+
 test("a word in a log line stays quiet when an unrelated file of that stem changes", () => {
   const hook = `require.main.require(require("path").join(__dirname, "b.js")); console.log("test");\n`;
   for (const stem of ["test", "index", "lib", "main"]) {
@@ -293,3 +438,39 @@ test.skipIf(!hasNode)("node really runs the extension-less target for the shapes
     }
   }
 }, 120_000);
+
+// The same flag-before-script and path-command shapes, run by real node from the package root. The hook sits in scripts/, so the root
+// file is reached only by the spawn, and the command is spelled with the path of the node binary found on PATH.
+const foundNode = hasNode ? Bun.which("node") : null;
+const nodePath = foundNode ? resolve(foundNode) : "";
+const nodePathAbsolute = isAbsolute(nodePath);
+
+test("the node binary found on PATH has an absolute path in CI", () => {
+  if (process.env.CI && hasNode) expect(nodePathAbsolute).toBe(true);
+  else if (hasNode && !nodePathAbsolute) console.warn("the node path is not absolute: the path-spelled run below is skipped");
+});
+
+test.skipIf(!hasNode || !nodePathAbsolute)("node really runs the script of a spawn with a flag before it or a path-spelled command", () => {
+  const CPR = `require("child_process")`;
+  for (const hook of [
+    `${CPR}.spawnSync("node", ["--no-warnings", "evil"], { stdio: "ignore" });\n`,
+    `${CPR}.spawnSync("node", ["-r", "./evil", "b.js"], { stdio: "ignore" });\n`,
+    `${CPR}.spawnSync(${JSON.stringify(nodePath)}, ["evil"], { stdio: "ignore" });\n`,
+    `${CPR}.spawnSync(${JSON.stringify(nodePath)}, ["--no-warnings", "evil"], { stdio: "ignore" });\n`,
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "nodeargs-"));
+    try {
+      const files: Record<string, string> = { ...scriptsHook(hook, "1.0.1", "evil.js"), "evil.js": `require("fs").writeFileSync(process.env.MARK, "1");\n` };
+      const pkg = join(root, "p");
+      for (const [p, c] of Object.entries(files)) {
+        mkdirSync(dirname(join(pkg, p)), { recursive: true });
+        writeFileSync(join(pkg, p), c);
+      }
+      spawnSync("sh", ["-c", "node scripts/h.js"], { cwd: pkg, env: { ...process.env, MARK: join(root, "RAN") }, timeout: 20000 });
+      expect(existsSync(join(root, "RAN"))).toBe(true);
+      expect(held(scriptsHook(hook, "1.0.0", "evil.js"), files)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+}, 60_000);

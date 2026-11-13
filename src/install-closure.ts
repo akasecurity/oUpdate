@@ -6052,6 +6052,10 @@ const LITERAL_PATH_FLAGS = new Set(["--import", "--loader", "--experimental-load
 const COMMAND_CALLS = new Set(["fork", "spawn", "spawnSync", "execFile", "execFileSync"]);
 // The programs whose first argument is the script they run.
 const NODE_PROGRAMS = new Set(["node", "nodejs"]);
+// Marks an operand named from the working directory (the package root): it resolves there as node does, never as a stem anywhere.
+const CWD_MARK = "\u0000";
+// A command word by its program name: a path (`/usr/bin/node`) and a `.exe` suffix name the same program.
+const programName = (w: string): string => binName(w).replace(/\.exe$/i, "");
 // Programs a command names, not files of the package.
 const PROGRAM_WORDS = new Set(["node", "nodejs", "npm", "npx", "yarn", "pnpm", "bun", "bunx", "sh", "bash", "zsh", "git", "make", "python", "python3", "curl", "tar"]);
 
@@ -6062,7 +6066,16 @@ const PROGRAM_WORDS = new Set(["node", "nodejs", "npm", "npx", "yarn", "pnpm", "
  */
 function operandTokens(text: string): string[] {
   const out: string[] = [];
-  type Frame = { open: string; callee: string; pending: string[]; lit: number; litMark: number; quiet: boolean };
+  type Frame = { open: string; callee: string; pending: string[]; extra: string[]; lit: number; litMark: number; quiet: boolean; node: boolean; plain: boolean };
+  // A word joins a frame's pending list, or its extra list: the words only a node command's args array adds (flag stems, working-directory
+  // names, script stems beyond the first word). The extra list is kept apart so pending stays the plain word list and its first word
+  // is still the command word. The frame remembers whether any word names node, and whether any is not a subscript key,
+  // so an args array never rescans a list.
+  const addWord = (f: Frame, w: string, key = false, extra = false): void => {
+    (extra ? f.extra : f.pending).push(w);
+    if (!key) f.plain = true;
+    if (!f.node && NODE_PROGRAMS.has(programName(w))) f.node = true;
+  };
   const stack: Frame[] = [];
   let lastClose = { at: -1, callee: "" };
   const n = text.length;
@@ -6096,7 +6109,7 @@ function operandTokens(text: string): string[] {
           // The value of an --import / --loader flag is read as spelled: it alone is dropped, never the words beside it.
           if (top.lit) top.lit = 0;
           else {
-            top.pending.push(tok);
+            addWord(top, tok);
             if (LITERAL_PATH_FLAGS.has(tok)) {
               top.lit = 1;
               top.litMark = out.length;
@@ -6118,9 +6131,9 @@ function operandTokens(text: string): string[] {
     }
     if (c === "(" || c === "[" || c === "{") {
       let callee = "";
+      let k = i - 1;
+      while (k >= 0 && (text[k] === " " || text[k] === "\t")) k--;
       if (c === "(") {
-        let k = i - 1;
-        while (k >= 0 && (text[k] === " " || text[k] === "\t")) k--;
         if (text[k] === ")" && lastClose.at === k) callee = lastClose.callee === "createRequire" ? "require" : "";
         else {
           const m = /([A-Za-z_$][\w$]*)$/.exec(text.slice(Math.max(0, k - 63), k + 1));
@@ -6129,8 +6142,12 @@ function operandTokens(text: string): string[] {
       }
       // Under an import( or run( a .join( array names nothing node loads, until a path call opens again.
       const up = stack[stack.length - 1];
-      const quiet = !PATH_CALLS.has(callee) && (LITERAL_PATH_CALLS.has(callee) || (!!up && up.quiet));
-      stack.push({ open: c, callee, pending: [], lit: 0, litMark: 0, quiet });
+      // A function body (`=> {`, `) {`) is code the call runs, not the argument expression: it is not quiet.
+      const body = c === "{" && (text[k] === ")" || (text[k] === ">" && text[k - 1] === "="));
+      const quiet = !PATH_CALLS.has(callee) && !body && (LITERAL_PATH_CALLS.has(callee) || (!!up && up.quiet));
+      // A `[` that follows a value (`process.env["NODE"]`) is a subscript, not an array: its words pass up like a group's, except in a command, where the key is read as a stem and is no args array.
+      const subscript = c === "[" && /[\w$)\]]/.test(text[k] ?? "") && !/(?:^|[^\w$])(?:return|yield|await|typeof|case|of|in|else|do|void|delete|new|throw)$/.test(text.slice(Math.max(0, k - 6), k + 1));
+      stack.push({ open: subscript ? "s" : c, callee, pending: [], extra: [], lit: 0, litMark: 0, quiet, node: false, plain: false });
       i++;
       continue;
     }
@@ -6144,29 +6161,66 @@ function operandTokens(text: string): string[] {
         // import( and run( read their own string arguments as spelled: those are dropped, and the operands an inner path call
         // already took stay.
         if (f.lit === 2) out.length = f.litMark;
-        if (LITERAL_PATH_CALLS.has(f.callee)) f.pending = [];
+        if (LITERAL_PATH_CALLS.has(f.callee)) {
+          f.pending = [];
+          f.extra = [];
+          f.node = false;
+          f.plain = false;
+        }
         else if (f.open === "(") {
           if (f.callee === "") pass = true; // a grouping paren or an unnamed call: its words belong to the enclosing call
           else keep = PATH_CALLS.has(f.callee);
-        } else if (f.open === "[") {
+        } else if (f.open === "[" || f.open === "s") {
           keep = !f.quiet && /^\s*\.\s*join\s*\(/.test(text.slice(i + 1, i + 40));
           pass = !keep;
         } else pass = true;
         if (keep) {
-          const cmd = COMMAND_CALLS.has(f.callee);
+          // fork takes a module path, so a program name there is a file name too.
+          const cmd = COMMAND_CALLS.has(f.callee) && f.callee !== "fork";
           f.pending.forEach((w, k) => {
             if (!(cmd && k === 0 && PROGRAM_WORDS.has(w))) out.push(w);
           });
-        } else if (pass && parent && f.open === "[" && COMMAND_CALLS.has(parent.callee)) {
+          for (const w of f.extra) out.push(w);
+        } else if (pass && parent && (f.open === "[" || f.open === "s") && COMMAND_CALLS.has(parent.callee)) {
           // The args array of a command call: its items are arguments, not paths. Only the script a node command runs (or a command
           // that is not a literal, such as process.execPath) is one, and a bare name there is a file of the working directory.
-          const script = f.pending[0];
-          const runs = parent.pending.length === 0 || NODE_PROGRAMS.has(parent.pending[0]!);
-          if (script !== undefined && runs && parent.callee !== "fork") parent.pending.push(/[./]/.test(script) ? script : `${script}.js`);
+          // A subscript here (`process.env["NODE"]`, `bins["evil"]`) keeps its first word as a stem, as before; it is no args array.
+          // The first word keeps the position it always had in the parent's list; the words a node command adds beyond it go to the extra list.
+          const first = parent.pending.length === 0 || NODE_PROGRAMS.has(parent.pending[0]!);
+          const runs = first || !parent.plain || parent.node;
+          if (runs && parent.callee !== "fork") {
+            const stem = (w: string) => (/[./]/.test(w) ? w : `${w}.js`);
+            if (f.open === "s") {
+              if (f.pending[0] !== undefined) {
+                addWord(parent, stem(f.pending[0]), true, !first);
+                if (NODE_PROGRAMS.has(programName(f.pending[0]))) parent.node = true;
+              }
+            } else if (f.pending[0] !== undefined) {
+              if (first) addWord(parent, stem(f.pending[0]));
+              // Leading flags are skipped as flags but also kept as stems (a file may be named -v.js); the value of -r / --require
+              // is a module path, taken as an operand.
+              let k = 0;
+              while (k < f.pending.length && f.pending[k]!.startsWith("-")) {
+                addWord(parent, stem(f.pending[k]!), false, true);
+                if (/^(?:-r|--require)$/.test(f.pending[k]!) && k + 1 < f.pending.length) addWord(parent, f.pending[++k]!, false, true);
+                k++;
+              }
+              const script = f.pending[k];
+              // A bare script is script.js (unique name anywhere) and what node resolves from the working directory.
+              if (script !== undefined) {
+                addWord(parent, stem(script), false, true);
+                if (!/[./]/.test(script)) addWord(parent, CWD_MARK + script, false, true);
+              }
+            }
+          }
         } else if (pass && parent) {
           // Small into large, so words under many nested brackets are not copied once per level.
           if (parent.pending.length < f.pending.length) [parent.pending, f.pending] = [f.pending, parent.pending];
           for (const w of f.pending) parent.pending.push(w);
+          if (parent.extra.length < f.extra.length) [parent.extra, f.extra] = [f.extra, parent.extra];
+          for (const w of f.extra) parent.extra.push(w);
+          if (f.node) parent.node = true;
+          if (f.plain) parent.plain = true;
         }
       }
       i++;
@@ -6184,6 +6238,11 @@ function settled(ctx: Ctx, key: string | undefined): boolean {
 }
 
 function addLiteralToken(ctx: Ctx, token: string, operand = false): void {
+  if (token.startsWith(CWD_MARK)) {
+    const w = token.slice(1);
+    if (w.length >= 3 && /^[A-Za-z0-9_@+-]+$/.test(w) && !ctx.hold && findFile(ctx, w) !== undefined) addLogical(ctx, w);
+    return;
+  }
   let t = token.replace(/\/{2,}/g, "/").replace(/^~(?:[+-]\d*|\d+)\/+/, "");
   while (t.startsWith("./")) t = t.slice(2);
   if (t.startsWith("/")) t = t.slice(1);
