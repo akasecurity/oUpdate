@@ -126,39 +126,76 @@ function runnerName(token: string): string {
   return bin.replace(/^(.+?)@(?![0-9A-Za-z.^~<>=*+-]*\.(?:tgz|tar|zip|gz)$)[0-9A-Za-z^~<>=*+-][0-9A-Za-z.^~<>=*+-]*$/i, "$1");
 }
 
+// A backslash outside quotes used to stay in the word. The reader now removes it as the shell does (`d\ocs` is `docs`), and a
+// view that took such a word is also read the old way, so everything the old reading reached is still reached.
+let oldBackslash = false;
+let tookBackslash = false;
 function words(cmd: string): string[] {
   // No quote, backslash or tilde: the words are the runs between blanks.
   if (!/['"\\~]/.test(cmd)) return cmd.split(/\s+/).filter((w) => w !== "");
   const out: string[] = [];
   let cur = "";
+  // Whether cur is a tilde prefix (a ~ and no / after it). Kept as characters are added: testing cur itself at every
+  // backslash or quote reads the whole word again and again.
+  let tilde = false;
+  const put = (x: string): void => {
+    tilde = cur === "" ? x[0] === "~" && !x.includes("/") : tilde && !x.includes("/");
+    cur += x;
+  };
+  const lead = (x: string): void => {
+    cur = x + cur;
+    tilde = false;
+  };
   let quote: string | undefined;
   let started = false; // a quote has opened in this word: an unquoted ~ after empty quotes is not at the start of the word
   // A quote or backslash inside the tilde prefix (up to the first /) makes the prefix literal: ./~+ names a file called ~+.
-  const tildePrefix = (next: string): boolean => /^~[^/]*$/.test(cur) || (cur === "" && next === "~");
+  const tildePrefix = (next: string): boolean => tilde || (cur === "" && next === "~");
   for (let ci = 0; ci < cmd.length; ci++) {
     const c = cmd[ci]!;
     if (quote) {
       // In double quotes a backslash before a quote, a backslash, a dollar or a backtick leaves that character (`\"` is `"`).
-      if (c === "\\" && quote === '"' && /["\\$`]/.test(cmd[ci + 1] ?? "")) cur += cmd[++ci]!;
+      // A backslash before a newline is a line continuation: both vanish.
+      if (!oldBackslash && c === "\\" && quote === '"' && cmd[ci + 1] === "\n") {
+        tookBackslash = true;
+        ci++;
+      } else if (c === "\\" && quote === '"' && /["\\$`]/.test(cmd[ci + 1] ?? "")) put(cmd[++ci]!);
       else if (c === quote) quote = undefined;
-      else cur += c;
+      else put(c);
       continue;
     }
     if (c === "'" || c === '"') {
-      if (tildePrefix(cmd[ci + 1] ?? "")) cur = "./" + cur;
+      if (tildePrefix(cmd[ci + 1] ?? "")) lead("./");
       started = true;
       quote = c;
       continue;
     }
-    if (c === "\\" && tildePrefix(cmd[ci + 1] ?? "")) { cur = "./" + cur + (cmd[ci + 1] ?? ""); ci++; continue; }
+    if (!oldBackslash && c === "\\" && cmd[ci + 1] === "\n") {
+      tookBackslash = true;
+      ci++;
+      continue;
+    }
+    if (c === "\\" && tildePrefix(cmd[ci + 1] ?? "")) {
+      lead("./");
+      put(cmd[ci + 1] ?? "");
+      ci++;
+      continue;
+    }
+    // Outside quotes a backslash leaves the next character literally (`d\ocs` is `docs`, `a\\b` is `a\b`); before a newline both
+    // vanish (a line continuation); at the very end it stays.
+    if (!oldBackslash && c === "\\" && ci + 1 < cmd.length) {
+      tookBackslash = true;
+      put(cmd[++ci]!);
+      continue;
+    }
     if (/\s/.test(c)) {
       if (cur) out.push(cur);
       cur = "";
+      tilde = false;
       started = false;
       continue;
     }
-    if (c === "~" && started && cur === "") cur = "./";
-    cur += c;
+    if (c === "~" && started && cur === "") lead("./");
+    put(c);
   }
   if (cur) out.push(cur);
   return out;
@@ -10060,6 +10097,22 @@ function notePrebuild(ctx: Ctx, root: Record<string, unknown>): void {
 }
 
 export function installView(files: FileMap): InstallView {
+  tookBackslash = false;
+  const v = installViewCore(files);
+  if (!tookBackslash) return v;
+  // Some word had a backslash: read the view the old way too and keep everything either reading reached.
+  oldBackslash = true;
+  let w: InstallView;
+  try {
+    w = installViewCore(files);
+  } finally {
+    oldBackslash = false;
+  }
+  const merge = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort();
+  return { ...v, hold: v.hold ?? w.hold, files: merge(v.files, w.files), gypFiles: merge(v.gypFiles, w.gypFiles), missing: merge(v.missing, w.missing), gyp: v.gyp ?? w.gyp };
+}
+
+function installViewCore(files: FileMap): InstallView {
   const indexed = indexFiles(files);
   const manifest = indexed.manifest ?? "package.json";
   if (!indexed.manifest && !indexed.gyp && !indexed.foldClash) {
