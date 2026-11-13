@@ -71,8 +71,15 @@ export function caskRunning(lsofOut: string, caskroom: string, cask: string, app
  * scan a release check relies on): output without lsof's COMMAND header is unusable too, never "no
  * process on the keg".
  */
-export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false): Promise<string | undefined> {
+export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false, scan?: { clean?: boolean }): Promise<string | undefined> {
   const r = await env.exec([bin, "-nP", "-w", "-d", "txt,mem"]);
+  // A complete answer: exit 0, nothing on stderr, the COMMAND header, at least one row past it, every row with lsof's
+  // nine fields and a numeric pid, and the last line ended (a cut-off answer is not a scan).
+  if (scan) {
+    const rows = r.out.split("\n").filter((l) => l.trim() !== "" && !l.startsWith("COMMAND"));
+    scan.clean = r.rc === 0 && !r.err.trim() && r.out.endsWith("\n") && r.out.split("\n").some((l) => l.startsWith("COMMAND")) && rows.length > 0 &&
+      rows.every((l) => { const f = l.trim().split(/\s+/); return f.length >= 9 && /^\d+$/.test(f[1]!); });
+  }
   if (r.rc === 127) log.push(`  stale-keg: ${bin} is not executable`);
   else if (r.rc !== 0) log.push(`  stale-keg: ${bin} exited non-zero`);
   else if (!r.out.trim()) log.push(`  stale-keg: ${bin} returned nothing`);
@@ -225,14 +232,26 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
   if (!cellar || !(await env.isDir(cellar))) return { note: "", log, scanned: false, unresolved: unresolvedKegs };
   // A release check's keg among them: an lsof answer that is not lsof's is no scan.
   const strict = !!o.releaseRacks?.size;
-  const maps = await lsofMaps(env, o.lsof, log, strict);
+  const scan: { clean?: boolean } = {};
+  const maps = await lsofMaps(env, o.lsof, log, strict, scan);
   if (maps === undefined) {
     const note = `STALE-KEG CHECK FAILED: lsof unusable (${o.lsof})`;
     log.push(`  ${note}`);
     return { note, log, scanned: false, unresolved: unresolvedKegs };
   }
   const held = kegHolders(maps, cellar);
-  if (!held.length) return { note: "", log, unresolved: unresolvedKegs };
+  // A row from an earlier run clears only when this run saw everything: lsof answered completely and every keg a process
+  // maps is still on disk (checked again here, just before the clear). A run that skipped, could not read or left alone
+  // any holder keeps the lane as it was.
+  const clearLane = async () => {
+    if (o.dryRun || !scan.clean) return;
+    for (const keg of new Set(held.map((h) => h.keg))) if (!(await env.isDir(keg))) return;
+    o.trackStuck([]);
+  };
+  if (!held.length) {
+    await clearLane();
+    return { note: "", log, unresolved: unresolvedKegs };
+  }
 
   const stale: string[] = [];
   const handed: string[] = [];
@@ -670,7 +689,10 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
     if (n) addNote(n);
   }
 
-  if (!stale.length) return { note: "", log, unresolved: unresolvedKegs };
+  if (!stale.length) {
+    await clearLane();
+    return { note: "", log, unresolved: unresolvedKegs };
+  }
   const handoffNote = handoffNotes.map((n) => n.text).join("; ");
   if (o.dryRun) return { note: handoffNote, log, unresolved: unresolvedKegs };
 

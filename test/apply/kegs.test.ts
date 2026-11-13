@@ -2,6 +2,7 @@
 // resolution and restart paths had no source tests; the "restart" block below is new.
 import { describe, expect, test } from "bun:test";
 import { killLive, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
+import { trackStuck } from "../../src/apply/stuck.ts";
 import { caskRunning, kegHolders, linkageCheck, lsofMaps, relinkUpgraded, staleKegCheck, type KegEnv, type KegOptions } from "../../src/apply/kegs.ts";
 import type { QueuedOwner } from "../../src/apply/owner-waiter.ts";
 
@@ -11,7 +12,9 @@ const TROUBLE_RE = /flag|block|cve|error|fail|abort|no status|stuck|stale|diverg
 const lsofLine = (pid: string, path: string) => `python ${pid} u txt REG 1,4 100 200 ${path}`;
 
 interface Fake {
-  lsof?: (string | number)[]; // successive answers: text, or an rc for a failure
+  lsof?: (string | number | { out: string; err: string })[]; // successive answers: text, an rc for a failure, or text with stderr
+  /** Kegs reported as on disk the first time they are asked about and missing after (removed between the scan and the clear). */
+  vanish?: string[];
   dirs?: string[];
   files?: string[];
   plists?: Record<string, string[]>;
@@ -42,7 +45,8 @@ function fakeEnv(f: Fake) {
     if (argv[0]!.endsWith("lsof")) {
       const a = lsof.length > 1 ? lsof.shift()! : lsof[0];
       if (a === undefined) return { rc: 127, out: "", err: "" };
-      return typeof a === "number" ? { rc: a, out: "", err: "" } : { rc: 0, out: a, err: "" };
+      if (typeof a === "number") return { rc: a, out: "", err: "" };
+      return typeof a === "string" ? { rc: 0, out: a, err: "" } : { rc: 0, out: a.out, err: a.err };
     }
     if (argv[0] === "ps") {
       const p = f.ps?.[argv[4]!] ?? {};
@@ -59,7 +63,11 @@ function fakeEnv(f: Fake) {
   const spawned: string[] = [];
   const env: KegEnv = {
     exec,
-    isDir: async (p) => dirs.has(p),
+    isDir: async (p) => {
+      const was = dirs.has(p);
+      if (f.vanish?.includes(p) && was) dirs.delete(p);
+      return was;
+    },
     exists: async (p) => files.has(p) || dirs.has(p),
     listDir: async (p) => f.plists?.[p] ?? [],
     home: "/home.test",
@@ -126,6 +134,54 @@ describe("staleKegCheck: detection", () => {
     const v = await staleKegCheck(env, opts().o);
     expect(v.note).toBe("");
     expect(v.log.join("\n")).not.toContain("STALE KEG");
+  });
+  describe("the stuck lane is cleared only by a complete clean scan", () => {
+    const KEG = `${CELLAR}/fakepkg/1.1`;
+    const OLD = `${CELLAR}/fakepkg/1.0_old`;
+    const HEADER = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME";
+    const scanOf = (...rows: string[]) => `${HEADER}\n${rows.join("\n")}\n`;
+    const other = scanOf(lsofLine("10", "/usr/bin/other"));
+    const onKeg = scanOf(lsofLine("10", `${KEG}/bin/python`));
+    const onOld = scanOf(lsofLine("10", `${OLD}/bin/python`));
+    /** The real lane state after the check, seeded with one earlier row: the row is kept or gone. */
+    const lane = async (f: Fake, over: Partial<KegOptions> = {}) => {
+      let state = "stale-keg\tredis\t3\t2026-10-20\n";
+      const { env } = fakeEnv({ dirs: [KEG], ...f });
+      await staleKegCheck(env, opts({ trackStuck: (s) => { const t = trackStuck(state, "stale-keg", s, { today: "2026-11-13", after: 3 }); state = t.state; return t.stuck; }, ...over }).o);
+      return state;
+    };
+    const KEPT = "stale-keg\tredis\t3\t2026-10-20\n";
+    test("exit 1, no process maps a keg: the row clears", async () => expect(await lane({ lsof: [other] })).toBe(""));
+    test("exit 2, processes map only kegs that are still on disk: the row clears", async () => expect(await lane({ lsof: [onKeg] })).toBe(""));
+    test("a dry run keeps the row at both exits", async () => {
+      expect(await lane({ lsof: [other] }, { dryRun: true })).toBe(KEPT);
+      expect(await lane({ lsof: [onKeg] }, { dryRun: true })).toBe(KEPT);
+    });
+    test("lsof wrote to stderr: keep, at both exits", async () => {
+      expect(await lane({ lsof: [{ out: other, err: "lsof: WARNING: can't stat() fuse file system" }] })).toBe(KEPT);
+      expect(await lane({ lsof: [{ out: onKeg, err: "lsof: permission denied" }] })).toBe(KEPT);
+    });
+    test("an answer that is not a whole scan keeps the row: header only, no header, a row cut short, a last line cut off", async () => {
+      for (const out of [`${HEADER}\n`, `${lsofLine("10", "/usr/bin/other")}\n`, `${HEADER}\npython 10 u txt REG\n`, `${HEADER}\n${lsofLine("10", "/brew/Cell")}`]) {
+        expect(await lane({ lsof: [out] })).toBe(KEPT);
+      }
+    });
+    test("lsof failed or printed nothing: keep", async () => {
+      for (const answer of [127, 1, ""]) expect(await lane({ lsof: [answer] })).toBe(KEPT);
+    });
+    test("a holder on a removed keg that was left alone (an interactive process): keep", async () => {
+      expect(await lane({ lsof: [onOld], ps: { "10": { comm: "python", command: "python x", ppid: "500" }, "500": { comm: "zsh", ppid: "1" } } })).toBe(KEPT);
+    });
+    test("a holder on a removed keg that is this run: keep", async () => {
+      expect(await lane({ lsof: [onOld], selfPid: 10, ps: { "10": { comm: "bun", command: "bun run", ppid: "1" } } })).toBe(KEPT);
+    });
+    test("a keg removed between the scan and the clear: keep", async () => {
+      expect(await lane({ lsof: [onKeg], vanish: [KEG] })).toBe(KEPT);
+    });
+    test("a real stale holder is tracked as before: the row is counted again with the package", async () => {
+      const state = await lane({ lsof: [onOld, onOld], ps: { "10": { comm: "python", command: "python x", ppid: "1" } } });
+      expect(state).toBe("stale-keg\tfakepkg\t1\t2026-11-13\n");
+    });
   });
   for (const [label, answer] of [["missing", 127], ["empty output", ""], ["a non-zero exit", 1]] as const) {
     test(`lsof ${label} is a reported failure, never "nothing stale"`, async () => {
