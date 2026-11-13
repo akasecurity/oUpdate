@@ -258,19 +258,34 @@ const blobDefsCache = new WeakMap<Uint8Array, { before: Uint8Array | undefined; 
 // An identifier: ID_Start, then ID_Continue: letters, digits, combining marks, connector punctuation (U+203F) and the joiners U+200C and U+200D.
 const IDENT = /[\p{L}_$][\p{L}\p{N}\p{M}\p{Pc}_$\u200C\u200D]*/gu;
 
-/** The names an encoded run of BLOB_RUN or more characters is assigned to on this line (`D = "<run>"`, `o.D = "<run>"`). */
+const BLOB_LEAD = 200; // characters before a run searched for the names that bind it
+const BLOB_NAME_MAX = 64; // a longer token is an encoded piece, not a name
+const BLOB_NAMES_PER_RUN = 3;
+// Words no identifier can be in JavaScript, Python or a shell: a definition is never selected through one, or every `const` would select every blob.
+const RESERVED = new Set(("break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof let new null return super switch this throw true try typeof var void while with yield " +
+  "def lambda and or not is elif pass raise global nonlocal None True False del except then fi done esac").split(" "));
+
+/** The names that bind an encoded run of BLOB_RUN or more characters on this line (`D = "<run>"`, `o.D = "<run>"`, `D = Buffer.from("<run>")`, `function D() { return "<run>" }`). */
 function encodedRunLead(l: string): string[] {
   const found: string[] = [];
   let start = -1;
+  let runs = 0;
   const isEnc = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 || c === 61 || c === 95 || c === 45;
   for (let i = 0; i <= l.length; i++) {
     if (i < l.length && isEnc(l.charCodeAt(i))) {
       if (start < 0) start = i;
       continue;
     }
-    if (start >= 0 && i - start >= BLOB_RUN && found.length < 16) {
-      const lead = /([\p{L}_$][\p{L}\p{N}\p{M}\p{Pc}_$\u200C\u200D]*)\s*=\s*['"`]?$/u.exec(l.slice(Math.max(0, start - 80), start));
-      if (lead) found.push(lead[1]!);
+    if (start >= 0 && i - start >= BLOB_RUN && runs++ < 16) {
+      // Every name in the BLOB_LEAD characters before the run binds or wraps it (`D = "<run>"`, `D = Buffer.from("<run>")`,
+      // `function D() { return "<run>" }`, `{ D: "<run>" }`, `D = ["<run>"]`): reserved words are no name, and an encoded piece is not one either.
+      // A receiver (`exports` in `exports.D`, `Buffer` in `Buffer.from`) is the object the name is read from: it is not selected.
+      const lead = l.slice(Math.max(0, start - BLOB_LEAD), start);
+      const names: string[] = [];
+      for (const m of lead.matchAll(IDENT)) {
+        if (m[0].length <= BLOB_NAME_MAX && !RESERVED.has(m[0]) && lead[m.index! + m[0].length] !== ".") names.push(m[0]);
+      }
+      found.push(...names.slice(-BLOB_NAMES_PER_RUN)); // the names nearest the run
     }
     start = -1;
   }
