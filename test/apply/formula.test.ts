@@ -158,6 +158,21 @@ describe("formulaReview", () => {
     expect(v).toMatchObject({ rc: 1, calls: 0 });
     expect(v.reason).toStartWith("cannot establish the installed artifact kind");
   });
+  for (const [label, shape] of [
+    ["a constant", "const:" + SOURCE("1.0")],
+    ["a method call", "raw:url url_for_release"],
+    ["a url only inside a resource block", `raw:resource "r" do\n    url "${SOURCE("1.0")}"\n  end`],
+    ["no url at all", "raw:# no url here"],
+  ] as const) {
+    test(`Md an installed formula whose url cannot be read (${label}) → FLAG, no reviewer call`, async () => {
+      const v = await review({ oldUrl: shape, newUrl: SOURCE("1.1"), artifact: "source" });
+      expect(v).toMatchObject({ rc: 1, calls: 0 });
+      expect(v.reason).toBe("cannot read the installed formula's url — manual review");
+    });
+  }
+  test("Md no installed formula at all (no receipt revision) with a source artifact still goes to the reviewer", async () => {
+    expect((await review({ receipt: "none", oldUrl: SOURCE("1.0"), newUrl: SOURCE("1.1"), artifact: "source" })).rc).toBe(0);
+  });
   test("Mb an old formula with a source url in an on_arm block → source→prebuilt FLAG", async () => {
     const v = await review({ oldExtra: `  on_arm do\n    url "${SOURCE("1.0")}"\n  end` });
     expect(v.reason).toStartWith("artifact kind changed source→prebuilt");
