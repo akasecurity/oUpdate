@@ -142,13 +142,26 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   const npmFailed: string[] = [];
 
   // Every command goes through here: brew never auto-updates, and a timeout is a FAILED entry of
-  // the current phase (the package, for an upgrade) that stops the current step.
+  // the current phase (the package, for an upgrade) that stops the current step. A soft command (a package's brew upgrade) is
+  // the exception: its timeout is returned, the caller records it, and the run goes on to the next package.
   // Labels the restart step handed to their owner command: the stale-keg check never hands them again.
   const ownerHanded = new Map<string, string>();
   let phase: "brew" | "npm" = "brew";
   const x: Exec = async (argv, o = {}) => {
     const env = argv[0] === cfg.brew ? { HOMEBREW_NO_AUTO_UPDATE: "1", ...o.env } : o.env;
+    const t0 = Date.now();
     const res = await exec(argv, { ...o, ...(env ? { env } : {}), timeoutMs: o.timeoutMs ?? cfg.timeoutMs });
+    // How long each upgrade took, so the limit can be set from measured runs.
+    if (argv[0] === cfg.brew && argv[1] === "upgrade" && !res.timedOut) {
+      log.push(`  ${argv.slice(1).join(" ")}: ${Math.round((Date.now() - t0) / 1000)} s`);
+      // An upgrade that ran to its end, whatever its rc, ends the run of consecutive time-box hits. One that never started (a release check that stopped before it) does not.
+      b.capHits = 0;
+    }
+    if (res.timedOut && o.soft) {
+      b.capHits++;
+      log.push(`  TIMEOUT after ${o.timeoutMs ?? cfg.timeoutMs} ms: ${argv.join(" ")} — killed with the processes seen under it; skipped, the run goes on`);
+      return res;
+    }
     if (res.timedOut) {
       const token = timeoutToken(argv[0] === cfg.brew ? ["brew", ...argv.slice(1)] : argv[0] === cfg.npm ? ["npm", ...argv.slice(1)] : argv);
       (phase === "brew" ? b.failed : npmFailed).push(token);

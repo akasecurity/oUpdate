@@ -134,6 +134,12 @@ export interface ApplyConfig {
   releaseChecks?: ReleaseCheck[];
   /** Per command; a command past it is killed and its phase marked failed. */
   timeoutMs: number;
+  /**
+   * Per package: one `brew upgrade` (formula or cask) past this is killed with the processes seen under it when the kill starts, recorded as FAILED, and
+   * the run goes on to the next package; two in a row stop the brew upgrades for the run. Default 20 minutes; a host that
+   * builds large formulae from source raises it (and timeoutMs).
+   */
+  upgradeTimeoutMs: number;
   npmRegistry: string;
   caps?: Caps;
 }
@@ -146,12 +152,13 @@ export const DEFAULTS = {
   stuckAfter: 3,
   sensitive: ["openssl", "curl", "git", "python", "node", "ssh", "openssh", "ollama", "llama-cpp"],
   timeoutMs: 45 * 60_000,
+  upgradeTimeoutMs: 20 * 60_000,
   npmRegistry: "https://registry.npmjs.org",
 };
 
 const KEYS = new Set([
   "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "hostPrefixes", "pinRoots",
-  "caskExclude", "inPlaceCasks", "heldByDesign", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "jobRunners", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "npmRegistry", "caps",
+  "caskExclude", "inPlaceCasks", "heldByDesign", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "jobRunners", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "upgradeTimeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
 
@@ -178,10 +185,10 @@ function list(o: Obj, k: string, where: string, nonEmpty = false): string[] | un
   return v as string[];
 }
 
-function posInt(o: Obj, k: string, where: string): number | undefined {
+function posInt(o: Obj, k: string, where: string, max = Number.MAX_SAFE_INTEGER): number | undefined {
   const v = o[k];
   if (v === undefined) return undefined;
-  if (typeof v !== "number" || !Number.isInteger(v) || v < 1) throw new Error(`${where}.${k} must be a positive integer`);
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > max) throw new Error(`${where}.${k} must be a positive integer${max < Number.MAX_SAFE_INTEGER ? ` of at most ${max}` : ""}`);
   return v;
 }
 
@@ -375,6 +382,7 @@ export function parseApplyConfig(text: string, fallbackHost: string, env: Record
     ...(a.releaseChecks !== undefined ? { releaseChecks: (a.releaseChecks as unknown[]).map((v, i) => releaseCheck(v, i, seenChecks)) } : {}),
     reviewer: a.reviewer === undefined ? undefined : validateReviewerSpec(a.reviewer),
     timeoutMs: posInt(a, "timeoutMs", w) ?? DEFAULTS.timeoutMs,
+    upgradeTimeoutMs: posInt(a, "upgradeTimeoutMs", w, 2147483647) ?? DEFAULTS.upgradeTimeoutMs,
     npmRegistry: str(a, "npmRegistry", w) ?? DEFAULTS.npmRegistry,
     caps,
   };

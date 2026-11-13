@@ -19,6 +19,10 @@ describe("parseApplyConfig", () => {
   test("heldByDesign is read from the file", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/state.test", heldByDesign: ["example/tap/head-tool"] }), "hosta").heldByDesign).toEqual(["example/tap/head-tool"]);
   });
+  test("upgradeTimeoutMs: 20 minutes by default, set from the file", () => {
+    expect(parseApplyConfig(cfg({ stateDir: "/state.test" }), "hosta").upgradeTimeoutMs).toBe(1200000);
+    expect(parseApplyConfig(cfg({ stateDir: "/state.test", upgradeTimeoutMs: 1234 }), "hosta").upgradeTimeoutMs).toBe(1234);
+  });
   test("claudeCode: the native binary's absolute path", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/state.test", claudeCode: "/opt.test/bin/claude" }), "hosta").claudeCode).toBe("/opt.test/bin/claude");
   });
@@ -102,6 +106,8 @@ describe("parseApplyConfig", () => {
     ["a string for caskExclude", cfg({ stateDir: "/s", caskExclude: "big" }), /array of non-empty strings/],
     ["a string for heldByDesign", cfg({ stateDir: "/s", heldByDesign: "head-tool" }), /array of non-empty strings/],
     ["an empty entry in heldByDesign", cfg({ stateDir: "/s", heldByDesign: [""] }), /array of non-empty strings/],
+    ["a zero per-package upgrade limit", cfg({ stateDir: "/s", upgradeTimeoutMs: 0 }), /positive integer/],
+    ["a per-package upgrade limit past the timer range", cfg({ stateDir: "/s", upgradeTimeoutMs: 2147483648 }), /at most 2147483647/],
     ["a zero threshold", cfg({ stateDir: "/s", stuckAfter: 0 }), /positive integer/],
     ["an incomplete deferred service", cfg({ stateDir: "/s", deferred: [{ name: "svc" }] }), /deferred\[0\]\.waiter is required/],
     ["a bad reviewer", cfg({ stateDir: "/s", reviewer: { type: "x", name: "r" } }), /reviewer type/],

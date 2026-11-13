@@ -35,6 +35,17 @@ export const gkUnchecked: GkOps = {
   check: async (cask) => ({ note: `${cask}: not checked`, log: [] }),
 };
 
+/** Two upgrades in a row hit the per-package time box: the rest of the run's brew upgrades wait for the next run. */
+const BREAKER_AFTER = 2;
+function breakerOpen(rt: RunCtx): boolean {
+  if (rt.b.capHits < BREAKER_AFTER) return false;
+  if (!rt.b.breakerOpened) {
+    rt.b.breakerOpened = true;
+    rt.log.push(`  ${rt.b.capHits} brew upgrades in a row hit the ${rt.cfg.upgradeTimeoutMs} ms time box — no more upgrades this run; the rest wait for the next run`);
+  }
+  return true;
+}
+
 export function assembleBrew(rt: RunCtx): string {
   const { dryRun, b, notify, step, quarantined, cfg } = rt;
   // Casks deferred but never tried (a step stopped first) are still listed as deferred.
@@ -61,6 +72,7 @@ export function assembleBrew(rt: RunCtx): string {
   if (b.casksSudo.length) parts.push(`casks need sudo: ${b.casksSudo.join(" ")}`);
   if (b.casksRunning.length) parts.push(`casks held (running): ${b.casksRunning.join(" ")}`);
   if (b.casksFailed.length) parts.push(`casks FAILED: ${b.casksFailed.join(" ")}`);
+  if (b.breakerSkipped.length) parts.push(`upgrades stopped by the time box, waiting for the next run: ${uniq(b.breakerSkipped).join(" ")}`);
   if (b.gkNotes.length) parts.push(`GATEKEEPER pending: ${b.gkNotes.join("; ")}`);
   if (parts.length) core = core ? `${core}; ${parts.join("; ")}` : parts.join("; ");
   const failed = uniq(b.failed);
@@ -365,8 +377,13 @@ export async function brewSection(rt: RunCtx) {
         b.deferredCasks = keptCasks;
         log.push(`Type A casks deferred until end of run: ${keptCasks.join(" ")}`);
       }
-      for (const pkg of typeA) {
-        if ((await upgradeFormula(rt, pkg)) !== 0) await brewFailed(pkg);
+      for (const [i, pkg] of typeA.entries()) {
+        if (breakerOpen(rt)) {
+          b.breakerSkipped.push(...typeA.slice(i));
+          break;
+        }
+        const code = await upgradeFormula(rt, pkg);
+        if (code !== 0) await brewFailed(pkg);
         else if (await versionHeld(rt, pkg, reviewedVersion(pkg, verbose), (await brewView(rt.rcEnv.exec, cfg.brew, pkg))?.current)) b.upgraded.push(pkg);
       }
     }
@@ -385,6 +402,11 @@ export async function brewSection(rt: RunCtx) {
         dryRun,
         into,
         upgrade: (full) => upgradeFormula(rt, full),
+        skip: (full) => {
+          if (!breakerOpen(rt)) return false;
+          b.breakerSkipped.push(last(full));
+          return true;
+        },
       });
     } finally {
       if (into.flagged) b.flagged = true;
@@ -460,7 +482,7 @@ async function versionHeld(rt: RunCtx, pkg: string, reviewed: string | undefined
 async function upgradeFormula(rt: RunCtx, full: string): Promise<number> {
   const { now, log, stamp, b, x, installEnv, rcEnv, rcPending, rcThisRun, oweAfter, cfg } = rt;
   const rc = findCheck(cfg.releaseChecks, full);
-  if (!rc) return (await x([cfg.brew, "upgrade", full], { env: installEnv })).rc;
+  if (!rc) return (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true })).rc;
   const f = last(full);
   const view = await brewView(rcEnv.exec, cfg.brew, full);
   const cel = await x([cfg.brew, "--cellar", f]);
@@ -493,7 +515,7 @@ async function upgradeFormula(rt: RunCtx, full: string): Promise<number> {
   // Owed only once written: a write that fails stops the upgrade, and a run that upgraded nothing owes none.
   await savePending(rcEnv, { ...p, upgradeStarted: true });
   p.upgradeStarted = true;
-  const code = (await x([cfg.brew, "upgrade", full], { env: installEnv })).rc;
+  const code = (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true })).rc;
   if (code === 0) {
     const now = await brewView(rcEnv.exec, cfg.brew, full);
     if (now?.current && now.current === p.from) {
@@ -547,6 +569,10 @@ export async function casksSection(rt: RunCtx) {
     // One at a time: a batch upgrade fails whole when any one cask fails.
     for (const cask of b.deferredCasks) {
       b.caskTried.add(cask);
+      if (breakerOpen(rt)) {
+        b.breakerSkipped.push(cask);
+        continue;
+      }
       // A pkg or kext artifact needs sudo, which an unattended run does not have.
       const info = await x([cfg.brew, "info", "--json=v2", "--cask", cask]);
       let needsSudo = false;
@@ -577,7 +603,7 @@ export async function casksSection(rt: RunCtx) {
       log.push(`  upgrading ${cask}...`);
       // The snapshot is taken before the upgrade replaces what it reads.
       const prior = await gk.snapshot(cask);
-      if ((await x([cfg.brew, "upgrade", "--cask", "--greedy", cask], { env: installEnv })).rc === 0) {
+      if ((await x([cfg.brew, "upgrade", "--cask", "--greedy", cask], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true })).rc === 0) {
         let got: unknown;
         try {
           got = (JSON.parse((await x([cfg.brew, "info", "--json=v2", "--cask", cask])).out) as { casks?: { installed?: unknown }[] }).casks?.[0]?.installed;

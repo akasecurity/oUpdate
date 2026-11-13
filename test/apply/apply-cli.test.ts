@@ -4,7 +4,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeRc, isStopping, KILL_GRACE_MS, killLive, liveGroups, onStop, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
+import { closeRc, isStopping, KILL_GRACE_MS, killLive, liveGroups, onStop, killTree, realExec, resetStopping, snapshotTree, type Exec } from "../../src/apply/exec.ts";
 import { realReleaseLock, realTakeLock } from "../../src/apply/owner-waiter.ts";
 import { applyMain, logPath, ownerWaiterArgv, ownerWaiterMain, parseHostCommand } from "../../src/host/cli.ts";
 import { parsePrevSummary } from "../../src/host/prev-log.ts";
@@ -511,6 +511,90 @@ describe("realExec: process groups (slice 7 re-review)", () => {
     await until(() => liveGroups().length === 0, KILL_GRACE_MS + 1500);
   }, 10_000);
 
+  test("a timed-out command also kills a descendant that left its process group", async () => {
+    // Mutant caught: only the group killed (a sandbox helper that escaped it, ignoring TERM, lived on).
+    const r = await realExec(["/bin/sh", "-c", `perl -e 'use POSIX; setsid(); $SIG{TERM}="IGNORE"; exec "sleep", "31"' & echo $!; wait`], { timeoutMs: 400 });
+    expect(r.timedOut).toBe(true);
+    const escaped = Number(r.out.trim());
+    expect(escaped).toBeGreaterThan(1);
+    expect(alive(escaped)).toBe(true);
+    expect(await until(() => !alive(escaped), KILL_GRACE_MS + 1500)).toBe(true);
+  }, 10_000);
+  test("a soft timeout returns only after the kill has finished, so the next command does not meet a lock the killed one holds", async () => {
+    // Mutant caught: the soft call returned at the timeout (the helper was still alive when the caller started the next brew).
+    const r = await realExec(["/bin/sh", "-c", `perl -e 'use POSIX; setsid(); $SIG{TERM}="IGNORE"; exec "sleep", "32"' & echo $!; wait`], { timeoutMs: 400, soft: true });
+    expect(r.timedOut).toBe(true);
+    // No waiting: the kill has finished when realExec returns.
+    expect(alive(Number(r.out.trim()))).toBe(false);
+    expect(liveGroups()).toEqual([]);
+  }, 10_000);
+  describe("the process-tree snapshot", () => {
+    const parentOf = async (script: string) => {
+      const p = Bun.spawn(["/bin/sh", "-c", script], { stdout: "ignore" });
+      await Bun.sleep(300);
+      return p;
+    };
+    test("lists children and grandchildren with start time and the whole command line, not the root", async () => {
+      const marker = "x".repeat(700);
+      const p = await parentOf(`sleep 33 & sleep 34 # ${marker}\n`);
+      const tree = snapshotTree(p.pid);
+      p.kill();
+      expect(tree.some((t) => t.cmd.includes("sleep 33"))).toBe(true);
+      expect(tree.some((t) => t.pid === p.pid)).toBe(false);
+      expect(tree.every((t) => /^\w{3} \w{3}\s+\d+ \d\d:\d\d:\d\d \d{4}$/.test(t.started))).toBe(true);
+      expect(tree.some((t) => t.cmd.length > 600 && t.cmd.endsWith(marker))).toBe(false);
+      for (const t of tree) process.kill(t.pid, "SIGKILL");
+    }, 10_000);
+    test("a long command line is kept whole in the snapshot", async () => {
+      const long = `${"y".repeat(900)}${crypto.randomUUID()}`;
+      const p = await parentOf(`exec sh -c 'sleep 35; echo ${long}' & wait`);
+      const tree = snapshotTree(p.pid);
+      const sh = tree.find((t) => t.cmd.includes(long));
+      p.kill();
+      expect(sh?.cmd.endsWith(long)).toBe(true);
+      // Only the pids this test recorded, each checked against its recorded start time and command line.
+      killTree(tree);
+    }, 10_000);
+    test("the snapshot is read in the C locale, so another locale's date names do not empty it", async () => {
+      // Mutant caught: LC_ALL=C removed from the ps calls (a non-English LC_TIME gives a start time the pattern does not match).
+      const saved = { all: process.env.LC_ALL, time: process.env.LC_TIME };
+      process.env.LC_ALL = "de_DE.UTF-8";
+      process.env.LC_TIME = "de_DE.UTF-8";
+      const p = await parentOf("sleep 38 & wait");
+      try {
+        const tree = snapshotTree(p.pid);
+        expect(tree.some((t) => t.cmd.includes("sleep 38"))).toBe(true);
+        p.kill();
+        killTree(tree);
+      } finally {
+        if (saved.all === undefined) delete process.env.LC_ALL;
+        else process.env.LC_ALL = saved.all;
+        if (saved.time === undefined) delete process.env.LC_TIME;
+        else process.env.LC_TIME = saved.time;
+      }
+    }, 10_000);
+    test("a root that is not our child (already reaped, its pid reused) yields nothing", async () => {
+      const p = await parentOf("sleep 36 & wait");
+      const grandchild = snapshotTree(p.pid)[0]!;
+      expect(snapshotTree(grandchild.pid)).toEqual([]);
+      expect(snapshotTree(p.pid, 1)).toEqual([]);
+      expect(snapshotTree(2 ** 22 - 7)).toEqual([]);
+      p.kill();
+      process.kill(grandchild.pid, "SIGKILL");
+    }, 10_000);
+    test("a snapshotted pid is killed only while its start time and command line are unchanged", async () => {
+      // Mutant caught: every snapshotted pid killed unconditionally (a reused pid, or a changed process, would die).
+      const p = await parentOf("sleep 37 & wait");
+      const e = snapshotTree(p.pid)[0]!;
+      killTree([{ ...e, cmd: `${e.cmd} changed` }]);
+      expect(alive(e.pid)).toBe(true);
+      killTree([{ ...e, started: "Mon Jan  1 00:00:00 2001" }]);
+      expect(alive(e.pid)).toBe(true);
+      killTree([e]);
+      expect(await until(() => !alive(e.pid), 1500)).toBe(true);
+      p.kill();
+    }, 10_000);
+  });
   test("a child killed by a signal is 128 + its number", async () => {
     // Mutant caught: every signal but SIGKILL reported as 143.
     expect((await realExec(["/bin/sh", "-c", "kill -INT $$"])).rc).toBe(130);

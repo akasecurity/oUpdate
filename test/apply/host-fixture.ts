@@ -174,6 +174,7 @@ export function testConfig(over: Partial<ApplyConfig> = {}): ApplyConfig {
     sensitive: DEFAULTS.sensitive,
     deferred: [],
     timeoutMs: 1000,
+    upgradeTimeoutMs: 500,
     npmRegistry: DEFAULTS.npmRegistry,
     ...over,
   };
@@ -199,6 +200,7 @@ export function fakeTypeB(rc: 0 | 1 | 2 = 0, kind = "formula-only, prebuilt") {
         run.log.push(`  dry-run: would upgrade ${pkg}`);
         continue;
       }
+      if (o.skip?.(`${tap}/${pkg}`)) continue;
       if ((await o.upgrade(`${tap}/${pkg}`)) === 0) {
         run.upgraded.push(pkg);
         run.upgradedFull.push(`${tap}/${pkg}`);

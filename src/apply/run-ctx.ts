@@ -137,6 +137,11 @@ export function newBrewState(dryRun: boolean) {
     casksFailed: [] as string[],
     casksSudo: [] as string[],
     casksRunning: [] as string[],
+    /** Consecutive per-package upgrade time-box hits (see apply.upgradeTimeoutMs). */
+    capHits: 0,
+    breakerOpened: false,
+    /** Packages not tried because the time-box breaker was open: waiting, not failed. */
+    breakerSkipped: [] as string[],
     gkNotes: [] as string[],
     /** `brew outdated --verbose`, as reviewed: the versions Type A approved. */
     verbose: "",

@@ -166,12 +166,16 @@ export async function typeBUpgrades(
   env: TypeBEnv,
   r: Reviewer,
   pairs: { pkg: string; tap: string }[],
-  o: TypeBOptions & { dryRun: boolean; upgrade: (fullName: string) => Promise<number>; into?: TypeBRun },
+  o: TypeBOptions & { dryRun: boolean; upgrade: (fullName: string) => Promise<number>; into?: TypeBRun; /** True: not tried this run (the upgrade time box stopped the run's upgrades), and the caller has recorded it. */ skip?: (fullName: string) => boolean },
 ): Promise<TypeBRun> {
   // `into`: the caller's record, filled as each package finishes, so a run stopped part-way
   // (a timeout) still knows what was already upgraded.
   const run: TypeBRun = o.into ?? { upgraded: [], upgradedFull: [], failed: [], flagged: false, log: [] };
   for (const { pkg, tap } of pairs) {
+    if (o.skip?.(`${tap}/${pkg}`)) {
+      run.log.push(`  ${pkg}: not tried — the upgrade time box stopped this run's upgrades`);
+      continue;
+    }
     const list = await env.brew(["list", "--versions", `${tap}/${pkg}`]);
     if (firstVersion(list.out).startsWith("HEAD-")) {
       run.log.push(`  ${pkg}: HEAD install: its review is not in this oupdate version — FLAG, not upgrading`);
