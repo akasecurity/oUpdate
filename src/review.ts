@@ -261,10 +261,11 @@ const IDENT = /[\p{L}_$][\p{L}\p{N}\p{M}\p{Pc}_$\u200C\u200D]*/gu;
 const BLOB_LEAD = 200; // characters before a run searched for the extra names that bind it
 const BLOB_EXTRA_RUNS = 16;
 const BLOB_NAMES_PER_RUN = 3;
+const BLOB_NAME_MAX_BINDING = 200; // a binding name is read whole
 // Words that are no name in the window before a run (the extra names only: the selection of `NAME = "<run>"` above reads every name): reserved words,
 // words that start a value or an access, and the words of a data URI or an inline map (`data:image/png;base64,`).
 const NOT_A_NAME = new Set(("break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof let new null return super switch this throw true try typeof var void while with yield " +
-  "def lambda and or not is elif raise global nonlocal None True False del except from static as of async await get set " +
+  "def lambda and or not is elif pass raise global nonlocal None True False del except then fi done esac from static as of async await get set " +
   "base64 data image png jpeg jpg gif webp svg xml charset utf application json octet stream text plain html font woff woff2 ttf otf wasm javascript css audio video mp3 mp4 mpeg ogg zip pdf").split(" "));
 
 /** The names an encoded run of BLOB_RUN or more characters is assigned to on this line (`D = "<run>"`, `o.D = "<run>"`). */
@@ -302,30 +303,15 @@ function windowRunNames(l: string): string[] {
       // Comments are blanked, then the statement is cut at its last `;` and at its last `,` outside any bracket (`const a=1,D=("<run>")`).
       let lead = l.slice(Math.max(0, start - BLOB_LEAD), start).replace(/\/\*[^]*?\*\//g, " ");
       lead = lead.slice(lead.lastIndexOf(";") + 1);
-      // Read forward, a comma is the end of the part only at bracket depth 0 (a closing bracket with no opener in the window counts for nothing):
-      // `a=1,D=("<run>")` ends at the comma, `D=f(x,"<run>")` and `function D(a,b){return "<run>"}` do not.
-      for (let k = 0, depth = 0, cutAt = -1; k <= lead.length; k++) {
-        if (k === lead.length) {
-          if (cutAt >= 0) lead = lead.slice(cutAt + 1);
+      for (let k = lead.length - 1, depth = 0; k >= 0; k--) {
+        const c = lead[k]!;
+        if (c === ")" || c === "]" || c === "}") depth++;
+        else if (c === "(" || c === "[" || c === "{") depth--;
+        else if (c === "," && depth <= 0) {
+          lead = lead.slice(k + 1);
           break;
         }
-        const c = lead[k]!;
-        if (c === "(" || c === "[" || c === "{") depth++;
-        else if ((c === ")" || c === "]" || c === "}") && depth > 0) depth--;
-        else if (c === "," && depth === 0) cutAt = k;
       }
-      // A group that is closed before the run (the parameters of `function D(a, b) {`) names nothing that binds the run: blank it.
-      const open: number[] = [];
-      const chars = [...lead];
-      for (let k = 0; k < chars.length; k++) {
-        const c = chars[k]!;
-        if (c === "(" || c === "[" || c === "{") open.push(k);
-        else if ((c === ")" || c === "]" || c === "}") && open.length) {
-          const o = open.pop()!;
-          if (c === ")") for (let j = o + 1; j < k; j++) chars[j] = " ";
-        }
-      }
-      lead = chars.join("");
       const names: string[] = [];
       for (const m of lead.matchAll(IDENT)) {
         const a = lead[m.index! - 1];
@@ -341,10 +327,55 @@ function windowRunNames(l: string): string[] {
   return found;
 }
 
-/** The names an encoded run binds on this line: those of the plain form, then the window names. */
+// Words no identifier can be: a binding is never read through one. Unlike NOT_A_NAME this is only the words of the languages, since a binding position is the filter.
+const HARD_RESERVED = new Set(("break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof let new null return super switch this throw true try typeof var void while with yield " +
+  "def lambda and or not is elif raise global nonlocal None True False del except").split(" "));
+const BINDING_AFTER = new Set(["function", "class", "def", "const", "let", "var", "static", "get", "set"]);
+
+/** Names in a binding position in the statement before each run, in addition to the two sets above and never instead of them: the statement is cut at its last `;` and at its last `,` at
+ *  bracket depth 0 (read forward, so a comma inside a call, a list or a parameter group does not end it); a name counts when `=`, `:` or `:=` follows it or it follows `function`, `class`,
+ *  `def`, `const`, `let`, `var`, `static`, `get` or `set` (`D = f(x, "<run>")`, `D = [x, "<run>"]`, `function D(a, b) { return "<run>" }`). Parameters and arguments are not in a binding position. */
+function bindingRunNames(l: string): string[] {
+  const found: string[] = [];
+  let start = -1;
+  let runs = 0;
+  const isEnc = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 || c === 61 || c === 95 || c === 45;
+  for (let i = 0; i <= l.length; i++) {
+    if (i < l.length && isEnc(l.charCodeAt(i))) {
+      if (start < 0) start = i;
+      continue;
+    }
+    if (start >= 0 && i - start >= BLOB_RUN && runs++ < BLOB_EXTRA_RUNS) {
+      let lead = l.slice(Math.max(0, start - BLOB_LEAD), start).replace(/\/\*[^]*?\*\//g, " ");
+      lead = lead.slice(lead.lastIndexOf(";") + 1);
+      for (let k = 0, depth = 0, cutAt = -1; k <= lead.length; k++) {
+        if (k === lead.length) {
+          if (cutAt >= 0) lead = lead.slice(cutAt + 1);
+          break;
+        }
+        const c = lead[k]!;
+        if (c === "(" || c === "[" || c === "{") depth++;
+        else if ((c === ")" || c === "]" || c === "}") && depth > 0) depth--;
+        else if (c === "," && depth === 0) cutAt = k;
+      }
+      const names: string[] = [];
+      for (const m of lead.matchAll(IDENT)) {
+        const end = m.index! + m[0].length;
+        if (m[0].length > BLOB_NAME_MAX_BINDING || HARD_RESERVED.has(m[0])) continue;
+        const after = /^\s*(:=|=(?![=>])|:(?!:))/.test(lead.slice(end, end + 12));
+        const before = /([A-Za-z_]+)\s+$/.exec(lead.slice(Math.max(0, m.index! - 12), m.index!));
+        if (after || (before && BINDING_AFTER.has(before[1]!))) names.push(m[0]);
+      }
+      found.push(...names.slice(-BLOB_NAMES_PER_RUN));
+    }
+    start = -1;
+  }
+  return found;
+}
+
+/** The names an encoded run binds on this line: those of the plain form, then the window names, then the names in a binding position. Each set only adds. */
 export function encodedRunNames(l: string): string[] {
-  const base = encodedRunLead(l);
-  return [...new Set([...base, ...windowRunNames(l)])];
+  return [...new Set([...encodedRunLead(l), ...windowRunNames(l), ...bindingRunNames(l)])];
 }
 
 /** True when some line is BLOB_RUN or more characters. */
