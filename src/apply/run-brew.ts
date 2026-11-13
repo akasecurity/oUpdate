@@ -73,6 +73,7 @@ export function assembleBrew(rt: RunCtx): string {
   if (b.casksRunning.length) parts.push(`casks held (running): ${b.casksRunning.join(" ")}`);
   if (b.casksFailed.length) parts.push(`casks FAILED: ${b.casksFailed.join(" ")}`);
   if (b.breakerSkipped.length) parts.push(`upgrades stopped by the time box, waiting for the next run: ${uniq(b.breakerSkipped).join(" ")}`);
+  if (b.unreadable.length) parts.push(`held, reviewer cannot read the formula: ${uniq(b.unreadable).join(" ")}`);
   if (b.gkNotes.length) parts.push(`GATEKEEPER pending: ${b.gkNotes.join("; ")}`);
   if (parts.length) core = core ? `${core}; ${parts.join("; ")}` : parts.join("; ");
   const failed = uniq(b.failed);
@@ -395,7 +396,7 @@ export async function brewSection(rt: RunCtx) {
     typeBPairs.splice(0, typeBPairs.length, ...typeBPairs.filter((p) => go.has(`${p.tap}/${p.pkg}`)));
   }
   if (typeBPairs.length) {
-    const into: TypeBRun = { upgraded: b.upgraded, upgradedFull: [], failed: b.failed, flagged: false, log };
+    const into: TypeBRun = { upgraded: b.upgraded, upgradedFull: [], failed: b.failed, flagged: false, log, unreadable: b.unreadable };
     try {
       await tb.upgrades(tbEnv, r, typeBPairs, {
         ...tbOpts,

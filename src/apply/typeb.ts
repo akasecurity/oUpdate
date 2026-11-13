@@ -36,6 +36,8 @@ export interface TypeBReview {
   pin?: TapPin;
   calls: number;
   log: string[];
+  /** The deterministic gate could not read the installed formula (formulaReview's flag, never the reviewer's text). */
+  unreadable?: true;
 }
 
 const firstVersion = (out: string) => out.trim().split("\n")[0]?.trim().split(/\s+/)[1] ?? "";
@@ -68,7 +70,7 @@ export async function typeBReview(env: TypeBEnv, r: Reviewer, pkg: string, tap: 
   log.push(...f.log);
   // The kind is reported only with a verdict: an rc 2 "no review" must not read as reviewed.
   const withKind = f.rc === 0 || f.rc === 1 ? { kind } : {};
-  if (f.rc !== 0) return { rc: f.rc, calls: f.calls, log, ...withKind };
+  if (f.rc !== 0) return { rc: f.rc, calls: f.calls, log, ...(f.unreadable ? { unreadable: true as const } : {}), ...withKind };
   if (artifact === "prebuilt") {
     log.push(`  ${pkg}: formula APPROVEd — prebuilt artifact (${stableUrl}); brew verifies it against the formula's pinned sha256`);
     return { rc: 0, calls: f.calls, log, pin: f.pin, ...withKind };
@@ -159,6 +161,8 @@ export interface TypeBRun {
   /** Something was held or failed: the brew phase reports FLAGGED and the run exits non-zero on a failure. */
   flagged: boolean;
   log: string[];
+  /** Full names (tap/pkg) held because the gate cannot read the installed formula. */
+  unreadable?: string[];
 }
 
 /** Reviews and upgrades each Type B package in turn; a hold never stops the rest. */
@@ -186,6 +190,7 @@ export async function typeBUpgrades(
     const v = await typeBReview(env, r, pkg, tap, o);
     run.log.push(...v.log);
     if (v.rc !== 0) {
+      if (v.unreadable) (run.unreadable ??= []).push(`${tap}/${pkg}`);
       run.flagged = true;
       continue;
     }

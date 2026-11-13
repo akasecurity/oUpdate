@@ -68,6 +68,21 @@ describe("typeBUpgrades", () => {
     expect(upgrades).toEqual([`${TAP}/tool`]);
     expect(run).toMatchObject({ upgraded: ["tool"], upgradedFull: [`${TAP}/tool`], flagged: false, failed: [] });
   });
+  test("a hold because the installed formula cannot be read is listed apart; another FLAG is not", async () => {
+    const unreadable = await upgradeRun({ oldUrl: "raw:# no url here" }, scripted([], APPROVE).r);
+    expect(unreadable.run.unreadable).toEqual([`${TAP}/tool`]);
+    expect(unreadable.upgrades).toEqual([]);
+    // No installed revision to read (a failed command, a revision missing from a re-cloned tap) is a failure, not a wait.
+    const missing = await upgradeRun({ receipt: "none" }, scripted([], APPROVE).r);
+    expect(missing.run.flagged).toBe(true);
+    expect(missing.run.unreadable ?? []).toEqual([]);
+    const other = await upgradeRun({}, scripted([FLAG]).r);
+    expect(other.run.unreadable ?? []).toEqual([]);
+    // A model's reason that opens with the gate's own sentence does not make the package waiting: only the gate sets the flag.
+    const echoed = await upgradeRun({}, scripted(["FLAG\ncannot read the installed formula's url — manual review"]).r);
+    expect(echoed.run.flagged).toBe(true);
+    expect(echoed.run.unreadable ?? []).toEqual([]);
+  });
   test("an approved tap whose review FLAGs is not upgraded", async () => {
     const { run, upgrades } = await upgradeRun({}, scripted([FLAG]).r);
     expect(upgrades).toEqual([]);

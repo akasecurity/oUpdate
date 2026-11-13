@@ -20,6 +20,15 @@ describe("renderDigest", () => {
     expect(text).toContain("- fancy: tap changed after review (tap HEAD moved 1111111111aa → 2222222222bb)");
   });
 
+  test("a formula the reviewer cannot read is held once when the flag notice also names it", () => {
+    const log = "  head-tool: cannot read the installed formula's url — manual review — FLAG\n[notify] ⚠️ studio Type B FLAG — head-tool (formula)\n=== studio summary ===\n  brew: FLAGGED; held, reviewer cannot read the formula: example/tap/head-tool\n  npm:  nothing to update\n";
+    const text = renderDigest({ host: "studio", date: "2026-11-03", log });
+    expect(text.split("\n").filter((l) => l.startsWith("- ") && l.includes("cannot read"))).toHaveLength(1);
+    // Without the notice, the summary part alone still lists it.
+    const alone = renderDigest({ host: "studio", date: "2026-11-03", log: log.split("\n").filter((l) => !l.includes("[notify]")).join("\n") });
+    expect(alone).toContain("- example/tap/head-tool: held, the reviewer cannot read the formula");
+  });
+
   test("a quiet run says nothing needs you", () => {
     const log = "=== studio summary ===\n  brew: nothing to update\n  npm:  nothing to update\n";
     const text = renderDigest({ host: "studio", date: "2026-11-03", log });
@@ -145,6 +154,7 @@ describe("renderDigest: summary parts", () => {
     ["the runtime's own package held", "brew", "upgraded: jq; HELD: bun (runs under it)", "bun: the updater runs under it"],
     ["casks left untried", "brew", "casks deferred: firefox zoom", "zoom: left for the end of the run and not tried"],
     ["upgrades stopped by the time box", "brew", "FAILED: pa pb; upgrades stopped by the time box, waiting for the next run: pc pd", "pc: not tried, an earlier upgrade hit the time limit; the next run tries again"],
+    ["a formula the reviewer cannot read", "brew", "FAILED: x; held, reviewer cannot read the formula: head-tool", "head-tool: held, the reviewer cannot read the formula; it needs a manual look"],
     ["a failed stale handoff", "brew", "nothing to update; svc stale — FAILED: /x/waiter missing, nothing will restart it", "svc: still runs an old version; FAILED: /x/waiter missing"],
   ];
   for (const [what, lane, line, expected] of cases) {

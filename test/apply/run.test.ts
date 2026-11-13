@@ -250,17 +250,62 @@ describe("the cask phase and Gatekeeper (port 06)", () => {
   });
 });
 
+describe("waiting is not stuck: exact names, by kind (never matched by a shared short name)", () => {
+  const STATE = "/state.test/pending-state.tsv";
+  const UNREAD = fakeTypeB(1, "formula-only, prebuilt", true);
+  const tbFiles = { [APPROVED]: `example/wm${T}*${T}2026-09-28${T}fixture\n` };
+  const RUNNING = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngcloud 55 u txt REG 1,4 1 2 /brew/Caskroom/docker/1.0/bin/gcloud\n";
+  test("an unreadable Type B formula is never counted as stuck, its old row clears through the stuck step, and the summary says so", async () => {
+    const seed = `brew${T}example/wm/wm=9.9${T}9${T}2026-10-01\n`;
+    const r = await run({ files: { ...tbFiles, [STATE]: seed }, formulas: "example/wm/wm", verbose: "example/wm/wm (0.1.0) < 0.2.0", formulaTaps: { "example/wm/wm": "example/wm" } }, { tb: UNREAD, cfg: { approvedTapsFile: APPROVED, stuckAfter: 3 } });
+    expect(r.brew).toContain("held, reviewer cannot read the formula: example/wm/wm");
+    expect(r.brew).not.toContain("STUCK");
+    expect(r.text).toContain("waiting, not stuck (a process is running from it, or the reviewer cannot read the formula): example/wm/wm=9.9");
+    expect(r.files.get(STATE) ?? "").not.toContain("wm=9.9");
+  });
+  test("it exempts neither another tap's formula, a core formula, nor a cask of the same short name", async () => {
+    const r = await run({
+      files: tbFiles, formulas: "example/wm/wm other/tap/wm wm", casks: "wm", caskTaps: { wm: "homebrew/cask" },
+      verbose: "example/wm/wm (0.1.0) < 0.2.0\nother/tap/wm (1) < 2\nwm (1) < 2\nwm (1) != 2", formulaTaps: { "example/wm/wm": "example/wm", "other/tap/wm": "homebrew/core", wm: "homebrew/core" },
+      upgradeRc: { "other/tap/wm": 1, wm: 1, "--cask --greedy wm": 1 }, sudoCasks: ["wm"],
+    }, { tb: UNREAD, cfg: { approvedTapsFile: APPROVED, stuckAfter: 1 } });
+    const state = r.files.get(STATE) ?? "";
+    expect(state).not.toContain("example/wm/wm=");
+    expect(state).toContain(`brew${T}other/tap/wm=9.9${T}1`);
+    expect(state).toContain(`brew${T}wm=9.9${T}1`);
+    expect(state.split("\n").filter((l) => l.startsWith(`brew${T}wm=`))).toHaveLength(2);
+  });
+  test("a running cask exempts neither a formula nor another cask of the same name; a cask held for sudo or one that failed is tracked", async () => {
+    const r = await run({
+      formulas: "docker", casks: "docker sudoapp", caskTaps: { docker: "homebrew/cask", sudoapp: "homebrew/cask" }, formulaTaps: { docker: "homebrew/core" },
+      verbose: "docker (1) < 2\ndocker (1) != 2\nsudoapp (1) != 2", upgradeRc: { docker: 1 }, sudoCasks: ["sudoapp"], lsof: [RUNNING, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"],
+    }, { cfg: { stuckAfter: 1 } });
+    const lines = (r.files.get(STATE) ?? "").split("\n").filter(Boolean);
+    expect(lines.filter((l) => l.startsWith(`brew${T}docker=`))).toHaveLength(1);
+    expect(r.brew).toContain("casks held (running): docker");
+    expect(lines.some((l) => l.startsWith(`brew${T}sudoapp=`))).toBe(true);
+  });
+});
+
 describe("a cask with a running process is deferred (oupdate#4)", () => {
   const RUN = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngcloud 55 u txt REG 1,4 1 2 /brew/Caskroom/app/1.0/bin/gcloud\n";
   const base = { casks: "app other", caskTaps: { app: "homebrew/cask", other: "homebrew/cask" }, verbose: "app (1.0) < 1.1\nother (2) < 3" };
-  test("it is not upgraded this run, is logged with the reason, counts as pending, and the rest carry on", async () => {
+  test("it is not upgraded this run, is logged with the reason, is reported as waiting (not counted as stuck), and the rest carry on", async () => {
     const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] });
     expect(r.calls).not.toContain("brew upgrade --cask --greedy app");
     expect(r.calls).toContain("brew upgrade --cask --greedy other");
     expect(r.text).toContain("app: deferred — a process is running from it (pid 55)");
     expect(r.brew).toContain("casks held (running): app");
     expect(r.brew).toContain("casks upgraded: other");
-    expect(r.files.get("/state.test/pending-state.tsv")).toContain(`brew${T}app=9.9${T}1${T}2026-10-22`);
+    expect(r.files.get("/state.test/pending-state.tsv") ?? "").not.toContain("app=9.9");
+    expect(r.text).toContain("waiting, not stuck (a process is running from it, or the reviewer cannot read the formula): app=9.9");
+  });
+  test("a cask held only because a process runs from it is never counted as stuck, and its old row clears", async () => {
+    const seed = `brew${T}app=9.9${T}9${T}2026-10-01\n`;
+    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"], files: { "/state.test/pending-state.tsv": seed } }, { cfg: { stuckAfter: 3 } });
+    expect(r.brew).toContain("casks held (running): app");
+    expect(r.brew).not.toContain("STUCK");
+    expect(r.files.get("/state.test/pending-state.tsv") ?? "").not.toContain("app=9.9");
   });
   test("a cask in inPlaceCasks is upgraded despite a running process, and the pids on the old build are logged", async () => {
     const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] }, { cfg: { inPlaceCasks: ["app"] } });

@@ -142,6 +142,8 @@ export function newBrewState(dryRun: boolean) {
     breakerOpened: false,
     /** Packages not tried because the time-box breaker was open: waiting, not failed. */
     breakerSkipped: [] as string[],
+    /** Type B formulas held because the review cannot read the installed formula. */
+    unreadable: [] as string[],
     gkNotes: [] as string[],
     /** `brew outdated --verbose`, as reviewed: the versions Type A approved. */
     verbose: "",

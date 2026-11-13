@@ -157,6 +157,7 @@ describe("formulaReview", () => {
     const v = await review({ receipt: "none" });
     expect(v).toMatchObject({ rc: 1, calls: 0 });
     expect(v.reason).toStartWith("cannot establish the installed artifact kind");
+    expect(v.unreadable).toBeUndefined();
   });
   for (const [label, shape] of [
     ["a constant", "const:" + SOURCE("1.0")],
@@ -168,6 +169,7 @@ describe("formulaReview", () => {
       const v = await review({ oldUrl: shape, newUrl: SOURCE("1.1"), artifact: "source" });
       expect(v).toMatchObject({ rc: 1, calls: 0 });
       expect(v.reason).toBe("cannot read the installed formula's url — manual review");
+      expect(v.unreadable).toBe(true);
     });
   }
   test("Md no installed formula at all (no receipt revision) with a source artifact still goes to the reviewer", async () => {

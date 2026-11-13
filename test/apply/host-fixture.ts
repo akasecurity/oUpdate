@@ -185,7 +185,7 @@ export function testConfig(over: Partial<ApplyConfig> = {}): ApplyConfig {
  * bash tests mocked type_b_brew_review: each records what it was asked and with which notify.
  * rc 0 approves (the upgrade then goes through the run's own upgrade function), 1 FLAGs, 2 is no review.
  */
-export function fakeTypeB(rc: 0 | 1 | 2 = 0, kind = "formula-only, prebuilt") {
+export function fakeTypeB(rc: 0 | 1 | 2 = 0, kind = "formula-only, prebuilt", unreadable = false) {
   const seen: string[] = [];
   const upgrades: typeof typeBUpgrades = async (_env, _r, pairs, o) => {
     const run: TypeBRun = o.into ?? { upgraded: [], upgradedFull: [], failed: [], flagged: false, log: [] };
@@ -193,6 +193,7 @@ export function fakeTypeB(rc: 0 | 1 | 2 = 0, kind = "formula-only, prebuilt") {
       seen.push(`TBREVIEW ${pkg} ${tap} suppress=0`);
       if (rc !== 0) {
         run.flagged = true;
+        if (unreadable) (run.unreadable ??= []).push(`${tap}/${pkg}`);
         await o.notify(`⚠️ <b>${o.host} Type B FLAG — ${pkg}</b>\nfixture FLAG\nLog: -`);
         continue;
       }

@@ -41,7 +41,7 @@ export function trackStuck(state: string, lane: string, pending: string[], o: { 
  * match held entries in full or by their last segment. Anything malformed is a failed query
  * (undefined), never an empty list: the caller keeps the previous state and marks the phase failed.
  */
-export function pendingFromOutdated(json: string, held: string[]): string[] | undefined {
+export function pendingFromOutdated(json: string, held: string[], only?: "formulae" | "casks"): string[] | undefined {
   let data: { formulae?: unknown; casks?: unknown };
   try {
     data = JSON.parse(json);
@@ -51,7 +51,7 @@ export function pendingFromOutdated(json: string, held: string[]): string[] | un
   if (!data || !Array.isArray(data.formulae) || !Array.isArray(data.casks)) return undefined;
   const skip = new Set(held);
   const out: string[] = [];
-  for (const item of [...data.formulae, ...data.casks] as Record<string, unknown>[]) {
+  for (const item of [...(only === "casks" ? [] : data.formulae), ...(only === "formulae" ? [] : data.casks)] as Record<string, unknown>[]) {
     const name = item?.name ?? item?.token;
     if (typeof name !== "string" || /\s/.test(name) || !name) return undefined;
     if (skip.has(name) || skip.has(name.split("/").at(-1)!)) continue;
