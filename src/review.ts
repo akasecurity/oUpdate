@@ -258,6 +258,15 @@ const blobDefsCache = new WeakMap<Uint8Array, { before: Uint8Array | undefined; 
 // An identifier: ID_Start, then ID_Continue: letters, digits, combining marks, connector punctuation (U+203F) and the joiners U+200C and U+200D.
 const IDENT = /[\p{L}_$][\p{L}\p{N}\p{M}\p{Pc}_$\u200C\u200D]*/gu;
 
+const BLOB_LEAD = 200; // characters before a run searched for the extra names that bind it
+const BLOB_EXTRA_RUNS = 16;
+const BLOB_NAMES_PER_RUN = 3;
+// Words that are no name in the window before a run (the extra names only: the selection of `NAME = "<run>"` above reads every name): reserved words,
+// words that start a value or an access, and the words of a data URI or an inline map (`data:image/png;base64,`).
+const NOT_A_NAME = new Set(("break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof let new null return super switch this throw true try typeof var void while with yield " +
+  "def lambda and or not is elif pass raise global nonlocal None True False del except then fi done esac from static as of async await get set " +
+  "base64 data image png jpeg jpg gif webp svg xml charset utf application json octet stream text plain html font woff woff2 ttf otf wasm javascript css audio video mp3 mp4 mpeg ogg zip pdf").split(" "));
+
 /** The names an encoded run of BLOB_RUN or more characters is assigned to on this line (`D = "<run>"`, `o.D = "<run>"`). */
 function encodedRunLead(l: string): string[] {
   const found: string[] = [];
@@ -275,6 +284,52 @@ function encodedRunLead(l: string): string[] {
     start = -1;
   }
   return found;
+}
+
+/** Extra names, added to the ones above and never instead of them: the names in the statement before each run (back to the last `;` or the last `,` outside brackets, comments blanked, at most BLOB_LEAD characters) that bind or wrap it
+ *  (`D = Buffer.from("<run>")`, `function D() { return "<run>" }`, `{ D: "<run>" }`, `D = ["<run>"]`), the 3 nearest. */
+function windowRunNames(l: string): string[] {
+  const found: string[] = [];
+  let start = -1;
+  let runs = 0;
+  const isEnc = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 43 || c === 47 || c === 61 || c === 95 || c === 45;
+  for (let i = 0; i <= l.length; i++) {
+    if (i < l.length && isEnc(l.charCodeAt(i))) {
+      if (start < 0) start = i;
+      continue;
+    }
+    if (start >= 0 && i - start >= BLOB_RUN && runs++ < BLOB_EXTRA_RUNS) {
+      // Comments are blanked, then the statement is cut at its last `;` and at its last `,` outside any bracket (`const a=1,D=("<run>")`).
+      let lead = l.slice(Math.max(0, start - BLOB_LEAD), start).replace(/\/\*[^]*?\*\//g, " ");
+      lead = lead.slice(lead.lastIndexOf(";") + 1);
+      for (let k = lead.length - 1, depth = 0; k >= 0; k--) {
+        const c = lead[k]!;
+        if (c === ")" || c === "]" || c === "}") depth++;
+        else if (c === "(" || c === "[" || c === "{") depth--;
+        else if (c === "," && depth <= 0) {
+          lead = lead.slice(k + 1);
+          break;
+        }
+      }
+      const names: string[] = [];
+      for (const m of lead.matchAll(IDENT)) {
+        const a = lead[m.index! - 1];
+        const b = lead[m.index! + m[0].length];
+        // A receiver (`Buffer` in `Buffer.from`) is read from, not a name; a token beside `+`, `/` or `-` is a piece of an encoded run.
+        if (b === "." || a === "+" || a === "/" || b === "+" || b === "/" || a === "-" || b === "-" || NOT_A_NAME.has(m[0])) continue;
+        names.push(m[0]);
+      }
+      found.push(...names.slice(-BLOB_NAMES_PER_RUN));
+    }
+    start = -1;
+  }
+  return found;
+}
+
+/** The names an encoded run binds on this line: those of the plain form, then the window names. */
+export function encodedRunNames(l: string): string[] {
+  const base = encodedRunLead(l);
+  return [...new Set([...base, ...windowRunNames(l)])];
 }
 
 /** True when some line is BLOB_RUN or more characters. */
@@ -301,7 +356,7 @@ function unchangedBlobDefs(after: string, getOps: (a?: string[], b?: string[]) =
     if (o.op === "+") added.push({ l: o.v, at: ni });
     else if (o.v.length >= BLOB_RUN) {
       kept[ni] = o.v;
-      for (const name of encodedRunLead(o.v)) {
+      for (const name of encodedRunNames(o.v)) {
         const at = defs.get(name);
         if (!at) defs.set(name, [ni]);
         else if (at[at.length - 1] !== ni) at.push(ni);
@@ -314,8 +369,8 @@ function unchangedBlobDefs(after: string, getOps: (a?: string[], b?: string[]) =
   for (const { l, at } of added) {
     for (const m of l.matchAll(IDENT)) {
       // A shell or PHP variable `$D` names the definition `D`: leading `$` signs are dropped unless the name itself is defined with them.
-      const n = defs.has(m[0]) ? m[0] : m[0].replace(/^\$+/, "");
-      if (defs.has(n) && !firstUse.has(n)) firstUse.set(n, at);
+      // Both the token and its stripped form select their definitions: a name defined with the `$` (`$D`) does not hide `D`.
+      for (const n of new Set([m[0], m[0].replace(/^\$+/, "")])) if (defs.has(n) && !firstUse.has(n)) firstUse.set(n, at);
     }
   }
   if (!firstUse.size) return undefined;
