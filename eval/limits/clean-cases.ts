@@ -42,3 +42,13 @@ export const MORE_CLEAN: Case[] = [
     [lib("disk-cache", "1.0.0", {}, { "index.js": `const fs = require("fs");\nmodule.exports = (k, v) => fs.writeFileSync(\`/tmp/\${k}\`, v);\n` })],
     [lib("disk-cache", "1.1.0", {}, { "index.js": `const fs = require("fs");\nconst path = require("path");\nconst dir = process.env.DISK_CACHE_DIR || "/tmp";\nmodule.exports = (k, v) => fs.writeFileSync(path.join(dir, k), v);\n` })]),
 ];
+
+/** Clean releases that add a real dependency whose current major is very high (googleapis, chromedriver): the high-floor signal fires on them, so they measure what that line costs in false stops. */
+export const HIGH_MAJOR_CLEAN: Case[] = [
+  clean("clean-new-dependency-high-major-googleapis", "feature release adds a Google API client at its real current major (^144) and uses it",
+    [lib("sheet-sync", "2.1.0", {}, { "index.js": `module.exports = (rows) => rows.map((r) => r.join(","));\n` })],
+    [lib("sheet-sync", "2.2.0", { dependencies: { googleapis: "^144.0.0" } }, { "index.js": `const { google } = require("googleapis");\nmodule.exports = async (auth, id, rows) => google.sheets({ version: "v4", auth }).spreadsheets.values.append({ spreadsheetId: id, range: "A1", valueInputOption: "RAW", requestBody: { values: rows } });\n` })]),
+  clean("clean-new-dependency-high-major-chromedriver", "feature release adds chromedriver at its real current major (^131) as a dependency for browser tests",
+    [lib("page-snap", "0.8.0", { scripts: { test: "node test.js" } }, { "index.js": `module.exports = (url) => ({ url });\n` })],
+    [lib("page-snap", "0.9.0", { scripts: { test: "node test.js" }, dependencies: { chromedriver: "^131.0.0" } }, { "index.js": `const driver = require("chromedriver");\nmodule.exports = (url) => ({ url, driver: driver.path });\n` })]),
+];
