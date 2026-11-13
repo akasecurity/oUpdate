@@ -28,6 +28,8 @@ export interface HostScript {
   timeout?: string[];
   /** rc for a command line (exact). */
   rc?: Record<string, number>;
+  /** The whole answer for a command line (exact): its rc and what it prints. */
+  answers?: Record<string, { rc: number; out: string }>;
   /** Successive lsof answers. */
   lsof?: string[];
   npmOutdated?: string;
@@ -56,6 +58,7 @@ export function fakeHost(s: HostScript = {}) {
     calls.push(line);
     if ((s.timeout ?? []).some((t) => line.startsWith(t))) return { rc: 143, out: "", err: "", timedOut: true };
     if (s.rc?.[line] !== undefined) return { rc: s.rc[line]!, out: "", err: "" };
+    if (s.answers?.[line] !== undefined) return { ...s.answers[line]!, err: "" };
     const [cmd, ...a] = argv;
     const rest = a.join(" ");
     if (cmd === "brew") {

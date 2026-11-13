@@ -566,6 +566,8 @@ export async function casksSection(rt: RunCtx) {
     const o: GkOptions = { dryRun, host, logFile: cfg.logFile, notify };
     return { snapshot: (k) => gkSnapshot(env, k), release: (k, p) => gkRelease(env, k, o, { prior: p }), check: (k) => gkCheck(env, k, o) };
   })());
+  /** Casks not upgraded because their running processes could not be read, with the reason: one notice for them all. */
+  const unreadCasks: string[] = [];
   try {
     // One at a time: a batch upgrade fails whole when any one cask fails.
     for (const cask of b.deferredCasks) {
@@ -591,11 +593,27 @@ export async function casksSection(rt: RunCtx) {
         continue;
       }
       // An upgrade removes the cask's binaries and app: one with a process running from it waits for the next run.
-      const room = (await x([cfg.brew, "--caskroom"])).out.trim();
-      const maps = room.startsWith("/") ? await lsofMaps({ exec: x } as KegEnv, cfg.lsof, log) : undefined;
-      const pids = maps === undefined ? [] : caskRunning(maps, room, cask, apps);
+      const rq = await x([cfg.brew, "--caskroom"]);
+      const room = rq.rc === 0 ? rq.out.trim() : "";
+      const lsofRead: { why?: string } = {};
+      // Strict: an answer with no COMMAND header is not lsof's, so not a scan.
+      const maps = room.startsWith("/") ? await lsofMaps({ exec: x } as KegEnv, cfg.lsof, log, true, lsofRead) : undefined;
       // inPlaceCasks matches brew's short cask name exactly (case-sensitive); a tap-qualified entry never matches.
-      const inPlace = pids.length > 0 && cfg.inPlaceCasks.includes(cask);
+      const listed = cfg.inPlaceCasks.includes(cask);
+      // lsof failing or printing nothing at all, or `brew --caskroom` failing, is never "none running" (fail closed): not
+      // upgraded, FAILED, retried next run. (lsof output with only its header is a scan that found no process.)
+      // A listed cask upgrades with processes running anyway, so it goes on, said in the log.
+      const unread = maps !== undefined ? "" : room.startsWith("/") ? `lsof ${lsofRead.why ?? "failed"}` : `brew --caskroom ${rq.rc !== 0 ? `exited ${rq.rc}` : "printed no path"}`;
+      if (unread && listed) log.push(`  ${cask}: the processes running from it could not be read (${unread}); process check skipped (inPlaceCasks), attempting the upgrade`);
+      if (unread && !listed) {
+        log.push(`  ${cask}: not upgraded — the processes running from it could not be read (${unread}); retried next run`);
+        unreadCasks.push(`${cask} (${unread})`);
+        b.failed.push(`cask-processes:${cask}`);
+        b.flagged = true;
+        continue;
+      }
+      const pids = maps === undefined ? [] : caskRunning(maps, room, cask, apps);
+      const inPlace = pids.length > 0 && listed;
       if (pids.length && !inPlace) {
         log.push(`  ${cask}: deferred — a process is running from it (pid ${pids.join(" ")}); retried next run`);
         b.casksRunning.push(cask);
@@ -627,6 +645,7 @@ export async function casksSection(rt: RunCtx) {
       }
     }
   } finally {
+    if (unreadCasks.length) await notify(`⚠️ <b>${host} casks not upgraded: running processes unreadable</b>\n${unreadCasks.join("\n")}\nRetried next run.\nLog: ${cfg.logFile ?? "-"}`);
     if (b.casksFailed.length) {
       b.flagged = true;
       await notify(`⚠️ <b>${host} casks FAILED</b>\ncasks: ${b.casksFailed.join(" ")}\nLog: ${cfg.logFile ?? "-"}`);
