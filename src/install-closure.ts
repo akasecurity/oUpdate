@@ -76,6 +76,8 @@ interface Ctx {
   scripts: Record<string, string>;
   seen: Set<string>;
   scanned: Set<string>;
+  // Files scanned while a gyp command was the caller: a file the hook walk scanned first is scanned again under gyp, so the files it reaches count as gyp files too.
+  gypScanned: Set<string>;
   ranSh: Set<string>;
   depth: number;
   // Directories a cd or a directory flag moved a run into: their files are not inert whatever the folder name.
@@ -2346,8 +2348,14 @@ export function runsOtherFile(text: string): boolean {
   return false;
 }
 
+// A file is scanned once, and once more when the first scan ran outside a gyp command and this one runs inside it.
+function scanDone(ctx: Ctx, key: string): boolean {
+  return ctx.scanned.has(key) && (!ctx.fromGyp || ctx.gypScanned.has(key));
+}
+
 function scanJs(ctx: Ctx, key: string): void {
-  if (ctx.hold || ctx.scanned.has(key) || !/\.(?:js|cjs|mjs)$/i.test(key)) return;
+  if (ctx.hold || scanDone(ctx, key) || !/\.(?:js|cjs|mjs)$/i.test(key)) return;
+  if (ctx.fromGyp) ctx.gypScanned.add(key);
   const text = dec.decode(ctx.bytes.get(key));
   if (text.length > 1_000_000) {
     ctx.scanned.add(key);
@@ -2356,7 +2364,7 @@ function scanJs(ctx: Ctx, key: string): void {
     else followLoads(ctx, key, text); // a large static file still names the files it loads
     return;
   }
-  if (ctx.scanned.size >= DEPTH) {
+  if (ctx.scanned.size >= DEPTH && !ctx.scanned.has(key)) {
     fail(ctx, "unresolved: script depth");
     return;
   }
@@ -2658,7 +2666,9 @@ function addScannedLiterals(ctx: Ctx): void {
   const keys = [...ctx.scanned];
   for (const key of keys) {
     if (ctx.hold) return;
-    for (const tok of quotedTokens(dec.decode(ctx.bytes.get(key)))) addLiteralToken(ctx, tok);
+    const text = dec.decode(ctx.bytes.get(key));
+    for (const tok of quotedTokens(text)) addLiteralToken(ctx, tok);
+    for (const tok of operandTokens(text)) addLiteralToken(ctx, tok, true);
   }
 }
 
@@ -5972,7 +5982,171 @@ function quotedTokens(text: string): string[] {
   return out;
 }
 
-function addLiteralToken(ctx: Ctx, token: string): void {
+// Basename -> files, and extension-less stem -> files, built once per file map so a scan of many quoted tokens stays linear.
+const NAME_INDEX = new WeakMap<Map<string, string>, { names: Map<string, string[]>; stems: Map<string, string[]> }>();
+function nameIndex(logicalMap: Map<string, string>): { names: Map<string, string[]>; stems: Map<string, string[]> } {
+  let idx = NAME_INDEX.get(logicalMap);
+  if (idx) return idx;
+  idx = { names: new Map(), stems: new Map() };
+  for (const logical of logicalMap.keys()) {
+    const base = logical.slice(logical.lastIndexOf("/") + 1);
+    const names = idx.names.get(base);
+    if (names) names.push(logical);
+    else idx.names.set(base, [logical]);
+    // Node resolves a name with no extension to name.js or name.node: the file is reached by a string that never spells its extension.
+    const ext = /\.(?:js|node)$/.exec(base);
+    if (!ext) continue;
+    const stem = base.slice(0, -ext[0].length);
+    const stems = idx.stems.get(stem);
+    if (stems) stems.push(logical);
+    else idx.stems.set(stem, [logical]);
+  }
+  NAME_INDEX.set(logicalMap, idx);
+  return idx;
+}
+
+// Calls whose string arguments are paths a process or worker can load from: a bare word there is a file name, not a package name.
+const PATH_CALLS = new Set(["join", "resolve", "fork", "spawn", "spawnSync", "execFile", "execFileSync", "Worker", "URL", "pathToFileURL"]);
+// Calls and flags whose path is read as it is spelled: import() and the test runner's files take no extension search, so a bare stem
+// under them names nothing node loads.
+const LITERAL_PATH_CALLS = new Set(["import", "run"]);
+const LITERAL_PATH_FLAGS = new Set(["--import", "--loader", "--experimental-loader"]);
+// Calls whose first argument is a command: a program word there names a program, not a file of the package.
+const COMMAND_CALLS = new Set(["fork", "spawn", "spawnSync", "execFile", "execFileSync"]);
+// The programs whose first argument is the script they run.
+const NODE_PROGRAMS = new Set(["node", "nodejs"]);
+// Programs a command names, not files of the package.
+const PROGRAM_WORDS = new Set(["node", "nodejs", "npm", "npx", "yarn", "pnpm", "bun", "bunx", "sh", "bash", "zsh", "git", "make", "python", "python3", "curl", "tar"]);
+
+/**
+ * The quoted words that are operands of a path call (join, resolve, fork, spawn, Worker, new URL ...) or items of an array
+ * a `.join(` closes. Only these name a file by a bare stem: `"evil"` in `path.join(dir, "evil")`. A word in a log line, an event
+ * name or a require specifier (a package or built-in module name, never a file of the package) is not one. One forward pass, linear in the text.
+ */
+function operandTokens(text: string): string[] {
+  const out: string[] = [];
+  type Frame = { open: string; callee: string; pending: string[]; lit: number; litMark: number; quiet: boolean };
+  const stack: Frame[] = [];
+  let lastClose = { at: -1, callee: "" };
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const c = text[i]!;
+    if (c === "/" && text[i + 1] === "/") {
+      const e = text.indexOf("\n", i);
+      i = e < 0 ? n : e;
+      continue;
+    }
+    if (c === "/" && text[i + 1] === "*") {
+      const e = text.indexOf("*/", i + 2);
+      i = e < 0 ? n : e + 2;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === "`") {
+      let j = i + 1;
+      let plain = c !== "`";
+      while (j < n && text[j] !== c) {
+        if (text[j] === "\\") {
+          plain = false;
+          j++;
+        } else if (text[j] === "\n" && c !== "`") break;
+        j++;
+      }
+      const top = stack[stack.length - 1];
+      if (plain && top && j < n && text[j] === c && j - i - 1 <= 512) {
+        for (const tok of text.slice(i + 1, j).split(/\s+/)) {
+          if (!tok) continue;
+          // The value of an --import / --loader flag is read as spelled: it alone is dropped, never the words beside it.
+          if (top.lit) top.lit = 0;
+          else {
+            top.pending.push(tok);
+            if (LITERAL_PATH_FLAGS.has(tok)) {
+              top.lit = 1;
+              top.litMark = out.length;
+            }
+          }
+        }
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === "," || c === ";" || c === ":") {
+      // The end of a flag's value. A value that is an expression (not a string) took operands from inner path calls: they go.
+      const top = stack[stack.length - 1];
+      if (top && c === "," && top.lit === 1) top.lit = 2;
+      else if (top) {
+        if (top.lit === 2) out.length = top.litMark;
+        top.lit = 0;
+      }
+    }
+    if (c === "(" || c === "[" || c === "{") {
+      let callee = "";
+      if (c === "(") {
+        let k = i - 1;
+        while (k >= 0 && (text[k] === " " || text[k] === "\t")) k--;
+        if (text[k] === ")" && lastClose.at === k) callee = lastClose.callee === "createRequire" ? "require" : "";
+        else {
+          const m = /([A-Za-z_$][\w$]*)$/.exec(text.slice(Math.max(0, k - 63), k + 1));
+          callee = m ? m[1]! : "";
+        }
+      }
+      // Under an import( or run( a .join( array names nothing node loads, until a path call opens again.
+      const up = stack[stack.length - 1];
+      const quiet = !PATH_CALLS.has(callee) && (LITERAL_PATH_CALLS.has(callee) || (!!up && up.quiet));
+      stack.push({ open: c, callee, pending: [], lit: 0, litMark: 0, quiet });
+      i++;
+      continue;
+    }
+    if (c === ")" || c === "]" || c === "}") {
+      const f = stack.pop();
+      if (f) {
+        const parent = stack[stack.length - 1];
+        if (c === ")") lastClose = { at: i, callee: f.callee };
+        let keep = false;
+        let pass = false;
+        // import( and run( read their own string arguments as spelled: those are dropped, and the operands an inner path call
+        // already took stay.
+        if (f.lit === 2) out.length = f.litMark;
+        if (LITERAL_PATH_CALLS.has(f.callee)) f.pending = [];
+        else if (f.open === "(") {
+          if (f.callee === "") pass = true; // a grouping paren or an unnamed call: its words belong to the enclosing call
+          else keep = PATH_CALLS.has(f.callee);
+        } else if (f.open === "[") {
+          keep = !f.quiet && /^\s*\.\s*join\s*\(/.test(text.slice(i + 1, i + 40));
+          pass = !keep;
+        } else pass = true;
+        if (keep) {
+          const cmd = COMMAND_CALLS.has(f.callee);
+          f.pending.forEach((w, k) => {
+            if (!(cmd && k === 0 && PROGRAM_WORDS.has(w))) out.push(w);
+          });
+        } else if (pass && parent && f.open === "[" && COMMAND_CALLS.has(parent.callee)) {
+          // The args array of a command call: its items are arguments, not paths. Only the script a node command runs (or a command
+          // that is not a literal, such as process.execPath) is one, and a bare name there is a file of the working directory.
+          const script = f.pending[0];
+          const runs = parent.pending.length === 0 || NODE_PROGRAMS.has(parent.pending[0]!);
+          if (script !== undefined && runs && parent.callee !== "fork") parent.pending.push(/[./]/.test(script) ? script : `${script}.js`);
+        } else if (pass && parent) {
+          // Small into large, so words under many nested brackets are not copied once per level.
+          if (parent.pending.length < f.pending.length) [parent.pending, f.pending] = [f.pending, parent.pending];
+          for (const w of f.pending) parent.pending.push(w);
+        }
+      }
+      i++;
+      continue;
+    }
+    i++;
+  }
+  return out;
+}
+
+// A key the scan has fully taken in: in the file set, scanned if it is scannable, and in the gyp set when a gyp command is the caller.
+function settled(ctx: Ctx, key: string | undefined): boolean {
+  if (!key || !ctx.files.has(key) || (ctx.fromGyp && !ctx.gypFiles.has(key))) return false;
+  return scanDone(ctx, key) || key.endsWith(".node");
+}
+
+function addLiteralToken(ctx: Ctx, token: string, operand = false): void {
   let t = token.replace(/\/{2,}/g, "/").replace(/^~(?:[+-]\d*|\d+)\/+/, "");
   while (t.startsWith("./")) t = t.slice(2);
   if (t.startsWith("/")) t = t.slice(1);
@@ -5981,30 +6155,39 @@ function addLiteralToken(ctx: Ctx, token: string): void {
   if (!t || badPath(t) || /[*?[]/.test(t) || !/^[A-Za-z0-9_@.+/-]+$/.test(t)) return;
   if (t.includes("/")) {
     if (ctx.logical.has(t)) addLogical(ctx, t);
+    // A path spelled without its extension (docs/run) names the file node resolves it to. It has a directory part, so it is a path
+    // wherever it is quoted, unlike a bare word.
+    else if (!ctx.hold && findFile(ctx, t) !== undefined) addLogical(ctx, t);
     return;
   }
   if (ctx.logical.has(t)) {
     addLogical(ctx, t);
     return;
   }
-  if (t.length < 3 || !t.includes(".")) return;
-  let hit: string | undefined;
-  for (const logical of ctx.logical.keys()) {
-    if (logical.slice(logical.lastIndexOf("/") + 1) !== t) continue;
-    if (hit) return;
-    hit = logical;
+  if (t.length < 3) return;
+  const idx = nameIndex(ctx.logical);
+  if (!t.includes(".")) {
+    // A bare word in a path call (join(dir, "run")) is the stem of run.js or run.node in any directory: every file of that stem stays in.
+    if (!operand) return;
+    const hits = idx.stems.get(t);
+    if (hits && hits.length <= 16) {
+      for (const logical of hits) if (!settled(ctx, ctx.logical.get(logical))) addLogical(ctx, logical);
+    }
+    return;
   }
-  if (hit) addLogical(ctx, hit);
+  const hits = idx.names.get(t);
+  if (hits && hits.length === 1) addLogical(ctx, hits[0]!);
 }
 
 function scanAdded(ctx: Ctx, key: string): void {
-  if (ctx.hold || ctx.scanned.has(key)) return;
+  if (ctx.hold || scanDone(ctx, key)) return;
   const base = key.slice(key.lastIndexOf("/") + 1);
   if (/\.(?:js|cjs|mjs)$/i.test(base)) {
     scanJs(ctx, key);
     return;
   }
-  if (ctx.scanned.size >= DEPTH) {
+  if (ctx.fromGyp) ctx.gypScanned.add(key);
+  if (ctx.scanned.size >= DEPTH && !ctx.scanned.has(key)) {
     fail(ctx, "unresolved: script depth");
     return;
   }
@@ -10072,6 +10255,7 @@ export function installView(files: FileMap): InstallView {
     scripts: {},
     seen: new Set(),
     scanned: new Set(),
+    gypScanned: new Set(),
     ranSh: new Set(),
     depth: 0,
     sawNodeGyp: false,
