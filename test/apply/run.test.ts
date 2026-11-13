@@ -235,6 +235,41 @@ describe("a cask with a running process is deferred (oupdate#4)", () => {
     expect(r.brew).toContain("casks upgraded: other");
     expect(r.files.get("/state.test/pending-state.tsv")).toContain(`brew${T}app=9.9${T}1${T}2026-10-22`);
   });
+  test("a cask in inPlaceCasks is upgraded despite a running process, and the pids on the old build are logged", async () => {
+    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] }, { cfg: { inPlaceCasks: ["app"] } });
+    expect(r.calls).toContain("brew upgrade --cask --greedy app");
+    expect(r.text).toContain("app: pids 55 keep running the old build (inPlaceCasks)");
+    expect(r.brew).not.toContain("casks held (running): app");
+    expect(r.brew).toContain("casks upgraded: app");
+  });
+  test("a listed cask with no running process takes the normal path: no in-place line", async () => {
+    const r = await run({ ...base, lsof: ["COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n", "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] }, { cfg: { inPlaceCasks: ["app"] } });
+    expect(r.calls).toContain("brew upgrade --cask --greedy app");
+    expect(r.text).not.toContain("keep running the old build");
+  });
+  test("an unlisted cask stays held while another cask is listed", async () => {
+    const both = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngcloud 55 u txt REG 1,4 1 2 /brew/Caskroom/app/1.0/bin/gcloud\ngcloud 56 u txt REG 1,4 1 2 /brew/Caskroom/other/2/bin/y\n";
+    const r = await run({ ...base, lsof: [both, both] }, { cfg: { inPlaceCasks: ["app"] } });
+    expect(r.calls).toContain("brew upgrade --cask --greedy app");
+    expect(r.calls).not.toContain("brew upgrade --cask --greedy other");
+    expect(r.brew).toContain("casks held (running): other");
+  });
+  test("a listed cask whose upgrade fails reports FAILED and no kept-running line", async () => {
+    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"], upgradeRc: { "--cask --greedy app": 1 } }, { cfg: { inPlaceCasks: ["app"] } });
+    expect(r.text).toContain("app: upgrade FAILED");
+    expect(r.text).not.toContain("keep running the old build");
+  });
+  test("a listed cask upgraded to a version other than the reviewed one is flagged, not counted, with no kept-running line", async () => {
+    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"], installedVersion: { app: "1.2" } }, { cfg: { inPlaceCasks: ["app"] } });
+    expect(r.text).toContain("Type A: app installed 1.2, reviewed 1.1 — FLAGGED");
+    expect(r.brew).not.toContain("casks upgraded: app");
+    expect(r.text).not.toContain("keep running the old build");
+  });
+  test.each([["a case variant", "App"], ["a wildcard", "*"], ["a tap-qualified entry", "example/tap/app"]])("%s does not match", async (_n, entry) => {
+    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] }, { cfg: { inPlaceCasks: [entry] } });
+    expect(r.calls).not.toContain("brew upgrade --cask --greedy app");
+    expect(r.brew).toContain("casks held (running): app");
+  });
 });
 
 describe("service restarts and the phase order (port 07)", () => {

@@ -567,7 +567,9 @@ export async function casksSection(rt: RunCtx) {
       const room = (await x([cfg.brew, "--caskroom"])).out.trim();
       const maps = room.startsWith("/") ? await lsofMaps({ exec: x } as KegEnv, cfg.lsof, log) : undefined;
       const pids = maps === undefined ? [] : caskRunning(maps, room, cask, apps);
-      if (pids.length) {
+      // inPlaceCasks matches brew's short cask name exactly (case-sensitive); a tap-qualified entry never matches.
+      const inPlace = pids.length > 0 && cfg.inPlaceCasks.includes(cask);
+      if (pids.length && !inPlace) {
         log.push(`  ${cask}: deferred — a process is running from it (pid ${pids.join(" ")}); retried next run`);
         b.casksRunning.push(cask);
         continue;
@@ -583,7 +585,10 @@ export async function casksSection(rt: RunCtx) {
           got = undefined;
         }
         const ok = await versionHeld(rt, cask, reviewedVersion(cask, b.verbose), typeof got === "string" ? got : undefined);
-        if (ok) b.casksUp.push(cask);
+        if (ok) {
+          b.casksUp.push(cask);
+          if (inPlace) log.push(`  ${cask}: pids ${pids.join(" ")} keep running the old build (inPlaceCasks) until restarted`);
+        }
         log.push(...(await gk.release(cask, prior)));
         const c = await gk.check(cask);
         log.push(...c.log);

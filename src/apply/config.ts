@@ -76,6 +76,14 @@ export interface ApplyConfig {
   /** Repos one level under these may hold a pins.json. */
   pinRoots: string[];
   caskExclude: string[];
+  /**
+   * Casks upgraded even while a process runs from them (off by default); each entry must equal the short cask
+   * name as `brew list --cask` shows it, exactly (case-sensitive; a tap-qualified entry never matches).
+   * Only the running-process hold is skipped. A running binary keeps its
+   * unlinked file, but a live session that starts a helper from the old directory then fails. For plain-binary
+   * casks with no app or daemon; the pids still on the old build are logged after the upgrade succeeds.
+   */
+  inPlaceCasks: string[];
   stuckAfter: number;
   /** Type A packages held on a major-version increase. */
   sensitive: string[];
@@ -136,7 +144,7 @@ export const DEFAULTS = {
 
 const KEYS = new Set([
   "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "hostPrefixes", "pinRoots",
-  "caskExclude", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "jobRunners", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "npmRegistry", "caps",
+  "caskExclude", "inPlaceCasks", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "jobRunners", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
 
@@ -344,6 +352,7 @@ export function parseApplyConfig(text: string, fallbackHost: string, env: Record
       return p;
     }),
     caskExclude: list(a, "caskExclude", w) ?? [],
+    inPlaceCasks: list(a, "inPlaceCasks", w) ?? [],
     stuckAfter: posInt(a, "stuckAfter", w) ?? DEFAULTS.stuckAfter,
     sensitive: list(a, "sensitive", w) ?? DEFAULTS.sensitive,
     deferred: ((a.deferred as unknown[] | undefined) ?? []).map(service),
