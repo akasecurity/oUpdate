@@ -10,11 +10,14 @@ describe("parseApplyConfig", () => {
     const c = parseApplyConfig(cfg({ stateDir: "/state.test" }), "hosta");
     expect(c).toMatchObject({
       host: "hosta", stateDir: "/state.test", brew: "brew", npm: "npm", lsof: DEFAULTS.lsof, officialTaps: DEFAULTS.officialTaps,
-      typeBTaps: [], pinRoots: [], caskExclude: [], inPlaceCasks: [], stuckAfter: 3, deferred: [], timeoutMs: DEFAULTS.timeoutMs,
+      typeBTaps: [], pinRoots: [], caskExclude: [], inPlaceCasks: [], heldByDesign: [], stuckAfter: 3, deferred: [], timeoutMs: DEFAULTS.timeoutMs,
     });
     expect(c.reviewer).toBeUndefined();
     expect(c.notify).toBeUndefined();
     expect(c.claudeCode).toBeUndefined();
+  });
+  test("heldByDesign is read from the file", () => {
+    expect(parseApplyConfig(cfg({ stateDir: "/state.test", heldByDesign: ["example/tap/head-tool"] }), "hosta").heldByDesign).toEqual(["example/tap/head-tool"]);
   });
   test("claudeCode: the native binary's absolute path", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/state.test", claudeCode: "/opt.test/bin/claude" }), "hosta").claudeCode).toBe("/opt.test/bin/claude");
@@ -97,6 +100,8 @@ describe("parseApplyConfig", () => {
     ["a non-string entry in inPlaceCasks", cfg({ stateDir: "/s", inPlaceCasks: [1] }), /array of non-empty strings/],
     ["a nested list in inPlaceCasks", cfg({ stateDir: "/s", inPlaceCasks: [["tool"]] }), /array of non-empty strings/],
     ["a string for caskExclude", cfg({ stateDir: "/s", caskExclude: "big" }), /array of non-empty strings/],
+    ["a string for heldByDesign", cfg({ stateDir: "/s", heldByDesign: "head-tool" }), /array of non-empty strings/],
+    ["an empty entry in heldByDesign", cfg({ stateDir: "/s", heldByDesign: [""] }), /array of non-empty strings/],
     ["a zero threshold", cfg({ stateDir: "/s", stuckAfter: 0 }), /positive integer/],
     ["an incomplete deferred service", cfg({ stateDir: "/s", deferred: [{ name: "svc" }] }), /deferred\[0\]\.waiter is required/],
     ["a bad reviewer", cfg({ stateDir: "/s", reviewer: { type: "x", name: "r" } }), /reviewer type/],

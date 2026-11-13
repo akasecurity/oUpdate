@@ -169,6 +169,7 @@ export function testConfig(over: Partial<ApplyConfig> = {}): ApplyConfig {
     pinRoots: [],
     caskExclude: [],
     inPlaceCasks: [],
+    heldByDesign: [],
     stuckAfter: 1,
     sensitive: DEFAULTS.sensitive,
     deferred: [],

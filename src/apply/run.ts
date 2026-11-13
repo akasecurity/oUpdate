@@ -401,12 +401,16 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   await step("brew", "stuck tracking", async () => {
     if (dryRun || b.noBrew) return;
     const q = await x([cfg.brew, "outdated", "--json=v2", "--greedy-auto-updates", ...(b.fetchHead ? ["--fetch-HEAD"] : [])]);
-    const pending = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld()) : undefined;
-    if (pending === undefined) {
+    const all = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld()) : undefined;
+    if (all === undefined) {
       await brewFailed("pending-query");
       return;
     }
-    const s = track("brew", pending);
+    // Held on purpose (apply.heldByDesign): reported here, never tracked, so never counted as stuck. An exact match on the whole name
+    // brew prints: a tap-qualified entry matches only that tap's package, a bare entry only a bare (core) name.
+    const design = all.filter((item) => cfg.heldByDesign.includes(item.slice(0, item.indexOf("="))));
+    if (design.length) log.push(`  held by design (not counted as stuck): ${design.join(" ")}`);
+    const s = track("brew", all.filter((item) => !design.includes(item)));
     if (s !== undefined) b.stuck = s;
   });
 
