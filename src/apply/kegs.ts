@@ -60,7 +60,10 @@ export function caskRunning(lsofOut: string, caskroom: string, cask: string, app
   const pids = new Set<string>();
   for (const line of lsofOut.split("\n")) {
     const f = line.trim().split(/\s+/);
-    const name = f.at(-1) ?? "";
+    // NAME is lsof's ninth field on, kept exactly as printed: a path with spaces (/Applications/My App.app/...) spans
+    // several words, and its spacing is its own (lsof prints a space inside COMMAND as \x20, so the eight fields before
+    // it are single words). A row with fewer than nine fields keeps its last word.
+    const name = line.match(/^\s*(?:\S+\s+){8}(.*)$/)?.[1]?.trimEnd() ?? f.at(-1) ?? "";
     if (f[1] && roots.some((r) => name.startsWith(r))) pids.add(f[1]);
   }
   return [...pids].sort((a, b) => Number(a) - Number(b));

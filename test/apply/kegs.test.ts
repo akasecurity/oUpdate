@@ -1155,4 +1155,26 @@ describe("caskRunning", () => {
     expect(caskRunning(out, ROOM, "gcloud", [])).toEqual([]);
     expect(caskRunning("", ROOM, "gcloud-cli", [])).toEqual([]);
   });
+  test("an app with spaces in its path (lsof's NAME has spaces): running it", () => {
+    const spaced = [lsofLine("21", "/Applications/My App.app/Contents/MacOS/My App"), lsofLine("22", "/Applications/Other.app/Contents/MacOS/Other")].join("\n");
+    expect(caskRunning(spaced, ROOM, "my-app", ["/Applications/My App.app"])).toEqual(["21"]);
+  });
+  test("a Caskroom path with a space in it: running it", () => {
+    expect(caskRunning(lsofLine("23", `${ROOM}/tool/1.0/Tool Helper.app/Contents/MacOS/helper`), ROOM, "tool", [])).toEqual(["23"]);
+  });
+  test("an app whose name only starts like another's (My.app vs My App.app): not a match (a pin: also so on base)", () => {
+    expect(caskRunning(lsofLine("24", "/Applications/My App.app/Contents/MacOS/My App"), ROOM, "my", ["/Applications/My.app"])).toEqual([]);
+  });
+  test("an app root is a folder: /Applications/My.app does not match a running /Applications/My.app.old (a pin: also so on base)", () => {
+    expect(caskRunning(lsofLine("25", "/Applications/My.app.old/Contents/MacOS/x"), ROOM, "my", ["/Applications/My.app"])).toEqual([]);
+  });
+  test("NAME keeps lsof's own spacing: two spaces are another folder than one", () => {
+    const two = lsofLine("26", "/Applications/My  App.app/Contents/MacOS/x");
+    expect(caskRunning(two, ROOM, "my-app", ["/Applications/My App.app"])).toEqual([]);
+    expect(caskRunning(two, ROOM, "my-app", ["/Applications/My  App.app"])).toEqual(["26"]);
+    expect(caskRunning(lsofLine("27", "/Applications/My App.app/Contents/MacOS/x"), ROOM, "my-app", ["/Applications/My App.app"])).toEqual(["27"]);
+  });
+  test("a row with fewer than nine fields keeps its last word (a pin: also so on base)", () => {
+    expect(caskRunning(`x 28 u txt REG 1,4 1 /Applications/X.app/Contents/MacOS/X`, ROOM, "x", ["/Applications/X.app"])).toEqual(["28"]);
+  });
 });
