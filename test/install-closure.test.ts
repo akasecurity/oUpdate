@@ -53,8 +53,8 @@ describe("install closure", () => {
 
   test("an unresolved command does not hold when the closed bytes match", () => {
     const quiet: object[] = [
-      { postinstall: "run-s 'setup --x'", setup: "node assets/x.bmp" },
-      { postinstall: "yarn run-s setup", setup: "node assets/x.bmp" },
+      // npm-run-all splits a name from its arguments at a space only: a tab keeps the whole word, no script has that name.
+      { postinstall: "run-s 'setup\t--x'", setup: "node assets/x.bmp" },
     ];
     for (const scripts of quiet) {
       const [oldF, newF] = same(scripts);
@@ -68,6 +68,10 @@ describe("install closure", () => {
       { postinstall: "cross-env A=1 npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "env npm run setup", setup: "node assets/x.bmp" },
       { postinstall: "npx run-s setup", setup: "node assets/x.bmp" },
+      // yarn runs the run-s binary when no script has that name, and run-s runs setup.
+      { postinstall: "yarn run-s setup", setup: "node assets/x.bmp" },
+      // npm-run-all runs the script before the first space of a name, with the rest as its arguments.
+      { postinstall: "run-s 'setup --x'", setup: "node assets/x.bmp" },
       // Holds because `npm exec` of a command that is not a local path is the unknown runner: it widens and fails.
       { postinstall: "npm exec -- run-s setup", setup: "node assets/x.bmp" },
       { postinstall: "yarn setup", setup: "node assets/x.bmp" },

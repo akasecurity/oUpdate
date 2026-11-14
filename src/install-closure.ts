@@ -74,7 +74,9 @@ interface Ctx {
   gypFiles: Set<string>;
   missing: Set<string>;
   scripts: Record<string, string>;
-  seen: Set<string>;
+  seen: Set<string>; // scripts read with their pre and post scripts on
+  // Scripts read while pre and post scripts were off: a later visit with them on reads the script again, hooks and all.
+  seenNoHooks: Set<string>;
   scanned: Set<string>;
   // The quoted and operand tokens of each scanned file, read once.
   literals?: Map<string, { quoted: string[]; operand: string[] }>;
@@ -7079,6 +7081,10 @@ function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
       }
       continue;
     }
+    // `bunx run-s evil`, `npx --yes run-s evil`, `pnpm dlx run-s evil`: the scripts are followed, and the stage is still read
+    // below as before (a dlx or exec runner keeps its widen).
+    const runsAt = /^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(runnerName(bin)) ? runsProgramAt(ws, 1, runnerName(bin), (n) => typeof ctx.raw[n] === "string") : -1;
+    if (runsAt >= 0) dispatchRunner(ctx, ws.slice(runsAt), ignoring);
     // `npx run-s evil`, `npm exec -- run-s evil`
     let run = ws;
     if (bin === "npx" || (bin === "npm" && /^(?:exec|x)$/.test(ws[1] ?? ""))) {
@@ -8099,9 +8105,15 @@ function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
   ctx.depth--;
 }
 
+function distinctScripts(ctx: Ctx): number {
+  let n = ctx.seen.size;
+  for (const name of ctx.seenNoHooks) if (!ctx.seen.has(name)) n++;
+  return n;
+}
+
 function runScript(ctx: Ctx, name: string, optional: boolean): void {
   if (ctx.hold) return;
-  if (ctx.seen.has(name)) return;
+  if (ctx.seen.has(name) || (ctx.ignoreHooks && ctx.seenNoHooks.has(name))) return;
   const raw = ctx.raw[name];
   if (typeof raw !== "string") {
     // A script named by an unresolved expansion (`npm run "$(cat name.txt)"`) may be any script of the package.
@@ -8112,13 +8124,15 @@ function runScript(ctx: Ctx, name: string, optional: boolean): void {
     if (!optional) fail(ctx, "unresolved: script");
     return;
   }
-  if (ctx.seen.size >= DEPTH || ctx.depth >= DEPTH) {
+  // The cap counts distinct scripts: a script read again with its hooks on is no new script.
+  const again = ctx.seenNoHooks.has(name);
+  if ((!again && distinctScripts(ctx) >= DEPTH) || ctx.depth >= DEPTH) {
     ctx.widenInert = true;
     widenAll(ctx);
     fail(ctx, "unresolved: script depth");
     return;
   }
-  ctx.seen.add(name);
+  (ctx.ignoreHooks ? ctx.seenNoHooks : ctx.seen).add(name);
   ctx.scripts[name] = raw;
   if (raw.length === 0) return;
   ctx.depth++;
@@ -8398,19 +8412,110 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
   runBody(ctx, dec.decode(ctx.bytes.get(key)));
 }
 
+// npm-run-all's own switches (from its --help): a mode or output flag before a name takes no value.
+const RUNS_BOOL_FLAGS = new Set(["-p", "--parallel", "-s", "--sequential", "--serial", "-c", "--continue-on-error", "-l", "--print-label", "-n", "--print-name", "-r", "--race", "--aggregate-output", "--silent"]);
+// --npm-path names a file npm-run-all runs as npm: it is not a value to skip, so the run stays unresolved as before.
+const RUNS_VALUE_FLAGS = new Set(["--max-parallel"]);
+
+// The index of run-s, run-p or npm-run-all when it is the program a package runner runs: `npx --yes run-s`, `bunx run-s`,
+// `pnpm dlx run-s`, `pnpm exec run-s`, `yarn run-s`, `npx pnpm exec run-s`. -1 for anything else, and for a yarn, pnpm or bun
+// run moved to another directory by a flag (that run is widened, its scripts are not this package's). `yarn run-s`, `pnpm run-s` and
+// `bun run-s` run the package's own script when one has that name (has), so that is not the binary.
+function runsProgramAt(argv: string[], i: number, bin: string, has: (name: string) => boolean): number {
+  const pm = (b: string) => /^(?:yarn|yarnpkg|pnpm|bun)$/.test(b);
+  const moved = (b: string, from: number): boolean => {
+    if (!pm(b)) return false;
+    const end = argv.indexOf("--", from);
+    const widen = WORKSPACE_WIDEN[b === "yarnpkg" ? "yarn" : (b as "yarn" | "pnpm" | "bun")];
+    return argv.slice(from, end < 0 ? argv.length : end).some((a) => widen.test(a));
+  };
+  if (moved(bin, i)) return -1;
+  // Only a bare name or a node_modules/.bin path is the package binary; ./tools/run-s is a local file of that name.
+  const binary = (w: string) => !w.includes("/") || /(?:^|\/)node_modules\/\.bin\/[^/]+$/.test(w);
+  let k = i;
+  let runner = bin;
+  let viaExec = false;
+  for (let d = 0; d < 4; d++) {
+    while (k < argv.length && argv[k]!.startsWith("-") && argv[k] !== "--") {
+      const ef = execFlag(argv[k]!);
+      if (ef?.kind === "call") return -1;
+      // npx --workspace sub and -w sub run in another package; --prefix and -C point npm at another package's
+      // configuration and keep the working directory. Either way the follow stops here.
+      if (!pm(runner) && (NPM_WORKSPACE_WIDEN.test(argv[k]!) || /^--(?:dir|cwd)(?:=|$)/.test(argv[k]!))) return -1;
+      if ((ef?.kind === "package" && ef.value === undefined) || RUNNER_VALUE_FLAGS.test(argv[k]!)) k++;
+      k++;
+    }
+    if (argv[k] === "--") k++;
+    const w = argv[k];
+    if (w === undefined) return -1;
+    const exe = runnerName(w);
+    // yarn, pnpm and bun run the package's own script of that name first: `pnpm bun run-s` with a script named bun runs it.
+    if (pm(runner) && !viaExec && has(w)) return -1;
+    if (!binary(w)) return -1;
+    if (/^(?:run-s|run-p|npm-run-all)$/.test(exe)) return k;
+    // `pnpm dlx`, `pnpm exec`, `yarn exec`, `bun x` and a nested npx run the word after them.
+    if (pm(runner) && /^(?:exec|x|dlx)$/.test(w)) viaExec = true;
+    else if (/^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(exe)) {
+      runner = exe;
+      viaExec = false;
+      if (moved(exe, k + 1)) return -1; // `npx yarn --cwd sub run-s` runs another package's scripts
+    } else return -1;
+    k++;
+  }
+  return -1;
+}
+
+// The number of words a directory flag of yarn, pnpm or bun at argv[j] takes when its directory is this package (`--cwd .`,
+// `--cwd=./`, `-C .`, `--dir .`) and the run has not moved: 0 when it names any other directory or a flag that does not name one.
+function selfDirFlag(ctx: Ctx, bin: "yarn" | "pnpm" | "bun", argv: string[], j: number): number {
+  if (ctx.cwd !== "") return 0;
+  const a = argv[j]!;
+  const names = bin === "pnpm" ? ["-C", "--dir"] : ["--cwd"];
+  for (const name of names) {
+    let value: string | undefined;
+    let n = 1;
+    if (a === name) {
+      value = argv[j + 1];
+      n = 2;
+    } else if (a.startsWith(name + "=")) value = a.slice(name.length + 1);
+    else if (name === "-C" && a.startsWith("-C") && a.length > 2) value = a.slice(2);
+    else continue;
+    if (value === undefined || value === "" || value === "--" || value.includes(UNRESOLVED)) return 0;
+    return joinDir("", value) === "" ? n : 0;
+  }
+  return 0;
+}
+
 function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
   for (let j = i; j < argv.length; j++) {
     if (ctx.hold) return;
-    const a = argv[j]!;
-    if (a === "--") {
+    const word = argv[j]!;
+    if (word === "--") {
       fail(ctx, "unresolved: flag");
       return;
+    }
+    // npm-run-all reads a name with arguments ("evil -- --flag") as the script before the first space, and runs
+    // `npm run evil -- --flag`: that command is read as written, so an argument that moves the run (`-w sub`) widens as it does there.
+    const trimmed = word.trim();
+    const sp = word.startsWith("-") ? -1 : trimmed.indexOf(" ");
+    const a = sp < 0 ? word : trimmed.slice(0, sp);
+    if (sp >= 0) {
+      const words = trimmed.split(/ +/);
+      if (/[*?[\]]/.test(a) || a.startsWith("-") || words.some((w) => /[\s'"\\$`]/.test(w))) {
+        fail(ctx, "unresolved: shell");
+        return;
+      }
+      dispatch(ctx, ["npm", "run", ...words].map((w) => `'${w}'`).join(" "));
+      continue;
     }
     if (a.startsWith("-")) {
       const eq = a.indexOf("=");
       const name = eq > 0 ? a.slice(0, eq) : a;
-      if (BOOL_FLAGS.has(name)) continue;
-      if (VALUE_FLAGS.has(name)) {
+      if (BOOL_FLAGS.has(name) || (eq < 0 && RUNS_BOOL_FLAGS.has(name))) continue;
+      // npm-run-all reads -cln as -c -l -n, and any --name=value (also --npm-path=x) as a config value: the run goes on. (run-s and
+      // run-p reject -p, --parallel and the long sequential flags, so nothing runs there; reading on only holds more.)
+      if ((eq < 0 && /^-[clnprs]+$/.test(a)) || (a.startsWith("--") && eq > 2)) continue;
+      if (VALUE_FLAGS.has(name) || RUNS_VALUE_FLAGS.has(name)) {
         if (eq < 0) {
           const next = argv[j + 1];
           if (next === undefined || next.startsWith("-")) {
@@ -9880,7 +9985,23 @@ function dispatch(ctx: Ctx, cmd: string): void {
   // A compound command's keywords (`if`, `then`, `do`, `fi` ...) are not commands: the command after one is read, and a bare
   // closing keyword runs nothing. Without this each of them was an unknown runner that widened and, with `[ -f x ]`
   // after `if`, held on the glob cap whatever changed.
-  while (i < argv.length && /^(?:if|then|elif|else|do|while|until|!|\{)$/.test(argv[i]!)) i++;
+  // `function f {` opens a function body like `f() {`: the command after it is read.
+  while (i < argv.length) {
+    if (/^(?:if|then|elif|else|do|while|until|!|\{)$/.test(argv[i]!)) i++;
+    else if (argv[i] === "function" && i + 1 < argv.length) {
+      // The body is read as a command too, and the line keeps its own reading (an unknown command word widens, as before).
+      const rest = argv.slice(i + (argv[i + 2] === "()" ? 3 : 2));
+      if (rest.length > 0 && ctx.depth < DEPTH) {
+        // A function body runs when the function is called: a cd in it does not move the rest of the line.
+        const cwd = ctx.cwd;
+        ctx.depth++;
+        dispatch(ctx, rest.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+        ctx.depth--;
+        ctx.cwd = cwd;
+      }
+      break;
+    } else break;
+  }
   if (i >= argv.length || /^(?:fi|done|esac|\})$/.test(argv[i]!)) return;
   if (argv[i] === "[" || argv[i] === "test") return; // the test builtin runs nothing
   if (/^(?:export|declare|typeset|local|readonly)$/.test(argv[i]!)) {
@@ -9974,6 +10095,16 @@ function dispatch(ctx: Ctx, cmd: string): void {
     if (k >= 0) {
       ctx.depth++;
       dispatch(ctx, argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      ctx.depth--;
+    }
+  }
+  // A package runner whose program is run-s, run-p or npm-run-all (`npx --yes run-s evil`, `pnpm dlx run-s evil`,
+  // `yarn run-s evil`) runs the scripts of this package it names: they are followed, and the runner's own reading goes on.
+  if (/^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(runnerName(bin)) && ctx.depth < DEPTH) {
+    const at = runsProgramAt(argv, i, runnerName(bin), (n) => typeof ctx.raw[n] === "string");
+    if (at >= 0) {
+      ctx.depth++;
+      dispatchRuns(ctx, argv, at + 1);
       ctx.depth--;
     }
   }
@@ -10125,6 +10256,15 @@ function dispatch(ctx: Ctx, cmd: string): void {
     for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
       if (widen.test(argv[j]!)) {
         widenAll(ctx);
+        // `yarn --cwd . evil` and `pnpm -C . evil` at the package root run this package's script: the run is read without the flag too.
+        const n = selfDirFlag(ctx, bin, argv, j);
+        if (n > 0 && ctx.depth < DEPTH && argv.length <= 200) {
+          const cwd = ctx.cwd;
+          ctx.depth++;
+          dispatch(ctx, [...argv.slice(i - 1, j), ...argv.slice(j + n)].map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+          ctx.depth--;
+          ctx.cwd = cwd;
+        }
         return;
       }
     }
@@ -10620,6 +10760,7 @@ function installViewCore(files: FileMap): InstallView {
     missing: new Set(),
     scripts: {},
     seen: new Set(),
+    seenNoHooks: new Set(),
     scanned: new Set(),
     gypScanned: new Set(),
     ranSh: new Set(),
