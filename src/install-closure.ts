@@ -8062,6 +8062,12 @@ function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
   ctx.depth--;
 }
 
+function distinctScripts(ctx: Ctx): number {
+  let n = ctx.seen.size;
+  for (const name of ctx.seenNoHooks) if (!ctx.seen.has(name)) n++;
+  return n;
+}
+
 function runScript(ctx: Ctx, name: string, optional: boolean): void {
   if (ctx.hold) return;
   if (ctx.seen.has(name) || (ctx.ignoreHooks && ctx.seenNoHooks.has(name))) return;
@@ -8075,7 +8081,9 @@ function runScript(ctx: Ctx, name: string, optional: boolean): void {
     if (!optional) fail(ctx, "unresolved: script");
     return;
   }
-  if (ctx.seen.size + ctx.seenNoHooks.size >= DEPTH || ctx.depth >= DEPTH) {
+  // The cap counts distinct scripts: a script read again with its hooks on is no new script.
+  const again = ctx.seenNoHooks.has(name);
+  if ((!again && distinctScripts(ctx) >= DEPTH) || ctx.depth >= DEPTH) {
     ctx.widenInert = true;
     widenAll(ctx);
     fail(ctx, "unresolved: script depth");
@@ -8443,13 +8451,26 @@ function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
       fail(ctx, "unresolved: flag");
       return;
     }
-    // npm-run-all reads a name with arguments ("evil -- --flag") as the script before the first space, run with the rest.
-    const a = word.startsWith("-") ? word : word.trim().split(" ")[0]!;
+    // npm-run-all reads a name with arguments ("evil -- --flag") as the script before the first space, and runs
+    // `npm run evil -- --flag`: that command is read as written, so an argument that moves the run (`-w sub`) widens as it does there.
+    const trimmed = word.trim();
+    const sp = word.startsWith("-") ? -1 : trimmed.indexOf(" ");
+    const a = sp < 0 ? word : trimmed.slice(0, sp);
+    if (sp >= 0) {
+      const words = trimmed.split(/ +/);
+      if (/[*?[\]]/.test(a) || a.startsWith("-") || words.some((w) => /[\s'"\\$`]/.test(w))) {
+        fail(ctx, "unresolved: shell");
+        return;
+      }
+      dispatch(ctx, ["npm", "run", ...words].map((w) => `'${w}'`).join(" "));
+      continue;
+    }
     if (a.startsWith("-")) {
       const eq = a.indexOf("=");
       const name = eq > 0 ? a.slice(0, eq) : a;
       if (BOOL_FLAGS.has(name) || (eq < 0 && RUNS_BOOL_FLAGS.has(name))) continue;
-      // npm-run-all reads -pcl as -p -c -l, and any --name=value (also --npm-path=x) as a config value: the run goes on.
+      // npm-run-all reads -cln as -c -l -n, and any --name=value (also --npm-path=x) as a config value: the run goes on. (run-s and
+      // run-p reject -p, --parallel and the long sequential flags, so nothing runs there; reading on only holds more.)
       if ((eq < 0 && /^-[clnprs]+$/.test(a)) || (a.startsWith("--") && eq > 2)) continue;
       if (VALUE_FLAGS.has(name) || RUNS_VALUE_FLAGS.has(name)) {
         if (eq < 0) {
