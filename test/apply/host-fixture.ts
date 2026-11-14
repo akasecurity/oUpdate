@@ -30,8 +30,8 @@ export interface HostScript {
   rc?: Record<string, number>;
   /** The whole answer for a command line (exact): its rc and what it prints. */
   answers?: Record<string, { rc: number; out: string }>;
-  /** Successive lsof answers. */
-  lsof?: string[];
+  /** Successive lsof answers: stdout, or stdout with something on stderr (exit 0 either way). */
+  lsof?: (string | { out: string; err: string })[];
   npmOutdated?: string;
   files?: Record<string, string>;
   dirs?: string[];
@@ -99,7 +99,7 @@ export function fakeHost(s: HostScript = {}) {
     }
     if (cmd!.endsWith("lsof")) {
       const next = lsof.length > 1 ? lsof.shift()! : lsof[0];
-      return next === undefined ? { rc: 1, out: "", err: "" } : ok(next);
+      return next === undefined ? { rc: 1, out: "", err: "" } : typeof next === "string" ? ok(next) : { rc: 0, out: next.out, err: next.err };
     }
     if (cmd === "ps") {
       const p = s.ps?.[argv[4]!];

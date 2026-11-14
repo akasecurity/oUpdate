@@ -23,7 +23,9 @@ const APPROVED = "/conf.test/approved-taps.tsv";
 const brewLine = (summary: string[]) => summary.find((l) => l.startsWith("  brew: ")) ?? "";
 const npmLine = (summary: string[]) => summary.find((l) => l.startsWith("  npm:  ")) ?? "";
 /** lsof with no process mapping anything: the cask phase reads it as nothing running from a cask. */
-const LSOF_NONE = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n";
+const LSOF_NONE = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nlaunchd 1 root txt REG 1,4 1 2 /sbin/launchd\n";
+/** lsof's header alone: no process listed, so not a complete scan. */
+const LSOF_HEADER = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n";
 
 async function run(script: HostScript, o: { cfg?: Parameters<typeof testConfig>[0]; dryRun?: boolean; tb?: ReturnType<typeof fakeTypeB>; gk?: GkOps; appNet?: AppNet; bunExec?: string } = {}) {
   const h = fakeHost(script);
@@ -280,7 +282,7 @@ describe("waiting is not stuck: exact names, by kind (never matched by a shared 
   test("a running cask exempts neither a formula nor another cask of the same name; a cask held for sudo or one that failed is tracked", async () => {
     const r = await run({
       formulas: "docker", casks: "docker sudoapp", caskTaps: { docker: "homebrew/cask", sudoapp: "homebrew/cask" }, formulaTaps: { docker: "homebrew/core" },
-      verbose: "docker (1) < 2\ndocker (1) != 2\nsudoapp (1) != 2", upgradeRc: { docker: 1 }, sudoCasks: ["sudoapp"], lsof: [RUNNING, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"],
+      verbose: "docker (1) < 2\ndocker (1) != 2\nsudoapp (1) != 2", upgradeRc: { docker: 1 }, sudoCasks: ["sudoapp"], lsof: [RUNNING, LSOF_NONE],
     }, { cfg: { stuckAfter: 1 } });
     const lines = (r.files.get(STATE) ?? "").split("\n").filter(Boolean);
     expect(lines.filter((l) => l.startsWith(`brew${T}docker=`))).toHaveLength(1);
@@ -293,7 +295,7 @@ describe("a cask with a running process is deferred (oupdate#4)", () => {
   const RUN = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngcloud 55 u txt REG 1,4 1 2 /brew/Caskroom/app/1.0/bin/gcloud\n";
   const base = { casks: "app other", caskTaps: { app: "homebrew/cask", other: "homebrew/cask" }, verbose: "app (1.0) < 1.1\nother (2) < 3" };
   test("it is not upgraded this run, is logged with the reason, is reported as waiting (not counted as stuck), and the rest carry on", async () => {
-    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] });
+    const r = await run({ ...base, lsof: [RUN, LSOF_NONE] });
     expect(r.calls).not.toContain("brew upgrade --cask --greedy app");
     expect(r.calls).toContain("brew upgrade --cask --greedy other");
     expect(r.text).toContain("app: deferred — a process is running from it (pid 55)");
@@ -304,7 +306,7 @@ describe("a cask with a running process is deferred (oupdate#4)", () => {
   });
   test("a cask held only because a process runs from it is never counted as stuck, and its old row clears", async () => {
     const seed = `brew${T}app=9.9${T}9${T}2026-10-01\n`;
-    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"], files: { "/state.test/pending-state.tsv": seed } }, { cfg: { stuckAfter: 3 } });
+    const r = await run({ ...base, lsof: [RUN, LSOF_NONE], files: { "/state.test/pending-state.tsv": seed } }, { cfg: { stuckAfter: 3 } });
     expect(r.brew).toContain("casks held (running): app");
     expect(r.brew).not.toContain("STUCK");
     expect(r.files.get("/state.test/pending-state.tsv") ?? "").not.toContain("app=9.9");
@@ -336,10 +338,28 @@ describe("a cask with a running process is deferred (oupdate#4)", () => {
     expect(r.text).toContain("app: upgrade FAILED");
     expect(r.text).not.toContain("upgraded anyway");
   });
-  test("lsof with only its header is a scan that found no process: the casks upgrade", async () => {
+  test("lsof listing other processes and none from the cask: a complete scan, the casks upgrade", async () => {
     const r = await run({ ...base, lsof: [LSOF_NONE] });
     expect(r.calls).toContain("brew upgrade --cask --greedy app");
     expect(r.brew).not.toContain("cask-processes");
+  });
+  test.each([
+    ["lsof listed no process (its header alone)", [LSOF_HEADER], "lsof listed no process"],
+    ["lsof printed something on stderr", [{ out: LSOF_NONE, err: "lsof: WARNING: can't stat() nfs file system /mnt/x\n" }], "lsof printed something on stderr"],
+    ["lsof's last line cut off", [`${LSOF_NONE}gcloud 55 u txt REG`], "lsof printed a cut-off last line"],
+    ["a row that is not lsof's", [`${LSOF_NONE}not a row\n`], "lsof printed a row that is not lsof's"],
+    ["a short row with a numeric pid", [`${LSOF_HEADER}worker 10 u txt REG\n`], "lsof printed a row that is not lsof's"],
+    ["a whole row with a pid that is not a number", [`${LSOF_HEADER}worker bogus u txt REG 1,4 1 2 /usr/bin/worker\n`], "lsof printed a row that is not lsof's"],
+  ] as const)("a partial scan (%s): no cask is upgraded, FAILED with the reason", async (_n, lsof, why) => {
+    const r = await run({ ...base, lsof: [...lsof] });
+    expect(r.calls.some((c) => c.startsWith("brew upgrade --cask"))).toBe(false);
+    expect(r.text).toContain(`app: not upgraded — the processes running from it could not be read (${why}); retried next run`);
+    expect(r.brew).toContain("FAILED: cask-processes:app cask-processes:other");
+  });
+  test("a partial scan and an inPlaceCasks cask: tried, its skipped check said before the attempt", async () => {
+    const r = await run({ ...base, lsof: [{ out: LSOF_NONE, err: "lsof: WARNING: x\n" }] }, { cfg: { inPlaceCasks: ["app"] } });
+    expect(r.calls).toContain("brew upgrade --cask --greedy app");
+    expect(r.text).toContain("app: the processes running from it could not be read (lsof printed something on stderr); process check skipped (inPlaceCasks), attempting the upgrade");
   });
   test("a cask held because lsof fails is counted toward stuck run after run, and a clean run clears it", async () => {
     const STUCK = "/state.test/pending-state.tsv";
@@ -361,14 +381,14 @@ describe("a cask with a running process is deferred (oupdate#4)", () => {
     expect(r.brew).toContain("FAILED: cask-processes:other");
   });
   test("a cask in inPlaceCasks is upgraded despite a running process, and the pids on the old build are logged", async () => {
-    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] }, { cfg: { inPlaceCasks: ["app"] } });
+    const r = await run({ ...base, lsof: [RUN, LSOF_NONE] }, { cfg: { inPlaceCasks: ["app"] } });
     expect(r.calls).toContain("brew upgrade --cask --greedy app");
     expect(r.text).toContain("app: pids 55 keep running the old build (inPlaceCasks)");
     expect(r.brew).not.toContain("casks held (running): app");
     expect(r.brew).toContain("casks upgraded: app");
   });
   test("a listed cask with no running process takes the normal path: no in-place line", async () => {
-    const r = await run({ ...base, lsof: ["COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n", "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] }, { cfg: { inPlaceCasks: ["app"] } });
+    const r = await run({ ...base, lsof: [LSOF_NONE, LSOF_NONE] }, { cfg: { inPlaceCasks: ["app"] } });
     expect(r.calls).toContain("brew upgrade --cask --greedy app");
     expect(r.text).not.toContain("keep running the old build");
   });
@@ -380,18 +400,18 @@ describe("a cask with a running process is deferred (oupdate#4)", () => {
     expect(r.brew).toContain("casks held (running): other");
   });
   test("a listed cask whose upgrade fails reports FAILED and no kept-running line", async () => {
-    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"], upgradeRc: { "--cask --greedy app": 1 } }, { cfg: { inPlaceCasks: ["app"] } });
+    const r = await run({ ...base, lsof: [RUN, LSOF_NONE], upgradeRc: { "--cask --greedy app": 1 } }, { cfg: { inPlaceCasks: ["app"] } });
     expect(r.text).toContain("app: upgrade FAILED");
     expect(r.text).not.toContain("keep running the old build");
   });
   test("a listed cask upgraded to a version other than the reviewed one is flagged, not counted, with no kept-running line", async () => {
-    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"], installedVersion: { app: "1.2" } }, { cfg: { inPlaceCasks: ["app"] } });
+    const r = await run({ ...base, lsof: [RUN, LSOF_NONE], installedVersion: { app: "1.2" } }, { cfg: { inPlaceCasks: ["app"] } });
     expect(r.text).toContain("Type A: app installed 1.2, reviewed 1.1 — FLAGGED");
     expect(r.brew).not.toContain("casks upgraded: app");
     expect(r.text).not.toContain("keep running the old build");
   });
   test.each([["a case variant", "App"], ["a wildcard", "*"], ["a tap-qualified entry", "example/tap/app"]])("%s does not match", async (_n, entry) => {
-    const r = await run({ ...base, lsof: [RUN, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] }, { cfg: { inPlaceCasks: [entry] } });
+    const r = await run({ ...base, lsof: [RUN, LSOF_NONE] }, { cfg: { inPlaceCasks: [entry] } });
     expect(r.calls).not.toContain("brew upgrade --cask --greedy app");
     expect(r.brew).toContain("casks held (running): app");
   });
@@ -527,7 +547,7 @@ describe("service restarts and the phase order (port 07)", () => {
   });
 
   test("leftover drains are recovered before the brew build, stale-keg check after, then linkage", async () => {
-    const lsofOut = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n";
+    const lsofOut = LSOF_NONE;
     const r = await run({ ...SVC_BREW, files: { ...SVC_BREW.files, [SVC.waiter]: "" }, dirs: ["/brew/Cellar"], lsof: [lsofOut] }, { cfg: { deferred: [SVC] } });
     const at = (re: RegExp) => r.calls.findIndex((c) => re.test(c));
     const order = [at(/^\/bin\/bash \/conf\.test\/svc-waiter\.sh --recover$/), at(/^brew update$/), at(/^brew upgrade good-a$/), at(/lsof -nP/), at(/^brew linkage --test/)];

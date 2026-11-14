@@ -652,15 +652,17 @@ export async function casksSection(rt: RunCtx) {
       // An upgrade removes the cask's binaries and app: one with a process running from it waits for the next run.
       const rq = await x([cfg.brew, "--caskroom"]);
       const room = rq.rc === 0 ? rq.out.trim() : "";
-      const lsofRead: { why?: string } = {};
-      // Strict: an answer with no COMMAND header is not lsof's, so not a scan.
-      const maps = room.startsWith("/") ? await lsofMaps({ exec: x } as KegEnv, cfg.lsof, log, true, lsofRead) : undefined;
+      const lsofRead: { clean?: boolean; why?: string; dirty?: string } = {};
+      // Strict and complete: exit 0, nothing on stderr, the header, at least one process, every row whole, the last line
+      // ended. Anything less is not a scan: a process missing from it would let its cask upgrade.
+      const read = room.startsWith("/") ? await lsofMaps({ exec: x } as KegEnv, cfg.lsof, log, true, lsofRead) : undefined;
+      const maps = lsofRead.clean ? read : undefined;
       // inPlaceCasks matches brew's short cask name exactly (case-sensitive); a tap-qualified entry never matches.
       const listed = cfg.inPlaceCasks.includes(cask);
-      // lsof failing or printing nothing at all, or `brew --caskroom` failing, is never "none running" (fail closed): not
-      // upgraded, FAILED, retried next run. (lsof output with only its header is a scan that found no process.)
+      // lsof failing or printing less than a complete scan, or `brew --caskroom` failing, is never "none running" (fail
+      // closed): not upgraded, FAILED, retried next run.
       // A listed cask upgrades with processes running anyway, so it goes on, said in the log.
-      const unread = maps !== undefined ? "" : room.startsWith("/") ? `lsof ${lsofRead.why ?? "failed"}` : `brew --caskroom ${rq.rc !== 0 ? `exited ${rq.rc}` : "printed no path"}`;
+      const unread = maps !== undefined ? "" : room.startsWith("/") ? `lsof ${lsofRead.why ?? lsofRead.dirty ?? "failed"}` : `brew --caskroom ${rq.rc !== 0 ? `exited ${rq.rc}` : "printed no path"}`;
       if (unread && listed) log.push(`  ${cask}: the processes running from it could not be read (${unread}); process check skipped (inPlaceCasks), attempting the upgrade`);
       if (unread && !listed) {
         log.push(`  ${cask}: not upgraded — the processes running from it could not be read (${unread}); retried next run`);
