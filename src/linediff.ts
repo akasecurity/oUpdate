@@ -148,7 +148,8 @@ export function renderLineDiff(before: string | undefined, after: string | undef
     out += `@@ -${o0 + 1} +${n0 + 1} @@${q ? QUOTE_NOTE : ""}\n`;
     if (del.length === add.length && del.every((l, j) => l.length > LONG && add[j]!.length > LONG)) {
       for (let j = 0; j < del.length; j++) {
-        const t = tokenDiff(del[j]!, add[j]!);
+        // the same text on both sides (a line only its context changed): shown whole, not as a token diff of nothing
+        const t = del[j] === add[j] ? undefined : tokenDiff(del[j]!, add[j]!);
         out += t === undefined ? `-${show(del[j]!)}\n+${show(add[j]!)}\n` : `~${t}\n`;
       }
     } else {
@@ -158,46 +159,76 @@ export function renderLineDiff(before: string | undefined, after: string | undef
   return out;
 }
 
-// The lexical context each line starts in: code, or inside a block comment, a template literal (with the depth of its
-// `${` holes), a string continued over a line end, or a Python triple-quoted string. One light pass over the text; a
-// regex literal is guessed from the character before the slash. A misread is not a way to hide a line: a line is
-// shown as changed when its start context differs between the two versions, and both versions are read the same way.
-export function lineStates(lines: string[], py = false): string[] {
+// The lexical context each line starts in: code, or inside a block comment, a template literal (with its `${` holes and the
+// braces inside them), a string continued over a line end, or a Python triple-quoted string. One light pass; a regex literal
+// is guessed from what comes before the slash. A misread cannot hide a line: a line is shown as changed when its start context
+// differs between the two versions, and both are read the same way. The stack is capped: past the cap every line is "unknown"
+// (always different, so shown), and no state string grows with the number of lines.
+const STACK_CAP = 32;
+const REGEX_AFTER = /[(,=:[!&|?{};+\-*%<>~^}]/;
+const REGEX_WORDS = new Set(["return", "typeof", "case", "in", "of", "void", "delete", "throw", "new", "else", "do", "yield", "await", "instanceof"]);
+
+export type LexMode = "js" | "py";
+
+/** The lexer a path gets: the JS family and Python only. Any other file keeps the plain diff. */
+export function lexMode(path: string): LexMode | undefined {
+  if (/\.(?:[cm]?[jt]s|[jt]sx)$/i.test(path)) return "js";
+  if (/\.py$/i.test(path)) return "py";
+  return undefined;
+}
+
+export function lineStates(lines: string[], mode: LexMode, tag: string): string[] {
+  const py = mode === "py";
   const out: string[] = [];
-  const stack: string[] = []; // "/*", "`", "${" (a code hole inside a template), '"""', "'''", or a quote kept over a line end
+  const stack: string[] = []; // "/*", "`", "${" (a hole), "{" (a brace in a hole), a triple quote, or a quote kept over a line end
+  let over = 0; // set once the stack passes the cap: the rest of the file is unknown context
   let prev = ""; // the last significant character of code
-  for (const line of lines) {
-    out.push(stack.join(" "));
+  let word = ""; // the identifier that ends at prev
+  const push = (x: string) => {
+    if (stack.length >= STACK_CAP) over = 1;
+    else stack.push(x);
+  };
+  const pop = () => {
+    stack.pop();
+  };
+  const top = () => (over > 0 ? "?" : stack[stack.length - 1]);
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li]!;
+    out.push(over > 0 ? `?${tag}` : stack.join(" "));
     let i = 0;
-    const top = () => stack[stack.length - 1];
+    if (li === 0 && !py && line.startsWith("#!")) continue; // a hashbang line is a comment
     while (i < line.length) {
       const t = top();
       const c = line[i]!;
-      if (t === "/*") {
-        if (c === "*" && line[i + 1] === "/") { stack.pop(); i += 2; prev = ")"; } else i++;
+      if (t === "?") {
+        i = line.length; // past the cap nothing is tracked
+      } else if (t === "/*") {
+        if (c === "*" && line[i + 1] === "/") { pop(); i += 2; prev = ")"; word = ""; } else i++;
       } else if (t === "`") {
         if (c === "\\") i += 2;
-        else if (c === "`") { stack.pop(); i++; prev = ")"; }
-        else if (c === "$" && line[i + 1] === "{") { stack.push("${"); i += 2; prev = "{"; }
+        else if (c === "`") { pop(); i++; prev = ")"; word = ""; }
+        else if (c === "$" && line[i + 1] === "{") { push("${"); i += 2; prev = "{"; word = ""; }
         else i++;
       } else if (t === '"""' || t === "'''") {
         if (c === "\\") i += 2;
-        else if (line.startsWith(t, i)) { stack.pop(); i += 3; prev = ")"; }
+        else if (line.startsWith(t, i)) { pop(); i += 3; prev = ")"; word = ""; }
         else i++;
       } else if (t === '"' || t === "'") {
         if (c === "\\") i += 2;
-        else if (c === t) { stack.pop(); i++; prev = ")"; }
+        else if (c === t) { pop(); i++; prev = ")"; word = ""; }
         else i++;
       } else {
-        // code (the top of the stack is empty or a template hole)
-        if (c === "/" && line[i + 1] === "*") { stack.push("/*"); i += 2; }
+        // code: the top is empty, a hole or a brace inside one
+        const inHole = t === "${" || t === "{";
+        if (c === "/" && line[i + 1] === "*") { push("/*"); i += 2; }
         else if (c === "/" && line[i + 1] === "/" && !py) break;
         else if (c === "#" && py) break;
-        else if (c === "`") { stack.push("`"); i++; }
-        else if (py && (line.startsWith('"""', i) || line.startsWith("'''", i))) { stack.push(line.slice(i, i + 3)); i += 3; }
-        else if (c === '"' || c === "'") { stack.push(c); i++; }
-        else if (c === "}" && t === "${") { stack.pop(); i++; }
-        else if (c === "/" && !py && (prev === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev))) {
+        else if (c === "`") { push("`"); i++; }
+        else if (py && (line.startsWith('"""', i) || line.startsWith("'''", i))) { push(line.slice(i, i + 3)); i += 3; }
+        else if (c === '"' || c === "'") { push(c); i++; }
+        else if (inHole && c === "{") { push("{"); i++; prev = "{"; word = ""; }
+        else if (inHole && c === "}") { pop(); i++; prev = "}"; word = ""; }
+        else if (c === "/" && !py && (prev === "" || REGEX_AFTER.test(prev) || (/[\w$]/.test(prev) && REGEX_WORDS.has(word)))) {
           // a regex literal: to the closing slash on this line, a class kept whole
           let j = i + 1;
           let cls = false;
@@ -209,24 +240,28 @@ export function lineStates(lines: string[], py = false): string[] {
           }
           i = j + 1;
           prev = ")";
+          word = "";
         } else {
+          if (/[\w$]/.test(c)) word = /[\w$]/.test(prev) && word ? word + c : c;
+          else if (!/\s/.test(c)) word = "";
           if (!/\s/.test(c)) prev = c;
           i++;
         }
       }
     }
     // a single-quoted string ends at the line end unless a backslash continues it
-    while ((top() === '"' || top() === "'") && !line.endsWith("\\")) stack.pop();
+    while ((top() === '"' || top() === "'") && !line.endsWith("\\")) pop();
   }
   return out;
 }
 
 // A line both versions hold is not shown by the diff, but its meaning changed when it went from a comment, a template or a
-// string to code (or back): removing `/*` and `*/` turns the lines between them into code. Such a line is shown as removed and added.
-export function shiftContext(a: string[], b: string[], ops: Op[], py = false): Op[] {
-  if (!ops.some((o) => o.op !== "=")) return ops;
-  const sa = lineStates(a, py);
-  const sb = lineStates(b, py);
+// string to code (or back): removing `/*` and `*/` turns the lines between them into code. Such a line is shown as removed and
+// added, in addition to the unchanged-line treatment the other readers of the diff give it.
+export function shiftContext(a: string[], b: string[], ops: Op[], mode: LexMode | undefined): Op[] {
+  if (!mode || !ops.some((o) => o.op !== "=")) return ops;
+  const sa = lineStates(a, mode, "a");
+  const sb = lineStates(b, mode, "b");
   const out: Op[] = [];
   let oi = 0;
   let ni = 0;
