@@ -257,8 +257,27 @@ describe("the final lexer round", () => {
   test("a hashbang ends at U+2028", () => {
     expect(added(view("cli.js", `#!/usr/bin/env node /*\n${P}\n*/\n`, `#!/usr/bin/env node \n${P}\n\n`))).toBe(true);
   });
-  test("the reviewer prompt explains an identical pair", () => {
+  test("the reviewer prompt explains an identical pair and its direction", () => {
     const text = require("node:fs").readFileSync(new URL("../src/review.ts", import.meta.url), "utf8");
-    expect(text).toContain("an identical \\`-\\` and \\`+\\` pair there is a line whose text did not change but whose meaning did");
+    expect(text).toContain("an identical \\`-\\` and \\`+\\` pair marks a line whose lexical context changed");
+    expect(text).toContain("Only code that becomes active (X->code) is a concern");
+  });
+});
+
+describe("the last three", () => {
+  const plainView = (f: string, b: string, a: string) => `=== ${f} (changed) ===\n` + renderLineDiff(b, a);
+  test("a regex after a division operator is a regex", () => {
+    const b = `const n = 10 / /[/*]/.source.length;\nconst a=1;\nconst b=2;\n`;
+    const a = `const n = 10 / /ok/.source.length;\nconst a=1;\nconst b=2;\n`;
+    expect(view("index.js", b, a)).toBe(plainView("index.js", b, a));
+  });
+  test("the header names the direction, both ways", () => {
+    expect(view("index.js", `/*\n${P}\n*/\n`, `\n${P}\n\n`)).toContain("[context changed: comment->code]");
+    expect(view("index.js", `\n${P}\n\n`, `/*\n${P}\n*/\n`)).toContain("[context changed: code->comment]");
+    expect(view("index.js", `const t=\`\n${P}\n\`;\n`, `const t=1;\n${P}\n`)).toContain("[context changed: template->code]");
+    expect(view("a.py", `a()\n"""\n${P}\n"""\n`, `a()\n\n${P}\n\n`)).toContain("[context changed: python-docstring->code]");
+  });
+  test("a for after a dot is a property: await after it is not a for-await head", () => {
+    expect(added(view("index.js", `obj.for\nawait (p) / 2; /*\n${P}\n*/\n`, `obj.for\nawait (p) / 2;\n${P}\n\n`))).toBe(true);
   });
 });

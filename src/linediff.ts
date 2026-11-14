@@ -165,7 +165,7 @@ export function renderLineDiff(before: string | undefined, after: string | undef
 // same way wrongly, and a line is shown as changed when its start context differs between the two versions. The context of a
 // line is the stack depth plus two running hashes of the stack's kinds under a per-run random seed (so a text cannot be built
 // to collide), kept as one short string per line: nothing is interned and nothing grows beyond the stack itself.
-const REGEX_AFTER = /[(,=:[!&|?{};+\-*%<>~^}]/;
+const REGEX_AFTER = /[(,=:[!&|?{};+\-*%<>~^}/]/; // a slash that was a division is an operator too
 const REGEX_WORDS = new Set(["return", "typeof", "case", "in", "of", "void", "delete", "throw", "new", "else", "do", "yield", "await", "instanceof"]);
 const PAREN_WORDS = new Set(["if", "while", "for", "with"]);
 const TERMINATOR_JS = /[\u2028\u2029\r]/;
@@ -183,16 +183,26 @@ export function lexMode(path: string): LexMode | undefined {
   return undefined;
 }
 
+/** What a stack top means to a reader: a template hole and a brace in one are code. */
+function contextLabel(top: string): string {
+  if (top === "" || top === "${" || top === "{") return "code";
+  if (top === "/*") return "comment";
+  if (top === "`") return "template";
+  if (top === '"' || top === "'") return "string";
+  return "python-docstring";
+}
+
 export type LexSeed = [number, number];
 export const newSeed = (): LexSeed => {
   const r = crypto.getRandomValues(new Uint32Array(2));
   return [r[0]!, r[1]!];
 };
 
-export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): string[] {
+export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): { states: string[]; kinds: string[] } {
   const py = mode === "py";
   const TERMINATOR = py ? TERMINATOR_PY : TERMINATOR_JS;
   const out: string[] = [];
+  const kindsOut: string[] = [];
   const stk: string[] = []; // "/*", "`", "${" (a hole), "{" (a brace in a hole), a triple quote, or a quote kept over a line end
   const h1: number[] = [seed[0]];
   const h2: number[] = [seed[1]];
@@ -209,6 +219,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
   let prev2 = ""; // the one before it
   let word = ""; // the identifier that ends at prev
   let prevWord = ""; // the identifier before it, when only whitespace separates them (`for await`)
+  let prevWordDot = false; // ... and that one is a property
   let wordDot = false; // that identifier is a property (`.return`)
   let gap = false; // whitespace or a comment since the last token: the next word starts a new one
   const parens: boolean[] = []; // per open paren: did an if/while/for/with head open it
@@ -220,6 +231,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
     const line = lines[li]!.endsWith("\r") ? lines[li]!.slice(0, -1) : lines[li]!;
     const now = stk.length === 0 ? "" : `${stk.length}:${h1[h1.length - 1]}:${h2[h2.length - 1]}`;
     out.push(now === last ? last : (last = now));
+    kindsOut.push(contextLabel(top()));
     gap = true;
     let i = 0;
     if (li === 0 && !py && line.startsWith("#!")) {
@@ -282,13 +294,13 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
           i = j + 1;
           reset();
         } else {
-          if (c === "(") parens.push(!wordDot && (PAREN_WORDS.has(word) || (word === "await" && prevWord === "for")));
+          if (c === "(") parens.push(!wordDot && (PAREN_WORDS.has(word) || (word === "await" && prevWord === "for" && !prevWordDot)));
           const closed = c === ")" ? parens.pop() === true : false;
           if (/\s/.test(c)) gap = true;
           else {
             if (isId(c)) {
               if (!gap && isId(prev) && word) word += c;
-              else { prevWord = gap && isId(prev) ? word : ""; word = c; wordDot = prev === "."; }
+              else { prevWord = gap && isId(prev) ? word : ""; prevWordDot = wordDot; word = c; wordDot = prev === "."; }
             } else { word = ""; wordDot = false; }
             gap = false;
             prev2 = prev;
@@ -302,7 +314,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
     // a single-quoted string ends at the line end unless a backslash continues it
     while ((top() === '"' || top() === "'") && !oddBackslashes(line)) pop();
   }
-  return out;
+  return { states: out, kinds: kindsOut };
 }
 
 // A line both versions hold is not shown by the diff, but its meaning changed when it went from a comment, a template or a
@@ -312,8 +324,8 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
 export function renderShifted(a: string[], b: string[], ops: Op[] | undefined, mode: LexMode | undefined): string {
   if (!ops || !mode || !ops.some((o) => o.op !== "=")) return "";
   const seed = newSeed();
-  const sa = lineStates(a, mode, seed);
-  const sb = lineStates(b, mode, seed);
+  const { states: sa, kinds: ka } = lineStates(a, mode, seed);
+  const { states: sb, kinds: kb } = lineStates(b, mode, seed);
   let oi = 0;
   let ni = 0;
   let out = "";
@@ -324,7 +336,7 @@ export function renderShifted(a: string[], b: string[], ops: Op[] | undefined, m
       if (sa[oi] !== sb[ni]) {
         const q = needsQuote(o.v) || /[\u2028\u2029]/.test(o.v);
         const show = q ? JSON.stringify(o.v).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029") : o.v;
-        out += `@@ -${oi + 1} +${ni + 1} @@ [context changed: the line is the same text, now read differently]${q ? QUOTE_NOTE : ""}\n-${show}\n+${show}\n`;
+        out += `@@ -${oi + 1} +${ni + 1} @@ [context changed: ${ka[oi]}->${kb[ni]}]${q ? QUOTE_NOTE : ""}\n-${show}\n+${show}\n`;
       }
       oi++;
       ni++;
