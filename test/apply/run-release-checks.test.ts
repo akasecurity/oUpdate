@@ -724,6 +724,95 @@ describe("release checks: review round 3 (3b26f7e)", () => {
     expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", `sudo -n launchctl kickstart -k system/${LABEL}`, "/opt/gate.test/check GATE_VERSION=1.3.0", "svcctl on"]);
     expect(r.res.log).toContain(`  release check owner: restarted ${LABEL}`);
   });
+  test("an owner whose staleOwners entry restarts by argv: the inline restart runs the argv (no launchctl kickstart), then health and the check", async () => {
+    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/fleet-restart", "gadget-server"];
+    let restarted = false;
+    const r = await rcRun({
+      cfg: { releaseChecks: [{ ...CHECK, owners: [LABEL] }], staleOwners: [{ match: LABEL, restart: ARGV }] },
+      onFs: (fs) => {
+        const exists = fs.exists;
+        fs.exists = async (p: string) => p === PLIST || exists(p);
+      },
+      answer: (line, argv) => {
+        if (line === ARGV.join(" ")) {
+          restarted = true;
+          return { rc: 0, out: "", err: "" };
+        }
+        if (line === `launchctl print system/${LABEL}`) return { rc: 0, out: `\tstate = running\n\tpid = ${restarted ? 88 : 77}\n\tpath = ${PLIST}\n`, err: "" };
+        if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+        if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: LSOF_HEAD, err: "" };
+        return undefined;
+      },
+    });
+    expect(r.calls).toContain(ARGV.join(" "));
+    expect(r.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(r.flow).toContain("/opt/gate.test/check GATE_VERSION=1.3.0");
+    expect(r.res.log).toContain(`  release check owner: restarted ${LABEL}`);
+  });
+  test("a pending record's owner restart is taken from the config now: a changed staleOwners argv runs, never the one the record kept", async () => {
+    const OLD_HELPER = "/opt/restart.test/old-helper";
+    const NEW_HELPER = "/opt/restart.test/new-helper";
+    const OLD = [OLD_HELPER];
+    const NEW = [NEW_HELPER];
+    const fx = (ran: string[], ok: boolean) => ({
+      onFs: (fs: ApplyFs) => {
+        const exists = fs.exists;
+        fs.exists = async (p: string) => p === PLIST || exists(p);
+      },
+      answer: (line: string, argv: string[]) => {
+        if (argv[0]!.startsWith("/opt/restart.test/")) {
+          ran.push(line);
+          return { rc: ok ? 0 : 1, out: "", err: "" };
+        }
+        if (line === `launchctl print system/${LABEL}`) return { rc: 0, out: `\tstate = running\n\tpid = ${ok && ran.length ? 88 : 77}\n\tpath = ${PLIST}\n`, err: "" };
+        if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+        if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: LSOF_HEAD, err: "" };
+        return undefined;
+      },
+    });
+    // First run: the owner restarts by the old argv, which fails: the record keeps the owner (and its old argv).
+    const ran1: string[] = [];
+    const first = await rcRun({ cfg: { releaseChecks: [{ ...CHECK, owners: [LABEL] }], staleOwners: [{ match: LABEL, restart: OLD }] }, ...fx(ran1, false) });
+    expect(ran1).toContain(OLD_HELPER);
+    expect(first.files.get(PENDING)).toContain(OLD_HELPER);
+    // Next run: the config now names the new argv.
+    const ran2: string[] = [];
+    await rcRun({ cfg: { releaseChecks: [{ ...CHECK, owners: [LABEL] }], staleOwners: [{ match: LABEL, restart: NEW }] }, ...fx(ran2, true), startLinked: "1.3.0", candidate: "1.3.0", script: { formulas: "", verbose: "" }, files: { [PENDING]: first.files.get(PENDING)! } });
+    expect(ran2).toContain(NEW_HELPER);
+    expect(ran2.some((l) => l.includes("old-helper"))).toBe(false);
+  });
+  test("a recorded owner the check no longer names, its staleOwners entry since removed: its recorded bootstrap runs (as on main), never a kickstart, though the record says named", async () => {
+    const fx = (ran: string[], bootRc: number) => ({
+      onFs: (fs: ApplyFs) => {
+        const exists = fs.exists;
+        fs.exists = async (p: string) => p === PLIST || exists(p);
+      },
+      answer: (line: string, argv: string[]) => {
+        if (line.includes("launchctl bootout") || line.includes("launchctl bootstrap") || line.includes("kickstart")) {
+          ran.push(line);
+          return { rc: line.includes("bootstrap") ? bootRc : 0, out: "", err: "" };
+        }
+        if (line === `launchctl print system/${LABEL}`) return { rc: 0, out: `\tstate = running\n\tpid = ${bootRc === 0 && ran.length ? 88 : 77}\n\tpath = ${PLIST}\n`, err: "" };
+        if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+        if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: LSOF_HEAD, err: "" };
+        return undefined;
+      },
+    });
+    const ran1: string[] = [];
+    const first = await rcRun({ cfg: { releaseChecks: [{ ...CHECK, owners: [LABEL] }], staleOwners: [{ match: LABEL, restart: { bootstrap: PLIST } }] }, ...fx(ran1, 5) });
+    expect(ran1.some((l) => l.includes("launchctl bootstrap"))).toBe(true);
+    // The record exactly as written (it saved named: true); the config now names no owner and has no entry for it.
+    expect(JSON.parse(first.files.get(PENDING)!).owners.some((q: { named?: boolean }) => q.named)).toBe(true);
+    const ran2: string[] = [];
+    await rcRun({ cfg: { releaseChecks: [{ ...CHECK }], staleOwners: [] }, ...fx(ran2, 0), startLinked: "1.3.0", candidate: "1.3.0", script: { formulas: "", verbose: "" }, files: { [PENDING]: first.files.get(PENDING)! } });
+    expect(ran2).toContain(`sudo -n launchctl bootstrap system ${PLIST}`);
+    expect(ran2.some((l) => l.includes("kickstart"))).toBe(false);
+    // The same record while the check still names the owner, with no entry: named by the config now, so kickstarted.
+    const ran3: string[] = [];
+    await rcRun({ cfg: { releaseChecks: [{ ...CHECK, owners: [LABEL] }], staleOwners: [] }, ...fx(ran3, 0), startLinked: "1.3.0", candidate: "1.3.0", script: { formulas: "", verbose: "" }, files: { [PENDING]: first.files.get(PENDING)! } });
+    expect(ran3).toContain(`sudo -n launchctl kickstart -k system/${LABEL}`);
+    expect(ran3.some((l) => l.includes("bootstrap"))).toBe(false);
+  });
   test("3: a tap-qualified formula's own service is restarted after the rollback by its short-name label", async () => {
     const AGENT = "/home.test/Library/LaunchAgents/sh.brew.gadget.plist";
     const r = await rcRun({

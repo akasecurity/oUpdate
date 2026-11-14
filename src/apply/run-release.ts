@@ -269,7 +269,7 @@ async function ownerJobs(rt: RunCtx, jobs: QueuedOwner[]): Promise<{ kind: "ok" 
     now: clock.now, sleep: clock.sleep, httpStatus: clock.httpStatus, takeLock: async () => true, releaseLock: async () => {},
     log: (l) => log.push(`    owner: ${l}`),
   };
-  const ops = ownerOps(env, { dir: ownerDir(cfg.stateDir), lsof: cfg.lsof });
+  const ops = ownerOps(env, { dir: ownerDir(cfg.stateDir), lsof: cfg.lsof, staleOwners: cfg.staleOwners ?? [], keepUnmatched: true });
   let kind: "ok" | "busy" | "failed" = "ok";
   const lines: string[] = [];
   for (const q of jobs) {
@@ -470,13 +470,16 @@ async function requiredJobs(rt: RunCtx, f: string, keg: string, expect?: string)
     const { expect: _, ...base } = q.keg === keg ? q : { ...q, pid: "?", keg };
     return { ...base, required: true, ...(expect ? { expect } : {}) };
   });
+  // Named by the config now (never by a saved record): the check's owners. Only these are kickstarted when no staleOwners
+  // entry matches (see ownerOps' derive); the formula's own service label is added below only when an entry matches it.
+  const named = new Set(findCheck(cfg.releaseChecks, f)?.owners ?? []);
   for (const label of [`sh.brew.${f}`, `homebrew.mxcl.${f}`]) {
     const where = (await fs.exists(`/Library/LaunchDaemons/${label}.plist`)) ? "system" : (await fs.exists(`${fs.home}/Library/LaunchAgents/${label}.plist`)) ? `gui/${fs.uid}` : "";
     if (!where) continue;
     const owner = matchOwner(cfg.staleOwners, label);
     const target = `${where}/${label}`;
     if (owner && !jobs.some((q) => q.target === target)) {
-      jobs.push({ label, target, pid: "?", keg, required: true, ...(expect ? { expect } : {}), ...(owner.probe ? { probe: owner.probe } : {}), ...(owner.health ? { health: owner.health } : {}),
+      jobs.push({ label, target, pid: "?", keg, required: true, named: true, ...(expect ? { expect } : {}), ...(owner.probe ? { probe: owner.probe } : {}), ...(owner.health ? { health: owner.health } : {}),
         ...(owner.restart ? { restart: owner.restart } : {}), ...(owner.healthWithinSec ? { healthWithinSec: owner.healthWithinSec } : {}) });
     }
     break;
@@ -487,12 +490,12 @@ async function requiredJobs(rt: RunCtx, f: string, keg: string, expect?: string)
     const target = `${where}/${label}`;
     const had = jobs.findIndex((q) => q.label === label);
     if (had >= 0) {
-      jobs[had] = { ...jobs[had]!, required: true };
+      jobs[had] = { ...jobs[had]!, required: true, named: true };
       continue;
     }
     const owner = matchOwner(cfg.staleOwners, label);
-    jobs.push({ label, target, pid: "?", keg, required: true, ...(expect ? { expect } : {}), ...(owner?.probe ? { probe: owner.probe } : {}), ...(owner?.health ? { health: owner.health } : {}),
+    jobs.push({ label, target, pid: "?", keg, required: true, named: true, ...(expect ? { expect } : {}), ...(owner?.probe ? { probe: owner.probe } : {}), ...(owner?.health ? { health: owner.health } : {}),
       ...(owner?.restart ? { restart: owner.restart } : {}), ...(owner?.healthWithinSec ? { healthWithinSec: owner.healthWithinSec } : {}) });
   }
-  return jobs;
+  return jobs.map(({ named: _, ...q }) => (named.has(q.label) ? { ...q, named: true } : q));
 }

@@ -78,6 +78,20 @@ describe("parseApplyConfig", () => {
     const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [{ match: "org.example.*" }, { match: "org.example.svc", probe: ["/opt/svc.test/idle", "--quiet"], health: "http://127.0.0.1:8080/health" }] }), "hosta");
     expect(c.staleOwners).toEqual([{ match: "org.example.*" }, { match: "org.example.svc", probe: ["/opt/svc.test/idle", "--quiet"], health: "http://127.0.0.1:8080/health" }]);
   });
+  test("staleOwners restartTimeoutSec: a positive integer, kept", () => {
+    expect(parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [{ match: "org.x", restartTimeoutSec: 600 }] }), "hosta").staleOwners).toEqual([{ match: "org.x", restartTimeoutSec: 600 }]);
+    expect(() => parseApplyConfig(cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restartTimeoutSec: 0 }] }), "hosta")).toThrow(/restartTimeoutSec/);
+    // A timer takes at most 2^31-1 ms: the bound is 2147483 s.
+    expect(parseApplyConfig(cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restartTimeoutSec: 2147483 }] }), "hosta").staleOwners?.[0]?.restartTimeoutSec).toBe(2147483);
+    expect(() => parseApplyConfig(cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restartTimeoutSec: 2147484 }] }), "hosta")).toThrow(/restartTimeoutSec must be a positive integer of at most 2147483/);
+  });
+  test("staleOwners restart: an entry of exactly 4096 characters is kept", () => {
+    expect(parseApplyConfig(cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: ["/usr/local/sbin/x", "a".repeat(4096)] }] }), "hosta").staleOwners?.[0]?.restart).toHaveLength(2);
+  });
+  test("staleOwners restart: an argv whose first entry is an absolute path is kept as given", () => {
+    const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [{ match: "org.example.host", restart: ["/usr/bin/sudo", "-n", "/usr/local/sbin/fleet-restart", "example-host"] }] }), "hosta");
+    expect(c.staleOwners).toEqual([{ match: "org.example.host", restart: ["/usr/bin/sudo", "-n", "/usr/local/sbin/fleet-restart", "example-host"] }]);
+  });
   test("staleOwners restart: kickstart (default) or bootout+bootstrap of an absolute plist; healthWithinSec", () => {
     const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [
       { match: "org.example.k", restart: "kickstart" },
@@ -136,8 +150,14 @@ describe("parseApplyConfig", () => {
     ["a staleOwners entry with an unknown key", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", probes: ["/a"] }] }), /apply\.staleOwners\[0\]: unknown key probes/],
     ["a staleOwners probe with a relative argv0", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", probe: ["idle.sh"] }] }), /apply\.staleOwners\[0\]\.probe\[0\] must be an absolute path/],
     ["a staleOwners probe that is empty", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", probe: [] }] }), /apply\.staleOwners\[0\]\.probe must be a non-empty array/],
-    ["a staleOwners restart word other than kickstart", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: "bootstrap" }] }), /apply\.staleOwners\[0\]\.restart must be "kickstart" or \{"bootstrap": "<absolute plist path>"\}/],
+    ["a staleOwners restart word other than kickstart", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: "bootstrap" }] }), /apply\.staleOwners\[0\]\.restart must be "kickstart", \{"bootstrap": "<absolute plist path>"\} or an argv of non-empty strings \(no NUL, at most 4096 characters each\) whose first entry is an absolute path/],
     ["a staleOwners bootstrap with a relative plist", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: { bootstrap: "org.x.plist" } }] }), /apply\.staleOwners\[0\]\.restart must be/],
+    ["a staleOwners restart argv that is empty", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: [] }] }), /apply\.staleOwners\[0\]\.restart must be/],
+    ["a staleOwners restart argv with a non-string entry", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: ["/usr/bin/sudo", 1] }] }), /apply\.staleOwners\[0\]\.restart must be/],
+    ["a staleOwners restart argv with an empty-string entry", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: ["/usr/bin/sudo", ""] }] }), /apply\.staleOwners\[0\]\.restart must be/],
+    ["a staleOwners restart argv with a NUL byte in an entry", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: ["/usr/local/sbin/x", "a\u0000b"] }] }), /apply\.staleOwners\[0\]\.restart must be/],
+    ["a staleOwners restart argv with an entry over 4096 characters", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: ["/usr/local/sbin/x", "a".repeat(4097)] }] }), /apply\.staleOwners\[0\]\.restart must be/],
+    ["a staleOwners restart argv with a relative first entry", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: ["sudo", "-n", "/usr/local/sbin/x"] }] }), /apply\.staleOwners\[0\]\.restart must be/],
     ["a staleOwners restart object with another key", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: { bootstrap: "/L/org.x.plist", how: 1 } }] }), /apply\.staleOwners\[0\]\.restart must be/],
     ["a staleOwners healthWithinSec of zero", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", healthWithinSec: 0 }] }), /apply\.staleOwners\[0\]\.healthWithinSec must be a positive integer/],
     ["a staleOwners health that is not a URL", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", health: "localhost:8080" }] }), /apply\.staleOwners\[0\]\.health must be an http\(s\) URL/],

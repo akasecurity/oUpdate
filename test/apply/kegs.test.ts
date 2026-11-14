@@ -904,6 +904,13 @@ describe("staleKegCheck: stale owners, job runner jobs and orphans", () => {
     await staleKegCheck(env, o);
     expect(queued).toEqual([[{ label: "org.example.model-server", target: "system/org.example.model-server", pid: "20", keg: KEG, restart: { bootstrap: "/Library/LaunchDaemons/org.example.model-server.plist" }, healthWithinSec: 120 }]]);
   });
+  test("the queued job carries an argv restart as given", async () => {
+    const { env } = fakeEnv({ lsof: [stale("20")], ps: { "20": { comm: "bun", ppid: "1" } }, out: { [PRINT]: rows("system", ["20", "org.example.model-server"]) } });
+    const argv = ["/usr/bin/sudo", "-n", "/usr/local/sbin/fleet-restart", "model-server"];
+    const { o, queued } = queueOpts({ staleOwners: [{ match: "org.example.model-server", restart: argv }] });
+    await staleKegCheck(env, o);
+    expect(queued).toEqual([[{ label: "org.example.model-server", target: "system/org.example.model-server", pid: "20", keg: KEG, restart: argv }]]);
+  });
   test("staleOwners comes before labelRestart skip and staleKegUnlisted report", async () => {
     const { env, calls } = fakeEnv({ lsof: [stale("20")], ps: { "20": { comm: "bun", ppid: "1" } }, out: { [PRINT]: rows("system", ["20", "org.example.serving"]) } });
     const { o, queued } = queueOpts({ labelRestart: { "org.example.serving": "skip" }, staleKegUnlisted: "report" });

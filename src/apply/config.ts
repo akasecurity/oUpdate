@@ -236,7 +236,11 @@ function appBundle(v: unknown, i: number): AppBundle {
   return { name, app, repo, asset, ...(restart ? { restart } : {}) };
 }
 
-const OWNER_KEYS = ["match", "probe", "health", "restart", "healthWithinSec"];
+const OWNER_KEYS = ["match", "probe", "health", "restart", "healthWithinSec", "restartTimeoutSec"];
+
+/** An argv entry the config takes: a non-empty string with no NUL, at most ARG_MAX characters (refused at load, never failed at run). */
+const ARG_MAX = 4096;
+const argWord = (a: unknown): a is string => typeof a === "string" && a !== "" && a.length <= ARG_MAX && !a.includes("\0");
 
 function staleOwner(v: unknown, i: number): StaleOwner {
   const where = `apply.staleOwners[${i}]`;
@@ -252,10 +256,14 @@ function staleOwner(v: unknown, i: number): StaleOwner {
   const r = v.restart;
   if (r === "kickstart") restart = r;
   else if (isObj(r) && Object.keys(r).length === 1 && typeof r.bootstrap === "string" && isAbsolute(r.bootstrap)) restart = { bootstrap: r.bootstrap };
-  else if (r !== undefined) throw new Error(`${where}.restart must be "kickstart" or {"bootstrap": "<absolute plist path>"}`);
+  else if (Array.isArray(r) && r.length > 0 && r.every(argWord) && isAbsolute(r[0] as string)) restart = [...(r as string[])];
+  else if (r !== undefined) throw new Error(`${where}.restart must be "kickstart", {"bootstrap": "<absolute plist path>"} or an argv of non-empty strings (no NUL, at most ${ARG_MAX} characters each) whose first entry is an absolute path`);
   const healthWithinSec = posInt(v, "healthWithinSec", where);
+  // A timer takes at most 2^31-1 ms: a longer bound would fire at once.
+  const restartTimeoutSec = posInt(v, "restartTimeoutSec", where, 2147483);
   return {
     match, ...(probe ? { probe: [...probe] } : {}), ...(health ? { health } : {}), ...(restart ? { restart } : {}), ...(healthWithinSec ? { healthWithinSec } : {}),
+    ...(restartTimeoutSec ? { restartTimeoutSec } : {}),
   };
 }
 

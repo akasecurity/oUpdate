@@ -54,8 +54,45 @@ describe("parseHostCommand", () => {
 });
 
 describe("ownerWaiterMain", () => {
+  test("the waiter never keeps a queued job no staleOwners entry matches: not tried, nothing restarted", async () => {
+    const c = config({ staleOwners: [{ match: "org.other.*" }] });
+    const q = join(c.dir, "state", "owner-restarts", "queue");
+    mkdirSync(q, { recursive: true });
+    writeFileSync(join(q, "gui%2F501%2Forg.example.svc.json"), JSON.stringify({ label: "org.example.svc", target: "gui/501/org.example.svc", pid: "20", keg: join(c.dir, "Cellar", "bun", "1.0_old"), restart: ["/opt/restart.test/recorded"] }));
+    const calls: string[] = [];
+    const exec: Exec = async (argv) => (calls.push(argv.join(" ")), { rc: 1, out: "", err: "" });
+    const lines: string[] = [];
+    await ownerWaiterMain({ mode: "owner-waiter", config: c.path }, { exec, out: (l) => lines.push(l) });
+    const outs = join(c.dir, "state", "owner-restarts", "outcomes");
+    expect(readdirSync(outs).map((n) => readFileSync(join(outs, n), "utf8"))).toEqual(["not tried: org.example.svc (no longer in staleOwners)\n"]);
+    expect(calls.some((x) => x.includes("recorded") || x.includes("kickstart"))).toBe(false);
+  });
+  test("passes the config's staleOwners: a queued job's restart is the config's, never the queue file's", async () => {
+    // A probe that answers idle at once (exit 0): no 60 s idle wait in a test.
+    const c = config({ staleOwners: [{ match: "org.example.*", probe: ["/opt/probe.test/idle"], restart: ["/opt/restart.test/from-config"] }] });
+    const cellar = join(c.dir, "Cellar");
+    mkdirSync(join(cellar, "bun", "1.1"), { recursive: true });
+    const q = join(c.dir, "state", "owner-restarts", "queue");
+    mkdirSync(q, { recursive: true });
+    writeFileSync(join(q, "gui%2F501%2Forg.example.svc.json"), JSON.stringify({ label: "org.example.svc", target: "gui/501/org.example.svc", pid: "20", keg: join(cellar, "bun", "1.0_old"), restart: ["/opt/restart.test/from-queue"] }));
+    const calls: string[] = [];
+    let restarted = false;
+    const exec: Exec = async (argv) => {
+      calls.push(argv.join(" "));
+      if (argv[0]!.startsWith("/opt/restart.test/")) {
+        restarted = true;
+        return { rc: 0, out: "", err: "" };
+      }
+      if (argv[0] === "launchctl") return { rc: 0, out: `gui/501/org.example.svc = {\n\tstate = running\n\tpid = ${restarted ? 27 : 20}\n}\n`, err: "" };
+      if (argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+      return { rc: 0, out: `bun ${restarted ? 27 : 20} u txt REG 1,4 1 2 ${cellar}/bun/1.1/bin/bun\n`, err: "" };
+    };
+    await ownerWaiterMain({ mode: "owner-waiter", config: c.path }, { exec, out: () => {} });
+    expect(calls).toContain("/opt/restart.test/from-config");
+    expect(calls.some((x) => x.includes("from-queue"))).toBe(false);
+  });
   test("works the config's queue on real files with the given exec, writes the outcome, releases the lock", async () => {
-    const c = config({});
+    const c = config({ staleOwners: [{ match: "org.example.*" }] });
     const cellar = join(c.dir, "Cellar");
     mkdirSync(join(cellar, "bun", "1.1"), { recursive: true });
     const q = join(c.dir, "state", "owner-restarts", "queue");

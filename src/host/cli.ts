@@ -180,7 +180,7 @@ export async function ownerWaiterMain(c: Extract<HostCommand, { mode: "owner-wai
       httpStatus: realHttpStatus,
       log: (l) => out(`${stamp()} owner waiter ${cfg.host}: ${l}`),
     },
-    { dir: ownerDir(cfg.stateDir), lsof: cfg.lsof },
+    { dir: ownerDir(cfg.stateDir), lsof: cfg.lsof, staleOwners: cfg.staleOwners ?? [] },
   );
 }
 
