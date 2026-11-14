@@ -760,7 +760,11 @@ export async function linkageCheck(env: KegEnv, o: Pick<KegOptions, "brew" | "ho
   }
   const formulae = words(list.out);
   if (!formulae.length) return { note: "", log };
-  const r = await env.exec([o.brew, "linkage", "--test", ...formulae]);
+  // `linkage` is a Homebrew developer command: run as is, brew turns its developer mode on for good (homebrew.devcmdrun
+  // in its git config) and `brew update` then follows its main branch, not stable releases. HOMEBREW_DEV_CMD_RUN for this
+  // call only is the flag brew itself sets once that mode is on: brew writes nothing, and none of HOMEBREW_DEVELOPER's
+  // stricter behavior (a Mach-O it cannot parse, a deprecation, raising instead of warning) applies.
+  const r = await env.exec([o.brew, "linkage", "--test", ...formulae], { env: { HOMEBREW_DEV_CMD_RUN: "1" } });
   if (r.rc === 0) return { note: "", log };
   const out = `${r.out}${r.err}`;
   const bad = new Set<string>();

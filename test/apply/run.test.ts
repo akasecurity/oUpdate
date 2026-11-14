@@ -194,6 +194,20 @@ describe("stuck tracking in the run (port 04)", () => {
     expect(r.rc).toBe(1);
   });
 
+  test("a whole run: only brew linkage gets HOMEBREW_DEV_CMD_RUN=1 (a developer command: without it brew turns its developer mode on for good); no brew call gets HOMEBREW_DEVELOPER, no other brew call either", async () => {
+    const h = fakeHost({ formulas: "good-a", verbose: "good-a (1) < 2", lsof: ["COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nlaunchd 1 root txt REG 1,4 1 2 /sbin/launchd\n"] });
+    const dev: string[] = [];
+    const exec: typeof h.exec = async (argv, o) => {
+      if (argv[0] === "brew") dev.push(`${argv[1]}=${o?.env?.HOMEBREW_DEVELOPER !== undefined ? "DEVELOPER" : (o?.env?.HOMEBREW_DEV_CMD_RUN ?? "-")}`);
+      return h.exec(argv, o);
+    };
+    const parent = [process.env.HOMEBREW_DEV_CMD_RUN, process.env.HOMEBREW_DEVELOPER];
+    await applyHost(testConfig(), exec, h.fs, { dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB });
+    expect([process.env.HOMEBREW_DEV_CMD_RUN, process.env.HOMEBREW_DEVELOPER]).toEqual(parent);
+    expect(dev).toContain("linkage=1");
+    expect(dev.filter((d) => !d.startsWith("linkage=")).every((d) => d.endsWith("=-"))).toBe(true);
+    expect(dev.length).toBeGreaterThan(3);
+  });
   test("an unreadable state file is kept and reported, never read as empty", async () => {
     const h = fakeHost({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", dirs: [STATE] });
     const res = await applyHost(testConfig(), h.exec, h.fs, { dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB });
