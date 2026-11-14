@@ -131,7 +131,7 @@ describe("main's output is the floor", () => {
     expect(out.startsWith(head("index.js") + renderLineDiff(b, a))).toBe(true);
     expect(out).toBe(head("index.js") + renderLineDiff(b, a));
   });
-  test("past 32 open holes an unchanged line stays out and a real shift is still shown", () => {
+  test("past 40 open holes an unchanged line stays out and a real shift is still shown", () => {
     const deep = "`${".repeat(40) + "1" + "}`".repeat(40) + ";\n";
     expect(view("index.js", `${deep}UNCHANGED();\nversion(1);\n`, `${deep}UNCHANGED();\nversion(2);\n`)).not.toContain("UNCHANGED");
     const out = view("index.js", `${deep}/*\n${P}\n*/\n`, `${deep}\n${P}\n\n`);
@@ -231,5 +231,34 @@ describe("the last lexer round", () => {
     const out = view("index.js", `${line}\nx();\n`, `${line}\ny();\n`);
     expect(performance.now() - t0).toBeLessThan(5000);
     expect(out).toContain("+y();");
+  });
+});
+
+describe("the final lexer round", () => {
+  const plainView = (f: string, b: string, a: string) => `=== ${f} (changed) ===\n` + renderLineDiff(b, a);
+  test("U+2028 does not end a python comment", () => {
+    const b = `# c """\nP()\nend()\n`;
+    const a = `# c x\nP()\nend()\n`;
+    expect(view("a.py", b, a)).toBe(plainView("a.py", b, a));
+  });
+  test("a property whose name has a non-ASCII letter before return is a property", () => {
+    expect(added(view("index.js", `obj.πreturn / 2; /*\n${P}\n*/\n`, `obj.πreturn / 2;\n${P}\n\n`))).toBe(true);
+  });
+  test("the paren of a for await head is followed by a regex", () => {
+    const b = `for await (const x of y) /[/*]/.test(x);\nconst a=1;\nconst b=2;\n`;
+    const a = `for await (const x of y) /ok/.test(x);\nconst a=1;\nconst b=2;\n`;
+    expect(view("index.js", b, a)).toBe(plainView("index.js", b, a));
+  });
+  test("a string line that ends in an even run of backslashes is not a continuation", () => {
+    const b = `const s="abc\\\\\nconst a=1;\nconst b=2;\n`;
+    const a = `const s="abc";\nconst a=1;\nconst b=2;\n`;
+    expect(view("index.js", b, a)).toBe(plainView("index.js", b, a));
+  });
+  test("a hashbang ends at U+2028", () => {
+    expect(added(view("cli.js", `#!/usr/bin/env node /*\n${P}\n*/\n`, `#!/usr/bin/env node \n${P}\n\n`))).toBe(true);
+  });
+  test("the reviewer prompt explains an identical pair", () => {
+    const text = require("node:fs").readFileSync(new URL("../src/review.ts", import.meta.url), "utf8");
+    expect(text).toContain("an identical \\`-\\` and \\`+\\` pair there is a line whose text did not change but whose meaning did");
   });
 });

@@ -168,7 +168,11 @@ export function renderLineDiff(before: string | undefined, after: string | undef
 const REGEX_AFTER = /[(,=:[!&|?{};+\-*%<>~^}]/;
 const REGEX_WORDS = new Set(["return", "typeof", "case", "in", "of", "void", "delete", "throw", "new", "else", "do", "yield", "await", "instanceof"]);
 const PAREN_WORDS = new Set(["if", "while", "for", "with"]);
-const TERMINATOR = /[\u2028\u2029\r]/;
+const TERMINATOR_JS = /[\u2028\u2029\r]/;
+const TERMINATOR_PY = /\r/; // CPython ends a line at CR or LF only
+const IDENT_CHAR = /[\p{ID_Continue}$\u200c\u200d\ud800-\udfff]/u; // a surrogate half counts: an astral letter is a name part
+const isId = (c: string) => IDENT_CHAR.test(c);
+const oddBackslashes = (l: string) => { let n = 0; for (let k = l.length - 1; k >= 0 && l[k] === "\\"; k--) n++; return n % 2 === 1; };
 
 export type LexMode = "js" | "py";
 
@@ -187,6 +191,7 @@ export const newSeed = (): LexSeed => {
 
 export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): string[] {
   const py = mode === "py";
+  const TERMINATOR = py ? TERMINATOR_PY : TERMINATOR_JS;
   const out: string[] = [];
   const stk: string[] = []; // "/*", "`", "${" (a hole), "{" (a brace in a hole), a triple quote, or a quote kept over a line end
   const h1: number[] = [seed[0]];
@@ -203,6 +208,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
   let prev = ""; // the last significant character of code
   let prev2 = ""; // the one before it
   let word = ""; // the identifier that ends at prev
+  let prevWord = ""; // the identifier before it, when only whitespace separates them (`for await`)
   let wordDot = false; // that identifier is a property (`.return`)
   let gap = false; // whitespace or a comment since the last token: the next word starts a new one
   const parens: boolean[] = []; // per open paren: did an if/while/for/with head open it
@@ -216,7 +222,13 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
     out.push(now === last ? last : (last = now));
     gap = true;
     let i = 0;
-    if (li === 0 && !py && line.startsWith("#!")) continue; // a hashbang line is a comment
+    if (li === 0 && !py && line.startsWith("#!")) {
+      // a hashbang line is a comment, to any line terminator
+      const m = TERMINATOR.exec(line);
+      if (!m) continue;
+      i = m.index + 1;
+      gap = true;
+    }
     while (i < line.length) {
       const t = top();
       const c = line[i]!;
@@ -257,7 +269,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
         else if (c === '"' || c === "'") { push(c); i++; }
         else if (inHole && c === "{") { push("{"); i++; prev2 = prev; prev = "{"; word = ""; wordDot = false; parenRegex = false; }
         else if (inHole && c === "}") { pop(); i++; prev2 = prev; prev = "}"; word = ""; wordDot = false; parenRegex = false; }
-        else if (c === "/" && !py && (prev === "" || (REGEX_AFTER.test(prev) && !((prev === "+" || prev === "-") && prev2 === prev)) || (prev === ")" && parenRegex) || (/[\w$]/.test(prev) && !wordDot && REGEX_WORDS.has(word)))) {
+        else if (c === "/" && !py && (prev === "" || (REGEX_AFTER.test(prev) && !((prev === "+" || prev === "-") && prev2 === prev)) || (prev === ")" && parenRegex) || (isId(prev) && !wordDot && REGEX_WORDS.has(word)))) {
           // a regex literal: to the closing slash on this line, a class kept whole
           let j = i + 1;
           let cls = false;
@@ -270,13 +282,13 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
           i = j + 1;
           reset();
         } else {
-          if (c === "(") parens.push(PAREN_WORDS.has(word) && !wordDot);
+          if (c === "(") parens.push(!wordDot && (PAREN_WORDS.has(word) || (word === "await" && prevWord === "for")));
           const closed = c === ")" ? parens.pop() === true : false;
           if (/\s/.test(c)) gap = true;
           else {
-            if (/[\w$]/.test(c)) {
-              if (!gap && /[\w$]/.test(prev) && word) word += c;
-              else { word = c; wordDot = prev === "."; }
+            if (isId(c)) {
+              if (!gap && isId(prev) && word) word += c;
+              else { prevWord = gap && isId(prev) ? word : ""; word = c; wordDot = prev === "."; }
             } else { word = ""; wordDot = false; }
             gap = false;
             prev2 = prev;
@@ -288,7 +300,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): strin
       }
     }
     // a single-quoted string ends at the line end unless a backslash continues it
-    while ((top() === '"' || top() === "'") && !line.endsWith("\\")) pop();
+    while ((top() === '"' || top() === "'") && !oddBackslashes(line)) pop();
   }
   return out;
 }
