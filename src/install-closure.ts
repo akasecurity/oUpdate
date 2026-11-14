@@ -8386,7 +8386,8 @@ function runsProgramAt(argv: string[], i: number, bin: string, has: (name: strin
     while (k < argv.length && argv[k]!.startsWith("-") && argv[k] !== "--") {
       const ef = execFlag(argv[k]!);
       if (ef?.kind === "call") return -1;
-      // npx --workspace sub, --prefix=sub, -w sub and the like run in another package.
+      // npx --workspace sub and -w sub run in another package; --prefix and -C point npm at another package's
+      // configuration and keep the working directory. Either way the follow stops here.
       if (!pm(runner) && (NPM_WORKSPACE_WIDEN.test(argv[k]!) || /^--(?:dir|cwd)(?:=|$)/.test(argv[k]!))) return -1;
       if ((ef?.kind === "package" && ef.value === undefined) || RUNNER_VALUE_FLAGS.test(argv[k]!)) k++;
       k++;

@@ -142,7 +142,13 @@ describe("review round two", () => {
   });
 
   // On a plain line the hook text itself already names the script (as before); in an if body only the follow reads it.
-  test("npx moved to another package by a workspace or prefix flag does not read this package's script", () => {
-    for (const hook of ["npx --workspace sub run-s evil", "npx --prefix=sub run-s evil", "npx -w sub run-s evil", "npx --prefix sub run-s evil"]) expect(bodyHeld(`if true; then ${hook}; fi`), hook).toBe(false);
+  test("npx with a workspace flag runs in that workspace, so this package's script is not read", () => {
+    for (const hook of ["npx --workspace sub run-s evil", "npx -w sub run-s evil"]) expect(bodyHeld(`if true; then ${hook}; fi`), hook).toBe(false);
+  });
+
+  // npm keeps the working directory for --prefix and -C but points npm_package_* at the prefix package;
+  // which package the runner then reads is left unresolved here, so the follow stops (same as before).
+  test("npx with a prefix flag stops the follow", () => {
+    for (const hook of ["npx --prefix=sub run-s evil", "npx --prefix sub run-s evil", "npx -C sub run-s evil"]) expect(bodyHeld(`if true; then ${hook}; fi`), hook).toBe(false);
   });
 });
