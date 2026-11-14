@@ -2262,16 +2262,24 @@ const CONTINUES = /^(?:[*\/%<>=&|^?,.(\[`]|!==?|\+(?!\+)|-(?!-)|(?:in|instanceof
 const DECLARATION = /(?:import(?![\w$])\s*(?:[\w$*{]|"")|export(?![\w$])\s*(?:default\b|const\b|let\b|var\b|function\b|class\b|async\b|[{*]))/y;
 // The leading quoted strings of the source, comments between them skipped. The kept text writes a plain template as a quoted
 // string, so a directive is real only when the source spells the same string with ' or " at the same place in the prologue.
+const LINE_END = /[\n\r\u2028\u2029]/;
+// A hashbang or line comment that ends at a lone CR, U+2028 or U+2029 ends there in the spec, but not in every runtime: whether
+// what follows is the prologue is not known, so no directive after it is read. LF and CR LF end it as everywhere.
+const lineEndKnown = (raw: string, i: number): boolean => i >= raw.length || raw[i] === "\n" || (raw[i] === "\r" && raw[i + 1] === "\n");
 function rawPrologue(raw: string): string[] {
   const out: string[] = [];
   let i = 0;
   // A leading hashbang line is not code: the prologue starts after it.
-  if (raw.startsWith("#!")) while (i < raw.length && raw[i] !== "\n") i++;
+  if (raw.startsWith("#!")) {
+    while (i < raw.length && !LINE_END.test(raw[i]!)) i++;
+    if (!lineEndKnown(raw, i)) return [];
+  }
   for (;;) {
     for (;;) {
       while (i < raw.length && /\s/.test(raw[i]!)) i++;
       if (raw.startsWith("//", i)) {
-        while (i < raw.length && raw[i] !== "\n") i++;
+        while (i < raw.length && !LINE_END.test(raw[i]!)) i++;
+        if (!lineEndKnown(raw, i)) return out;
       } else if (raw.startsWith("/*", i)) {
         const e = raw.indexOf("*/", i + 2);
         if (e < 0) return out;
