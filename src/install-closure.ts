@@ -3246,6 +3246,7 @@ function numericName(code: string, n: string, trust: Map<string, boolean>, loose
 // A key that is a number (or a symbol) for sure: digits, a counter, the length of a fixed array, Math.* of the global Math, a
 // Symbol value of the global Symbol, and arithmetic on those.
 function numericKey(key: string, nums: NumericNames, code: string, trust: Map<string, boolean>, at: number): boolean {
+  jsStep(key.length);
   if (/^Symbol\s*(?:\(\s*(?:""|\d+)?\s*\)|\.\s*for\s*\(\s*""\s*\)|\.\s*[A-Za-z_$][\w$]*)$/.test(key) && trustedCached(trust, code, "Symbol")) return true;
   let flat = key.replace(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*length(?![\w$])/g, (all, x: string) => (lengthNumber(code, x, trust) ? "0" : all));
   if (/(?<![\w$.])Math\s*\./.test(flat) && trustedCached(trust, code, "Math")) flat = flat.replace(/(?<![\w$.])Math\s*\.\s*[A-Za-z]+\s*\(/g, "(");
@@ -3259,38 +3260,539 @@ function numericKey(key: string, nums: NumericNames, code: string, trust: Map<st
 // "code" has no strings or comments: a string is "" and a key built from strings is more than that.
 function computedCallChain(code: string): boolean {
   let nums: NumericNames | undefined;
+  let index: BracketPairs | undefined; // built once per scan, only when a member needs it
   const trust = new Map<string, boolean>();
+  const numeric = (key: string, at: number) => {
+    nums ??= numericNames(code, trust);
+    return numericKey(key, nums, code, trust, at);
+  };
   for (let i = code.indexOf("["); i >= 0; i = code.indexOf("[", i + 1)) {
     let j = i;
     while (j > 0 && /\s/.test(code[j - 1]!)) j--;
     const prev = j > 0 ? code[j - 1]! : "";
-    if (!/[\w$)\]"'`\u0080-\uffff]/.test(prev)) continue;
-    if (BEFORE_ARRAY.test(code.slice(Math.max(0, j - 12), j))) continue;
-    if (/(?<![\w$.])of$/.test(code.slice(Math.max(0, j - 3), j)) && FOR_OF_HEAD.test(code.slice(Math.max(0, j - 256), j))) continue;
-    let depth = 0;
-    let end = -1;
-    for (let k = i; k < code.length; k++) {
-      if (code[k] === "[") depth++;
-      else if (code[k] === "]" && --depth === 0) {
-        end = k;
+    // o?.[k] is a member access like o[k]; so is function(){}[k], class{}[k] or ({})[k] after a brace that closes a value.
+    const optional = prev === "." && code[j - 2] === "?";
+    if (!optional && !/[\w$)\]}"'`\u0080-\uffff]/.test(prev)) continue;
+    if (!optional && BEFORE_ARRAY.test(code.slice(Math.max(0, j - 12), j))) continue;
+    if (!optional && /(?<![\w$.])of$/.test(code.slice(Math.max(0, j - 3), j)) && FOR_OF_HEAD.test(code.slice(Math.max(0, j - 256), j))) continue;
+    const ix = (index ??= bracketPairs(code));
+    if (prev === "}" && !braceValue(code, ix, j - 1)) continue;
+    const end = ix.closer[i]!;
+    if (end < 0 || code[end] !== "]") return true;
+    // The key text is read only when it is short or a chain needs it, so nested brackets cost no copy per level.
+    let keyText: string | undefined;
+    const keyOf = () => {
+      if (keyText === undefined) {
+        jsStep(end - i);
+        keyText = code.slice(i + 1, end).trim();
+      }
+      return keyText;
+    };
+    // A key of at most 64 characters that is a number or an empty string (a quoted literal reads as one in this text), whatever
+    // blanks pad it.
+    let ks = i + 1;
+    let ke = end;
+    while (ks < ke && /\s/.test(code[ks]!)) ks++;
+    while (ke > ks && /\s/.test(code[ke - 1]!)) ke--;
+    jsStep(ks - i + end - ke);
+    if (ke - ks <= 64) {
+      const lit = code.slice(ks, ke);
+      if (/^\d+$/.test(lit) || lit === '""') continue;
+    }
+    let e = end + 1;
+    while (e < code.length && /\s/.test(code[e]!)) e++;
+    jsStep(e - end);
+    const next = code[e];
+    let chained = next === "(" || next === "[" || (next === "?" && optionalCallOrIndex(code, e) !== "") || /(?<![\w$.])new\s+[\w$.\s]*$/.test(code.slice(Math.max(0, j - 80), i));
+    // A tagged template (o[k]`...`, a string in this text), .call / .apply / .bind and the base of a class (class A extends o[k] {}).
+    if (!chained) chained = next === "`" || next === '"' || callMethodAt(code, e) || (next === "{" && inExtendsHead(code, memberStart(code, ix, i)));
+    if (chained) {
+      if (numeric(keyOf(), i)) continue;
+      return true;
+    }
+    // A callee in grouping parentheses: (o[k])(...), (0, o[k])(...), (o[k] || f)(...), (c ? o[k] : f)(...), new (o[k]).
+    if (groupedCallee(code, ix, i, e, numeric) && !numeric(keyOf(), i)) return true;
+  }
+  return false;
+}
+
+// One pass over a text's brackets, kept for one scan (the shared bracket cache holds a few texts; adding this one would push out
+// the texts the other readers use): each opener's closer and each closer's opener (-1 when none), and the innermost opener still
+// open at each position (-1 at the top level). Charged to the budget.
+interface BracketPairs {
+  inner: Int32Array;
+  closer: Int32Array;
+  opener: Int32Array;
+}
+function bracketPairs(code: string): BracketPairs {
+  jsStep(code.length);
+  const inner = new Int32Array(code.length);
+  const closer = new Int32Array(code.length).fill(-1);
+  const opener = new Int32Array(code.length).fill(-1);
+  const stack: number[] = [];
+  for (let k = 0; k < code.length; k++) {
+    inner[k] = stack.length > 0 ? stack[stack.length - 1]! : -1;
+    const c = code.charCodeAt(k);
+    if (c === 40 || c === 91 || c === 123) stack.push(k);
+    else if (c === 41 || c === 93 || c === 125) {
+      const o = stack.pop();
+      if (o !== undefined) {
+        closer[o] = k;
+        opener[k] = o;
+      }
+    }
+  }
+  return { inner, closer, opener };
+}
+
+// .call( / .apply( / .bind( at "at", whatever whitespace sits between the words (the text has no comments).
+const CALL_METHOD = /\??\.\s*(?:call|apply|bind)\s*(?:\?\.\s*)?\(/y;
+function callMethodAt(code: string, at: number): boolean {
+  if (code[at] !== "." && !(code[at] === "?" && code[at + 1] === ".")) {
+    jsStep(1);
+    return false;
+  }
+  CALL_METHOD.lastIndex = at;
+  const hit = CALL_METHOD.test(code);
+  if (hit) {
+    jsStep(CALL_METHOD.lastIndex - at);
+    return true;
+  }
+  // A miss still walked the blanks after the dot (and after the name): charge what it read.
+  let k = at + (code[at] === "?" ? 2 : 1);
+  while (k < code.length && /\s/.test(code[k]!)) k++;
+  while (k < code.length && /[\w$]/.test(code[k]!)) k++;
+  while (k < code.length && /\s/.test(code[k]!)) k++;
+  jsStep(k - at + 1);
+  return false;
+}
+
+// The index of the first non-space character at or before "at" - 1 plus one: "at" moved back over whitespace (charged).
+function backOverSpace(code: string, at: number): number {
+  let b = at;
+  while (b > 0 && /\s/.test(code[b - 1]!)) b--;
+  jsStep(at - b + 1);
+  return b;
+}
+
+// Where the member expression whose last [ is at "at" starts: back over .name, ?.name, calls and indexes to its first name or
+// bracketed primary ([].map[k] starts at the first [, a.b(c)[k] at a).
+function memberStart(code: string, ix: BracketPairs, at: number): number {
+  let k = at;
+  for (;;) {
+    const b = backOverSpace(code, k);
+    const c = code[b - 1];
+    if (c === ")" || c === "]") {
+      const o = ix.opener[b - 1]!;
+      if (o < 0) return b;
+      k = o;
+      continue;
+    }
+    if (c !== undefined && /[\w$]/.test(c)) {
+      let a = b;
+      while (a > 0 && /[\w$]/.test(code[a - 1]!)) a--;
+      jsStep(b - a);
+      // A keyword before a bracketed primary (extends [].map, return [x]) is not part of the member.
+      if (/^(?:extends|return|typeof|void|delete|await|yield|throw|case|in|of|new|instanceof|else|do)$/.test(code.slice(a, b))) return k;
+      const d = backOverSpace(code, a);
+      if (code[d - 1] === "." && code[d - 2] !== ".") {
+        k = code[d - 2] === "?" ? d - 2 : d - 1;
+        continue;
+      }
+      return a;
+    }
+    if (c === "." && code[b - 2] === "?") {
+      k = b - 2;
+      continue;
+    }
+    return k;
+  }
+}
+
+// The operand that starts at "start" can be the value of the group it sits in: it follows the group's ( or , or ? or : of a
+// conditional, or || && ?? or a plain =. After typeof, void, !, a comparison or arithmetic its value is not the operand's.
+function operandSlot(code: string, start: number): boolean {
+  const b = backOverSpace(code, start);
+  const c = code[b - 1] ?? "";
+  if (c === "(" || c === "," || c === ":") return true;
+  if (c === "?") return true; // a ternary branch, or the right side of ??
+  if (c === "|") return code[b - 2] === "|";
+  if (c === "&") return code[b - 2] === "&";
+  if (c === "=") return !/[=!<>]/.test(code[b - 2] ?? "");
+  if (/[\w$]/.test(c)) return wordBefore(code, b) === "await";
+  return false;
+}
+
+// The token after the operand that ends right before "at" lets its value through to the group: ) ends the group, || or ?? keeps
+// it when truthy or set, : ends the true branch of a conditional. A ? (it is the test), && (it is the left side) or another
+// operator makes some other value the group's.
+function passesThrough(code: string, at: number): boolean {
+  const c = code[at];
+  if (c === ")" || c === ":") return true;
+  if (c === "|") return code[at + 1] === "|";
+  if (c === "?") return code[at + 1] === "?";
+  return false;
+}
+
+// The member whose [ is at "from" ends right before "after" (its next token): true when it is the value of a group of parentheses
+// that is then called, tagged, indexed, used with .call / .apply / .bind or new, or is a class base, also through more groups
+// ((o[k]) || f)(x). Not when the group is a call's arguments (f(o[k])(x) passes o[k] to f), and not when the member is the test of
+// a conditional, the left side of &&, behind typeof or void, or only kept with an empty [] or {} default that is then indexed.
+const CLIMBS = new WeakMap<BracketPairs, Map<number, boolean>>();
+function groupedCallee(code: string, ix: BracketPairs, from: number, after: number, numeric: (key: string, at: number) => boolean): boolean {
+  if (!passesThrough(code, after)) return false;
+  let start = memberStart(code, ix, from);
+  let at = after;
+  // The climb from a group's opener up depends on that group alone (what follows it comes from the group's closer), so each level
+  // above the first is read once: a member that reaches a level read before takes its answer.
+  let climbed = CLIMBS.get(ix);
+  if (climbed === undefined) CLIMBS.set(ix, (climbed = new Map()));
+  const levels: number[] = [];
+  const done = (r: boolean): boolean => {
+    for (const l of levels) climbed!.set(l, r);
+    return r;
+  };
+  for (let level = 0; ; level++) {
+    jsStep(16);
+    if (level > 0) {
+      const known = climbed.get(start);
+      if (known !== undefined) return done(known);
+      levels.push(start);
+    }
+    if (!operandSlot(code, start)) return done(false);
+    const o = ix.inner[start]!;
+    if (o < 0 || code[o] !== "(") return done(false);
+    const c = ix.closer[o]!;
+    if (c < 0) return done(false);
+    // Something after the member at the group's own depth discards it: a comma, or (after || or ??) a ? that makes it a test.
+    const [lastComma, lastTest] = groupMarks(code, ix, o, c);
+    if (lastComma > at) return done(false);
+    if (code[at] !== ":" && code[at] !== ")" && lastTest > at) return done(false);
+    const { e, next, call, index } = groupNext(code, ix, c);
+    // A default after || or ?? that is an empty array or object, then read by name or indexed (defaultIndex): (cache[k] || [])[0]
+    // and (cache[k] || [])?.[0] read the default's member, as main does. Called, also through .call / .apply / .bind or ?.(, or
+    // indexed by another key and called (["call"](...)), it is the member that runs: ([].map[k] || [])(...).
+    if ((code[at] === "|" || code[at] === "?") && !call && (index >= 0 ? defaultIndex(code, ix, index, numeric) : next === "." || (next === "?" && code[e + 1] === ".")) && emptyDefault(code, ix, at + 2, c)) return done(false);
+    const verdict = groupVerdict(code, ix, o, e, next, call, index);
+    if (verdict !== 0) return done(verdict === 1);
+    start = o;
+    at = e;
+  }
+}
+// What the group at "o" (closing before e) does with a member climbing to it, read once per group, whatever the member: 1 the group
+// is called or constructed (held), 2 it is not an operand (not held), 0 it passes the member on to what encloses it.
+const GROUP_VERDICT = new WeakMap<BracketPairs, Map<number, number>>();
+function groupVerdict(code: string, ix: BracketPairs, o: number, e: number, next: string | undefined, call: boolean, index: number): number {
+  let byGroup = GROUP_VERDICT.get(ix);
+  if (byGroup === undefined) GROUP_VERDICT.set(ix, (byGroup = new Map()));
+  let v = byGroup.get(o);
+  if (v !== undefined) return v;
+  v = groupVerdictOf(code, ix, o, e, next, call, index);
+  byGroup.set(o, v);
+  return v;
+}
+function groupVerdictOf(code: string, ix: BracketPairs, o: number, e: number, next: string | undefined, call: boolean, index: number): number {
+  const b = backOverSpace(code, o);
+  const word = wordBefore(code, b);
+  if (/^(?:new|extends)$/.test(word)) return 1; // new (o[k]), class A extends (o[k]) {}
+  const keyword = /^(?:return|typeof|void|delete|await|yield|throw|case|in|of|else|do|instanceof|default)$/.test(word);
+  const prev = b > 0 ? code[b - 1]! : "";
+  // A call's arguments or a statement header; after an if / while / for / with header's ) a statement starts.
+  if (!keyword && /[\w$)\]]/.test(prev) && !(prev === ")" && controlHeaderEnd(code, ix, b - 1))) return 2;
+  if (/^(?:typeof|void|delete)$/.test(word)) return 2;
+  if (next === "(" || next === "`" || next === '"' || call || index >= 0) return 1;
+  if (next === "{" && inExtendsHead(code, o)) return 1;
+  return passesThrough(code, e) ? 0 : 2;
+}
+
+// What follows the group's closer at "c", read once per group: the next token's place and character, whether it calls (( is
+// read by the caller; .call / .apply / .bind, ?.( ) and where the [ of an index (also ?.[) opens, -1 when none. A long chain of
+// members climbing to the same group reads it once.
+interface GroupNext {
+  e: number;
+  next: string | undefined;
+  call: boolean;
+  index: number;
+}
+const GROUP_NEXT = new WeakMap<BracketPairs, Map<number, GroupNext>>();
+function groupNext(code: string, ix: BracketPairs, c: number): GroupNext {
+  let byGroup = GROUP_NEXT.get(ix);
+  if (byGroup === undefined) GROUP_NEXT.set(ix, (byGroup = new Map()));
+  let v = byGroup.get(c);
+  if (v !== undefined) return v;
+  let e = c + 1;
+  while (e < code.length && /\s/.test(code[e]!)) e++;
+  jsStep(e - c);
+  let call = callMethodAt(code, e);
+  let index = code[e] === "[" ? e : -1;
+  if (!call && code[e] === "?") {
+    const o = optionalCallOrIndex(code, e);
+    call = o === "(";
+    if (o === "[") index = code.indexOf("[", e);
+  }
+  byGroup.set(c, (v = { e, next: code[e], call, index }));
+  return v;
+}
+// ?. then ( or [ at "at", whatever blanks follow the ?. : the opener, or "" when it is neither (?.name, or no ?. at all).
+function optionalCallOrIndex(code: string, at: number): string {
+  if (code[at] !== "?" || code[at + 1] !== ".") return "";
+  let k = at + 2;
+  while (k < code.length && /\s/.test(code[k]!)) k++;
+  jsStep(k - at);
+  return code[k] === "(" || code[k] === "[" ? code[k]! : "";
+}
+// The index whose [ is at "open" reads the default's member: its key is a number (numericKey), or what it reads is a plain value
+// (not called, indexed or tagged after it, also past one .name: (map[a] || {})[b], (map[a] || {})[b].size, where ["call"](...)
+// would run the member). Read once per index.
+const DEFAULT_INDEX = new WeakMap<BracketPairs, Map<number, boolean>>();
+function defaultIndex(code: string, ix: BracketPairs, open: number, numeric: (key: string, at: number) => boolean): boolean {
+  let byOpen = DEFAULT_INDEX.get(ix);
+  if (byOpen === undefined) DEFAULT_INDEX.set(ix, (byOpen = new Map()));
+  let v = byOpen.get(open);
+  if (v === undefined) {
+    const close = ix.closer[open]!;
+    if (close < 0) v = false;
+    else {
+      let n = close + 1;
+      while (n < code.length && /\s/.test(code[n]!)) n++;
+      jsStep(n - close);
+      // One .name read after it is plain too, when nothing chains on (.prototype.constructor(...) or .call(...) would).
+      const dot = /^(?:\?\.|\.)\s*[A-Za-z_$][\w$]*\s*/.exec(code.slice(n, n + 64));
+      if (dot) {
+        n += dot[0].length;
+        jsStep(dot[0].length);
+      }
+      if (!/[([`".?]/.test(code[n] ?? "") || (code[n] === "?" && code[n + 1] !== ".")) v = true;
+      else {
+        jsStep(close - open);
+        const key = code.slice(open + 1, close).trim();
+        v = /^\d+$/.test(key) || numeric(key, open);
+      }
+    }
+    byOpen.set(open, v);
+  }
+  return v;
+}
+// [] or {} alone (blanks around it) from "from" to the group's closer at "close", read once per place.
+const EMPTY_DEFAULT = new WeakMap<BracketPairs, Map<number, boolean>>();
+function emptyDefault(code: string, ix: BracketPairs, from: number, close: number): boolean {
+  let byFrom = EMPTY_DEFAULT.get(ix);
+  if (byFrom === undefined) EMPTY_DEFAULT.set(ix, (byFrom = new Map()));
+  let v = byFrom.get(from);
+  if (v !== undefined) return v;
+  let k = from;
+  while (k < close && /\s/.test(code[k]!)) k++;
+  jsStep(k - from + 1);
+  if (!((code[k] === "[" && code[k + 1] === "]") || (code[k] === "{" && code[k + 1] === "}"))) v = false;
+  else {
+    let m = k + 2;
+    while (m < close && /\s/.test(code[m]!)) m++;
+    jsStep(m - k);
+    v = m === close;
+  }
+  byFrom.set(from, v);
+  return v;
+}
+// The last comma and the last conditional ? at the own depth of the group (o, c), read once per group and kept per bracket index.
+const GROUP_MARKS = new WeakMap<BracketPairs, Map<number, [number, number]>>();
+function groupMarks(code: string, ix: BracketPairs, o: number, c: number): [number, number] {
+  let byGroup = GROUP_MARKS.get(ix);
+  if (byGroup === undefined) GROUP_MARKS.set(ix, (byGroup = new Map()));
+  let v = byGroup.get(o);
+  if (v !== undefined) return v;
+  let comma = -1;
+  let test = -1;
+  for (let k = o + 1; k < c; k++) {
+    jsStep(1);
+    const ch = code[k]!;
+    if (ch === "(" || ch === "[" || ch === "{") {
+      const end = ix.closer[k]!;
+      if (end < 0 || end > c) break;
+      k = end;
+    } else if (ch === ",") comma = k;
+    else if (ch === "?" && code[k + 1] !== "?" && code[k - 1] !== "?" && code[k + 1] !== ".") test = k;
+  }
+  byGroup.set(o, (v = [comma, test]));
+  return v;
+}
+// The ) at "close" ends an if, while, for or with header: what follows it starts a statement.
+function controlHeaderEnd(code: string, ix: BracketPairs, close: number): boolean {
+  const o = ix.opener[close]!;
+  return o >= 0 && /^(?:if|while|for|with)$/.test(wordBefore(code, o));
+}
+
+// The expression that starts at "start" (a member's start, found by reading back over its names, dots and bracketed groups) is the
+// base of a class head: class A extends <here> {.
+function inExtendsHead(code: string, start: number): boolean {
+  const b = backOverSpace(code, start);
+  return wordBefore(code, b) === "extends";
+}
+
+// The start of "class [Name] [extends Expr]" that ends right before "at" (a class body's {), or -1. The base expression is read
+// back over names, dots, calls and indexes (bracketed groups by their pairs), so its length is not capped.
+function classHeadStart(code: string, ix: BracketPairs, at: number): number {
+  let k = backOverSpace(code, at);
+  // The base expression after extends, if any, is walked back to extends, then the name to class.
+  for (;;) {
+    const c = code[k - 1];
+    if (c === undefined) return -1;
+    if (c === ")" || c === "]" || c === "}") {
+      const o = ix.opener[k - 1]!;
+      if (o < 0) return -1;
+      k = backOverSpace(code, o);
+      continue;
+    }
+    if (c === ".") {
+      k = backOverSpace(code, code[k - 2] === "?" ? k - 2 : k - 1);
+      continue;
+    }
+    if (/[\w$]/.test(c)) {
+      let a = k;
+      while (a > 0 && /[\w$]/.test(code[a - 1]!)) a--;
+      jsStep(k - a);
+      const w = code.slice(a, k);
+      if (w === "class" && (a === 0 || !/[\w$.]/.test(code[a - 1]!))) return a;
+      const before = backOverSpace(code, a);
+      if (w === "extends") {
+        k = before;
+        continue;
+      }
+      // A name: part of the base (after . or new), the base's first name (after extends), or the class's name (after class).
+      const pw = wordBefore(code, before);
+      if (code[before - 1] === "." || pw === "new" || pw === "extends" || pw === "class") {
+        k = before;
+        continue;
+      }
+      return -1;
+    }
+    return -1;
+  }
+}
+
+// The function keyword (function, function*, async function, with or without a name) whose parameter list opens at "open": its
+// start, or -1. Whitespace between the words is not capped.
+function functionKeywordStart(code: string, open: number): number {
+  let k = backOverSpace(code, open);
+  // an optional name
+  let a = k;
+  while (a > 0 && /[\w$]/.test(code[a - 1]!)) a--;
+  jsStep(k - a);
+  if (a < k && code.slice(a, k) !== "function") k = backOverSpace(code, a);
+  if (code[k - 1] === "*") k = backOverSpace(code, k - 1);
+  if (wordBefore(code, k) !== "function") return -1;
+  let s = k - "function".length;
+  const pre = backOverSpace(code, s);
+  if (wordBefore(code, pre) === "async") s = pre - "async".length;
+  return s;
+}
+
+// The token at "at" starts where an expression goes: after an operator, an opening bracket, a comma or an expression keyword.
+// Not after ; { } or ) (a statement start, a block or a header), at the file start, or after the : of a case or a label.
+function exprPosition(code: string, ix: BracketPairs, at: number, depth = 0): boolean {
+  const b = backOverSpace(code, at);
+  if (b === 0) return false;
+  const c = code[b - 1]!;
+  if (/[\w$]/.test(c)) return /^(?:return|typeof|void|delete|await|yield|throw|case|in|of|new|instanceof|extends)$/.test(wordBefore(code, b));
+  if (c === ":") return colonValue(code, ix, b - 1, depth);
+  return /[([,=?!&|+\-*/%~^<>]/.test(c);
+}
+
+// The : at "colon" is followed by a value: a ternary's (c ? a : {}) or an object property's ({ k: {} }, also a key named default
+// or case). After case x:, default: or a label (l: {}) inside a block a statement follows. Read back to the statement's start at
+// the same depth; unsure past a few nested levels: a value.
+// What the walk back from the last : read in each enclosing bracket (0 reached the opener or a comma, 1 a ?, 2 a ; or case), so the
+// next : in the same bracket stops at that one instead of walking every earlier statement again.
+const COLON_WALKS = new WeakMap<BracketPairs, Map<number, [number, number]>>();
+function colonValue(code: string, ix: BracketPairs, colon: number, depth: number): boolean {
+  if (depth > 8) return true;
+  const o = ix.inner[colon]!;
+  // Inside an object literal every : at its own depth is a property's, whatever the key is called.
+  if (o >= 0 && code[o] === "{" && objectBrace(code, ix, o, depth + 1)) return true;
+  let walks = COLON_WALKS.get(ix);
+  if (walks === undefined) COLON_WALKS.set(ix, (walks = new Map()));
+  const seen = walks.get(o);
+  const floor = seen !== undefined && seen[0] <= colon ? seen[0] : o; // the same colon again walks nothing
+  let out = seen !== undefined && seen[0] <= colon ? seen[1] : 0;
+  let hit = false;
+  for (let k = colon - 1; k > floor; k--) {
+    jsStep(1);
+    const ch = code[k]!;
+    if (ch === ")" || ch === "]" || ch === "}") {
+      const m = ix.opener[k]!;
+      if (m < 0) {
+        out = 1;
+        hit = true;
+        break;
+      }
+      k = m;
+    } else if (ch === "?" && code[k + 1] !== "." && code[k + 1] !== "?" && code[k - 1] !== "?") {
+      out = 1;
+      hit = true;
+      break;
+    } else if (ch === ";") {
+      out = 2;
+      hit = true;
+      break;
+    } else if (ch === ",") {
+      out = 0;
+      hit = true;
+      break;
+    } else if (/[\w$]/.test(ch) && !/[\w$]/.test(code[k - 1] ?? "")) {
+      const w = /^[\w$]+/.exec(code.slice(k, k + 8))![0];
+      if (w === "case" || w === "default") {
+        out = 2;
+        hit = true;
         break;
       }
     }
-    if (end < 0) return true;
-    let e = end + 1;
-    while (e < code.length && /\s/.test(code[e]!)) e++;
-    const next = code[e];
-    const tail = code.slice(e, e + 3);
-    const chained = next === "(" || next === "[" || (next === "?" && code[e + 1] === "." && (code[e + 2] === "(" || code[e + 2] === "[")) || /(?<![\w$.])new\s+[\w$.\s]*$/.test(code.slice(Math.max(0, j - 80), i));
-    void tail;
-    if (!chained) continue;
-    const key = code.slice(i + 1, end).trim();
-    if (/^\d+$/.test(key) || key === '""') continue;
-    nums ??= numericNames(code, trust);
-    if (numericKey(key, nums, code, trust, i)) continue;
-    return true;
   }
-  return false;
+  if (!hit && floor === o) out = 0;
+  walks.set(o, [colon, out]);
+  if (out === 1) return true;
+  if (out === 2) return false;
+  // A property name or a label; an object literal's was answered above.
+  if (o < 0) return false;
+  return code[o] !== "{";
+}
+
+// The { at "open" starts an object literal: it sits where an expression goes and is not a block after a header or an arrow.
+// Read once per brace, whatever colon asks.
+const OBJECT_BRACE = new WeakMap<BracketPairs, Map<number, boolean>>();
+function objectBrace(code: string, ix: BracketPairs, open: number, depth: number): boolean {
+  let byOpen = OBJECT_BRACE.get(ix);
+  if (byOpen === undefined) OBJECT_BRACE.set(ix, (byOpen = new Map()));
+  let v = byOpen.get(open);
+  if (v === undefined) {
+    v = objectBraceOf(code, ix, open, depth);
+    byOpen.set(open, v);
+  }
+  return v;
+}
+function objectBraceOf(code: string, ix: BracketPairs, open: number, depth: number): boolean {
+  const b = backOverSpace(code, open);
+  if (code[b - 1] === ")" || code.slice(Math.max(0, b - 2), b) === "=>") return false;
+  if (classHeadStart(code, ix, open) >= 0) return false;
+  return exprPosition(code, ix, open, depth);
+}
+
+// The } at "close" ends a value a member can be read on: an object literal, a class body or a function body in expression position
+// (({}).x, (class {})[k], x = function () {}[k]). A } that ends a block, a method body, a declaration or an arrow body ends a
+// statement or a definition: a [ after it starts an array or a computed method name.
+function braceValue(code: string, ix: BracketPairs, close: number): boolean {
+  const o = ix.opener[close]!;
+  if (o < 0) return true;
+  if (code[o] !== "{") return false;
+  const b = backOverSpace(code, o);
+  if (b > 0 && code[b - 1] === ")") {
+    const p = ix.opener[b - 1]!;
+    if (p < 0) return true;
+    const fn = functionKeywordStart(code, p);
+    return fn >= 0 && exprPosition(code, ix, fn);
+  }
+  const cls = classHeadStart(code, ix, o);
+  if (cls >= 0) return exprPosition(code, ix, cls);
+  if (code.slice(Math.max(0, b - 2), b) === "=>") return false; // an arrow's block body
+  return exprPosition(code, ix, o);
 }
 
 // "use strict" as a complete directive statement in the prologue, or import / export declarations (whole words): strict code.

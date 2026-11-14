@@ -1320,7 +1320,8 @@ test("env destructured out of process holds a changed payload (round 28m)", () =
 });
 
 // A computed key that is not a number or one plain string, then called, indexed again or used with new, reaches Function from any
-// value ("".["con"+"structor"]["con"+"structor"](code)()). The name is built from parts here so no file spells it whole.
+// value ("".["con"+"structor"]["con"+"structor"](code)()). The key at each call site is built from parts, so only the computed-chain
+// rule can see the call (two rows still compare the parameter with the whole name before the call).
 const CTOR = ["con", "structor"].join("");
 const FN_ARGS = '("return 1")()';
 for (const [label, pre] of [
@@ -1330,12 +1331,13 @@ for (const [label, pre] of [
   ["a tagged template key", 'const t = (s) => s[0]; exports.main = () => [][t`' + CTOR + '`][t`' + CTOR + "`]" + FN_ARGS + "\n"],
   ["a key that is a function parameter", `function f(k) { return [][k][k]${FN_ARGS} }\nexports.main = () => f(["con", "structor"].join(""))\n`],
   ["a key from fromCharCode", `const k = String.fromCharCode(99, 111, 110, 115, 116, 114, 117, 99, 116, 111, 114); exports.main = () => [][k][k]${FN_ARGS}\n`],
-  ["a guarded key used later", `function f(x) { return x === "${CTOR}" ? [][x][x]${FN_ARGS} : 0 }\nexports.main = () => f("${CTOR}")\n`],
-  ["a case label then the use", `function f(x) { switch (x) { case "${CTOR}": return [][x][x]${FN_ARGS} } }\nexports.main = () => f("${CTOR}")\n`],
+  ["a guarded key used later", `function f(x) { return x === "${CTOR}" ? [][x][x]${FN_ARGS} : 0 }\nexports.main = () => f(["con", "structor"].join(""))\n`],
+  ["a case label then the use", `function f(x) { switch (x) { case "${CTOR}": return [][x][x]${FN_ARGS} } }\nexports.main = () => f(["con", "structor"].join(""))\n`],
   ["two literals joined into the key", `exports.main = () => [][ "con" + "structor" ][ "con" + "structor" ]${FN_ARGS}\n`],
-  ["new through a computed key", `function f(k) { return new [][k][k]("return 1") }\nexports.main = () => f("${CTOR}")()\n`],
-  ["an optional chain through a computed key", `function f(k) { return []?.[k]?.[k]?.("return 1")() }\nexports.main = () => f("${CTOR}")\n`],
-  ["a key held by a name then called", `function f(o, k) { return o[k]("return 1") }\nexports.main = () => f([].map, "${CTOR}")\n`],
+  ["a literal joined to a name into the key", `const a = "con"; exports.main = () => [][ a + "structor" ][ a + "structor" ]${FN_ARGS}\n`],
+  ["new through a computed key", `function f(k) { return new [][k][k]("return 1") }\nexports.main = () => f(["con", "structor"].join(""))()\n`],
+  ["an optional chain through a computed key", `function f(k) { return []?.[k]?.[k]?.("return 1")() }\nexports.main = () => f(["con", "structor"].join(""))\n`],
+  ["a key held by a name then called", `function f(o, k) { return o[k]("return 1") }\nexports.main = () => f([].map, ["con", "structor"].join(""))\n`],
 ] as const) {
   test(`${label} holds a changed payload (computed chain)`, () => expect(widensDocs(pre)).toBe(true));
 }
