@@ -71,14 +71,16 @@ export function caskRunning(lsofOut: string, caskroom: string, cask: string, app
  * scan a release check relies on): output without lsof's COMMAND header is unusable too, never "no
  * process on the keg".
  */
-export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false, scan?: { clean?: boolean; why?: string }, fds = "txt,mem"): Promise<string | undefined> {
+export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false, scan?: { clean?: boolean; why?: string; dirty?: string }, fds = "txt,mem"): Promise<string | undefined> {
   const r = await env.exec([bin, "-nP", "-w", "-d", fds]);
   // A complete answer: exit 0, nothing on stderr, the COMMAND header, at least one row past it, every row with lsof's
-  // nine fields and a numeric pid, and the last line ended (a cut-off answer is not a scan).
+  // nine fields and a numeric pid, and the last line ended (a cut-off answer is not a scan). dirty: what is not.
   if (scan) {
     const rows = r.out.split("\n").filter((l) => l.trim() !== "" && !l.startsWith("COMMAND"));
-    scan.clean = r.rc === 0 && !r.err.trim() && r.out.endsWith("\n") && r.out.split("\n").some((l) => l.startsWith("COMMAND")) && rows.length > 0 &&
-      rows.every((l) => { const f = l.trim().split(/\s+/); return f.length >= 9 && /^\d+$/.test(f[1]!); });
+    const whole = (l: string) => { const f = l.trim().split(/\s+/); return f.length >= 9 && /^\d+$/.test(f[1]!); };
+    scan.dirty = r.rc !== 0 ? "exited non-zero" : r.err.trim() ? "printed something on stderr" : !r.out.endsWith("\n") ? "printed a cut-off last line"
+      : !r.out.split("\n").some((l) => l.startsWith("COMMAND")) ? "printed no COMMAND header" : !rows.length ? "listed no process" : !rows.every(whole) ? "printed a row that is not lsof's" : undefined;
+    scan.clean = scan.dirty === undefined;
   }
   const why = r.rc === 127 ? "is not executable" : r.rc !== 0 ? "exited non-zero" : !r.out.trim() ? "returned nothing" : strict && !r.out.split("\n").some((l) => l.startsWith("COMMAND")) ? "printed no COMMAND header" : "";
   if (!why) return r.out;
