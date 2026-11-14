@@ -74,7 +74,9 @@ interface Ctx {
   gypFiles: Set<string>;
   missing: Set<string>;
   scripts: Record<string, string>;
-  seen: Set<string>;
+  seen: Set<string>; // scripts read with their pre and post scripts on
+  // Scripts read while pre and post scripts were off: a later visit with them on reads the script again, hooks and all.
+  seenNoHooks: Set<string>;
   scanned: Set<string>;
   // The quoted and operand tokens of each scanned file, read once.
   literals?: Map<string, { quoted: string[]; operand: string[] }>;
@@ -8062,7 +8064,7 @@ function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
 
 function runScript(ctx: Ctx, name: string, optional: boolean): void {
   if (ctx.hold) return;
-  if (ctx.seen.has(name)) return;
+  if (ctx.seen.has(name) || (ctx.ignoreHooks && ctx.seenNoHooks.has(name))) return;
   const raw = ctx.raw[name];
   if (typeof raw !== "string") {
     // A script named by an unresolved expansion (`npm run "$(cat name.txt)"`) may be any script of the package.
@@ -8073,13 +8075,13 @@ function runScript(ctx: Ctx, name: string, optional: boolean): void {
     if (!optional) fail(ctx, "unresolved: script");
     return;
   }
-  if (ctx.seen.size >= DEPTH || ctx.depth >= DEPTH) {
+  if (ctx.seen.size + ctx.seenNoHooks.size >= DEPTH || ctx.depth >= DEPTH) {
     ctx.widenInert = true;
     widenAll(ctx);
     fail(ctx, "unresolved: script depth");
     return;
   }
-  ctx.seen.add(name);
+  (ctx.ignoreHooks ? ctx.seenNoHooks : ctx.seen).add(name);
   ctx.scripts[name] = raw;
   if (raw.length === 0) return;
   ctx.depth++;
@@ -8436,15 +8438,19 @@ function selfDirFlag(ctx: Ctx, bin: "yarn" | "pnpm" | "bun", argv: string[], j: 
 function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
   for (let j = i; j < argv.length; j++) {
     if (ctx.hold) return;
-    const a = argv[j]!;
-    if (a === "--") {
+    const word = argv[j]!;
+    if (word === "--") {
       fail(ctx, "unresolved: flag");
       return;
     }
+    // npm-run-all reads a name with arguments ("evil -- --flag") as the script before the first space, run with the rest.
+    const a = word.startsWith("-") ? word : word.trim().split(" ")[0]!;
     if (a.startsWith("-")) {
       const eq = a.indexOf("=");
       const name = eq > 0 ? a.slice(0, eq) : a;
       if (BOOL_FLAGS.has(name) || (eq < 0 && RUNS_BOOL_FLAGS.has(name))) continue;
+      // npm-run-all reads -pcl as -p -c -l, and any --name=value (also --npm-path=x) as a config value: the run goes on.
+      if ((eq < 0 && /^-[clnprs]+$/.test(a)) || (a.startsWith("--") && eq > 2)) continue;
       if (VALUE_FLAGS.has(name) || RUNS_VALUE_FLAGS.has(name)) {
         if (eq < 0) {
           const next = argv[j + 1];
@@ -10690,6 +10696,7 @@ function installViewCore(files: FileMap): InstallView {
     missing: new Set(),
     scripts: {},
     seen: new Set(),
+    seenNoHooks: new Set(),
     scanned: new Set(),
     gypScanned: new Set(),
     ranSh: new Set(),
