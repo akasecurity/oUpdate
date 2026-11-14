@@ -35,10 +35,14 @@ describe("parseApplyConfig", () => {
     const c = parseApplyConfig(cfg({ stateDir: "/state.test", releaseChecks: [
       { formula: "gadget", command: ["/opt/gate.test/check", "--quick"] },
       { formula: "other", command: ["/opt/gate.test/other"], retries: 0, timeoutSec: 60, before: ["svcctl", "off", "--now"], after: ["svcctl", "on"], runAs: "svc-user", owners: ["com.example.other-server"] },
+      { formula: "third", command: ["/opt/gate.test/third"], owners: ["com.example.third-server"], ownerUnloaded: "upgrade" },
+      { formula: "fourth", command: ["/opt/gate.test/fourth"], owners: ["com.example.fourth-server"], ownerUnloaded: "hold" },
     ] }), "hosta");
     expect(c.releaseChecks).toEqual([
       { formula: "gadget", command: ["/opt/gate.test/check", "--quick"], retries: 1, timeoutSec: 900 },
       { formula: "other", command: ["/opt/gate.test/other"], retries: 0, timeoutSec: 60, before: ["svcctl", "off", "--now"], after: ["svcctl", "on"], runAs: "svc-user", owners: ["com.example.other-server"] },
+      { formula: "third", command: ["/opt/gate.test/third"], retries: 1, timeoutSec: 900, owners: ["com.example.third-server"], ownerUnloaded: "upgrade" },
+      { formula: "fourth", command: ["/opt/gate.test/fourth"], retries: 1, timeoutSec: 900, owners: ["com.example.fourth-server"] },
     ]);
   });
   test("notify [] is kept: log-only by choice, not unconfigured", () => {
@@ -148,6 +152,8 @@ describe("parseApplyConfig", () => {
     ["a releaseChecks before that is empty", cfg({ stateDir: "/s", releaseChecks: [{ formula: "gadget", command: ["/c"], before: [] }] }), /apply\.releaseChecks\[0\]\.before must be a non-empty array/],
     ["a releaseChecks runAs that is not a user name", cfg({ stateDir: "/s", releaseChecks: [{ formula: "gadget", command: ["/c"], runAs: "-u root" }] }), /apply\.releaseChecks\[0\]\.runAs must be a user name/],
     ["a releaseChecks owners that is empty", cfg({ stateDir: "/s", releaseChecks: [{ formula: "gadget", command: ["/c"], owners: [] }] }), /apply\.releaseChecks\[0\]\.owners must be a non-empty array/],
+    ["a releaseChecks ownerUnloaded that is not hold or upgrade", cfg({ stateDir: "/s", releaseChecks: [{ formula: "gadget", command: ["/c"], owners: ["org.x"], ownerUnloaded: "skip" }] }), /apply\.releaseChecks\[0\]\.ownerUnloaded must be "hold" or "upgrade"/],
+    ["a releaseChecks ownerUnloaded with no owners", cfg({ stateDir: "/s", releaseChecks: [{ formula: "gadget", command: ["/c"], ownerUnloaded: "upgrade" }] }), /apply\.releaseChecks\[0\]\.ownerUnloaded needs owners/],
     ["a releaseChecks owners entry that is not a string", cfg({ stateDir: "/s", releaseChecks: [{ formula: "gadget", command: ["/c"], owners: [1] }] }), /apply\.releaseChecks\[0\]\.owners must be a non-empty array/],
     ["a releaseChecks formula listed twice", cfg({ stateDir: "/s", releaseChecks: [{ formula: "gadget", command: ["/c"] }, { formula: "example/tap/gadget", command: ["/d"] }] }), /apply\.releaseChecks\[1\]\.formula gadget is listed twice/],
   ] as const) {

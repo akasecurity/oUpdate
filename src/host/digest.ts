@@ -238,7 +238,7 @@ const PARTS: Part[] = [
 
 // src/apply/run-release.ts and release-checks.ts notes, joined by ", " though a note can carry ", "
 // itself: a piece starts a new note only when it reads as one and does not follow a "(held)".
-const RC_START = /^\S+(?::| \S+ (?:PASS|FAIL|check |not checked)| (?:upgrade changed|not checked|not upgraded|waits for|release check error))/;
+const RC_START = /^\S+(?::| \S+ (?:PASS|FAIL|check |not checked)| (?:upgrade changed|not checked|not upgraded|upgraded unchecked|waits for|release check error))/;
 const RC_BAD = /\bFAIL|failed|could not run|unreadable|\berror\b/;
 function rcNotes(text: string): string[] {
   const pieces: string[] = [];

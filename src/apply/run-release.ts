@@ -1,7 +1,7 @@
 // The release-check step of the host apply run (run.ts drives it): each unfinished check's owner restarts, its
 // pre-check gate and its verdict, and the owner jobs a check requires.
 
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { kegHolders, lsofMaps, type Holder, type KegEnv } from "./kegs.ts";
 import { matchOwner, ownerDir, ownerFiles, ownerOps, parsePrint, type OwnerWaiterEnv, type QueuedOwner } from "./owner-waiter.ts";
 import { asUser, brewView, resume, findCheck, holdFailed, pendingPath, readHold, runHook, savePending, type PendingCheck } from "./release-checks.ts";
@@ -288,17 +288,161 @@ async function ownerJobs(rt: RunCtx, jobs: QueuedOwner[]): Promise<{ kind: "ok" 
 /**
  * The release check's named owners (launchd labels) that are not running now: `launchctl print` of the
  * job (the probe the owner restart uses) names no pid. Asked before the upgrade, so a formula whose
- * check could never run is not upgraded at all.
+ * check could never run is not upgraded at all. Without `deep`, one print per owner (as always) and no
+ * owner is unloaded. With `deep` (ownerUnloaded: upgrade), see ownersUnloadedProbe.
  */
-export async function ownersNotRunning(rt: RunCtx, labels: readonly string[]): Promise<string[]> {
+export async function ownersNotRunning(rt: RunCtx, labels: readonly string[], deep = false): Promise<{ label: string; unloaded: boolean }[]> {
+  if (deep) return ownersUnloadedProbe(rt, labels);
   const { x, fs } = rt;
-  const down: string[] = [];
+  const down: { label: string; unloaded: boolean }[] = [];
   for (const label of labels) {
-    const where = (await fs.exists(`/Library/LaunchDaemons/${label}.plist`)) ? "system" : (await fs.exists(`${fs.home}/Library/LaunchAgents/${label}.plist`)) ? `gui/${fs.uid}` : "system";
-    const r = await x(["launchctl", "print", `${where}/${label}`]);
-    if (r.rc !== 0 || !parsePrint(r.out).pid) down.push(label);
+    const r = await x(["launchctl", "print", `${await plistDomain(rt, label)}/${label}`]);
+    if (r.rc === 0 && parsePrint(r.out).pid) continue;
+    down.push({ label, unloaded: false });
   }
   return down;
+}
+
+/** The domain launchd would hold the label in by its plist: system for /Library/LaunchDaemons, gui/<uid> for ~/Library/LaunchAgents, else system. */
+async function plistDomain(rt: RunCtx, label: string): Promise<string> {
+  const { fs } = rt;
+  return (await fs.exists(`/Library/LaunchDaemons/${label}.plist`)) ? "system" : (await fs.exists(`${fs.home}/Library/LaunchAgents/${label}.plist`)) ? `gui/${fs.uid}` : "system";
+}
+
+type PrintAnswer = { rc: number; out: string; err?: string; timedOut?: boolean };
+/**
+ * launchctl print's answer for a job that does not exist: exit 113 with "Could not find service"; for a gui or
+ * user domain (`userDomain`), also a domain that does not exist (no login session on a headless host): exit 112
+ * with "Could not find domain". Anything else (denied, a timeout, another answer) is not.
+ */
+function noJobAnswer(r: PrintAnswer, userDomain: boolean): boolean {
+  const text = `${r.out}\n${r.err ?? ""}`;
+  if (r.timedOut) return false;
+  return (r.rc === 113 && /Could not find service/.test(text)) || (userDomain && r.rc === 112 && /Could not find domain/.test(text));
+}
+
+/**
+ * ownerUnloaded: upgrade. Every owner positively no job: its plist is in /Library/LaunchDaemons or
+ * ~/Library/LaunchAgents and names that Label (a mistyped label has none), and every print of it in the
+ * system, gui/<uid> and user/<uid> domains says no job. The domain its plist puts it in is printed last, for
+ * every owner after every other probe, so those prints are the last calls before the upgrade. Every
+ * command goes straight to exec: a timeout or an error is not unloaded (a hold), never a phase stop.
+ */
+async function ownersUnloadedProbe(rt: RunCtx, labels: readonly string[]): Promise<{ label: string; unloaded: boolean }[]> {
+  const { fs } = rt;
+  const raw = (argv: string[]) => rawExec(rt, argv);
+  const print = async (domain: string, label: string): Promise<PrintAnswer> => {
+    try {
+      return await raw(["launchctl", "print", `${domain}/${label}`]);
+    } catch {
+      return { rc: 1, out: "" };
+    }
+  };
+  const state = new Map<string, { own: string[]; unloaded: boolean }>();
+  for (const label of labels) {
+    const home = await plistDomain(rt, label);
+    let ok = false;
+    try {
+      const daemon = `/Library/LaunchDaemons/${label}.plist`;
+      const agent = `${fs.home}/Library/LaunchAgents/${label}.plist`;
+      const plist = (await fs.exists(daemon)) ? daemon : (await fs.exists(agent)) ? agent : "";
+      const named = plist ? await raw(["plutil", "-extract", "Label", "raw", "-o", "-", plist]) : undefined;
+      ok = !!named && !named.timedOut && named.rc === 0 && named.out.trim() === label;
+    } catch {
+      ok = false;
+    }
+    // The domains its plist cannot put it in first; the ones it can (system for a daemon; gui and user for an
+    // agent, user when there is no gui session) last, for every owner after every other probe.
+    const own = home === "system" ? ["system"] : [`gui/${fs.uid}`, `user/${fs.uid}`];
+    const others = ["system", `gui/${fs.uid}`, `user/${fs.uid}`].filter((d) => !own.includes(d));
+    for (const d of others) if (ok) ok = noJobAnswer(await print(d, label), d !== "system");
+    state.set(label, { own, unloaded: ok });
+  }
+  const down: { label: string; unloaded: boolean }[] = [];
+  for (const label of labels) {
+    const s = state.get(label)!;
+    let running = false;
+    let unloaded = s.unloaded;
+    for (const d of s.own) {
+      const r = await print(d, label);
+      if (!r.timedOut && r.rc === 0 && parsePrint(r.out).pid) running = true;
+      unloaded = unloaded && noJobAnswer(r, d !== "system");
+    }
+    if (!running) down.push({ label, unloaded });
+  }
+  return down;
+}
+
+/** Straight to exec, not through the run's wrapper: a timeout reads as a failed command (a hold), never a phase stop or a time-box hit. */
+function rawExec(rt: RunCtx, argv: string[]) {
+  return rt.exec(argv, { timeoutMs: rt.cfg.timeoutMs, ...(argv[0] === rt.cfg.brew ? { env: { HOMEBREW_NO_AUTO_UPDATE: "1" } } : {}) });
+}
+
+/**
+ * What runs from formula `f` now: the pids, or why that cannot be told. From a fresh, complete lsof (exit 0,
+ * nothing on stderr, every row whole: lsofMaps' clean scan) of its kegs, which sees this user's processes
+ * only, and `ps -ax` of every user's process (ps shows every user's command line) whose executable or any
+ * argument names a path under a keg of it or its opt link (<prefix>/opt/<f>/), also after `=`, `:`, `,`, a
+ * quote, an attached short option or `file://`; a process that only mentions such a path holds too (the safe
+ * side). Only this run's own process and its ps are left out (not the lsof scan: a formula this run maps holds). A command ps cannot show (`(name)`: mid-exec, or a zombie) is read once more:
+ * holders of both reads count, and a pid unreadable in the second read is "a process command is unreadable".
+ */
+export async function formulaPids(rt: RunCtx, f: string): Promise<{ pids: string[] } | { why: string }> {
+  const { log, cfg } = rt;
+  const raw = (argv: string[]) => rawExec(rt, argv);
+  const unread = { why: "the processes running from it could not be read completely" };
+  try {
+    const cel = await raw([cfg.brew, "--cellar", f]);
+    const rack = !cel.timedOut && cel.rc === 0 ? cel.out.trim() : "";
+    if (!rack.startsWith("/")) return unread;
+    const scan: { clean?: boolean } = {};
+    // cwd too: a process whose working directory is in a keg (running a relative script) maps nothing from it.
+    const maps = await lsofMaps({ exec: raw } as KegEnv, cfg.lsof, log, true, scan, "cwd,txt,mem");
+    if (maps === undefined || !scan.clean) return unread;
+    const esc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // At the start, after whitespace, `=`, `:`, `,` or a quote, after an attached short option (`-r<path>`, `-I<path>`)
+    // or after `file://`.
+    // A keg or the opt link, the folder itself or anything under it, at the start, after whitespace, `=`, `:`, `,`, `;`,
+    // `@` (an argument file), a quote, shell punctuation (`& | ( < > { [` and a backtick), an attached short option
+    // (`-r<path>`, `-I<path>`) or `file://`; ended by `/`, the end, whitespace or such punctuation.
+    const names = new RegExp(`(^|[\\s=:,;@'"&|(<>{\\[\`]|\\s-[A-Za-z]+|file://)(${[rack, `${dirname(dirname(rack))}/opt/${basename(rack)}`].map(esc).join("|")})(/|$|[\\s'",:;&|)<>}\\]\`])`);
+    type Row = { pid: string; ppid: string; cmd: string };
+    const read = async (): Promise<Row[] | undefined> => {
+      const ps = await raw(["ps", "-axww", "-o", "pid=,ppid=,command="]);
+      if (ps.timedOut || ps.rc !== 0 || !ps.out.trim()) return undefined;
+      return ps.out.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+        const [pid = "", ppid = "", ...rest] = l.split(/\s+/);
+        return { pid, ppid, cmd: rest.join(" ") };
+      });
+    };
+    const unreadable = (cmd: string) => cmd === "" || /^\(.*\)$/.test(cmd);
+    // This run's own process and the ps reading the list, nothing else: a child of this run that runs a keg script holds.
+    const self = String(rt.kegEnv.selfPid ?? process.pid);
+    const mine = (rows: Row[]) => new Set([self, ...rows.filter((r) => r.ppid === self && /^(\/bin\/)?ps -axww /.test(r.cmd)).map((r) => r.pid)]);
+    const holders = (rows: Row[]) => {
+      const own = mine(rows);
+      return rows.filter((r) => !own.has(r.pid) && names.test(r.cmd)).map((r) => r.pid);
+    };
+    const first = await read();
+    if (!first) return unread;
+    const found = new Set(holders(first));
+    // lsof rows: a mapped file or a working directory under a keg or the opt link (NAME is lsof's ninth field on).
+    for (const l of maps.split("\n").slice(1)) {
+      const c = l.trim().split(/\s+/);
+      if (c.length >= 9 && names.test(c.slice(8).join(" "))) found.add(c[1]!);
+    }
+    if (first.some((r) => unreadable(r.cmd))) {
+      const second = await read();
+      if (!second) return unread;
+      for (const p of holders(second)) found.add(p);
+      const own = mine(second);
+      const hidden = second.filter((r) => !own.has(r.pid) && unreadable(r.cmd)).map((r) => r.pid);
+      if (hidden.length && !found.size) return { why: `a process command is unreadable (pid ${hidden.join(" ")})` };
+    }
+    return { pids: [...found] };
+  } catch {
+    return unread;
+  }
 }
 
 /**

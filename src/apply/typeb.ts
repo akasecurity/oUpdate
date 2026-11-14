@@ -170,7 +170,7 @@ export async function typeBUpgrades(
   env: TypeBEnv,
   r: Reviewer,
   pairs: { pkg: string; tap: string }[],
-  o: TypeBOptions & { dryRun: boolean; upgrade: (fullName: string) => Promise<number>; into?: TypeBRun; /** True: not tried this run (the upgrade time box stopped the run's upgrades), and the caller has recorded it. */ skip?: (fullName: string) => boolean },
+  o: TypeBOptions & { dryRun: boolean; upgrade: (fullName: string) => Promise<number | "held">; into?: TypeBRun; /** True: not tried this run (the upgrade time box stopped the run's upgrades), and the caller has recorded it. */ skip?: (fullName: string) => boolean },
 ): Promise<TypeBRun> {
   // `into`: the caller's record, filled as each package finishes, so a run stopped part-way
   // (a timeout) still knows what was already upgraded.
@@ -207,7 +207,10 @@ export async function typeBUpgrades(
       continue;
     }
     run.log.push(`  upgrading ${pkg}...`);
-    if ((await o.upgrade(`${tap}/${pkg}`)) !== 0) {
+    const code = await o.upgrade(`${tap}/${pkg}`);
+    // Held right before its upgrade (the caller said why): not upgraded, not an upgrade failure.
+    if (code === "held") continue;
+    if (code !== 0) {
       run.failed.push(pkg);
       run.flagged = true;
       run.log.push(`  ${pkg}: upgrade FAILED — continuing`);

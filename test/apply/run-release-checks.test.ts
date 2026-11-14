@@ -50,6 +50,8 @@ interface Rc {
   installsOnFail?: boolean;
   /** Pids a kickstart of their job does not end (an orphaned child): still in the scripted lsof after it. */
   outlives?: string[];
+  /** The faked Type B review's rc (default 0: approved; 1 holds it). */
+  typeBRc?: 0 | 1;
 }
 
 async function rcRun(o: Rc = {}) {
@@ -160,7 +162,7 @@ async function rcRun(o: Rc = {}) {
   const locks = [...(o.lock ?? [])];
   resetStopping();
   const res = await applyHost(testConfig({ npm: null, typeBTaps: ["example/tap"], releaseChecks: [CHECK], notify: ["send-notice"], ...o.cfg }), exec, h.fs, {
-    dryRun: o.dryRun ?? false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB, now: new Date(2026, 9, 26, 4, 0),
+    dryRun: o.dryRun ?? false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB(o.typeBRc ?? 0).typeB, now: new Date(2026, 9, 26, 4, 0),
     ownerClock: { now: () => clockT, sleep: async (ms) => void (clockT += ms), httpStatus: async () => 200 },
     ...(o.cfgArgv ? { ownerWaiterArgv: o.cfgArgv } : {}),
     ownerLock: {
@@ -1446,5 +1448,439 @@ describe("OUP-78: a formula whose check owner is not running is held, and an unf
     expect(second.calls).not.toContain("brew cleanup");
     expect(second.calls.some((c) => c.startsWith("brew cleanup") && c.includes("gadget"))).toBe(false);
     expect(second.calls.some((c) => c.startsWith("brew uninstall"))).toBe(false);
+  });
+});
+
+describe("a check whose owner is left unloaded on purpose (ownerUnloaded: upgrade) upgrades with no check; anything short of a positive no-such-job holds", () => {
+  const A = "com.example.gadget-server";
+  const B = "com.example.gadget-worker";
+  const daemonPlist = (l: string) => `/Library/LaunchDaemons/${l}.plist`;
+  const agentPlist = (l: string) => `/home.test/Library/LaunchAgents/${l}.plist`;
+  type State = "unloaded" | "loaded" | "running" | "denied" | "system-running" | "user-idle" | "rc113-other" | "notfound-rc1" | "no-gui-domain" | "no-system-domain";
+  const NOJOB = (l: string, d: string) => ({ rc: 113, out: "Bad request.\n", err: `Could not find service "${l}" in domain for ${d}\n` });
+  /** A complete lsof: its header and one unrelated process, ended. */
+  const CLEAN = `${LSOF_HEAD}launchd 1 root txt REG 1,4 1 2 /sbin/launchd\n`;
+  interface Owner {
+    state: State;
+    /** Where its plist is (default /Library/LaunchDaemons); "none": no plist anywhere. */
+    plist?: "daemon" | "agent" | "none";
+    /** The Label its plist names (default the owner label). */
+    plistLabel?: string;
+    /** After this many prints of the label (any domain), it runs. */
+    loadsAfter?: number;
+    /** The answer to the label's first print only. */
+    firstPrint?: { rc: number; out: string; err: string };
+    /** What it becomes after loadsAfter prints (default running). */
+    becomes?: State;
+  }
+  /**
+   * Owners by label, and launchd's answers. "running" names pid 77 for its first 3 running prints, then 88 (restarted).
+   * `lsof`: the full-scan answer (default CLEAN). `timeouts`: command lines that time out.
+   */
+  /** Every user's processes as `ps -axww -o pid=,ppid=,command=` prints them (default: launchd only). */
+  const PS = "    1     0 /sbin/launchd\n";
+  type Answer = { rc: number; out: string };
+  /** `ps`: one answer for every read, or successive answers (the last repeats). */
+  const owners = (o: Record<string, Owner>, x: { lsof?: { rc: number; out: string; err?: string }; ps?: Answer | Answer[]; timeouts?: string[] } = {}) => {
+    const psAnswers = x.ps === undefined ? [{ rc: 0, out: PS }] : Array.isArray(x.ps) ? [...x.ps] : [x.ps];
+    const prints = new Map<string, number>();
+    const running = new Map<string, number>();
+    const plistOf = (l: string) => ((o[l]!.plist ?? "daemon") === "none" ? "" : o[l]!.plist === "agent" ? agentPlist(l) : daemonPlist(l));
+    const plists = Object.keys(o).map(plistOf).filter(Boolean);
+    return {
+      onFs: (fs: ApplyFs) => {
+        const exists = fs.exists;
+        fs.exists = async (p: string) => plists.includes(p) || exists(p);
+      },
+      script: x.timeouts ? { timeout: x.timeouts } : {},
+      answer: (line: string, argv: string[]) => {
+        if (x.timeouts?.includes(line)) return undefined;
+        const pl = line.match(/^plutil -extract Label raw -o - (\S+)$/);
+        if (pl) {
+          const l = Object.keys(o).find((k) => plistOf(k) === pl[1]);
+          return l ? { rc: 0, out: `${o[l]!.plistLabel ?? l}\n`, err: "" } : { rc: 1, out: "", err: "No such file\n" };
+        }
+        const m = line.match(/^launchctl print (system|gui\/501|user\/501)\/(\S+)$/);
+        if (m && o[m[2]!]) {
+          const l = m[2]!;
+          const n = (prints.get(l) ?? 0) + 1;
+          prints.set(l, n);
+          if (n === 1 && o[l]!.firstPrint) return o[l]!.firstPrint!;
+          const st = o[l]!.loadsAfter !== undefined && n > o[l]!.loadsAfter! ? (o[l]!.becomes ?? "running") : o[l]!.state;
+          const domain = m[1] === "system" ? "system" : m[1] === "user/501" ? "uid: 501" : "user gui: 501";
+          if (st === "denied") return { rc: 1, out: "", err: "Operation not permitted\n" };
+          if (st === "rc113-other") return { rc: 113, out: "Bad request.\n", err: "" };
+          if (st === "notfound-rc1") return { ...NOJOB(l, domain), rc: 1 };
+          if (st === "no-system-domain") return m[1] === "system" ? { rc: 112, out: "Bad request.\n", err: "Could not find domain for system\n" } : NOJOB(l, domain);
+          if (st === "no-gui-domain") return m[1] === "gui/501" ? { rc: 112, out: "Bad request.\n", err: "Could not find domain for user gui: 501\n" } : NOJOB(l, domain);
+          if (st === "unloaded" || ((st === "system-running" || st === "running") && m[1] !== "system") || (st === "user-idle" && m[1] !== "user/501")) return NOJOB(l, domain);
+          if (st === "loaded" || st === "user-idle") return { rc: 0, out: `\tstate = not running\n\tpath = ${daemonPlist(l)}\n`, err: "" };
+          const k = (running.get(l) ?? 0) + 1;
+          running.set(l, k);
+          return { rc: 0, out: `\tstate = running\n\tpid = ${k <= 3 ? 77 : 88}\n\tpath = ${daemonPlist(l)}\n`, err: "" };
+        }
+        if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+        if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: LSOF_HEAD, err: "" };
+        if (argv[0]!.endsWith("lsof") && argv.some((a) => a.endsWith("txt,mem"))) return { err: "", ...(x.lsof ?? { rc: 0, out: CLEAN }) };
+        if (line === "ps -axww -o pid=,ppid=,command=") return { err: "", ...(psAnswers.length > 1 ? psAnswers.shift()! : psAnswers[0]!) };
+        return undefined;
+      },
+    };
+  };
+  const cfgOf = (labels: string[], mode: "upgrade" | "none" = "upgrade") => ({ releaseChecks: [{ ...CHECK, owners: labels, ...(mode === "upgrade" ? { ownerUnloaded: mode } : {}) }] });
+  const held = (r: Awaited<ReturnType<typeof rcRun>>) => {
+    expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
+    expect(r.brew).toContain("FAILED: release-check:gadget");
+    expect(r.notices().some((n) => n.includes("release check gadget: held, not upgraded"))).toBe(true);
+    expect(r.res.log.some((l) => l.includes("upgraded unchecked"))).toBe(false);
+  };
+
+  test("unloaded (plist naming the label, rc 113 'Could not find service' in system, gui and user), nothing on its kegs: upgraded with no before, check or after, said after the upgrade, no FAILED, no warning, no record", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }) });
+    expect(r.flow).toEqual(["brew upgrade example/tap/gadget"]);
+    for (const d of ["system", "gui/501", "user/501"]) expect(r.calls).toContain(`launchctl print ${d}/${A}`);
+    expect(r.calls).toContain(`plutil -extract Label raw -o - ${daemonPlist(A)}`);
+    expect(r.res.log).toContain(`  release check gadget: its owner ${A} is not loaded and nothing runs from it (ownerUnloaded: upgrade) — no check this run, asked again right before the upgrade`);
+    expect(r.res.log).toContain(`  release check gadget: brew upgrade done with no check — its owner ${A} is not loaded; not restarted`);
+    expect(r.res.log).toContain("restart: gadget not restarted — upgraded unchecked, its owner is not loaded");
+    expect(r.brew).toContain("release check: gadget upgraded unchecked, owner not loaded");
+    expect(r.brew).not.toContain("release-check:gadget");
+    expect(r.notices().some((n) => n.includes("⚠️"))).toBe(false);
+    expect(r.files.has(PENDING)).toBe(false);
+  });
+  test("right before the upgrade the owner probes are the last calls: nothing runs between the last print and brew upgrade", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }) });
+    const up = r.calls.indexOf("brew upgrade example/tap/gadget");
+    expect(up).toBeGreaterThan(0);
+    // Its plist is a LaunchDaemon's: the system print is the last, after gui and user.
+    expect(r.calls.slice(up - 3, up)).toEqual([`launchctl print gui/501/${A}`, `launchctl print user/501/${A}`, `launchctl print system/${A}`]);
+    // The recheck: the scan (cellar, lsof, ps), then the probes, then the upgrade.
+    const recheck = r.calls.slice(0, up);
+    const lastScan = Math.max(recheck.lastIndexOf("ps -axww -o pid=,ppid=,command="), recheck.lastIndexOf("brew --cellar gadget"));
+    const firstProbeAfter = recheck.findIndex((c, i) => i > lastScan && c.startsWith("launchctl print"));
+    expect(firstProbeAfter).toBeGreaterThan(lastScan);
+    expect(recheck.slice(lastScan + 1).every((c) => c.startsWith("launchctl print") || c.startsWith("plutil "))).toBe(true);
+  });
+  test("the owner starts (in system) while gui is asked: the system print, last, sees it running: the checked path, never unchecked", async () => {
+    // A LaunchDaemon: gui, user, then system. It starts after the first print, in system only.
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded", loadsAfter: 1, becomes: "system-running" } }) });
+    expect(r.flow[0]).toBe("svcctl off --now");
+    expect(r.res.log.some((l) => l.includes("no check this run") || l.includes("upgraded unchecked"))).toBe(false);
+  });
+  test("two owners: every owner's own-domain print comes after every other probe, the last calls before brew upgrade", async () => {
+    const r = await rcRun({ cfg: cfgOf([A, B]), ...owners({ [A]: { state: "unloaded" }, [B]: { state: "unloaded" } }) });
+    const up = r.calls.indexOf("brew upgrade example/tap/gadget");
+    expect(up).toBeGreaterThan(0);
+    expect(r.calls.slice(up - 3, up)).toEqual([`launchctl print user/501/${B}`, `launchctl print system/${A}`, `launchctl print system/${B}`]);
+  });
+  test("an agent (its plist in ~/Library/LaunchAgents): system first, then gui and user last (user holds it with no gui session)", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "no-gui-domain", plist: "agent" } }) });
+    const up = r.calls.indexOf("brew upgrade example/tap/gadget");
+    expect(up).toBeGreaterThan(0);
+    expect(r.calls.slice(up - 3, up)).toEqual([`launchctl print system/${A}`, `launchctl print gui/501/${A}`, `launchctl print user/501/${A}`]);
+  });
+  test("a headless host (gui/<uid> answers 'Could not find domain', exit 112): no job there, upgraded unchecked", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "no-gui-domain" } }) });
+    expect(r.flow).toEqual(["brew upgrade example/tap/gadget"]);
+  });
+  test("unloaded but another user's process runs from its keg (ps, which lsof as this user cannot see): held", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 0, out: `${PS}  4242     1 /brew/Cellar/gadget/1.2.0/libexec/bin/python3 -m server\n` } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 4242 runs from it — not upgraded, its keg is untouched)`);
+  });
+  test("unloaded but a process runs from its opt link: held", async () => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 0, out: `${PS}  4243     1 /brew/opt/gadget/bin/gadget serve\n` } }) }));
+  });
+  test("unloaded but ps fails: held", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 1, out: "" } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but the processes running from it could not be read completely — not upgraded, its keg is untouched)`);
+  });
+  // The same formula as Type A (its tap official here).
+  const typeA = (labels: string[]) => ({ ...cfgOf(labels), typeBTaps: [], officialTaps: ["homebrew/core", "example/tap"] });
+  test("Type A: unloaded, upgraded unchecked", async () => {
+    const r = await rcRun({ cfg: typeA([A]), ...owners({ [A]: { state: "unloaded" } }) });
+    expect(r.res.log.some((l) => l.startsWith("--- Type A review"))).toBe(true);
+    expect(r.flow).toEqual(["brew upgrade gadget"]);
+    expect(r.brew).toContain("release check: gadget upgraded unchecked, owner not loaded");
+  });
+  test("Type A: the owner loads before the recheck: held, not upgraded, not an upgrade failure", async () => {
+    const r = await rcRun({ cfg: typeA([A]), ...owners({ [A]: { state: "unloaded", loadsAfter: 3 } }) });
+    expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
+    expect(r.brew).toContain("FAILED: release-check:gadget;");
+    expect(r.brew).not.toMatch(/FAILED: [^;]*(^| )(example\/tap\/)?gadget( |;)/);
+  });
+  test("Type A: upgraded to a version other than the reviewed one: flagged, and no 'upgraded unchecked' note", async () => {
+    const r = await rcRun({ cfg: typeA([A]), ...owners({ [A]: { state: "unloaded" } }), script: { verbose: "example/tap/gadget (1.2.0) < 1.4.0" } });
+    expect(r.calls).toContain("brew upgrade gadget");
+    expect(r.res.log.some((l) => l.includes("Type A:") && l.includes("FLAGGED"))).toBe(true);
+    expect(r.brew).not.toContain("upgraded unchecked");
+  });
+  /**
+   * A whole run where pid 66 sits on a deleted keg of gadget after the upgrade, run by launchd under the
+   * formula's own label (the stale-keg step would restart it). `o`: the run's other options; `fromStart`: there from
+   * the start of the run.
+   */
+  const leftover = async (o: Partial<Rc> = {}, ownerState: Owner = { state: "unloaded" }, fromStart = false) => {
+    const SVC = "sh.brew.gadget";
+    const AGENT = `/home.test/Library/LaunchAgents/${SVC}.plist`;
+    const base = owners({ [A]: ownerState });
+    let upgraded = false;
+    return rcRun({
+      cfg: cfgOf([A]),
+      ...o,
+      onFs: (fs) => {
+        base.onFs(fs);
+        const exists = fs.exists;
+        fs.exists = async (p: string) => p === AGENT || exists(p);
+      },
+      script: { ...o.script, ps: { "66": { comm: "gadget", command: "/brew/Cellar/gadget/1.1.9/bin/gadget serve", ppid: "1" } } },
+      answer: (line, argv) => {
+        // From the upgrade on (or from the start: a run after the one that upgraded).
+        if (fromStart || line.startsWith("brew upgrade")) upgraded = true;
+        if (upgraded && argv[0]!.endsWith("lsof") && argv.some((a) => a.endsWith("txt,mem"))) return { rc: 0, out: `${CLEAN}gadget 66 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.1.9/bin/gadget\n`, err: "" };
+        if (line === `launchctl print gui/501/${SVC}`) return { rc: 0, out: `\tstate = running\n\tpid = 66\n\tpath = ${AGENT}\n`, err: "" };
+        if (line === "launchctl print gui/501") return { rc: 0, out: `services = {\n\t66\t-\t${SVC}\n}\n`, err: "" };
+        return base.answer(line, argv);
+      },
+    });
+  };
+  test("a whole run: a process on a deleted keg of the formula after an unchecked upgrade is reported by the stale-keg check, never restarted", async () => {
+    const r = await leftover();
+    expect(r.calls).toContain("brew upgrade example/tap/gadget");
+    expect(r.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(r.res.log).toContain("    gadget: upgraded with no release check (its owner is not loaded) — pid 66 is reported, never restarted here");
+  });
+  test("a whole run: planned unchecked but its upgrade failed: not left alone, the stale-keg step handles it as any package", async () => {
+    const r = await leftover({ script: { upgradeRc: { "example/tap/gadget": 1 } } });
+    expect(r.res.log.some((l) => l.includes("upgraded with no release check"))).toBe(false);
+    expect(r.calls).toContain(`launchctl kickstart -k gui/501/sh.brew.gadget`);
+  });
+  test("a whole run, Type A: brew upgraded it unchecked, then a version mismatch flagged it: its leftover process is still left alone", async () => {
+    const r = await leftover({ cfg: { ...cfgOf([A]), typeBTaps: [], officialTaps: ["homebrew/core", "example/tap"] }, script: { verbose: "example/tap/gadget (1.2.0) < 1.4.0" } });
+    expect(r.calls).toContain("brew upgrade gadget");
+    expect(r.res.log.some((l) => l.includes("Type A:") && l.includes("FLAGGED"))).toBe(true);
+    expect(r.calls.some((c) => c.includes("kickstart"))).toBe(false);
+  });
+  test("the next run (no unchecked upgrade in it): a leftover process on the unchecked formula's deleted keg is restarted as any stale process (documented: oUpdate keeps no record of it)", async () => {
+    const r = await leftover({ script: { formulas: "", verbose: "" } }, { state: "unloaded" }, true);
+    expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
+    expect(r.calls).toContain(`launchctl kickstart -k gui/501/sh.brew.gadget`);
+  });
+  test("the first print denied (exit 1), every later print 'no such job', scans clean: held (the first answer must say no job too)", async () => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded", firstPrint: { rc: 1, out: "", err: "Operation not permitted\n" } } }) }));
+  });
+  test.each([["daemon", "the first print"], ["agent", "a later print"]] as const)("the system domain answering 'Could not find domain' (exit 112), %s plist (%s): held (only a gui or user domain may be absent)", async (plist) => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "no-system-domain", plist } }) }));
+  });
+  test.each([
+    ["a script under a keg's share/", "/usr/bin/python3 /brew/opt/gadget/share/server.py"],
+    ["a path after --opt=", "/usr/bin/java --opt=/brew/Cellar/gadget/1.2.0/lib/x.jar"],
+    ["a path inside a -cp list", "/usr/bin/java -cp /a.jar:/brew/opt/gadget/lib/b.jar:/c.jar Main"],
+    ["a program that only reads a file there (tail -f of a log; held, the safe side)", "tail -f /brew/opt/gadget/share/status.log"],
+    ["an attached -r option", "/usr/bin/ruby -r/brew/opt/gadget/libexec/server.rb -e sleep"],
+    ["an attached -I option", "/usr/bin/ruby -I/brew/Cellar/gadget/1.2.0/lib -e sleep"],
+    ["a file:// url", "/usr/bin/java -Dx=1 file:///brew/opt/gadget/share/app.jar"],
+    ["a quoted path", "/bin/sh -c '/brew/opt/gadget/bin/gadget serve'"],
+    ["a path after a comma", "/usr/bin/tool --paths=/a,/brew/opt/gadget/lib"],
+    ["the opt folder itself, no trailing slash", "/usr/bin/java -Dhome=/brew/opt/gadget -jar x.jar"],
+    ["an argument file (@<path>)", "/usr/bin/javac @/brew/opt/gadget/share/args.txt"],
+    ["a path after a semicolon", "/bin/sh -c true;/brew/opt/gadget/bin/gadget"],
+    ["the opt folder before &&", "/bin/sh -c 'cd /brew/opt/gadget&&./run'"],
+    ["the opt folder before a pipe", "/bin/sh -c 'ls /brew/opt/gadget|cat'"],
+    ["the opt folder before )", "/bin/sh -c '(cd /brew/opt/gadget)'"],
+    ["the opt folder before a backtick", "/bin/sh -c 'echo `ls /brew/opt/gadget`'"],
+    ["the opt folder at the end of the line", "/usr/bin/tool --home /brew/opt/gadget"],
+  ])("a process naming a path under its keg or opt link (%s): held", async (_n, cmd) => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 0, out: `${PS}  4244     1 ${cmd}\n` } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 4244 runs from it — not upgraded, its keg is untouched)`);
+  });
+  test("a path that only shares a prefix (/brew/opt/gadget-extra/): not a holder, upgraded unchecked", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 0, out: `${PS}  4248     1 /brew/opt/gadget-extra/bin/x\n` } }) });
+    expect(r.flow).toEqual(["brew upgrade example/tap/gadget"]);
+  });
+  test("a path that only ends like its opt link (/tmp/brew/opt/gadget/): not a holder, upgraded unchecked", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 0, out: `${PS}  4250     1 /tmp/brew/opt/gadget/bin/x\n` } }) });
+    expect(r.flow).toEqual(["brew upgrade example/tap/gadget"]);
+  });
+  test("this run's own process and its ps name the formula's paths: not holders, upgraded unchecked", async () => {
+    const self = String(process.pid);
+    const ps = `${PS}  ${self}     1 bun oupdate host --apply /brew/opt/gadget/bin/gadget\n  4251  ${self} ps -axww -o pid=,ppid=,command= /brew/opt/gadget/\n`;
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 0, out: ps } }) });
+    expect(r.flow).toEqual(["brew upgrade example/tap/gadget"]);
+  });
+  test("a child of this run running a keg script (an interpreter: not in lsof's txt maps): held", async () => {
+    const self = String(process.pid);
+    const ps = `${PS}  ${self}     1 bun oupdate host --apply\n  4252  ${self} /usr/bin/ruby /brew/Cellar/gadget/1.2.0/libexec/worker.rb\n`;
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 0, out: ps } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 4252 runs from it — not upgraded, its keg is untouched)`);
+  });
+  test("an interpreter running a script from its keg's libexec: a holder, held", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 0, out: `${PS}  4245     1 /usr/bin/python3 -u /brew/opt/gadget/libexec/server.py\n` } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 4245 runs from it — not upgraded, its keg is untouched)`);
+  });
+  test("a process ps cannot show (\"(name)\") on both reads: held", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: { rc: 0, out: `${PS}  4246     1 (server)\n` } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but a process command is unreadable (pid 4246) — not upgraded, its keg is untouched)`);
+  });
+  test("a process ps cannot show on one read only (mid-exec): read again (2 reads per scan), readable and unrelated, upgraded unchecked", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: [{ rc: 0, out: `${PS}  4247     1 (bash)\n` }, { rc: 0, out: `${PS}  4247     1 /bin/bash -c true\n` }] }) });
+    expect(r.flow).toEqual(["brew upgrade example/tap/gadget"]);
+    // The plan and the recheck: 2 reads, then 1 (the second scan's first read is readable).
+    expect(r.calls.filter((c) => c === "ps -axww -o pid=,ppid=,command=")).toHaveLength(3);
+  });
+  test("mid-exec on the first read, the second shows it running from the keg: held", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: [{ rc: 0, out: `${PS}  4247     1 (gadget)\n` }, { rc: 0, out: `${PS}  4247     1 /brew/Cellar/gadget/1.2.0/bin/gadget serve\n` }] }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 4247 runs from it — not upgraded, its keg is untouched)`);
+  });
+  test("lsof finds a holder while a ps row stays unreadable: the hold names the holder, not the unreadable row", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { lsof: { rc: 0, out: `${CLEAN}gadget 66 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.2.0/bin/gadget\n` }, ps: { rc: 0, out: `${PS}  4253     1 (x)\n` } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 66 runs from it — not upgraded, its keg is untouched)`);
+  });
+  test("a holder in the first read that reads \"(name)\" in the second is still a holder (both reads count)", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { ps: [
+      { rc: 0, out: `${PS}    41     1 (bash)\n    42     1 /usr/bin/python3 /brew/opt/gadget/libexec/server.py\n` },
+      { rc: 0, out: `${PS}    41     1 /bin/bash -c true\n    42     1 (python3)\n` },
+    ] }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 42 runs from it — not upgraded, its keg is untouched)`);
+  });
+  test.each([["prints nothing", { rc: 0, out: "" }], ["exits 1 though it printed a list", { rc: 1, out: "    1     0 /sbin/launchd\n" }], ["times out", "timeout"]] as const)("unloaded but ps %s: held", async (_n, ps) => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, ps === "timeout" ? { timeouts: ["ps -axww -o pid=,ppid=,command="] } : { ps: { ...ps } }) }));
+  });
+  test("unloaded, its plist in ~/Library/LaunchAgents: upgraded unchecked", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded", plist: "agent" } }) });
+    expect(r.flow).toEqual(["brew upgrade example/tap/gadget"]);
+    expect(r.calls).toContain(`plutil -extract Label raw -o - ${agentPlist(A)}`);
+  });
+  test("unloaded, dry run: says it would upgrade unchecked and runs nothing", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }), dryRun: true });
+    expect(r.flow).toEqual([]);
+    expect(r.res.log).toContain(`  dry-run: release check gadget: its owner ${A} is not loaded and nothing runs from it (ownerUnloaded: upgrade) — would upgrade with no before, check or after`);
+  });
+  test("the owner loads between the plan and the upgrade (a review takes minutes): asked again, held as before, not upgraded", async () => {
+    // The plan prints 3 times (gui, user, then system); from the next print on it runs (in system).
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded", loadsAfter: 3 } }) });
+    expect(r.res.log).toContain(`  release check gadget: its owner ${A} is not loaded and nothing runs from it (ownerUnloaded: upgrade) — no check this run, asked again right before the upgrade`);
+    expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
+    expect(r.brew).toContain("FAILED: release-check:gadget");
+    expect(r.res.log.some((l) => l.includes("upgraded unchecked"))).toBe(false);
+    expect(r.brew).toContain("FAILED: release-check:gadget;");
+    expect(r.brew).not.toContain("STUCK");
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} runs now, though it was not loaded when this run planned — not upgraded, its keg is untouched)`);
+  });
+  test("the formula's own service label, unloaded with its plist present and default restart settings: no kickstart, no restart FAILED", async () => {
+    const OWN = "homebrew.mxcl.gadget";
+    const r = await rcRun({ cfg: cfgOf([OWN]), ...owners({ [OWN]: { state: "unloaded" } }) });
+    expect(r.calls).toContain("brew upgrade example/tap/gadget");
+    expect(r.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(r.brew).not.toContain("FAILED");
+    expect(r.res.log).toContain("restart: gadget not restarted — upgraded unchecked, its owner is not loaded");
+  });
+  test("a failed upgrade: no 'upgraded unchecked', FAILED as for any upgrade", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }), script: { upgradeRc: { "example/tap/gadget": 1 } } });
+    expect(r.res.log.some((l) => l.includes("upgraded unchecked"))).toBe(false);
+    expect(r.brew).not.toContain("upgraded unchecked");
+    expect(r.brew).toMatch(/FAILED: .*gadget/);
+  });
+  test("a review hold after the owner probe: not upgraded, no 'upgraded unchecked'", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }), typeBRc: 1 });
+    expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
+    expect(r.brew).not.toContain("upgraded unchecked");
+  });
+  test("same user, working directory inside a keg (a relative script maps nothing from it): the lsof cwd row holds it", async () => {
+    const cwd = `${CLEAN}python3 66 u cwd DIR 1,4 736 2 /brew/Cellar/gadget/1.2.0/libexec\n`;
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { lsof: { rc: 0, out: cwd } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 66 runs from it — not upgraded, its keg is untouched)`);
+    expect(r.calls).toContain("/usr/sbin/lsof -nP -w -d cwd,txt,mem");
+  });
+  test("same user, working directory at a keg's root (no file under it): the lsof cwd row holds it", async () => {
+    const cwd = `${CLEAN}python3 66 u cwd DIR 1,4 736 2 /brew/Cellar/gadget/1.2.0\n`;
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { lsof: { rc: 0, out: cwd } }) });
+    held(r);
+  });
+  test("a working directory elsewhere: not a holder, upgraded unchecked", async () => {
+    const cwd = `${CLEAN}python3 66 u cwd DIR 1,4 736 2 /Users/someone/project\n`;
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { lsof: { rc: 0, out: cwd } }) });
+    expect(r.flow).toEqual(["brew upgrade example/tap/gadget"]);
+  });
+  test("unloaded but a process maps a keg of the formula: held", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { lsof: { rc: 0, out: `${CLEAN}gadget 66 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.2.0/bin/gadget\n` } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 66 runs from it — not upgraded, its keg is untouched)`);
+  });
+  test.each([
+    ["lsof fails", { rc: 1, out: "" }],
+    ["lsof warns on stderr (a partial scan)", { rc: 0, out: CLEAN, err: "lsof: WARNING: can't stat() nfs file system /mnt/x\n" }],
+    ["lsof's last row is cut off", { rc: 0, out: `${CLEAN}gadget 66 u txt REG` }],
+    ["lsof prints only its header", { rc: 0, out: LSOF_HEAD }],
+  ] as const)("unloaded but %s: held", async (_n, lsof) => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { lsof: { ...lsof } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but the processes running from it could not be read completely — not upgraded, its keg is untouched)`);
+  });
+  test("a print that fails for another reason (permission denied): held", async () => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "denied" } }) }));
+  });
+  test.each([["rc 113 with no 'Could not find service'", "rc113-other"], ["'Could not find service' with another rc", "notfound-rc1"]] as const)("an odd print answer (%s): held", async (_n, state) => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state } }) }));
+  });
+  test("a mistyped label (no plist in either place, no job in any domain): held", async () => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded", plist: "none" } }) }));
+  });
+  test("a plist whose Label is another job's: held", async () => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded", plistLabel: "com.example.other" } }) }));
+  });
+  test("another domain: plist in ~/Library/LaunchAgents, no job in gui/<uid>, but the job runs in system: held", async () => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "system-running", plist: "agent" } }) }));
+  });
+  test("loaded idle in user/<uid> (no job in system or gui): held", async () => {
+    held(await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "user-idle" } }) }));
+  });
+  test("a probe that times out (ownerUnloaded: upgrade): held, the run goes on", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { timeouts: [`launchctl print user/501/${A}`] }) });
+    held(r);
+    expect(r.brew).not.toContain("timeout:");
+  });
+  test("the first print times out (ownerUnloaded: upgrade): held, no phase stop, the run goes on", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { timeouts: [`launchctl print system/${A}`] }) });
+    held(r);
+    expect(r.brew).not.toContain("timeout:");
+  });
+  test("the default (no ownerUnloaded): only the one print runs, as before, so a would-be second probe timing out changes nothing", async () => {
+    const r = await rcRun({ cfg: cfgOf([A], "none"), ...owners({ [A]: { state: "unloaded" } }, { timeouts: [`launchctl print gui/501/${A}`, `launchctl print user/501/${A}`] }) });
+    held(r);
+    expect(r.calls.filter((c) => c.startsWith("launchctl print") && c.endsWith(A))).toEqual([`launchctl print system/${A}`]);
+    expect(r.calls.some((c) => c.startsWith("plutil"))).toBe(false);
+    expect(r.brew).not.toContain("timeout:");
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not running — not upgraded, its keg is untouched)`);
+    expect(r.brew).toContain(`gadget not upgraded, owner ${A} not running`);
+  });
+  test("loaded with no pid: held, as with no ownerUnloaded", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "loaded" } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not running — not upgraded, its keg is untouched)`);
+  });
+  test("two owners, one unloaded and one loaded with no pid: held, each named as found", async () => {
+    const r = await rcRun({ cfg: cfgOf([A, B]), ...owners({ [A]: { state: "unloaded" }, [B]: { state: "loaded" } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, ${B} is not running — not upgraded, its keg is untouched)`);
+  });
+  test("two owners, one unloaded and one running: not unchecked; held as for an owner not running", async () => {
+    const r = await rcRun({ cfg: cfgOf([A, B]), ...owners({ [A]: { state: "unloaded" }, [B]: { state: "running" } }) });
+    held(r);
+    expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded (the others run) — not upgraded, its keg is untouched)`);
+  });
+  test("running: the full checked path (before, upgrade, owner restart, check, after), never the unchecked one", async () => {
+    const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "running" } }) });
+    expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", `sudo -n launchctl kickstart -k system/${A}`, "/opt/gate.test/check GATE_VERSION=1.3.0", "svcctl on"]);
+    expect(r.res.log.some((l) => l.includes("upgraded unchecked"))).toBe(false);
   });
 });

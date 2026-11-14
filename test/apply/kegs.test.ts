@@ -199,6 +199,15 @@ describe("staleKegCheck: restart", () => {
   const base = (pkg: string, plists: Record<string, string[]>, extra: Partial<Fake> = {}): Fake => ({
     lsof: [stale(pkg), fresh(pkg)], dirs: [`${CELLAR}/${pkg}/1.1`], plists, ps: { "20": { comm: pkg, command: pkg, ppid: "1" } }, ...extra,
   });
+  test("a package upgraded with no release check (leavePkgs) is reported, never restarted, though its label matches", async () => {
+    // Not restarted, so the re-scan still finds it.
+    const { env, calls } = fakeEnv(base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }, { lsof: [stale("redis"), stale("redis")] }));
+    const v = await staleKegCheck(env, opts({ leavePkgs: new Set(["redis"]) }).o);
+    expect(calls.some((c) => c.includes("kickstart"))).toBe(false);
+    expect(v.log).toContain("    redis: upgraded with no release check (its owner is not loaded) — pid 20 is reported, never restarted here");
+    expect(v.note).toContain("redis");
+    expect(v.note).toMatch(TROUBLE_RE);
+  });
   test("a daemon with one matching label is kickstarted, and the re-scan confirms it", async () => {
     const { env, calls } = fakeEnv(base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }));
     const v = await staleKegCheck(env, opts().o);

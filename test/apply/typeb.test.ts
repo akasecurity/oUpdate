@@ -18,7 +18,7 @@ function opts() {
   return { o, notices };
 }
 
-async function upgradeRun(f: Fx, r: Reviewer, extra: { dryRun?: boolean; upgradeRc?: number } = {}) {
+async function upgradeRun(f: Fx, r: Reviewer, extra: { dryRun?: boolean; upgradeRc?: number | "held" } = {}) {
   const fx = fixture(f);
   const { o, notices } = opts();
   const upgrades: string[] = [];
@@ -98,6 +98,12 @@ describe("typeBUpgrades", () => {
     expect(run).toMatchObject({ upgraded: [], failed: ["tool"], flagged: true });
     expect(run.log).toContain("  tool: upgrade FAILED — continuing");
     expect(notices.at(-1)).toBe("fixture brew FAILED: tool; log: -");
+  });
+  test("an upgrade the caller held right before it ran (\"held\"): neither upgraded nor failed, no FAILED notice", async () => {
+    const { run, notices } = await upgradeRun({}, scripted([], APPROVE).r, { upgradeRc: "held" });
+    expect(run).toMatchObject({ upgraded: [], failed: [] });
+    expect(run.log).not.toContain("  tool: upgrade FAILED — continuing");
+    expect(notices.some((n) => n.includes("brew FAILED"))).toBe(false);
   });
   test("a HEAD install is held without a review", async () => {
     const { r, prompts } = scripted([], APPROVE);

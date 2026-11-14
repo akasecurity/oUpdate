@@ -71,8 +71,8 @@ export function caskRunning(lsofOut: string, caskroom: string, cask: string, app
  * scan a release check relies on): output without lsof's COMMAND header is unusable too, never "no
  * process on the keg".
  */
-export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false, scan?: { clean?: boolean; why?: string }): Promise<string | undefined> {
-  const r = await env.exec([bin, "-nP", "-w", "-d", "txt,mem"]);
+export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false, scan?: { clean?: boolean; why?: string }, fds = "txt,mem"): Promise<string | undefined> {
+  const r = await env.exec([bin, "-nP", "-w", "-d", fds]);
   // A complete answer: exit 0, nothing on stderr, the COMMAND header, at least one row past it, every row with lsof's
   // nine fields and a numeric pid, and the last line ended (a cut-off answer is not a scan).
   if (scan) {
@@ -163,6 +163,11 @@ export interface KegOptions {
    * disk (the previous keg the check keeps, and any older retained one).
    */
   releaseRacks?: ReadonlyMap<string, string>;
+  /**
+   * Packages upgraded this run with no release check (its owner unloaded on purpose): a process on one of their
+   * deleted kegs is reported, never restarted (no kickstart, handoff, helper, owner command or waiter job).
+   */
+  leavePkgs?: ReadonlySet<string>;
 }
 
 /**
@@ -522,6 +527,13 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
     const comm = basename(await ps("comm", h.pid));
     const cmd = await ps("command", h.pid);
     const staleLine = `  STALE KEG: ${h.pkg} — pid ${h.pid} (${cmd || "?"}) still running from ${basename(h.keg)}, ${retired ? "a keg a release check retires (its owners must leave it)" : "which no longer exists"}`;
+    if (o.leavePkgs?.has(h.pkg)) {
+      log.push(staleLine, `    ${h.pkg}: upgraded with no release check (its owner is not loaded) — pid ${h.pid} is reported, never restarted here`);
+      add(stale, h.pkg);
+      mark(h.pkg, "orphans", h.pid);
+      add(unresolved, `${h.pkg}(upgraded unchecked, not restarted)`);
+      return;
+    }
     if (await isSelf(h.pid)) {
       // Restarting it would stop this run part-way; the next run starts on the new keg.
       log.push(staleLine, `    ${h.pkg}: pid ${h.pid} is this oupdate run — restarts with its next run`);

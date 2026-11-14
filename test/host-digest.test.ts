@@ -257,6 +257,12 @@ describe("renderDigest: summary parts", () => {
     expect(section(text, "Notes")).toBe("- release check: bar 1.1 PASS\n- release check: qux waits for foo");
   });
 
+  test("an unchecked upgrade is its own note, after a waiting one and beside another", () => {
+    const text = digest("=== studio summary ===\n  brew: upgraded: gadget widget; release check: baz not upgraded, candidate unreadable, gadget upgraded unchecked, owner not loaded, widget upgraded unchecked, owner not loaded\n");
+    expect(section(text, "Waiting on you")).toBe("- release check: baz not upgraded, candidate unreadable; read the run log");
+    expect(section(text, "Notes")).toContain("- release check: gadget upgraded unchecked, owner not loaded\n- release check: widget upgraded unchecked, owner not loaded");
+  });
+
   test("a failed release check already named by FAILED waits once", () => {
     const text = digest("=== studio summary ===\n  brew: FAILED: release-check:foo; nothing to update; release check: foo 2.0 FAIL, rolled back to 1.9 (held, 1.9 PASS), bar 1.1 PASS\n");
     expect(section(text, "Waiting on you")).toBe("- release-check:foo: the upgrade failed; read the run log");

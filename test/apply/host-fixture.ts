@@ -205,7 +205,9 @@ export function fakeTypeB(rc: 0 | 1 | 2 = 0, kind = "formula-only, prebuilt", un
         continue;
       }
       if (o.skip?.(`${tap}/${pkg}`)) continue;
-      if ((await o.upgrade(`${tap}/${pkg}`)) === 0) {
+      const code = await o.upgrade(`${tap}/${pkg}`);
+      if (code === "held") continue;
+      if (code === 0) {
         run.upgraded.push(pkg);
         run.upgradedFull.push(`${tap}/${pkg}`);
       } else {

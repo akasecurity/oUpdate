@@ -210,6 +210,8 @@ export interface RunCtx {
   rcPending: Map<string, PendingCheck>;
   rcBroken: string[];
   rcThisRun: Set<string>;
+  /** Gated formulae upgraded this run with no check (every owner unloaded on purpose, ownerUnloaded: upgrade), with those owners; never restarted. */
+  rcUnchecked: Map<string, { owners: string[]; name: string; ran?: boolean }>;
   rcJobs: Map<string, QueuedOwner[]>;
   mergeOwners: (a: readonly QueuedOwner[], add: readonly QueuedOwner[]) => QueuedOwner[];
   rcStopOff: Map<string, () => void>;
