@@ -1070,6 +1070,20 @@ describe("staleKegCheck: deferred and unresolved", () => {
 });
 
 describe("linkageCheck", () => {
+  test("brew linkage (a Homebrew developer command) gets HOMEBREW_DEV_CMD_RUN=1 in its own env, never HOMEBREW_DEVELOPER; brew list gets neither", async () => {
+    const seen: { line: string; developer?: string; cmdRun?: string }[] = [];
+    const env: KegEnv = {
+      exec: async (argv, o) => {
+        seen.push({ line: argv.join(" "), developer: o?.env?.HOMEBREW_DEVELOPER, cmdRun: o?.env?.HOMEBREW_DEV_CMD_RUN });
+        return argv[1] === "list" ? { rc: 0, out: "zstd\n", err: "" } : { rc: 0, out: "", err: "" };
+      },
+    } as KegEnv;
+    await linkageCheck(env, opts().o);
+    expect(seen).toEqual([
+      { line: "brew list --formula", developer: undefined, cmdRun: undefined },
+      { line: "brew linkage --test zstd", developer: undefined, cmdRun: "1" },
+    ]);
+  });
   test("no brew on the host → nothing to check, no note", async () => {
     const { env } = fakeEnv({ rc: { "brew list --formula": 127 } });
     expect((await linkageCheck(env, opts().o)).note).toBe("");
