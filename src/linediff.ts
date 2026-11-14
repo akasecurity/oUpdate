@@ -232,6 +232,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): { sta
     const now = stk.length === 0 ? "" : `${stk.length}:${h1[h1.length - 1]}:${h2[h2.length - 1]}`;
     out.push(now === last ? last : (last = now));
     kindsOut.push(contextLabel(top()));
+    let ran = false; // some part of this line runs as code in this version
     gap = true;
     let i = 0;
     if (li === 0 && !py && line.startsWith("#!")) {
@@ -255,7 +256,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): { sta
       } else if (t === "`") {
         if (c === "\\") i += 2;
         else if (c === "`") { pop(); i++; reset(); }
-        else if (c === "$" && line[i + 1] === "{") { push("${"); i += 2; prev2 = prev; prev = "{"; word = ""; wordDot = false; parenRegex = false; }
+        else if (c === "$" && line[i + 1] === "{") { ran = true; push("${"); i += 2; prev2 = prev; prev = "{"; word = ""; wordDot = false; parenRegex = false; }
         else i++;
       } else if (t === '"""' || t === "'''") {
         if (c === "\\") i += 2;
@@ -268,6 +269,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): { sta
       } else {
         // code: the top is empty, a hole or a brace inside one
         const inHole = t === "${" || t === "{";
+        if (!ran && !/\s/.test(c) && !(c === "/" && (line[i + 1] === "*" || (line[i + 1] === "/" && !py))) && !(c === "#" && py)) ran = true;
         if (c === "/" && line[i + 1] === "*") { cmt = [prev, prev2, word, wordDot, parenRegex]; push("/*"); i += 2; }
         else if ((c === "/" && line[i + 1] === "/" && !py) || (c === "#" && py)) {
           // a line comment ends at a line terminator: LF, CR, U+2028, U+2029
@@ -311,6 +313,8 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): { sta
         }
       }
     }
+    // a line that starts in a comment or a string and still runs code after a closing delimiter or in a hole is code
+    if (ran) kindsOut[li] = "code";
     // a single-quoted string ends at the line end unless a backslash continues it
     while ((top() === '"' || top() === "'") && !oddBackslashes(line)) pop();
   }
