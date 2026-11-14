@@ -7036,6 +7036,10 @@ function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
       }
       continue;
     }
+    // `bunx run-s evil`, `npx --yes run-s evil`, `pnpm dlx run-s evil`: the scripts are followed, and the stage is still read
+    // below as before (a dlx or exec runner keeps its widen).
+    const runsAt = runsProgramAt(ws, 1, runnerName(bin));
+    if (runsAt >= 0) dispatchRunner(ctx, ws.slice(runsAt), ignoring);
     // `npx run-s evil`, `npm exec -- run-s evil`
     let run = ws;
     if (bin === "npx" || (bin === "npm" && /^(?:exec|x)$/.test(ws[1] ?? ""))) {
@@ -8355,6 +8359,66 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
   runBody(ctx, dec.decode(ctx.bytes.get(key)));
 }
 
+// npm-run-all's own switches (from its --help): a mode or output flag before a name takes no value.
+const RUNS_BOOL_FLAGS = new Set(["-p", "--parallel", "-s", "--sequential", "--serial", "-c", "--continue-on-error", "-l", "--print-label", "-n", "--print-name", "-r", "--race", "--aggregate-output", "--silent"]);
+const RUNS_VALUE_FLAGS = new Set(["--max-parallel", "--npm-path"]);
+
+// The index of run-s, run-p or npm-run-all when it is the program a package runner runs: `npx --yes run-s`, `bunx run-s`,
+// `pnpm dlx run-s`, `pnpm exec run-s`, `yarn run-s`, `npx pnpm exec run-s`. -1 for anything else, and for a yarn, pnpm or bun
+// run moved to another directory by a flag (that run is widened, its scripts are not this package's).
+function runsProgramAt(argv: string[], i: number, bin: string): number {
+  const end = argv.indexOf("--", i);
+  const pm = (b: string) => /^(?:yarn|yarnpkg|pnpm|bun)$/.test(b);
+  if (pm(bin)) {
+    const widen = WORKSPACE_WIDEN[bin === "yarnpkg" ? "yarn" : (bin as "yarn" | "pnpm" | "bun")];
+    if (argv.slice(i, end < 0 ? argv.length : end).some((a) => widen.test(a))) return -1;
+  }
+  let k = i;
+  let runner = bin;
+  for (let d = 0; d < 4; d++) {
+    while (k < argv.length && argv[k]!.startsWith("-") && argv[k] !== "--") {
+      const ef = execFlag(argv[k]!);
+      if (ef?.kind === "call") return -1;
+      if ((ef?.kind === "package" && ef.value === undefined) || RUNNER_VALUE_FLAGS.test(argv[k]!)) k++;
+      k++;
+    }
+    if (argv[k] === "--") k++;
+    const w = argv[k];
+    if (w === undefined) return -1;
+    const exe = runnerName(w);
+    if (/^(?:run-s|run-p|npm-run-all)$/.test(exe)) return k;
+    // `pnpm dlx`, `pnpm exec`, `yarn exec`, `bun x` and a nested npx run the word after them.
+    if ((pm(runner) && /^(?:exec|x|dlx)$/.test(w)) || /^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(exe)) {
+      if (!/^(?:exec|x|dlx)$/.test(w)) runner = exe;
+      k++;
+      continue;
+    }
+    return -1;
+  }
+  return -1;
+}
+
+// The number of words a directory flag of yarn, pnpm or bun at argv[j] takes when its directory is this package (`--cwd .`,
+// `--cwd=./`, `-C .`, `--dir .`) and the run has not moved: 0 when it names any other directory or a flag that does not name one.
+function selfDirFlag(ctx: Ctx, bin: "yarn" | "pnpm" | "bun", argv: string[], j: number): number {
+  if (ctx.cwd !== "") return 0;
+  const a = argv[j]!;
+  const names = bin === "pnpm" ? ["-C", "--dir"] : ["--cwd"];
+  for (const name of names) {
+    let value: string | undefined;
+    let n = 1;
+    if (a === name) {
+      value = argv[j + 1];
+      n = 2;
+    } else if (a.startsWith(name + "=")) value = a.slice(name.length + 1);
+    else if (name === "-C" && a.startsWith("-C") && a.length > 2) value = a.slice(2);
+    else continue;
+    if (value === undefined || value === "" || value === "--" || value.includes(UNRESOLVED)) return 0;
+    return joinDir("", value) === "" ? n : 0;
+  }
+  return 0;
+}
+
 function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
   for (let j = i; j < argv.length; j++) {
     if (ctx.hold) return;
@@ -8366,8 +8430,8 @@ function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
     if (a.startsWith("-")) {
       const eq = a.indexOf("=");
       const name = eq > 0 ? a.slice(0, eq) : a;
-      if (BOOL_FLAGS.has(name)) continue;
-      if (VALUE_FLAGS.has(name)) {
+      if (BOOL_FLAGS.has(name) || (eq < 0 && RUNS_BOOL_FLAGS.has(name))) continue;
+      if (VALUE_FLAGS.has(name) || RUNS_VALUE_FLAGS.has(name)) {
         if (eq < 0) {
           const next = argv[j + 1];
           if (next === undefined || next.startsWith("-")) {
@@ -9837,7 +9901,12 @@ function dispatch(ctx: Ctx, cmd: string): void {
   // A compound command's keywords (`if`, `then`, `do`, `fi` ...) are not commands: the command after one is read, and a bare
   // closing keyword runs nothing. Without this each of them was an unknown runner that widened and, with `[ -f x ]`
   // after `if`, held on the glob cap whatever changed.
-  while (i < argv.length && /^(?:if|then|elif|else|do|while|until|!|\{)$/.test(argv[i]!)) i++;
+  // `function f {` opens a function body like `f() {`: the command after it is read.
+  while (i < argv.length) {
+    if (/^(?:if|then|elif|else|do|while|until|!|\{)$/.test(argv[i]!)) i++;
+    else if (argv[i] === "function" && i + 1 < argv.length) i += argv[i + 2] === "()" ? 3 : 2;
+    else break;
+  }
   if (i >= argv.length || /^(?:fi|done|esac|\})$/.test(argv[i]!)) return;
   if (argv[i] === "[" || argv[i] === "test") return; // the test builtin runs nothing
   if (/^(?:export|declare|typeset|local|readonly)$/.test(argv[i]!)) {
@@ -9931,6 +10000,16 @@ function dispatch(ctx: Ctx, cmd: string): void {
     if (k >= 0) {
       ctx.depth++;
       dispatch(ctx, argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      ctx.depth--;
+    }
+  }
+  // A package runner whose program is run-s, run-p or npm-run-all (`npx --yes run-s evil`, `pnpm dlx run-s evil`,
+  // `yarn run-s evil`) runs the scripts of this package it names: they are followed, and the runner's own reading goes on.
+  if (/^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(runnerName(bin)) && ctx.depth < DEPTH) {
+    const at = runsProgramAt(argv, i, runnerName(bin));
+    if (at >= 0) {
+      ctx.depth++;
+      dispatchRuns(ctx, argv, at + 1);
       ctx.depth--;
     }
   }
@@ -10082,6 +10161,13 @@ function dispatch(ctx: Ctx, cmd: string): void {
     for (let j = i; j < argv.length && argv[j] !== "--"; j++) {
       if (widen.test(argv[j]!)) {
         widenAll(ctx);
+        // `yarn --cwd . evil` and `pnpm -C . evil` at the package root run this package's script: the run is read without the flag too.
+        const n = selfDirFlag(ctx, bin, argv, j);
+        if (n > 0 && ctx.depth < DEPTH) {
+          ctx.depth++;
+          dispatch(ctx, [...argv.slice(i - 1, j), ...argv.slice(j + n)].map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+          ctx.depth--;
+        }
         return;
       }
     }
