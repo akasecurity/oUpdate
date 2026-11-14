@@ -8492,6 +8492,10 @@ function restart(ctx: Ctx): void {
 // as a value (`--registry URL`, `--cache DIR`, `--cwd .`, `-p pkg`) are skipped with it. A package manager that runs another
 // program (`corepack npm exec -- node`, `corepack npx node`) is followed to that program.
 const RUNNER_VALUE_FLAGS = /^--(?:registry|cache|userconfig|globalconfig|loglevel|cwd|prefix|workspace|shell|node-arg|node-options|config|tag|scope)$/;
+// Options npx (npm's config) and bunx parse as taking the next word as a value. An option outside this list (npx --cwd, --config,
+// not npm's) is not skipped with a value; the word after it keeps the reading it always had.
+const NPX_VALUE_FLAGS = /^--(?:registry|cache|userconfig|globalconfig|loglevel|prefix|workspace|shell|script-shell|node-options|tag|scope)$/;
+const BUNX_VALUE_FLAGS = /^--(?:cwd|node-arg)$/;
 function runnerExecutable(argv: string[], i: number, depth = 0): string {
   for (let j = i; j < argv.length; j++) {
     const a = argv[j]!;
@@ -9085,6 +9089,29 @@ function flagDirs(rest: string[], dirs: string[]): void {
 // flag or an npm flag not known to stay in place, or a wrapper (env, cross-env, exec, command, npx, npm exec,
 // pnpm exec, sh -c) around one of those. Only the command word is looked at, so other programs' flags and quoted
 // text (`tar -C dir`, `echo 'workspace'`) are not. Directories named on the way go to `dirs`.
+// The options of npx, bunx or corepack, then the command they run. With skip, a value option (NPX_VALUE_FLAGS) is skipped with
+// its next word even when that word starts with `-` (main's reading, without skip, still reads it as an option). The node
+// options are read in movesCore.
+function runnerMoves(bin: string, rest: string[], dirs: string[], skip: boolean): boolean {
+  let n = 0;
+  while (n < rest.length && rest[n]!.startsWith("-")) {
+    const ef = execFlag(rest[n]!);
+    if (ef?.kind === "call" && (ef.value !== undefined || rest[n + 1] !== undefined)) return movesRun(ef.value ?? rest[n + 1]!, dirs);
+    // npx and bunx take the workspace and prefix flags too.
+    if (NPM_WORKSPACE_WIDEN.test(rest[n]!) || (bin === "bunx" && WORKSPACE_WIDEN.bun.test(rest[n]!))) {
+      flagDirs(rest, dirs);
+      if (/^--(?:userconfig|globalconfig)/.test(rest[n]!)) dirs.push(UNSURE);
+      return true;
+    }
+    const opt = skip ? /^(--[\w-]+)(=?)/.exec(rest[n]!) : null;
+    if (opt && NPX_VALUE_FLAGS.test(opt[1]!)) {
+      n += opt[2] ? 1 : 2;
+      continue;
+    }
+    n++;
+  }
+  return n < rest.length && moves(rest.slice(n), dirs);
+}
 function movesCore(argv: string[], dirs: string[]): boolean {
   // CDPATH, PATH, HOME and the startup-file variables change what any later command resolves to, here or in a later
   // command: read every file.
@@ -9172,19 +9199,31 @@ function movesCore(argv: string[], dirs: string[]): boolean {
     return ex >= 0 && moves(rest.slice(ex + 1), dirs);
   }
   if (bin === "npx" || bin === "bunx" || bin === "corepack") {
-    let n = 0;
-    while (n < rest.length && rest[n]!.startsWith("-")) {
-      const ef = execFlag(rest[n]!);
-      if (ef?.kind === "call" && (ef.value !== undefined || rest[n + 1] !== undefined)) return movesRun(ef.value ?? rest[n + 1]!, dirs);
-      // npx and bunx take the workspace and prefix flags too.
-      if (NPM_WORKSPACE_WIDEN.test(rest[n]!) || (bin === "bunx" && WORKSPACE_WIDEN.bun.test(rest[n]!))) {
-        flagDirs(rest, dirs);
-        if (/^--(?:userconfig|globalconfig)/.test(rest[n]!)) dirs.push(UNSURE);
-        return true;
-      }
-      n++;
+    // Read both ways: each option alone (a value may then read as the command, as it always did), and with a value option skipped
+    // with its value (`--shell sh -c ...`). The run moves when either reading moves it, so neither hides what the other finds.
+    // The second reading runs only when a leading option is one it skips, so a plain chain (npx npx ... x) is read once.
+    // The node options (--node-options, bunx --node-arg) name files node loads (-r, --import, --env-file, a loader): every file is
+    // read, as npm exec --node-options is, whatever either reading finds after them.
+    // The options prefix of either reading: option words, and the word after a value option (its value in the skip reading, an
+    // option or the command in main's). A node option anywhere in it counts, also where one reading takes it as a value
+    // (`npx --tag --node-options "-r x"`).
+    let node = false;
+    let skips = false;
+    let value = false;
+    for (let n = 0; n < rest.length; n++) {
+      const w = rest[n]!;
+      if (!w.startsWith("-") && !value) break;
+      if (/^--node-(?:options|arg)(?:=|$)/.test(w)) node = true;
+      const o = w.startsWith("-") ? /^--[\w-]+/.exec(w)?.[0] : undefined;
+      value = o !== undefined && !w.includes("=") && (NPX_VALUE_FLAGS.test(o) || (bin === "bunx" && BUNX_VALUE_FLAGS.test(o)));
+      if (o !== undefined && (NPX_VALUE_FLAGS.test(o) || (bin === "bunx" && BUNX_VALUE_FLAGS.test(o)))) skips = true;
     }
-    return n < rest.length && moves(rest.slice(n), dirs);
+    if (node) dirs.push(UNSURE);
+    const alone = runnerMoves(bin, rest, dirs, false);
+    // A node option has already pushed UNSURE above, so every file is read whichever reading returns here. (npx --node-arg is not an
+    // npm option and sets node without skips, so the second reading may not run for it.)
+    if (!skips || alone) return alone;
+    return runnerMoves(bin, rest, dirs, true) || node;
   }
   if (SHELL_RE.test(bin)) {
     let rc = false;
@@ -10618,22 +10657,49 @@ function dispatch(ctx: Ctx, cmd: string): void {
     return;
   }
   if (bin === "npx" || bin === "bunx") {
-    // The call string of `npx -c '...'` (or `--cal`, `-yc`) is a shell body.
-    for (let j = i; j < argv.length && argv[j] !== "--" && argv[j]!.startsWith("-"); j++) {
-      const ef = execFlag(argv[j]!);
-      if (ef?.kind === "call") {
-        const call = ef.value ?? argv[j + 1];
-        if (call !== undefined && ctx.depth < DEPTH) {
-          ctx.depth++;
-          runBody(ctx, call);
-          ctx.depth--;
-        } else if (call !== undefined) {
-          ctx.widenInert = true;
-          widenAll(ctx);
+    // The call string of `npx -c '...'` (or `--cal`, `-yc`) is a shell body. It is read two ways: an option that takes a value
+    // (`--shell sh`, `--node-options "-r x"`) skipped with its value unless that word is itself an option, and skipped with its next
+    // word whatever it is (`--cache -c -c body`). A shell given by path (`--shell=./x.sh`) is a file of the package that runs.
+    const calls = new Set<string>();
+    const shells = new Set<string>();
+    for (const always of [false, true]) {
+      for (let j = i; j < argv.length && argv[j] !== "--" && argv[j]!.startsWith("-"); j++) {
+        const flag = /^--[\w-]+/.exec(argv[j]!)?.[0];
+        if (flag !== undefined && (NPX_VALUE_FLAGS.test(flag) || (bin === "bunx" && BUNX_VALUE_FLAGS.test(flag)))) {
+          const eq = argv[j]!.indexOf("=");
+          const value = eq >= 0 ? argv[j]!.slice(eq + 1) : argv[j + 1];
+          if ((flag === "--shell" || flag === "--script-shell") && value?.includes("/")) shells.add(value);
+          if (eq < 0 && (always || !argv[j + 1]?.startsWith("-"))) j++;
+          continue;
         }
-        break;
+        const ef = execFlag(argv[j]!);
+        if (ef?.kind === "call") {
+          const call = ef.value ?? argv[j + 1];
+          if (call !== undefined) calls.add(call);
+          break;
+        }
+        if (ef?.kind === "package" && ef.value === undefined) j++;
       }
-      if (ef?.kind === "package" && ef.value === undefined) j++;
+    }
+    for (const call of calls) {
+      if (ctx.depth < DEPTH) {
+        ctx.depth++;
+        runBody(ctx, call);
+        ctx.depth--;
+      } else {
+        ctx.widenInert = true;
+        widenAll(ctx);
+      }
+    }
+    for (const sh of shells) {
+      if (ctx.depth < DEPTH) {
+        ctx.depth++;
+        dispatch(ctx, `'${sh.replace(/'/g, "'\\''")}'`);
+        ctx.depth--;
+      } else {
+        ctx.widenInert = true;
+        widenAll(ctx);
+      }
     }
   }
   if (bin === "npx" || bin === "corepack") {
