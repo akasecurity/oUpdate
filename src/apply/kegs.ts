@@ -71,7 +71,7 @@ export function caskRunning(lsofOut: string, caskroom: string, cask: string, app
  * scan a release check relies on): output without lsof's COMMAND header is unusable too, never "no
  * process on the keg".
  */
-export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false, scan?: { clean?: boolean }): Promise<string | undefined> {
+export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false, scan?: { clean?: boolean; why?: string }): Promise<string | undefined> {
   const r = await env.exec([bin, "-nP", "-w", "-d", "txt,mem"]);
   // A complete answer: exit 0, nothing on stderr, the COMMAND header, at least one row past it, every row with lsof's
   // nine fields and a numeric pid, and the last line ended (a cut-off answer is not a scan).
@@ -80,11 +80,10 @@ export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict =
     scan.clean = r.rc === 0 && !r.err.trim() && r.out.endsWith("\n") && r.out.split("\n").some((l) => l.startsWith("COMMAND")) && rows.length > 0 &&
       rows.every((l) => { const f = l.trim().split(/\s+/); return f.length >= 9 && /^\d+$/.test(f[1]!); });
   }
-  if (r.rc === 127) log.push(`  stale-keg: ${bin} is not executable`);
-  else if (r.rc !== 0) log.push(`  stale-keg: ${bin} exited non-zero`);
-  else if (!r.out.trim()) log.push(`  stale-keg: ${bin} returned nothing`);
-  else if (strict && !r.out.split("\n").some((l) => l.startsWith("COMMAND"))) log.push(`  stale-keg: ${bin} printed no COMMAND header`);
-  else return r.out;
+  const why = r.rc === 127 ? "is not executable" : r.rc !== 0 ? "exited non-zero" : !r.out.trim() ? "returned nothing" : strict && !r.out.split("\n").some((l) => l.startsWith("COMMAND")) ? "printed no COMMAND header" : "";
+  if (!why) return r.out;
+  log.push(`  stale-keg: ${bin} ${why}`);
+  if (scan) scan.why = why;
   return undefined;
 }
 
