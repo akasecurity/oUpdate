@@ -728,8 +728,9 @@ function isManifest(logical: string): boolean {
 
 // A literal require/import is followed exactly. A bare name that resolves inside a
 // bundled node_modules package closes that package. Anything else is not a path.
-/** A string literal's text as JavaScript reads it: \x41, \u0041, \u{41} and the one-character escapes; undefined when unsure. */
-function decodeJsString(raw: string): string | undefined {
+/** A string literal's text as JavaScript reads it: \x41, \u0041, \u{41} and the one-character escapes; undefined when unsure.
+ * With names set (a check for a dangerous property name, never a load), a line continuation is read too: it adds no character. */
+function decodeJsString(raw: string, names = false): string | undefined {
   let out = "";
   for (let i = 0; i < raw.length; i++) {
     const c = raw[i]!;
@@ -753,6 +754,9 @@ function decodeJsString(raw: string): string | undefined {
       if (cp > 0x10ffff) return undefined;
       out += String.fromCodePoint(cp);
       i += m[0].length;
+    } else if (names && /[\n\u2028\u2029]/.test(n)) continue;
+    else if (names && n === "\r") {
+      if (raw[i + 1] === "\n") i++; // CR LF is one line terminator
     } else if (/[0-9\r\n\u2028\u2029]/.test(n)) return undefined;
     else out += n;
   }
@@ -844,15 +848,38 @@ const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWo
 const LOADS_PROCESS = /(?:\brequire\s*\(|\brequire\s*\.\s*resolve\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*(['"`])(?:node:)?process\1/;
 const DANGEROUS_KEY = /^(?:constructor|getBuiltinModule|mainModule|_?linkedBinding|createRequire|prepareStackTrace|getThis|getFunction)$/;
 // The value of a key made only of string literals, template literals of literals, + and parentheses; undefined for anything else.
+// Escapes and line continuations are read as in a name; a piece that does not decode makes the key undefined. A piece with no
+// backslash reads as it always did; in a piece with one, only an unescaped ${"..."} of a template is a substitution.
+const LITERAL_HOLE = /\$\{\s*(?:"([^"]*)"|'([^']*)')\s*\}/g;
+function templateText(piece: string): string | undefined {
+  let out = "";
+  let from = 0;
+  for (const h of piece.matchAll(LITERAL_HOLE)) {
+    let b = 0;
+    for (let k = h.index - 1; k >= 0 && piece[k] === "\\"; k--) b++;
+    if (b % 2 === 1) continue; // \${ is text
+    const text = decodeJsString(piece.slice(from, h.index), true);
+    if (text === undefined) return undefined;
+    out += text + (h[1] ?? h[2] ?? "");
+    from = h.index + h[0].length;
+  }
+  const rest = decodeJsString(piece.slice(from), true);
+  return rest === undefined ? undefined : out + rest;
+}
 function pureLiteralKey(key: string): string | undefined {
   let i = 0;
   let out = "";
   const ws = () => { while (i < key.length && /[\s()]/.test(key[i]!)) i++; };
   for (;;) {
     ws();
-    const m = /^(?:"([^"\\\n]*)"|'([^'\\\n]*)'|`((?:[^`\\$]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*)`)/.exec(key.slice(i));
+    const m = /^(?:"((?:[^"\\\n]|\\[\s\S])*)"|'((?:[^'\\\n]|\\[\s\S])*)'|`((?:[^`\\$]|\\[\s\S]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*)`)/.exec(key.slice(i));
     if (!m) return undefined;
-    out += (m[1] ?? m[2] ?? m[3] ?? "").replace(/\$\{\s*(?:"([^"]*)"|'([^']*)')\s*\}/g, (_x, a: string | undefined, b: string | undefined) => a ?? b ?? "");
+    const piece = m[1] ?? m[2] ?? m[3] ?? "";
+    let text: string | undefined;
+    if (!piece.includes("\\")) text = piece.replace(LITERAL_HOLE, (_x, a: string | undefined, b: string | undefined) => a ?? b ?? "");
+    else text = m[3] === undefined ? decodeJsString(piece, true) : templateText(piece);
+    if (text === undefined) return undefined;
+    out += text;
     i += m[0].length;
     ws();
     if (i >= key.length) return out;
@@ -969,7 +996,7 @@ function dangerousStringUse(source: string): boolean {
   const masked = maskSpans(out, spans);
   for (const s of spans) {
     if (s.mask) continue;
-    const v = s.raw.includes("\\") ? decodeJsString(s.raw) : s.raw;
+    const v = s.raw.includes("\\") ? decodeJsString(s.raw, true) : s.raw;
     if (v === undefined) continue;
     const danger = DANGEROUS_KEY.test(v);
     const steering = STEERING_NAME.test(v);
@@ -1004,10 +1031,18 @@ function dangerousStringUse(source: string): boolean {
   return false;
 }
 // True when a bracket expression is only literals and spells a dangerous property name.
+// Two scans: a backslash before a line end is part of a string in the second, not the first, so a string that only looks like an
+// opening bracket cannot hide a real key from both.
+const LITERAL_KEY_SCANS = [
+  /\[((?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`|[^\]\["'`])*)\]/g,
+  /\[((?:"(?:[^"\\\n]|\\[\s\S])*"|'(?:[^'\\\n]|\\[\s\S])*'|`[^`]*`|[^\]\["'`])*)\]/g,
+];
 function dangerousLiteralKey(keep: string): boolean {
-  for (const m of keep.matchAll(/\[((?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`|[^\]\["'`])*)\]/g)) {
-    const v = pureLiteralKey(m[1]!);
-    if (v !== undefined && DANGEROUS_KEY.test(v)) return true;
+  for (const scan of LITERAL_KEY_SCANS) {
+    for (const m of keep.matchAll(scan)) {
+      const v = pureLiteralKey(m[1]!);
+      if (v !== undefined && DANGEROUS_KEY.test(v)) return true;
+    }
   }
   return false;
 }
