@@ -13,7 +13,7 @@ import { installView, otherInstallEntry, prepareInert } from "./install-closure.
 import type { Registry } from "./adapters/ecosystem/types.ts";
 import type { Advisory, AdvisoryFeed } from "./adapters/advisory/osv.ts";
 import { newFindings, type Finding } from "./adapters/scanner/types.ts";
-import { diffSeq, lexMode, lineEndingsOnly, renderLineDiff, shiftContext, type Op } from "./linediff.ts";
+import { diffSeq, lexMode, lineEndingsOnly, renderLineDiff, renderShifted, type Op } from "./linediff.ts";
 
 export type LayerName = "cooldown" | "advisory" | "prepass" | "scan" | "reviewer" | "gate";
 export const LAYERS: LayerName[] = ["cooldown", "advisory", "prepass", "scan", "reviewer", "gate"];
@@ -226,10 +226,13 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
     bt !== undefined && at !== undefined
       ? (a?: string[], b?: string[]): Op[] | undefined => (ops ??= { v: lineEndingsOnly(bt, at) ? undefined : diffSeq(a ?? bt.split("\n"), b ?? at.split("\n")) }).v
       : undefined;
-  // A line whose lexical context changed is added to the rendering as removed and added; the definitions listed after it read the plain ops.
+  const out = [head, renderLineDiff(bt, at, getOps)];
+  // A line whose lexical context changed is added after the diff as its own removed/added pair; the diff itself is as it always was.
   const mode = lexMode(path);
-  const shown = getOps && mode ? (x: string[], y: string[]): Op[] | undefined => { const o = getOps(x, y); return o && shiftContext(x, y, o, mode); } : getOps;
-  const out = [head, renderLineDiff(bt, at, shown)];
+  if (getOps && mode && bt !== undefined && at !== undefined) {
+    const [x, y] = [bt.split("\n"), at.split("\n")];
+    out.push(renderShifted(x, y, getOps(x, y), mode));
+  }
   if (getOps && at !== undefined && (state === "changed" || state === "loaded by code")) {
     let c = after && blobDefsCache.get(after);
     if (!c || c.before !== before) {

@@ -148,8 +148,7 @@ export function renderLineDiff(before: string | undefined, after: string | undef
     out += `@@ -${o0 + 1} +${n0 + 1} @@${q ? QUOTE_NOTE : ""}\n`;
     if (del.length === add.length && del.every((l, j) => l.length > LONG && add[j]!.length > LONG)) {
       for (let j = 0; j < del.length; j++) {
-        // the same text on both sides (a line only its context changed): shown whole, not as a token diff of nothing
-        const t = del[j] === add[j] ? undefined : tokenDiff(del[j]!, add[j]!);
+        const t = tokenDiff(del[j]!, add[j]!);
         out += t === undefined ? `-${show(del[j]!)}\n+${show(add[j]!)}\n` : `~${t}\n`;
       }
     } else {
@@ -161,12 +160,13 @@ export function renderLineDiff(before: string | undefined, after: string | undef
 
 // The lexical context each line starts in: code, or inside a block comment, a template literal (with its `${` holes and the
 // braces inside them), a string continued over a line end, or a Python triple-quoted string. One light pass; a regex literal
-// is guessed from what comes before the slash. A misread cannot hide a line: a line is shown as changed when its start context
-// differs between the two versions, and both are read the same way. The stack is capped: past the cap every line is "unknown"
-// (always different, so shown), and no state string grows with the number of lines.
-const STACK_CAP = 32;
+// is guessed from what comes before the slash (a keyword, an operator, or the `)` of an if/while/for/with head). A misread
+// cannot hide a line: a line is shown as changed when its start context differs between the two versions, and both are read
+// the same way. Contexts are interned (a stack of kinds as a chain of ids), so equal stacks have equal ids, depth is not capped
+// and nothing grows with the number of lines but one id per line.
 const REGEX_AFTER = /[(,=:[!&|?{};+\-*%<>~^}]/;
 const REGEX_WORDS = new Set(["return", "typeof", "case", "in", "of", "void", "delete", "throw", "new", "else", "do", "yield", "await", "instanceof"]);
+const PAREN_WORDS = new Set(["if", "while", "for", "with"]);
 
 export type LexMode = "js" | "py";
 
@@ -177,45 +177,57 @@ export function lexMode(path: string): LexMode | undefined {
   return undefined;
 }
 
-export function lineStates(lines: string[], mode: LexMode, tag: string): string[] {
+type Interner = Map<string, number>;
+
+export function lineStates(lines: string[], mode: LexMode, interner: Interner): number[] {
   const py = mode === "py";
-  const out: string[] = [];
-  const stack: string[] = []; // "/*", "`", "${" (a hole), "{" (a brace in a hole), a triple quote, or a quote kept over a line end
-  let over = 0; // set once the stack passes the cap: the rest of the file is unknown context
+  const out: number[] = [];
+  // the stack is a chain of interned nodes: id -> (parent id, kind) is the key, so equal stacks share an id
+  const kinds: string[] = []; // node id -> kind (for the top)
+  const parents: number[] = [];
+  const nodeOf = (parent: number, kind: string): number => {
+    const key = `${parent}|${kind}`;
+    let id = interner.get(key);
+    if (id === undefined) {
+      id = interner.size + 1;
+      interner.set(key, id);
+    }
+    kinds[id] = kind;
+    parents[id] = parent;
+    return id;
+  };
+  let cur = 0; // the current top node, 0 for plain code
+  const push = (kind: string) => { cur = nodeOf(cur, kind); };
+  const pop = () => { cur = parents[cur] ?? 0; };
+  const top = () => (cur === 0 ? "" : kinds[cur]!);
   let prev = ""; // the last significant character of code
   let word = ""; // the identifier that ends at prev
-  const push = (x: string) => {
-    if (stack.length >= STACK_CAP) over = 1;
-    else stack.push(x);
-  };
-  const pop = () => {
-    stack.pop();
-  };
-  const top = () => (over > 0 ? "?" : stack[stack.length - 1]);
+  let gap = false; // whitespace since the last token: the next word starts a new one
+  const parens: boolean[] = []; // per open paren: did an if/while/for/with head open it
+  let parenRegex = false; // the last token was the `)` that closes such a head: a slash after it starts a regex
+  const reset = () => { prev = ")"; word = ""; parenRegex = false; gap = false; };
   for (let li = 0; li < lines.length; li++) {
-    const line = lines[li]!;
-    out.push(over > 0 ? `?${tag}` : stack.join(" "));
+    const line = lines[li]!.endsWith("\r") ? lines[li]!.slice(0, -1) : lines[li]!;
+    out.push(cur);
     let i = 0;
     if (li === 0 && !py && line.startsWith("#!")) continue; // a hashbang line is a comment
     while (i < line.length) {
       const t = top();
       const c = line[i]!;
-      if (t === "?") {
-        i = line.length; // past the cap nothing is tracked
-      } else if (t === "/*") {
-        if (c === "*" && line[i + 1] === "/") { pop(); i += 2; prev = ")"; word = ""; } else i++;
+      if (t === "/*") {
+        if (c === "*" && line[i + 1] === "/") { pop(); i += 2; reset(); } else i++;
       } else if (t === "`") {
         if (c === "\\") i += 2;
-        else if (c === "`") { pop(); i++; prev = ")"; word = ""; }
-        else if (c === "$" && line[i + 1] === "{") { push("${"); i += 2; prev = "{"; word = ""; }
+        else if (c === "`") { pop(); i++; reset(); }
+        else if (c === "$" && line[i + 1] === "{") { push("${"); i += 2; prev = "{"; word = ""; parenRegex = false; }
         else i++;
       } else if (t === '"""' || t === "'''") {
         if (c === "\\") i += 2;
-        else if (line.startsWith(t, i)) { pop(); i += 3; prev = ")"; word = ""; }
+        else if (line.startsWith(t, i)) { pop(); i += 3; reset(); }
         else i++;
       } else if (t === '"' || t === "'") {
         if (c === "\\") i += 2;
-        else if (c === t) { pop(); i++; prev = ")"; word = ""; }
+        else if (c === t) { pop(); i++; reset(); }
         else i++;
       } else {
         // code: the top is empty, a hole or a brace inside one
@@ -226,9 +238,9 @@ export function lineStates(lines: string[], mode: LexMode, tag: string): string[
         else if (c === "`") { push("`"); i++; }
         else if (py && (line.startsWith('"""', i) || line.startsWith("'''", i))) { push(line.slice(i, i + 3)); i += 3; }
         else if (c === '"' || c === "'") { push(c); i++; }
-        else if (inHole && c === "{") { push("{"); i++; prev = "{"; word = ""; }
-        else if (inHole && c === "}") { pop(); i++; prev = "}"; word = ""; }
-        else if (c === "/" && !py && (prev === "" || REGEX_AFTER.test(prev) || (/[\w$]/.test(prev) && REGEX_WORDS.has(word)))) {
+        else if (inHole && c === "{") { push("{"); i++; prev = "{"; word = ""; parenRegex = false; }
+        else if (inHole && c === "}") { pop(); i++; prev = "}"; word = ""; parenRegex = false; }
+        else if (c === "/" && !py && (prev === "" || REGEX_AFTER.test(prev) || (prev === ")" && parenRegex) || (/[\w$]/.test(prev) && REGEX_WORDS.has(word)))) {
           // a regex literal: to the closing slash on this line, a class kept whole
           let j = i + 1;
           let cls = false;
@@ -239,12 +251,18 @@ export function lineStates(lines: string[], mode: LexMode, tag: string): string[
             j++;
           }
           i = j + 1;
-          prev = ")";
-          word = "";
+          reset();
         } else {
-          if (/[\w$]/.test(c)) word = /[\w$]/.test(prev) && word ? word + c : c;
-          else if (!/\s/.test(c)) word = "";
-          if (!/\s/.test(c)) prev = c;
+          if (c === "(") parens.push(PAREN_WORDS.has(word));
+          const closed = c === ")" ? parens.pop() === true : false;
+          if (/\s/.test(c)) gap = true;
+          else {
+            if (/[\w$]/.test(c)) word = !gap && /[\w$]/.test(prev) && word ? word + c : c;
+            else word = "";
+            gap = false;
+            prev = c;
+            parenRegex = closed;
+          }
           i++;
         }
       }
@@ -256,21 +274,26 @@ export function lineStates(lines: string[], mode: LexMode, tag: string): string[
 }
 
 // A line both versions hold is not shown by the diff, but its meaning changed when it went from a comment, a template or a
-// string to code (or back): removing `/*` and `*/` turns the lines between them into code. Such a line is shown as removed and
-// added, in addition to the unchanged-line treatment the other readers of the diff give it.
-export function shiftContext(a: string[], b: string[], ops: Op[], mode: LexMode | undefined): Op[] {
-  if (!mode || !ops.some((o) => o.op !== "=")) return ops;
-  const sa = lineStates(a, mode, "a");
-  const sb = lineStates(b, mode, "b");
-  const out: Op[] = [];
+// string to code (or back): removing `/*` and `*/` turns the lines between them into code. The rendering of the diff is left
+// exactly as it is; each such line is added after it as its own whole removed and added pair, never merged into a hunk of the
+// diff and never token-rendered, so everything the plain rendering shows is still shown.
+export function renderShifted(a: string[], b: string[], ops: Op[] | undefined, mode: LexMode | undefined): string {
+  if (!ops || !mode || !ops.some((o) => o.op !== "=")) return "";
+  const interner: Interner = new Map();
+  const sa = lineStates(a, mode, interner);
+  const sb = lineStates(b, mode, interner);
   let oi = 0;
   let ni = 0;
+  let out = "";
   for (const o of ops) {
-    if (o.op === "-") { oi++; out.push(o); }
-    else if (o.op === "+") { ni++; out.push(o); }
+    if (o.op === "-") oi++;
+    else if (o.op === "+") ni++;
     else {
-      if (sa[oi] !== sb[ni]) out.push({ op: "-", v: o.v }, { op: "+", v: o.v });
-      else out.push(o);
+      if (sa[oi] !== sb[ni]) {
+        const q = needsQuote(o.v);
+        const show = q ? JSON.stringify(o.v) : o.v;
+        out += `@@ -${oi + 1} +${ni + 1} @@ [context changed: the line is the same text, now read differently]${q ? QUOTE_NOTE : ""}\n-${show}\n+${show}\n`;
+      }
       oi++;
       ni++;
     }

@@ -102,3 +102,87 @@ describe("braces inside a template hole", () => {
     expect(added(view("index.js", before, after))).toBe(true);
   });
 });
+
+// The rendering of the diff is exactly main's; shifted lines come after it as separate whole pairs.
+describe("main's output is the floor", () => {
+  const head = (f: string) => `=== ${f} (changed) ===\n`;
+  const suffix = "; " + "clean(); ".repeat(35) + "KEEP_THIS_TEXT(); " + "clean(); ".repeat(35);
+  const L = (s: string) => s + suffix;
+  const kept = (out: string) => out.split("KEEP_THIS_TEXT").length - 1;
+
+  test("a shift that merges hunks of long lines does not elide what main shows in full", () => {
+    const b = [L("/*"), L("old2"), L("PAYLOAD"), L("*/")].join("\n");
+    const a = [L("new1"), L("PAYLOAD"), L("new3"), L("new4")].join("\n");
+    const out = view("index.js", b, a);
+    expect(out.startsWith(head("index.js") + renderLineDiff(b, a))).toBe(true);
+    expect(kept(out)).toBeGreaterThanOrEqual(kept(renderLineDiff(b, a)));
+  });
+  test("an off-by-one pairing of long changed lines keeps main's full lines", () => {
+    const b = [L("old1"), L("/*"), L("old2"), L("PAYLOAD"), L("*/"), L("old3")].join("\n");
+    const a = [L("new1"), L("old2x"), L("PAYLOAD"), L("new2"), L("new3")].join("\n");
+    const out = view("index.js", b, a);
+    expect(out.startsWith(head("index.js") + renderLineDiff(b, a))).toBe(true);
+  });
+  test("a deep template prefix does not change what is shown", () => {
+    const pre = "const t=" + "`${".repeat(17) + "1" + "}`".repeat(17) + ";\n";
+    const b = pre + [L("old1"), L("old2"), L("same"), L("old3")].join("\n");
+    const a = pre + [L("new1"), L("same"), L("new2"), L("new3")].join("\n");
+    const out = view("index.js", b, a);
+    expect(out.startsWith(head("index.js") + renderLineDiff(b, a))).toBe(true);
+    expect(out).toBe(head("index.js") + renderLineDiff(b, a));
+  });
+  test("past 32 open holes an unchanged line stays out and a real shift is still shown", () => {
+    const deep = "`${".repeat(40) + "1" + "}`".repeat(40) + ";\n";
+    expect(view("index.js", `${deep}UNCHANGED();\nversion(1);\n`, `${deep}UNCHANGED();\nversion(2);\n`)).not.toContain("UNCHANGED");
+    const out = view("index.js", `${deep}/*\n${P}\n*/\n`, `${deep}\n${P}\n\n`);
+    expect(added(out)).toBe(true);
+  });
+  test("a million lines at depth 31 stay bounded", () => {
+    const pre = "`${".repeat(31) + "\n";
+    const body = "\n".repeat(1_000_000);
+    const t0 = performance.now();
+    const out = view("index.js", pre + body + "a();\n", pre + body + "b();\n");
+    expect(performance.now() - t0).toBeLessThan(5000);
+    expect(out).toContain("+b();");
+  });
+  test("a generated differential: main's lines are always a prefix of the output", () => {
+    let seed = 12345;
+    const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff), seed % n);
+    const pool = ["/*", "*/", "`", "`${", "}`", "${", "}", "{", '"', "'", "\\", "/[/*]/", "if (a) /x/.test(y);", "return /[/*]/;", "x();", "PAYLOAD();", "// c", "a /* b", "end */", "", "  "];
+    const line = () => Array.from({ length: 1 + rnd(3) }, () => pool[rnd(pool.length)]!).join(rnd(2) ? " " : "") + (rnd(6) === 0 ? " ".repeat(500) + "z" : "");
+    for (let n = 0; n < 300; n++) {
+      const base = Array.from({ length: 2 + rnd(10) }, line);
+      const next = base.map((l) => (rnd(3) === 0 ? line() : l)).filter(() => rnd(8) !== 0);
+      const [b, a] = [base.join("\n"), next.join("\n")];
+      if (b === a) continue;
+      const out = view("index.js", b, a);
+      expect(out.startsWith(head("index.js") + renderLineDiff(b, a))).toBe(true);
+    }
+  });
+});
+
+describe("the lexer reads the forms the audits named", () => {
+  test("a regex after the paren of an if head is a regex: a changed regex does not over-show the code after it", () => {
+    const b = `if (ok) /[/*]/.test(x);\nconst a=1;\nconst b=2;\n`;
+    const a = `if (ok) /ok/.test(x);\nconst a=1;\nconst b=2;\n`;
+    expect(view("index.js", b, a)).toBe(`=== index.js (changed) ===\n` + renderLineDiff(b, a));
+  });
+  test("a regex after a keyword that follows another word is a regex", () => {
+    const b = `else return /[/*]/;\nconst a=1;\nconst b=2;\n`;
+    const a = `else return /ok/;\nconst a=1;\nconst b=2;\n`;
+    expect(view("index.js", b, a)).toBe(`=== index.js (changed) ===\n` + renderLineDiff(b, a));
+  });
+  test("a division after a call paren is a division: a block comment opened after it is seen", () => {
+    expect(added(view("index.js", `f(1) /* x\n${P}\n*/\n`, `f(1) x\n${P}\n\n`))).toBe(true);
+  });
+  test("a CRLF file with a continued string keeps its state", () => {
+    const b = `const s="x\\\r\n${P}//";\r\nend();`;
+    const a = `const s="x";\r\n${P}//";\r\nend();`;
+    expect(added(view("index.js", b, a))).toBe(true);
+  });
+  test("a clean CRLF file shows what main shows", () => {
+    const b = `/* a */\r\nconst a=1;\r\nconst b=2;\r\n`;
+    const a = `/* b */\r\nconst a=1;\r\nconst b=2;\r\n`;
+    expect(view("index.js", b, a)).toBe(`=== index.js (changed) ===\n` + renderLineDiff(b, a));
+  });
+});
