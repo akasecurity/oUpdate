@@ -18,7 +18,8 @@ const shifts: [string, string, string, string][] = [
   ["a template body that becomes code", `a();\nconst t=\`\n${P}\n\`;\nb();\n`, `a();\nconst t=1;\n${P}\nb();\n`, "index.js"],
   ["a template closed earlier", `a();\nconst t=\`x\n${P}\ny\`;\n`, `a();\nconst t=\`x\`;\n${P}\ny\`;\n`, "index.js"],
   ["a template hole that closes the template", `a();\nconst t=\`\${1}\n${P}\n\`;\n`, `a();\nconst t=\`\${1}\`;\n${P}\n\`;\n`, "index.js"],
-  ["a string continued over a line end", `a();\nconst s="x\\\n${P}\\\n";\n`, `a();\nconst s="x";\n${P}\n`, "index.js"],
+  ["a string continued over a line end (the payload line identical, only the delimiter changes)", `a();\nconst s="x\\\n${P}\nend();\n`, `a();\nconst s="x";\n${P}\nend();\n`, "index.js"],
+  ["the same, in the reverse direction (code becomes the continued string)", `a();\nconst s="x";\n${P}\nend();\n`, `a();\nconst s="x\\\n${P}\nend();\n`, "index.js"],
   ["a python docstring that is removed", `a()\n"""\n${P}\n"""\nb()\n`, `a()\n\n${P}\n\nb()\n`, "a.py"],
   ["a python triple-quoted string with single quotes", `a()\n'''\n${P}\n'''\nb()\n`, `a()\n\n${P}\n\nb()\n`, "a.py"],
 ];
@@ -262,6 +263,8 @@ describe("the final lexer round", () => {
     expect(text).toContain("an identical \\`-\\` and \\`+\\` pair marks a line whose lexical context at its start changed");
     expect(text).toContain("Read the whole line as if it were added code: anything after a closing delimiter or inside a \\${ } hole runs.");
     expect(text).not.toContain("is a concern");
+    expect(text).toContain("The new version (the right side of the header) is the one to judge.");
+    expect(text).toContain("judge a string or template whose content becomes code through eval, Function or import() as code.");
   });
 });
 
