@@ -1293,7 +1293,8 @@ function isSpaceCode(c: number): boolean {
 function isOperandCode(c: number): boolean {
   return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95 || c === 36 || c === 41 || c === 93;
 }
-function codeOnly(text: string, watch: string[] = [], keep = false, strings?: SpanNote[]): string | undefined {
+// regexes (when given) takes the source offsets of each regular expression literal the scan reads: its opening and closing slash.
+function codeOnly(text: string, watch: string[] = [], keep = false, strings?: SpanNote[], regexes?: number[]): string | undefined {
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
   // The last character of `out` that is not white space. Kept as the text grows: reading it back from `out` would flatten the string at every backtick.
@@ -1468,6 +1469,7 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
         if (danger.test(span) || !endsInOperand(span) || !closesCleanly(end + 1)) return undefined;
       }
       if (end >= 0) {
+        regexes?.push(i, end);
         if (keep) {
           strings?.push({ raw: "", at: out.length, len: end + 1 - i, mask: true });
           add(text.slice(i, end + 1));
@@ -2759,6 +2761,37 @@ function addNative(ctx: Ctx): void {
   }
 }
 
+// The text with every quote and backtick inside a regular expression literal blanked (same length, same lines), or undefined when there is
+// none or the main scan (codeOnly) cannot read the file. Each / is decided once, by the main scan itself: its regex or division reading,
+// and an unclear / taken as a regex only where both readings see the same names. A .js, .cjs or .mjs file it cannot read (an unclear /
+// it refuses, an unclosed regex) is a process hazard, so the file is already read as running anything; nothing is added here (a file of
+// another kind it cannot read is read as before, the plain reading only). The scan runs under an
+// allowance of its own, as it does for the hazard check, so it faults here only where it faults there too.
+export function regexQuotesBlanked(text: string): string | undefined {
+  const at: number[] = [];
+  const read = budgeted(text.length, () => codeOnly(text, [], false, undefined, at) !== undefined, () => false);
+  if (!read) return undefined;
+  const parts: string[] = [];
+  let from = 0;
+  let bodies = 0;
+  for (let r = 0; r < at.length; r += 2) {
+    const open = at[r]!;
+    const close = at[r + 1]!;
+    bodies += close - open;
+    for (let k = open + 1; k < close; k++) {
+      const d = text[k]!;
+      if (d === "'" || d === '"' || d === "`") {
+        parts.push(text.slice(from, k), " ");
+        from = k + 1;
+      }
+    }
+  }
+  jsStep(bodies);
+  if (!parts.length) return undefined;
+  parts.push(text.slice(from));
+  return parts.join("");
+}
+
 function addScannedLiterals(ctx: Ctx): void {
   const keys = [...ctx.scanned];
   for (const key of keys) {
@@ -2772,6 +2805,14 @@ function addScannedLiterals(ctx: Ctx): void {
         const quoted = quotedTokens(text);
         const commands: string[] = [];
         const operand = operandTokens(text, commands);
+        // A quote inside a regular expression (`/"/`) opens no string. The text is read again with those quotes blanked (the main scan's own
+        // regex reading), and both readings are kept: the plain reading is unchanged, so the result is never narrower than it.
+        const plain = regexQuotesBlanked(text);
+        if (plain !== undefined) {
+          jsStep(plain.length);
+          quoted.push(...quotedTokens(plain));
+          operand.push(...operandTokens(plain, commands));
+        }
         return { quoted, operand: [...operand, ...commands] };
       }, () => undefined);
       // A file whose literals could not be read is held, and not remembered as having none.
