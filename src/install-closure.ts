@@ -2761,18 +2761,24 @@ function addNative(ctx: Ctx): void {
   }
 }
 
-// The text with every quote and backtick inside a regular expression literal blanked (same length, same lines), or undefined when there is
-// none or the main scan (codeOnly) cannot read the file. Each / is decided once, by the main scan itself: its regex or division reading,
-// and an unclear / taken as a regex only where both readings see the same names. A .js, .cjs or .mjs file it cannot read (an unclear /
-// it refuses, an unclosed regex) is a process hazard, so the file is already read as running anything; nothing is added here (a file of
-// another kind it cannot read is read as before, the plain reading only). The scan runs under an
-// allowance of its own, as it does for the hazard check, so it faults here only where it faults there too.
-export function regexQuotesBlanked(text: string): string | undefined {
+// Two readings of the text with characters inside regular expression literals blanked (same length, same lines): `quotes` blanks every
+// quote and backtick there (in the literal reader one would open a string), `all` blanks / and * as well (one would open a comment).
+// Each is undefined when it blanks nothing or blanks the same as the other (`all` then only where a body holds a / or *), and the whole
+// is undefined when the main scan (codeOnly) cannot read the file. Both are kept: `all` exposes text that `quotes` hid behind a false
+// comment, and that text can upset the literal reader in a way the hidden one did not, so neither reading replaces the other. Each / is
+// decided once, by the main scan itself: its regex or division reading, and an unclear / taken as a regex only where both readings see
+// the same names. A .js, .cjs or .mjs file it cannot read (an unclear / it refuses, an unclosed regex) is a process hazard, so the file
+// is already read as running anything; nothing is added here (a file of another kind it cannot read is read as before, the plain reading
+// only). The scan runs under an allowance of its own, as it does for the hazard check, so it faults here only where it faults there too.
+export function regexBlanked(text: string): { quotes: string | undefined; all: string | undefined } | undefined {
   const at: number[] = [];
   const read = budgeted(text.length, () => codeOnly(text, [], false, undefined, at) !== undefined, () => false);
   if (!read) return undefined;
-  const parts: string[] = [];
-  let from = 0;
+  const quotes: string[] = [];
+  const all: string[] = [];
+  let qFrom = 0;
+  let aFrom = 0;
+  let comment = false;
   let bodies = 0;
   for (let r = 0; r < at.length; r += 2) {
     const open = at[r]!;
@@ -2780,16 +2786,26 @@ export function regexQuotesBlanked(text: string): string | undefined {
     bodies += close - open;
     for (let k = open + 1; k < close; k++) {
       const d = text[k]!;
-      if (d === "'" || d === '"' || d === "`") {
-        parts.push(text.slice(from, k), " ");
-        from = k + 1;
-      }
+      const quote = d === "'" || d === '"' || d === "`";
+      if (!quote && d !== "/" && d !== "*") continue;
+      if (quote) {
+        quotes.push(text.slice(qFrom, k), " ");
+        qFrom = k + 1;
+      } else comment = true;
+      all.push(text.slice(aFrom, k), " ");
+      aFrom = k + 1;
     }
   }
   jsStep(bodies);
-  if (!parts.length) return undefined;
-  parts.push(text.slice(from));
-  return parts.join("");
+  if (!all.length) return undefined;
+  quotes.push(text.slice(qFrom));
+  all.push(text.slice(aFrom));
+  return { quotes: quotes.length > 1 ? quotes.join("") : undefined, all: comment ? all.join("") : undefined };
+}
+
+// The quote-only reading of regexBlanked.
+export function regexQuotesBlanked(text: string): string | undefined {
+  return regexBlanked(text)?.quotes;
 }
 
 function addScannedLiterals(ctx: Ctx): void {
@@ -2807,11 +2823,13 @@ function addScannedLiterals(ctx: Ctx): void {
         const operand = operandTokens(text, commands);
         // A quote inside a regular expression (`/"/`) opens no string. The text is read again with those quotes blanked (the main scan's own
         // regex reading), and both readings are kept: the plain reading is unchanged, so the result is never narrower than it.
-        const plain = regexQuotesBlanked(text);
-        if (plain !== undefined) {
-          jsStep(plain.length);
-          quoted.push(...quotedTokens(plain));
-          operand.push(...operandTokens(plain, commands));
+        // A / or * there opens no comment either: that reading is a third one, added to the other two, never in place of them.
+        const blanked = regexBlanked(text);
+        for (const other of [blanked?.quotes, blanked?.all]) {
+          if (other === undefined) continue;
+          jsStep(other.length);
+          quoted.push(...quotedTokens(other));
+          operand.push(...operandTokens(other, commands));
         }
         return { quoted, operand: [...operand, ...commands] };
       }, () => undefined);
