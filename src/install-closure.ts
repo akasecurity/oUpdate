@@ -8337,9 +8337,14 @@ const SHELL_BUILTINS = new Set(["echo", "printf", "cd", "pushd", "popd", "test",
   "typeset", "eval", "exec", "source", ".", ":", "exit", "return", "shift", "alias", "unalias", "wait", "trap", "umask", "ulimit", "kill", "pwd", "type", "hash", "command",
   "builtin", "let", "getopts", "break", "continue", "times", "jobs", "fg", "bg", "disown", "dirs", "history", "fc", "enable", "help", "logout", "mapfile", "readarray", "shopt",
   "suspend", "caller", "compgen", "complete", "bind"]);
+// The long options npx (npm's config) parses as taking the next word as a value: one list, used by the runner reading here and by the npx
+// option skip (NPX_VALUE_FLAGS) below.
+const NPX_VALUE_NAMES = ["registry", "cache", "userconfig", "globalconfig", "loglevel", "prefix", "workspace", "shell", "script-shell", "node-options", "tag", "scope"];
+// Of those, --tag and --scope: npm reads no value that starts with a dash for them, so a dash word next is not skipped as their value.
+// A line with either is read twice, once with and once without a value for them (main's reading), and the commands of both are used.
+const NPX_NO_DASH_VALUE = new Set(["--tag", "--scope"]);
 // Options of a package runner that take the next word as their value (a package spec, a shell string, a directory, a filter).
-const RUNNER_VALUE_OPTS = new Set(["-p", "--package", "-c", "--call", "-w", "--workspace", "--prefix", "-C", "--cache", "--userconfig", "--globalconfig", "--registry",
-  "--dir", "--cwd", "-F", "--filter", "--loglevel", "--node-options", "--shell", "--script-shell"]);
+const RUNNER_VALUE_OPTS = new Set(["-p", "--package", "-c", "--call", "-w", "-C", "--dir", "--cwd", "-F", "--filter", ...NPX_VALUE_NAMES.map((n) => `--${n}`)]);
 // Subcommands that are the package manager's own commands, not a script or a bin, per manager: yarn runs a script or a bin for any
 // other word (yarn build, yarn test), pnpm's test and start run scripts only, bun's build, test and repl are its own.
 const PM_OWN: Record<string, Set<string>> = {
@@ -8360,6 +8365,15 @@ const PM_OWN: Record<string, Set<string>> = {
 // yarn, yarn run, pnpm, bun and bun run with no subcommand of their own, that word unless a script of that name runs first. A nested
 // runner (npx yarn tool, corepack pnpm exec tool) is followed. npm run, pnpm run and the words after the command are never commands.
 function runnerCommand(argv: string[], i: number, hasScript: (name: string) => boolean): string[] {
+  const found = runnerCommandRead(argv, i, hasScript, false);
+  // With --tag or --scope on the line, main's whole reading (neither takes a value there) is run as well and both results are used, so
+  // nothing main found, however far into a nested runner, is dropped.
+  if (!argv.slice(i).some((w) => NPX_NO_DASH_VALUE.has(w))) return found;
+  const old = runnerCommandRead(argv, i, hasScript, true);
+  return [...found, ...old.filter((w) => !found.includes(w))];
+}
+// legacy: main's reading, where --tag and --scope take no value.
+function runnerCommandRead(argv: string[], i: number, hasScript: (name: string) => boolean, legacy: boolean): string[] {
   let runner = runnerName(binName(argv[i] ?? ""));
   let k = i + 1;
   let exec = runner === "npx" || runner === "bunx" || runner === "pnpx";
@@ -8369,7 +8383,10 @@ function runnerCommand(argv: string[], i: number, hasScript: (name: string) => b
     while (k < argv.length && argv[k]!.startsWith("-") && argv[k] !== "--") {
       const w = argv[k]!;
       if (/^(?:--version|-v|--help|-h|--usage|-\?)$/.test(w)) return nested;
-      k += RUNNER_VALUE_OPTS.has(w) || (/^-[A-Za-z]$/.test(w) && w === "-p") ? 2 : 1;
+      // For --tag and --scope npm (nopt) takes the next word as the value unless it starts with a dash (`--tag --registry r tool` is --tag
+      // alone, then --registry r); the legacy reading takes no value for them.
+      const noValue = NPX_NO_DASH_VALUE.has(w) && (legacy || argv[k + 1]?.startsWith("-"));
+      k += RUNNER_VALUE_OPTS.has(w) && !noValue ? 2 : 1;
     }
     if (argv[k] === "--") {
       if (!exec) return nested;
@@ -8522,11 +8539,21 @@ const WRAPPER_VALUE_OPTS: Record<string, Set<string>> = {
 // A runner's command, marked: SCRIPT_MARK where the package manager runs a script of that name first (yarn tool, pnpm tool, bun run
 // tool), so the package's scripts decide it when the mark is read; BIN_MARK elsewhere (npx tool).
 function runnerMarks(ws: string[], k: number): string[] {
-  const scriptFirst = new Set<string>();
-  return runnerCommand(ws, k, (n) => {
-    scriptFirst.add(n);
-    return false;
-  }).map((w) => (scriptFirst.has(w) ? SCRIPT_MARK : BIN_MARK) + w);
+  // Each reading (see runnerCommand) is marked on its own: the same word can be a script's in one and a bin's in the other.
+  const out: string[] = [];
+  for (const legacy of [false, true]) {
+    if (legacy && !ws.slice(k).some((w) => NPX_NO_DASH_VALUE.has(w))) break;
+    const scriptFirst = new Set<string>();
+    const found = runnerCommandRead(ws, k, (n) => {
+      scriptFirst.add(n);
+      return false;
+    }, legacy);
+    for (const w of found) {
+      const marked = (scriptFirst.has(w) ? SCRIPT_MARK : BIN_MARK) + w;
+      if (!out.includes(marked)) out.push(marked);
+    }
+  }
+  return out;
 }
 // A command word by its program name: a path (`/usr/bin/node`) and a `.exe` suffix name the same program.
 const programName = (w: string): string => binName(w).replace(/\.exe$/i, "");
@@ -10459,7 +10486,7 @@ function restart(ctx: Ctx): void {
 const RUNNER_VALUE_FLAGS = /^--(?:registry|cache|userconfig|globalconfig|loglevel|cwd|prefix|workspace|shell|node-arg|node-options|config|tag|scope)$/;
 // Options npx (npm's config) and bunx parse as taking the next word as a value. An option outside this list (npx --cwd, --config,
 // not npm's) is not skipped with a value; the word after it keeps the reading it always had.
-const NPX_VALUE_FLAGS = /^--(?:registry|cache|userconfig|globalconfig|loglevel|prefix|workspace|shell|script-shell|node-options|tag|scope)$/;
+const NPX_VALUE_FLAGS = new RegExp(`^--(?:${NPX_VALUE_NAMES.join("|")})$`);
 const BUNX_VALUE_FLAGS = /^--(?:cwd|node-arg)$/;
 function runnerExecutable(argv: string[], i: number, depth = 0): string {
   for (let j = i; j < argv.length; j++) {
