@@ -7038,7 +7038,7 @@ function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
     }
     // `bunx run-s evil`, `npx --yes run-s evil`, `pnpm dlx run-s evil`: the scripts are followed, and the stage is still read
     // below as before (a dlx or exec runner keeps its widen).
-    const runsAt = runsProgramAt(ws, 1, runnerName(bin));
+    const runsAt = /^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(runnerName(bin)) ? runsProgramAt(ws, 1, runnerName(bin), (n) => typeof ctx.raw[n] === "string") : -1;
     if (runsAt >= 0) dispatchRunner(ctx, ws.slice(runsAt), ignoring);
     // `npx run-s evil`, `npm exec -- run-s evil`
     let run = ws;
@@ -8361,20 +8361,25 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
 
 // npm-run-all's own switches (from its --help): a mode or output flag before a name takes no value.
 const RUNS_BOOL_FLAGS = new Set(["-p", "--parallel", "-s", "--sequential", "--serial", "-c", "--continue-on-error", "-l", "--print-label", "-n", "--print-name", "-r", "--race", "--aggregate-output", "--silent"]);
-const RUNS_VALUE_FLAGS = new Set(["--max-parallel", "--npm-path"]);
+// --npm-path names a file npm-run-all runs as npm: it is not a value to skip, so the run stays unresolved as before.
+const RUNS_VALUE_FLAGS = new Set(["--max-parallel"]);
 
 // The index of run-s, run-p or npm-run-all when it is the program a package runner runs: `npx --yes run-s`, `bunx run-s`,
 // `pnpm dlx run-s`, `pnpm exec run-s`, `yarn run-s`, `npx pnpm exec run-s`. -1 for anything else, and for a yarn, pnpm or bun
-// run moved to another directory by a flag (that run is widened, its scripts are not this package's).
-function runsProgramAt(argv: string[], i: number, bin: string): number {
-  const end = argv.indexOf("--", i);
+// run moved to another directory by a flag (that run is widened, its scripts are not this package's). `yarn run-s`, `pnpm run-s` and
+// `bun run-s` run the package's own script when one has that name (has), so that is not the binary.
+function runsProgramAt(argv: string[], i: number, bin: string, has: (name: string) => boolean): number {
   const pm = (b: string) => /^(?:yarn|yarnpkg|pnpm|bun)$/.test(b);
-  if (pm(bin)) {
-    const widen = WORKSPACE_WIDEN[bin === "yarnpkg" ? "yarn" : (bin as "yarn" | "pnpm" | "bun")];
-    if (argv.slice(i, end < 0 ? argv.length : end).some((a) => widen.test(a))) return -1;
-  }
+  const moved = (b: string, from: number): boolean => {
+    if (!pm(b)) return false;
+    const end = argv.indexOf("--", from);
+    const widen = WORKSPACE_WIDEN[b === "yarnpkg" ? "yarn" : (b as "yarn" | "pnpm" | "bun")];
+    return argv.slice(from, end < 0 ? argv.length : end).some((a) => widen.test(a));
+  };
+  if (moved(bin, i)) return -1;
   let k = i;
   let runner = bin;
+  let viaExec = false;
   for (let d = 0; d < 4; d++) {
     while (k < argv.length && argv[k]!.startsWith("-") && argv[k] !== "--") {
       const ef = execFlag(argv[k]!);
@@ -8386,14 +8391,15 @@ function runsProgramAt(argv: string[], i: number, bin: string): number {
     const w = argv[k];
     if (w === undefined) return -1;
     const exe = runnerName(w);
-    if (/^(?:run-s|run-p|npm-run-all)$/.test(exe)) return k;
+    if (/^(?:run-s|run-p|npm-run-all)$/.test(exe)) return pm(runner) && !viaExec && has(w) ? -1 : k;
     // `pnpm dlx`, `pnpm exec`, `yarn exec`, `bun x` and a nested npx run the word after them.
-    if ((pm(runner) && /^(?:exec|x|dlx)$/.test(w)) || /^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(exe)) {
-      if (!/^(?:exec|x|dlx)$/.test(w)) runner = exe;
-      k++;
-      continue;
-    }
-    return -1;
+    if (pm(runner) && /^(?:exec|x|dlx)$/.test(w)) viaExec = true;
+    else if (/^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(exe)) {
+      runner = exe;
+      viaExec = false;
+      if (moved(exe, k + 1)) return -1; // `npx yarn --cwd sub run-s` runs another package's scripts
+    } else return -1;
+    k++;
   }
   return -1;
 }
@@ -9904,8 +9910,16 @@ function dispatch(ctx: Ctx, cmd: string): void {
   // `function f {` opens a function body like `f() {`: the command after it is read.
   while (i < argv.length) {
     if (/^(?:if|then|elif|else|do|while|until|!|\{)$/.test(argv[i]!)) i++;
-    else if (argv[i] === "function" && i + 1 < argv.length) i += argv[i + 2] === "()" ? 3 : 2;
-    else break;
+    else if (argv[i] === "function" && i + 1 < argv.length) {
+      // The body is read as a command too, and the line keeps its own reading (an unknown command word widens, as before).
+      const rest = argv.slice(i + (argv[i + 2] === "()" ? 3 : 2));
+      if (rest.length > 0 && ctx.depth < DEPTH) {
+        ctx.depth++;
+        dispatch(ctx, rest.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+        ctx.depth--;
+      }
+      break;
+    } else break;
   }
   if (i >= argv.length || /^(?:fi|done|esac|\})$/.test(argv[i]!)) return;
   if (argv[i] === "[" || argv[i] === "test") return; // the test builtin runs nothing
@@ -10006,7 +10020,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
   // A package runner whose program is run-s, run-p or npm-run-all (`npx --yes run-s evil`, `pnpm dlx run-s evil`,
   // `yarn run-s evil`) runs the scripts of this package it names: they are followed, and the runner's own reading goes on.
   if (/^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(runnerName(bin)) && ctx.depth < DEPTH) {
-    const at = runsProgramAt(argv, i, runnerName(bin));
+    const at = runsProgramAt(argv, i, runnerName(bin), (n) => typeof ctx.raw[n] === "string");
     if (at >= 0) {
       ctx.depth++;
       dispatchRuns(ctx, argv, at + 1);
@@ -10163,7 +10177,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
         widenAll(ctx);
         // `yarn --cwd . evil` and `pnpm -C . evil` at the package root run this package's script: the run is read without the flag too.
         const n = selfDirFlag(ctx, bin, argv, j);
-        if (n > 0 && ctx.depth < DEPTH) {
+        if (n > 0 && ctx.depth < DEPTH && argv.length <= 200) {
           ctx.depth++;
           dispatch(ctx, [...argv.slice(i - 1, j), ...argv.slice(j + n)].map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
           ctx.depth--;
