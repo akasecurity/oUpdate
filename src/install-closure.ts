@@ -66,6 +66,14 @@ const DEPTH = 64;
 
 const dec = new TextDecoder("utf-8", { fatal: false });
 
+interface LookupSets {
+  seen: Set<string>;
+  seenNoHooks: Set<string>;
+  scanned: Set<string>;
+  gypScanned: Set<string>;
+  ranSh: Set<string>;
+  binsRead: Set<string>;
+}
 interface Ctx {
   hold?: string;
   noEnvIgnore?: boolean; // inside a wrapper other than env: a leading assignment is a command word, not the environment
@@ -101,6 +109,16 @@ interface Ctx {
   fileCount: number;
   // Paths a hook command names directly.
   hookNamed: Set<string>;
+  // The package's own bins: name -> target paths (package.json `bin`, string or object, and every file under `directories.bin`).
+  bins: Map<string, string[]>;
+  // Bin files already read.
+  binsRead: Set<string>;
+  // The command being dispatched is only looked up, listed or asked for help (command -v tool, sudo -l tool, npm exec --help tool):
+  // nothing in it runs, so no bin of this package is read for it or for what it would redispatch. Set and restored around it.
+  noBinLookup?: boolean;
+  // The read-once records of looked-up commands (see underLookup), and the real ones while a looked-up command is read.
+  lookupSets?: LookupSets;
+  realSets?: LookupSets;
   logical: Map<string, string>;
   raw: Record<string, unknown>;
   config: Record<string, unknown>;
@@ -2453,7 +2471,7 @@ function scanJs(ctx: Ctx, key: string): void {
     else followLoads(ctx, key, text); // a large static file still names the files it loads
     return;
   }
-  if (ctx.scanned.size >= DEPTH && !ctx.scanned.has(key)) {
+  if (capCount(ctx, "scanned") >= DEPTH && !(ctx.realSets ?? ctx).scanned.has(key) && !ctx.lookupSets?.scanned.has(key)) {
     fail(ctx, "unresolved: script depth");
     return;
   }
@@ -2890,7 +2908,7 @@ export function templatesQuoted(text: string): string | undefined {
 }
 
 function addScannedLiterals(ctx: Ctx): void {
-  const keys = [...ctx.scanned];
+  const keys = [...(ctx.realSets ?? ctx).scanned, ...(ctx.lookupSets?.scanned ?? [])];
   for (const key of keys) {
     if (ctx.hold) return;
     // A file's literals are read once, under an allowance of its own (it is not the file being scanned), and kept for the next widen step.
@@ -6509,6 +6527,8 @@ function commandTokens(raw: string, out: string[], depth = 0): void {
     while (end < words.length && !read[end]!.op) end++;
     let k = at;
     while (k < end && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]!) || /^(?:env|npx|exec)$/.test(words[k]!))) k++;
+    // The command this segment runs may be one of the package's own bins: the word at command position, or a package runner's command.
+    for (const t of commandWordsOf(words.slice(at, end))) out.push(t);
     if (k < end && SHELL_PROGRAMS.has(programName(words[k]!)) && words[k + 1] === "-c" && k + 2 < end && depth < 4) commandTokens(words[k + 2]!, out, depth + 1);
     else if (k < end && NODE_PROGRAMS.has(programName(words[k]!))) {
       let wide = false;
@@ -6574,6 +6594,206 @@ const COMMAND_CALLS = new Set(["fork", "spawn", "spawnSync", "execFile", "execFi
 const NODE_PROGRAMS = new Set(["node", "nodejs"]);
 // Marks an operand named from the working directory (the package root): it resolves there as node does, never as a stem anywhere.
 const CWD_MARK = "\u0000";
+// The command word of a command string a scanned file runs, resolved against the package's own bins.
+const BIN_MARK = "\u0001";
+// A runner's command that a script of the same name would take first (yarn tool): a bin only when the package has no such script.
+const SCRIPT_MARK = "\u0002";
+// The shell runs its own builtin for these words, never a bin of that name.
+const SHELL_BUILTINS = new Set(["echo", "printf", "cd", "pushd", "popd", "test", "[", "[[", "true", "false", "export", "set", "unset", "read", "readonly", "local", "declare",
+  "typeset", "eval", "exec", "source", ".", ":", "exit", "return", "shift", "alias", "unalias", "wait", "trap", "umask", "ulimit", "kill", "pwd", "type", "hash", "command",
+  "builtin", "let", "getopts", "break", "continue", "times", "jobs", "fg", "bg", "disown", "dirs", "history", "fc", "enable", "help", "logout", "mapfile", "readarray", "shopt",
+  "suspend", "caller", "compgen", "complete", "bind"]);
+// Options of a package runner that take the next word as their value (a package spec, a shell string, a directory, a filter).
+const RUNNER_VALUE_OPTS = new Set(["-p", "--package", "-c", "--call", "-w", "--workspace", "--prefix", "-C", "--cache", "--userconfig", "--globalconfig", "--registry",
+  "--dir", "--cwd", "-F", "--filter", "--loglevel", "--node-options", "--shell", "--script-shell"]);
+// Subcommands that are the package manager's own commands, not a script or a bin, per manager: yarn runs a script or a bin for any
+// other word (yarn build, yarn test), pnpm's test and start run scripts only, bun's build, test and repl are its own.
+const PM_OWN: Record<string, Set<string>> = {
+  yarn: new Set(["exec", "dlx", "set", "node", "install", "add", "remove", "upgrade", "up", "upgrade-interactive", "outdated", "audit", "list", "why", "info", "publish",
+    "pack", "version", "versions", "link", "unlink", "import", "cache", "config", "global", "login", "logout", "owner", "tag", "team", "licenses", "check", "autoclean",
+    "generate-lock-entry", "help", "policies", "plugin", "dedupe", "constraints", "explain", "rebuild", "patch", "patch-commit", "unplug", "workspace", "workspaces",
+    "init", "create", "npm", "search", "stage", "bin"]),
+  pnpm: new Set(["exec", "dlx", "add", "install", "i", "install-test", "it", "update", "up", "upgrade", "remove", "rm", "uninstall", "un", "link", "ln", "unlink", "import",
+    "rebuild", "rb", "prune", "fetch", "patch", "patch-commit", "patch-remove", "audit", "list", "ls", "outdated", "why", "licenses", "create", "test", "t", "start",
+    "publish", "pack", "recursive", "m", "multi", "server", "store", "root", "bin", "setup", "init", "deploy", "doctor", "config", "c", "get", "set", "env", "cache",
+    "dedupe", "self-update", "approve-builds", "ignored-builds", "sbom", "view", "info", "login", "logout", "version", "owner", "tag", "team", "help"]),
+  bun: new Set(["x", "exec", "test", "repl", "install", "i", "add", "a", "remove", "rm", "update", "outdated", "audit", "link", "unlink", "pm", "build", "init", "create",
+    "c", "upgrade", "publish", "patch", "patch-commit", "info", "why", "help", "completions", "feedback"]),
+};
+
+// The command a package runner line runs, from the runner word at argv[i]: after npx, bunx, pnpx, npm exec / x, pnpm exec / dlx, yarn
+// exec / dlx and bun x, the first word that is not an option (a known option's value is skipped; a `--` before it is allowed); after
+// yarn, yarn run, pnpm, bun and bun run with no subcommand of their own, that word unless a script of that name runs first. A nested
+// runner (npx yarn tool, corepack pnpm exec tool) is followed. npm run, pnpm run and the words after the command are never commands.
+function runnerCommand(argv: string[], i: number, hasScript: (name: string) => boolean): string[] {
+  let runner = runnerName(binName(argv[i] ?? ""));
+  let k = i + 1;
+  let exec = runner === "npx" || runner === "bunx" || runner === "pnpx";
+  // A runner named after npx or npm exec resolves through node_modules/.bin too (npx npm, npx yarn tool): a bin of that name runs.
+  const nested: string[] = [];
+  for (let d = 0; d < 6 && k < argv.length; d++) {
+    while (k < argv.length && argv[k]!.startsWith("-") && argv[k] !== "--") {
+      const w = argv[k]!;
+      if (/^(?:--version|-v|--help|-h|--usage|-\?)$/.test(w)) return nested;
+      k += RUNNER_VALUE_OPTS.has(w) || (/^-[A-Za-z]$/.test(w) && w === "-p") ? 2 : 1;
+    }
+    if (argv[k] === "--") {
+      if (!exec) return nested;
+      k++;
+    }
+    const w = argv[k];
+    if (w === undefined) return nested;
+    const name = runnerName(binName(w));
+    if (!exec) {
+      if (runner === "corepack") {
+        runner = name;
+        k++;
+        continue;
+      }
+      if (runner === "npm") {
+        if (w !== "exec" && w !== "x") return nested;
+        exec = true;
+        k++;
+        continue;
+      }
+      if (runner === "yarn" || runner === "yarnpkg" || runner === "pnpm" || runner === "bun") {
+        if (w === "exec" || w === "dlx" || (runner === "bun" && w === "x")) {
+          exec = true;
+          k++;
+          continue;
+        }
+        // yarn run and bun run run a bin when no script has the name; pnpm run runs scripts only.
+        if (w === "run" && runner !== "pnpm") {
+          k++;
+          const next = argv[k];
+          return next !== undefined && !next.startsWith("-") && !hasScript(next) ? [...nested, next] : nested;
+        }
+        if (PM_OWN[runner === "yarnpkg" ? "yarn" : runner]!.has(w) || hasScript(w)) return nested;
+        return [...nested, w];
+      }
+      return nested;
+    }
+    if (/^(?:npx|bunx|pnpx|npm|yarn|yarnpkg|pnpm|bun|corepack)$/.test(name)) {
+      if (name !== "corepack") nested.push(w);
+      runner = name;
+      exec = runner === "npx" || runner === "bunx" || runner === "pnpx";
+      k++;
+      continue;
+    }
+    return [...nested, w];
+  }
+  return nested;
+}
+
+// The words of one command (a segment of a command string) that may run a bin of the package: its command word after assignments and
+// wrappers (env, exec, command, nohup, time, nice, timeout, sudo, xargs, stdbuf, setsid, ionice, with their options and the values
+// of those that take one; timeout's duration), unless it is a shell builtin, or a package runner's command.
+function commandWordsOf(ws: string[]): string[] {
+  let k = 0;
+  while (k < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k]!)) k++;
+  while (k < ws.length && Object.hasOwn(WRAPPER_VALUE_OPTS, ws[k]!)) {
+    const wrapper = ws[k++]!;
+    const takes = WRAPPER_VALUE_OPTS[wrapper]!;
+    while (k < ws.length && (ws[k]!.startsWith("-") || (wrapper === "env" && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[k]!)))) {
+      const o = ws[k++]!;
+      if (o === "--") break;
+      if (wrapperLookup(wrapper, o)) return [];
+      if (takes.has(o)) k++;
+    }
+    if (wrapper === "timeout") k++;
+  }
+  const w = ws[k];
+  if (w === undefined) return [];
+  if (/^(?:npx|bunx|pnpx|npm|yarn|yarnpkg|pnpm|bun|corepack)$/.test(runnerName(programName(w)))) return [BIN_MARK + w, ...runnerMarks(ws, k)];
+  return SHELL_BUILTINS.has(w) ? [] : [BIN_MARK + w];
+}
+// Options with which a wrapper runs nothing: it only looks the command up, lists or prints its help or version.
+// sudo -l, -V and -h list, print or ask for help, and -K refuses a command; -k (--reset-timestamp) still runs it. command -v and -V only
+// look the name up. A cluster is read letter by letter up to an option that takes a value (sudo -uwill: -u with the value "will").
+const WRAPPER_LOOKUP: Record<string, { long: RegExp; short: string; value: string }> = {
+  command: { long: /^$/, short: "vV", value: "" },
+  sudo: { long: /^--(?:list|version|help|remove-timestamp)$/, short: "lVhK", value: "ugCDprtUTR" },
+  env: { long: /^--(?:help|version)$/, short: "", value: "uCPSaLU" },
+  nice: { long: /^--(?:help|version)$/, short: "", value: "n" },
+  timeout: { long: /^--(?:help|version)$/, short: "", value: "sk" },
+  xargs: { long: /^--(?:help|version)$/, short: "", value: "ILnPsdEa" },
+};
+// Reads a command that is only looked up (command -v, sudo -l, npm exec --help): no bin of this package is read for it, and it keeps
+// read-once records of its own (scripts, sh files, scanned files, bins), kept across lookups, so nothing it reads without its bins counts
+// as read for a later real run of the same script or file, and a script read once under a lookup is not read again under one. Its
+// scripts count toward the script limit like any other, each name once.
+function underLookup(ctx: Ctx, run: () => void): void {
+  if (ctx.noBinLookup) {
+    run();
+    return;
+  }
+  const lk = (ctx.lookupSets ??= { seen: new Set(), seenNoHooks: new Set(), scanned: new Set(), gypScanned: new Set(), ranSh: new Set(), binsRead: new Set() });
+  const real = { seen: ctx.seen, seenNoHooks: ctx.seenNoHooks, scanned: ctx.scanned, gypScanned: ctx.gypScanned, ranSh: ctx.ranSh, binsRead: ctx.binsRead };
+  ctx.realSets = real;
+  Object.assign(ctx, lk);
+  ctx.noBinLookup = true;
+  try {
+    run();
+  } finally {
+    Object.assign(ctx, real);
+    ctx.realSets = undefined;
+    ctx.noBinLookup = undefined;
+  }
+}
+// Main's caps (sh files, scanned files) count every file read once, lookup reads included: the size of both records together.
+function capCount(ctx: Ctx, key: "ranSh" | "scanned"): number {
+  const real = (ctx.realSets ?? ctx)[key];
+  const lk = ctx.lookupSets?.[key];
+  if (!lk || lk.size === 0) return real.size;
+  let n = real.size;
+  for (const k of lk) if (!real.has(k)) n++;
+  return n;
+}
+// A file read in either group is no new file for a cap (main read it once).
+function readInEither(ctx: Ctx, key: "ranSh" | "scanned", file: string): boolean {
+  return (ctx.realSets ?? ctx)[key].has(file) || ctx.lookupSets?.[key].has(file) === true;
+}
+// The script records of both kinds of read: the real ones and the lookup ones.
+function scriptSets(ctx: Ctx): Set<string>[] {
+  const real = ctx.realSets ?? ctx;
+  const out = [real.seen, real.seenNoHooks];
+  if (ctx.lookupSets) out.push(ctx.lookupSets.seen, ctx.lookupSets.seenNoHooks);
+  return out;
+}
+function wrapperLookup(wrapper: string, o: string): boolean {
+  const l = Object.hasOwn(WRAPPER_LOOKUP, wrapper) ? WRAPPER_LOOKUP[wrapper]! : undefined;
+  if (!l || !o.startsWith("-") || o === "-") return false;
+  if (o.startsWith("--")) return l.long.test(o.split("=")[0]!);
+  for (let c = 1; c < o.length; c++) {
+    if (l.short.includes(o[c]!)) return true;
+    if (l.value.includes(o[c]!)) return false;
+  }
+  return false;
+}
+// Wrappers that run the command after them, and their options that take the next word as a value.
+const WRAPPER_VALUE_OPTS: Record<string, Set<string>> = {
+  env: new Set(["-u", "--unset", "-C", "--chdir", "-P", "-a", "--argv0", "-L", "-U"]),
+  exec: new Set(["-a"]),
+  command: new Set(),
+  nohup: new Set(),
+  time: new Set(["-f", "--format", "-o", "--output"]),
+  nice: new Set(["-n", "--adjustment"]),
+  timeout: new Set(["-s", "--signal", "-k", "--kill-after"]),
+  sudo: new Set(["-u", "--user", "-g", "--group", "-C", "--close-from", "-D", "--chdir", "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type", "-U", "--other-user", "-T", "--command-timeout"]),
+  xargs: new Set(["-I", "-L", "-n", "--max-args", "-P", "--max-procs", "-s", "--max-chars", "-d", "--delimiter", "-E", "-a", "--arg-file"]),
+  stdbuf: new Set(["-i", "-o", "-e"]),
+  setsid: new Set(),
+  ionice: new Set(["-c", "--class", "-n", "--classdata", "-p", "--pid"]),
+};
+// A runner's command, marked: SCRIPT_MARK where the package manager runs a script of that name first (yarn tool, pnpm tool, bun run
+// tool), so the package's scripts decide it when the mark is read; BIN_MARK elsewhere (npx tool).
+function runnerMarks(ws: string[], k: number): string[] {
+  const scriptFirst = new Set<string>();
+  return runnerCommand(ws, k, (n) => {
+    scriptFirst.add(n);
+    return false;
+  }).map((w) => (scriptFirst.has(w) ? SCRIPT_MARK : BIN_MARK) + w);
+}
 // A command word by its program name: a path (`/usr/bin/node`) and a `.exe` suffix name the same program.
 const programName = (w: string): string => binName(w).replace(/\.exe$/i, "");
 // Programs a command names, not files of the package.
@@ -6727,6 +6947,10 @@ function operandTokens(text: string, commands?: string[]): string[] {
           // that is not a literal, such as process.execPath) is one, and a bare name there is a file of the working directory.
           // A subscript here (`process.env["NODE"]`, `bins["evil"]`) keeps its first word as a stem, as before; it is no args array.
           // The first word keeps the position it always had in the parent's list; the words a node command adds beyond it go to the extra list.
+          // A package runner's args array (spawn("npx", ["tool"])) may name one of the package's own bins in any item.
+          if (commands && parent.pending.length > 0 && /^(?:npx|bunx|pnpx|npm|yarn|yarnpkg|pnpm|bun|corepack)$/.test(runnerName(programName(parent.pending[0]!)))) {
+            for (const t of runnerMarks([parent.pending[0]!, ...f.pending], 0)) commands.push(t);
+          }
           const first = parent.pending.length === 0 || NODE_PROGRAMS.has(parent.pending[0]!);
           const runs = first || !parent.plain || parent.node;
           if (runs && parent.callee !== "fork") {
@@ -6779,6 +7003,12 @@ function settled(ctx: Ctx, key: string | undefined): boolean {
 }
 
 function addLiteralToken(ctx: Ctx, token: string, operand = false): void {
+  if (token.startsWith(BIN_MARK) || token.startsWith(SCRIPT_MARK)) {
+    const w = token.slice(1);
+    if (token.startsWith(SCRIPT_MARK) && typeof ctx.raw[w] === "string") return;
+    for (const target of ownBinTargets(ctx, w)) readOwnBin(ctx, target);
+    return;
+  }
   if (token.startsWith(CWD_MARK)) {
     const w = token.slice(1);
     // A bare word, or a path from the working directory (a relative path in a command string), never one leaving it.
@@ -6827,7 +7057,7 @@ function scanAdded(ctx: Ctx, key: string): void {
     return;
   }
   if (ctx.fromGyp) ctx.gypScanned.add(key);
-  if (ctx.scanned.size >= DEPTH && !ctx.scanned.has(key)) {
+  if (capCount(ctx, "scanned") >= DEPTH && !(ctx.realSets ?? ctx).scanned.has(key) && !ctx.lookupSets?.scanned.has(key)) {
     fail(ctx, "unresolved: script depth");
     return;
   }
@@ -8399,8 +8629,9 @@ function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
 }
 
 function distinctScripts(ctx: Ctx): number {
-  let n = ctx.seen.size;
-  for (const name of ctx.seenNoHooks) if (!ctx.seen.has(name)) n++;
+  const sets = scriptSets(ctx);
+  let n = sets[0]!.size;
+  for (let k = 1; k < sets.length; k++) for (const name of sets[k]!) if (!sets.slice(0, k).some((x) => x.has(name))) n++;
   return n;
 }
 
@@ -8418,7 +8649,7 @@ function runScript(ctx: Ctx, name: string, optional: boolean): void {
     return;
   }
   // The cap counts distinct scripts: a script read again with its hooks on is no new script.
-  const again = ctx.seenNoHooks.has(name);
+  const again = scriptSets(ctx).some((x) => x.has(name));
   if ((!again && distinctScripts(ctx) >= DEPTH) || ctx.depth >= DEPTH) {
     ctx.widenInert = true;
     widenAll(ctx);
@@ -8701,7 +8932,7 @@ function dispatchSh(ctx: Ctx, argv: string[], i: number): void {
     return;
   }
   if (ctx.ranSh.has(key)) return;
-  if (ctx.ranSh.size >= DEPTH) {
+  if (capCount(ctx, "ranSh") >= DEPTH && !readInEither(ctx, "ranSh", key)) {
     fail(ctx, "unresolved: script depth");
     return;
   }
@@ -8917,8 +9148,11 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
   let k = ex + 1;
   let remote = false;
   let call: string | undefined;
+  // npm exec --help or --version runs nothing: the command after it is read as before, but not as a bin of this package.
+  let help = false;
   while (k < argv.length && argv[k] !== "--" && argv[k]!.startsWith("-")) {
     const a = argv[k]!;
+    if (/^(?:--help|-h|--version|-v|--usage)$/.test(a)) help = true;
     const ef = execFlag(a);
     if (ef?.kind === "call") {
       call = ef.value ?? argv[k + 1] ?? "";
@@ -8967,7 +9201,10 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
   }
   ctx.depth++;
   if (k >= argv.length || remote || !localEntry(argv[k]!)) {
-    if (k < argv.length) dispatch(ctx, inner);
+    if (k < argv.length) {
+      if (help) underLookup(ctx, () => dispatch(ctx, inner));
+      else dispatch(ctx, inner);
+    }
     widenAll(ctx);
     fail(ctx, "unresolved: runner");
   } else dispatch(ctx, inner);
@@ -9324,7 +9561,7 @@ function readFedAt(ctx: Ctx, path: string, shell: boolean): void {
   if (!key || isManifest(key)) return;
   noteHookArg(ctx, path);
   if (ctx.ranSh.has(key)) return;
-  if (ctx.ranSh.size >= DEPTH || ctx.depth >= DEPTH) {
+  if ((capCount(ctx, "ranSh") >= DEPTH && !readInEither(ctx, "ranSh", key)) || ctx.depth >= DEPTH) {
     // A budget ran out with a fed file unread: read every file.
     ctx.widenInert = true;
     widenAll(ctx);
@@ -10314,6 +10551,11 @@ function dispatch(ctx: Ctx, cmd: string): void {
     if (argv[i]!.startsWith("\\")) argv[i] = argv[i]!.slice(1);
     else i++;
   }
+  // command -v / -V only looks the command up: it is read as before, with no bin of this package read for it.
+  if (!ctx.noBinLookup && i > 0 && argv[i - 1] === "command" && wrapperLookup("command", argv[i] ?? "")) {
+    underLookup(ctx, () => dispatch(ctx, cmd));
+    return;
+  }
   // A compound command's keywords (`if`, `then`, `do`, `fi` ...) are not commands: the command after one is read, and a bare
   // closing keyword runs nothing. Without this each of them was an unknown runner that widened and, with `[ -f x ]`
   // after `if`, held on the glob cap whatever changed.
@@ -10376,6 +10618,14 @@ function dispatch(ctx: Ctx, cmd: string): void {
   }
   if (argv.some((a) => RUNNERS.has(runnerName(a)))) ctx.sawRunner = true;
   const bin = binName(argv[i]!);
+  // One of the package's own bins runs its file: the command word (not a shell builtin), or the command of a package runner (npx tool,
+  // pnpm exec tool, yarn tool, bun x tool). The bin's file is read as its own process; the word keeps its own reading too.
+  const runnerLine = /^(?:npx|bunx|pnpx|npm|yarn|yarnpkg|pnpm|bun|corepack)$/.test(runnerName(bin));
+  // A bin named like the runner itself (bin {npm: ...}) runs in its place: node_modules/.bin comes first on the scripts' PATH.
+  if (!ctx.noBinLookup) for (const w of runnerLine ? [argv[i]!, ...runnerCommand(argv, i, (n) => typeof ctx.raw[n] === "string")] : SHELL_BUILTINS.has(argv[i]!) ? [] : [argv[i]!]) {
+    for (const target of ownBinTargets(ctx, w)) readOwnBin(ctx, target);
+  }
+  if (ctx.hold) return;
   // An unresolved command word may be any runner: every file is read, docs and tests included.
   if (bin.includes(UNRESOLVED) && !argv[i]!.includes("/")) {
     ctx.widenInert = true;
@@ -10414,7 +10664,29 @@ function dispatch(ctx: Ctx, cmd: string): void {
         if (envIg !== undefined && binName(inner[0]!) === "npm") ctx.ignoreHooks = envIg;
         else if (envClears(argv.slice(i))) ctx.ignoreHooks = false;
       }
-      dispatch(ctx, inner.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      // command -v, sudo -l and the like only look the inner command up.
+      // The words the unwrap stripped (when the inner words are the line's tail), each option read under the wrapper it follows.
+      const tail = inner.length <= argv.length - i && argv.slice(argv.length - inner.length).join("\u0000") === inner.join("\u0000");
+      const end = tail ? argv.length - inner.length : argv.length;
+      let look = false;
+      let cur = bin;
+      for (let o = i; o < end; o++) {
+        const w = argv[o]!;
+        if (!w.startsWith("-")) {
+          if (Object.hasOwn(WRAPPER_VALUE_OPTS, binName(w))) cur = binName(w);
+          else if (!tail) break;
+          continue;
+        }
+        if (w === "--") {
+          if (!tail) break;
+          continue;
+        }
+        if (wrapperLookup(cur, w)) look = true;
+        else if (Object.hasOwn(WRAPPER_VALUE_OPTS, cur) && WRAPPER_VALUE_OPTS[cur]!.has(w)) o++;
+      }
+      const run = () => dispatch(ctx, inner.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      if (look) underLookup(ctx, run);
+      else run();
       ctx.noEnvIgnore = savedNoEnv;
       ctx.ignoreHooks = savedIg;
       ctx.depth--;
@@ -11068,6 +11340,166 @@ function stampBin(root: Record<string, unknown>): string {
   return JSON.stringify({ bin: root.bin === undefined ? null : root.bin, directoriesBin });
 }
 
+// npm links a package's bins into the node_modules/.bin of the package that installs it before install and postinstall run, and that
+// folder is on the scripts' PATH: a bin name (or a .bin/<name> path) in a hook or in a command a scanned file runs is that bin's file.
+// Read as npm reads them: a `bin` string is named by the package name without its scope, a `bin` object by the base name of each key,
+// and every file under `directories.bin` by its base name. `directories.bin` is read even when `bin` is set (npm then ignores it): wider.
+function ownBins(root: Record<string, unknown>, logical: Map<string, string>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const add = (name: string, raw: string) => {
+    // Lowercase: on a case-insensitive file system (macOS, Windows) .bin/TOOL is .bin/tool.
+    const n = name.slice(name.lastIndexOf("/") + 1).toLowerCase();
+    const target = inPackage(raw);
+    if (!n || !target) return;
+    const list = out.get(n);
+    if (list) list.push(target);
+    else out.set(n, [target]);
+  };
+  const bin = root.bin;
+  if (typeof bin === "string" && typeof root.name === "string") add(root.name, bin);
+  else if (bin && typeof bin === "object" && !Array.isArray(bin)) {
+    for (const [k, v] of Object.entries(bin as Record<string, unknown>)) if (typeof v === "string") add(k, v);
+  }
+  const dirs = root.directories;
+  const dir = dirs && typeof dirs === "object" && !Array.isArray(dirs) ? (dirs as Record<string, unknown>).bin : undefined;
+  if (typeof dir === "string") {
+    const d = inPackage(dir);
+    if (d) for (const l of logical.keys()) if (l.startsWith(`${d}/`)) add(l, l);
+  }
+  return out;
+}
+
+// A package-relative path as npm resolves it (./x, a/../b, a trailing slash), or undefined when it leaves the package or is absolute.
+function inPackage(raw: string): string | undefined {
+  if (!raw || raw.startsWith("/") || /^[A-Za-z]:/.test(raw) || raw.includes("\\")) return undefined;
+  const out: string[] = [];
+  for (const seg of raw.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (!out.length) return undefined;
+      out.pop();
+    } else out.push(seg);
+  }
+  const p = out.join("/");
+  return p && !badPath(p) ? p : undefined;
+}
+
+// A bin's file runs as its own process: a cd in it moves nothing after it, and it starts in the caller's working directory. It is read
+// from the package root (a cd before it already widens through the moved folder) and the working directory is put back after. The
+// system runs it by its shebang: a node, nodejs or bun interpreter is read as `node <its shebang words> <file>` reads it (NODE_OPTIONS=,
+// --require, -e), any other as a script run by its path is. With no shebang the extension decides (.js, .cjs, .mjs as node reads it,
+// any other as a script); a shebang whose interpreter cannot be read is read both ways. Each bin is read once.
+function readOwnBin(ctx: Ctx, target: string): void {
+  if (ctx.hold || ctx.binsRead.has(target)) return;
+  ctx.binsRead.add(target);
+  const key = findKey(ctx, target);
+  if (!key) return;
+  const saved = ctx.cwd;
+  const savedIgnore = ctx.ignoreHooks;
+  const savedNoEnv = ctx.noEnvIgnore;
+  ctx.cwd = "";
+  // Each bin is read once, so that one read is the widest: pre/post scripts run, and an ignore-scripts setting of the command that
+  // reached it is not carried in (a later plain run of the same file would run them).
+  ctx.ignoreHooks = undefined;
+  ctx.noEnvIgnore = true;
+  try {
+    const first = dec.decode(ctx.bytes.get(key)?.subarray(0, 512)).split("\n", 1)[0] ?? "";
+    const words = shebangCommand(first);
+    const at = words?.findIndex((w) => !ASSIGN.test(w)) ?? -1;
+    const interp = words === undefined ? undefined : at < 0 ? "" : shebangBase(words[at]!);
+    // No shebang: the extension decides. A shebang whose interpreter cannot be read (`#!` alone): both ways.
+    const asNode = interp === undefined ? /\.(?:js|cjs|mjs)$/i.test(target) : interp === "" || /^(?:node|nodejs|bun)$/.test(interp);
+    const asScript = interp === "" || !asNode;
+    if (asNode) {
+      if (ctx.depth >= DEPTH) {
+        ctx.widenInert = true;
+        widenAll(ctx);
+        return;
+      }
+      // The shebang's own words run too: its assignments (NODE_OPTIONS=...) and the interpreter's options (--require x, -e code).
+      const q = (w: string) => `'${w.replace(/'/g, "'\\''")}'`;
+      const pre = words && at >= 0 ? [...words.slice(0, at), "node", ...words.slice(at + 1)] : ["node"];
+      ctx.depth++;
+      dispatch(ctx, [...pre, target].map(q).join(" "));
+      ctx.depth--;
+    }
+    if (asScript) readFed(ctx, target, true);
+  } finally {
+    ctx.cwd = saved;
+    ctx.ignoreHooks = savedIgnore;
+    ctx.noEnvIgnore = savedNoEnv;
+  }
+}
+
+// A shebang path's program name; a Windows .exe suffix is dropped.
+const shebangBase = (w: string) => w.slice(w.lastIndexOf("/") + 1).replace(/\.exe$/i, "");
+// env options that take a value (GNU and BSD): -u NAME, -C dir, -P path, -a name, -L/-U user; the long forms take it as --opt=v or the next word.
+const ENV_SHORT_VALUE = new Set(["u", "C", "P", "a", "L", "U"]);
+const ENV_LONG_VALUE = new Set(["--unset", "--chdir", "--argv0"]);
+
+// The command a first line's shebang runs, as words: the interpreter and its arguments, after env its assignments too (env's own
+// options and their values dropped, a -S / --split-string string split into words). Words split as env -S splits them (quotes
+// group and are removed, an unquoted # starts a comment). Undefined when the line is no shebang.
+export function shebangCommand(first: string): string[] | undefined {
+  if (!first.startsWith("#!")) return undefined;
+  const ws: string[] = [];
+  const re = /(?:[^\s'"]+|'[^']*'?|"[^"]*"?)+/g;
+  for (const m of first.slice(2).trim().matchAll(re)) {
+    if (m[0].startsWith("#")) break;
+    ws.push(m[0].replace(/'([^']*)'?|"([^"]*)"?/g, (_s, a: string | undefined, b: string | undefined) => a ?? b ?? ""));
+  }
+  if (ws[0] === undefined || shebangBase(ws[0]) !== "env") return ws;
+  const out: string[] = [];
+  let k = 1;
+  while (k < ws.length) {
+    const w = ws[k]!;
+    if (ASSIGN.test(w)) {
+      out.push(w);
+      k++;
+      continue;
+    }
+    if (w === "--") {
+      k++;
+      break;
+    }
+    if (w === "-") {
+      k++;
+      continue;
+    }
+    if (!w.startsWith("-")) break;
+    k++;
+    if (w.startsWith("--")) {
+      const eq = w.indexOf("=");
+      const name = eq < 0 ? w : w.slice(0, eq);
+      if (name === "--split-string") {
+        if (eq >= 0) ws.splice(k, 0, ...w.slice(eq + 1).split(/\s+/).filter(Boolean));
+      } else if (eq < 0 && name.length >= 3 && [...ENV_LONG_VALUE].some((o) => o.startsWith(name))) k++;
+      continue;
+    }
+    // A cluster of short options (-iu NAME, -uNAME, -Snode): a value option takes the rest of the cluster or the next word.
+    for (let c = 1; c < w.length; c++) {
+      if (w[c] === "S") {
+        if (c + 1 < w.length) ws.splice(k, 0, ...w.slice(c + 1).split(/\s+/).filter(Boolean));
+        break;
+      }
+      if (ENV_SHORT_VALUE.has(w[c]!)) {
+        if (c + 1 === w.length) k++;
+        break;
+      }
+    }
+  }
+  return [...out, ...ws.slice(k)];
+}
+
+// The targets of the package's own bin a command word names: a bare name or a path ending in .bin/<name>, else none.
+function ownBinTargets(ctx: Ctx, word: string): string[] {
+  if (ctx.bins.size === 0) return [];
+  const m = /(?:^|\/)\.bin\/([^/]+)$/.exec(word);
+  if (!m && word.includes("/")) return [];
+  const name = binName(m ? m[1]! : word).toLowerCase();
+  return ctx.bins.get(name) ?? ctx.bins.get(name.replace(/\.exe$/i, "")) ?? [];
+}
+
 // A safe relative prebuild.test is part of the closure. Any other prebuild value is a download or a config we do not read.
 function notePrebuild(ctx: Ctx, root: Record<string, unknown>): void {
   if (ctx.hold || root.prebuild === undefined) return;
@@ -11129,6 +11561,8 @@ function installViewCore(files: FileMap): InstallView {
     fromGyp: false,
     fileCount: files.size,
     hookNamed: new Set(),
+    bins: new Map(),
+    binsRead: new Set(),
     movedDirs: new Set(),
     cwd: "",
     widenInert: false,
@@ -11146,6 +11580,7 @@ function installViewCore(files: FileMap): InstallView {
   const root = pj ?? {};
   const hook = installHook(root);
   const stamp = stampBin(root);
+  ctx.bins = ownBins(root, indexed.logical);
   const done = (gyp?: string) => finish(ctx, manifest, gyp, hook, stamp);
   const scripts = root.scripts;
   ctx.raw = scripts && typeof scripts === "object" && !Array.isArray(scripts) ? (scripts as Record<string, unknown>) : {};
