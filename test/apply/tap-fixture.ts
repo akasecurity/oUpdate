@@ -55,6 +55,8 @@ export interface Fx {
   newUrl?: string;
   oldExtra?: string;
   newExtra?: string;
+  /** Extra changes committed with the old formula (the installed revision). */
+  before?: (tap: string) => void;
   /** Extra changes committed with the new formula. */
   after?: (tap: string) => void;
   receipt?: "rev" | "none" | "unknown" | "head";
@@ -78,6 +80,7 @@ export function fixture(f: Fx = {}) {
   git(tap, "init", "-q");
   writeFileSync(join(tap, "Formula/tool.rb"), rb(f.oldUrl ?? PREBUILT("1.0"), "1.0", f.oldExtra));
   writeFileSync(join(tap, "Formula/helper.rb"), "class Helper < Formula\nend\n");
+  f.before?.(tap);
   git(tap, "add", "-A");
   git(tap, "commit", "-qm", "old");
   const oldRev = git(tap, "rev-parse", "HEAD").out.trim();
