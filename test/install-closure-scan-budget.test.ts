@@ -47,6 +47,43 @@ describe("JS scan step budget", () => {
     expect(tier).toEqual(CLOSED);
     expect(scannerFaultCount() - before).toBe(1);
   }, 60000);
+  test("30,000 nested computed members are read from one bracket index, in linear time and with no fault", () => {
+    const n = 30_000;
+    const src = "exports.a = x" + "[x".repeat(n) + "]".repeat(n) + ";\n";
+    setJsScanSteps(40 * src.length); // a step count is the same on every machine; a quadratic reading spends far more
+    const before = scannerFaultCount();
+    provablyStatic(src);
+    expect(scannerFaultCount() - before).toBe(0);
+  });
+  test("30,000 nested computed members with || defaults in groups are read in linear time with no fault", () => {
+    const n = 30_000;
+    const src = "exports.a = " + "(x[".repeat(n) + "y" + "]||0)".repeat(n) + ";\n";
+    setJsScanSteps(40 * src.length);
+    const before = scannerFaultCount();
+    provablyStatic(src);
+    expect(scannerFaultCount() - before).toBe(0);
+  });
+  test("a 2 MB file of counter loops with computed calls reads every use of the counter under the default budget and stays static", () => {
+    const src = "const o = { x: [(v) => v] };\n" + "for (let i = 0; i < 1; i++) o.x[i](i);\n".repeat(52_000);
+    setJsScanSteps(40 * src.length);
+    const before = scannerFaultCount();
+    expect(provablyStatic(src)).toBe(true);
+    expect(scannerFaultCount() - before).toBe(0);
+  });
+  test("a 70 KB semicolon-free file of a[0] || b lines stays static with no fault", () => {
+    const src = "const a = [1]\nlet b = 2\n" + "x = a[0] || b\n".repeat(5000);
+    setJsScanSteps(40 * src.length);
+    const before = scannerFaultCount();
+    expect(provablyStatic(src)).toBe(true);
+    expect(scannerFaultCount() - before).toBe(0);
+  });
+  test("a semicolon-free file of computed reads joined by || stays static with no fault", () => {
+    const src = "exports.f = (o, k, d) => {\n" + "  x = o[k] || d\n".repeat(5000) + "}\n";
+    setJsScanSteps(40 * src.length);
+    const before = scannerFaultCount();
+    expect(provablyStatic(src)).toBe(true);
+    expect(scannerFaultCount() - before).toBe(0);
+  });
   test("an ordinary 2 MB hook is far under the default budget and is not held", () => {
     const tier = classifyJs("a.js", "const fs = require('fs');\n" + "foo(bar(baz(1, 'a')), [1, 2].map((x) => x));\n".repeat(50_000));
     expect(tier.all).toBe(false);
