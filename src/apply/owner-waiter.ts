@@ -13,6 +13,8 @@
 // version rollback), and is written to the failed file: the run never queues it again until that
 // file is removed.
 //
+// An owner with an argv restart (argv[0] absolute) is restarted by running that argv instead of launchctl
+// (a host where only a narrow root helper may restart it); its FAILED note names the same argv.
 // An owner with restart {bootstrap: plist} is restarted by `launchctl bootout` then `launchctl
 // bootstrap <domain> <plist>` instead (its FAILED note says "bootstrap again"); healthWithinSec
 // replaces the 60 s health window.
@@ -42,13 +44,26 @@ export interface StaleOwner {
   /**
    * "kickstart" (default): `launchctl kickstart -k`. {bootstrap: plist}: `launchctl bootout` then
    * `launchctl bootstrap <domain> <plist>` (for a daemon kickstart -k once left stuck in a spawn failure).
+   * An argv (argv[0] absolute): run as given in their place (for a host where only a narrow root helper,
+   * not launchctl, may restart the job: ["/usr/bin/sudo", "-n", "<helper>", "<name>"]).
    */
   restart?: OwnerRestart;
   /** How long the restarted job has to be healthy (default 60). */
   healthWithinSec?: number;
+  /** How long an argv restart may run (default 120). */
+  restartTimeoutSec?: number;
 }
 
-export type OwnerRestart = "kickstart" | { bootstrap: string };
+export type OwnerRestart = "kickstart" | { bootstrap: string } | string[];
+
+/** A restart argv: non-empty, every entry a string, the first an absolute path. */
+export const isRestartArgv = (r: unknown): r is string[] =>
+  Array.isArray(r) && r.length > 0 && r.every((a) => typeof a === "string" && a !== "") && (r[0] as string).startsWith("/");
+
+/** A queued job's restart as written: absent, "kickstart", {bootstrap: absolute path} or a restart argv. */
+const restartReadable = (r: unknown) =>
+  r === undefined || r === "kickstart" || isRestartArgv(r) ||
+  (typeof r === "object" && r !== null && !Array.isArray(r) && Object.keys(r).length === 1 && typeof (r as { bootstrap?: unknown }).bootstrap === "string" && (r as { bootstrap: string }).bootstrap.startsWith("/"));
 
 export interface QueuedOwner {
   label: string;
@@ -61,6 +76,10 @@ export interface QueuedOwner {
   probe?: string[];
   health?: string;
   restart?: OwnerRestart;
+  /** How long an argv restart may run (default 120). */
+  restartTimeoutSec?: number;
+  /** A release check's named owner (releaseChecks.owners, as the config says now): kickstarted when no staleOwners entry matches it. */
+  named?: boolean;
   healthWithinSec?: number;
   /**
    * Always restarted and health-checked (a release check's named owner): never "already on the new
@@ -156,11 +175,11 @@ export async function ownerWaiterReport(
   }
   for (const l of lines) {
     const m = l.match(/^held: busy (\S+)/);
-    if (m) busy.add(m[1]!);
+    if (m) busy.add(unshown(m[1]!));
   }
   // Joined with commas: a part of the brew line starting "FAILED:" would read as failed packages.
   if (lines.length) notes.push(`owner restart waiter: ${lines.join(", ")}`);
-  if (failed.size) notes.push(`owner restart FAILED earlier for ${[...failed].join(" ")} — not retried, retry: rm ${f.failed}`);
+  if (failed.size) notes.push(`owner restart FAILED earlier for ${[...failed].map(shown).join(" ")} — not retried, retry: rm ${f.failed}`);
   return { note: notes.join("; "), busy, failed };
 }
 
@@ -198,6 +217,15 @@ export interface OwnerWaiterOptions {
   healthMs?: number;
   healthPollMs?: number;
   probeTimeoutMs?: number;
+  /** An argv restart's bound (default 120 s): a helper that never exits is a restart failure, never a stuck queue. */
+  restartTimeoutMs?: number;
+  /**
+   * The config's staleOwners: when given, a job's restart is taken from the entry matching its label now (none:
+   * kickstart), never from the queue file. Absent (tests): the queued restart.
+   */
+  staleOwners?: readonly StaleOwner[];
+  /** A release check's inline restart: an owner no entry matches, not named, keeps the job as recorded (never dropped mid-check). */
+  keepUnmatched?: boolean;
 }
 
 const BUSY_BOUND_MS = 2 * 60 * 60_000;
@@ -215,6 +243,18 @@ export function parsePrint(out: string): { pid?: string; state?: string; path?: 
   return r;
 }
 
+/** A label as an outcome line shows it: control characters (newline, ESC) JSON-escaped, a ";" too (the summary parser splits there). */
+const shown = (label: string) => JSON.stringify(label).slice(1, -1).replace(/;/g, "\\u003b");
+/** The label a shown one was made from (the report compares raw labels); text that is not a shown label is kept as it is. */
+const unshown = (text: string): string => {
+  try {
+    const v: unknown = JSON.parse(`"${text}"`);
+    return typeof v === "string" ? v : text;
+  } catch {
+    return text;
+  }
+};
+
 /** system or gui/<uid>: the target without its label. */
 const domainOf = (q: QueuedOwner) => q.target.slice(0, q.target.length - q.label.length - 1);
 
@@ -222,8 +262,10 @@ const domainOf = (q: QueuedOwner) => q.target.slice(0, q.target.length - q.label
 const rollback = (q: QueuedOwner, plist: string | undefined) => {
   const sudo = q.target.startsWith("system/") ? "sudo " : "";
   // No ";" anywhere in an outcome: the summary parser splits the brew line there.
-  if (typeof q.restart === "object") return `bootstrap again: ${sudo}launchctl bootstrap ${domainOf(q)} ${q.restart.bootstrap}`;
-  return `rollback: ${sudo}launchctl bootout ${q.target} && ${sudo}launchctl bootstrap ${domainOf(q)} ${plist ?? `<${q.label}.plist>`}`;
+  // An argv restart: the same argv as JSON, every argument boundary kept (display only; a ";" escaped, as above).
+  if (Array.isArray(q.restart)) return `rollback: ${JSON.stringify(q.restart).replace(/;/g, "\\u003b")}`;
+  if (typeof q.restart === "object") return `bootstrap again: ${sudo}launchctl bootstrap ${shown(domainOf(q))} ${shown(q.restart.bootstrap)}`;
+  return `rollback: ${sudo}launchctl bootout ${shown(q.target)} && ${sudo}launchctl bootstrap ${shown(domainOf(q))} ${shown(plist ?? `<${q.label}.plist>`)}`;
 };
 
 interface InProgress {
@@ -271,6 +313,32 @@ export interface OwnerJobResult {
  * (which restart their formula's owner inline, so their check runs after it).
  */
 export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
+  /**
+   * The job as the config names it now: with o.staleOwners, every owner field (probe, health, restart, healthWithinSec,
+   * restartTimeoutSec) comes from the entry matching the label, never from a queue file or an older record; label,
+   * target, pid, keg, expect, required and named stay. No entry matches: a release check's named owner keeps the
+   * kickstart default; another release-check owner (keepUnmatched) keeps a recorded launchctl restart (kickstart or
+   * bootstrap, as on main), never a recorded argv or restartTimeoutSec (an argv runs only from the config now: none is
+   * kickstart); a queued stale job is undefined (the operator removed or narrowed its entry: not tried).
+   * Without o.staleOwners (tests): the job as given.
+   */
+  const derive = (q: QueuedOwner): QueuedOwner | undefined => {
+    if (!o.staleOwners) return q;
+    const { probe: _p, health: _h, restart: _r, healthWithinSec: _w, restartTimeoutSec: _t, ...base } = q;
+    const owner = matchOwner(o.staleOwners, q.label);
+    // No entry: a named owner is kickstarted; another owner of a release check keeps its recorded launchctl method (as on
+    // main), an argv never taken from a record; a queued stale job is not tried.
+    if (!owner) {
+      if (q.named) return base;
+      if (!o.keepUnmatched) return undefined;
+      const { restartTimeoutSec: _rt, restart, ...kept } = q;
+      return Array.isArray(restart) || restart === undefined ? kept : { ...kept, restart };
+    }
+    return {
+      ...base, ...(owner.probe ? { probe: owner.probe } : {}), ...(owner.health ? { health: owner.health } : {}), ...(owner.restart ? { restart: owner.restart } : {}),
+      ...(owner.healthWithinSec ? { healthWithinSec: owner.healthWithinSec } : {}), ...(owner.restartTimeoutSec ? { restartTimeoutSec: owner.restartTimeoutSec } : {}),
+    };
+  };
   const f = ownerFiles(o.dir);
   const idleMs = o.idleMs ?? 60_000;
   const sampleMs = o.sampleMs ?? 3_000;
@@ -326,6 +394,11 @@ export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
   };
   /** The restart itself, argv arrays only (sudo -n in the system domain). Returns the reason when it failed. */
   const restartJob = async (q: QueuedOwner): Promise<string | undefined> => {
+    // An argv restart runs as given (its own sudo, if any), in place of launchctl.
+    if (Array.isArray(q.restart)) {
+      const r = await env.exec(q.restart, { timeoutMs: q.restartTimeoutSec !== undefined ? q.restartTimeoutSec * 1000 : (o.restartTimeoutMs ?? 120_000) });
+      return r.timedOut ? "restart timed out" : r.rc !== 0 ? `restart rc ${r.rc}` : undefined;
+    }
     const sudo = q.target.startsWith("system/") ? ["sudo", "-n"] : [];
     if (typeof q.restart === "object") {
       const out = await env.exec([...sudo, "launchctl", "bootout", q.target]);
@@ -364,32 +437,35 @@ export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
    * skipped, unless ignoreFailed). `restarting` is called
    * right before the restart with the plist path launchd named.
    */
-  const job = async (q: QueuedOwner, hooks: { restarting?: (plist: string | undefined) => Promise<void>; ignoreFailed?: boolean } = {}): Promise<OwnerJobResult> => {
+  const job = async (queued: QueuedOwner, hooks: { restarting?: (plist: string | undefined) => Promise<void>; ignoreFailed?: boolean } = {}): Promise<OwnerJobResult> => {
+    // The job as the config names it now (see derive); a queued job no entry matches is not tried.
+    const q = derive(queued);
+    if (!q) return { kind: "skipped", line: `not tried: ${shown(queued.label)} (no longer in staleOwners)` };
     // ignoreFailed: a release check restarts its owner even when an earlier restart of it failed.
     if (!hooks.ignoreFailed && failedLabels(await env.readFile(f.failed)).has(q.label)) return { kind: "skipped" };
     const first = await print(q.target);
-    if (!first?.pid) return { kind: "not-running", line: `held: ${q.label} not running` };
-    if (!q.required && first.pid !== q.pid && (await onDeletedKeg(first.pid, q.keg)) === false) return { kind: "already", line: `already on the new keg: ${q.label}` };
+    if (!first?.pid) return { kind: "not-running", line: `held: ${shown(q.label)} not running` };
+    if (!q.required && first.pid !== q.pid && (await onDeletedKeg(first.pid, q.keg)) === false) return { kind: "already", line: `already on the new keg: ${shown(q.label)}` };
     let pid = first.pid;
     let plist = first.path;
     for (let tries = 0; ; tries++) {
       env.log(`${q.label}: waiting for idle (pid ${pid})`);
-      if (!(await waitIdle(q, pid))) return { kind: "busy", line: `held: busy ${q.label} (busy past ${Math.round(bound / 60_000)} min)` };
+      if (!(await waitIdle(q, pid))) return { kind: "busy", line: `held: busy ${shown(q.label)} (busy past ${Math.round(bound / 60_000)} min)` };
       const again = await print(q.target);
-      if (!again?.pid) return { kind: "not-running", line: `held: ${q.label} not running` };
+      if (!again?.pid) return { kind: "not-running", line: `held: ${shown(q.label)} not running` };
       plist = again.path ?? plist;
       if (again.pid === pid) break;
-      if (!q.required && (await onDeletedKeg(again.pid, q.keg)) === false) return { kind: "already", line: `already on the new keg: ${q.label}` };
-      if (tries >= REPLACED_MAX) return { kind: "busy", line: `held: ${q.label} keeps being replaced (pid ${again.pid})` };
+      if (!q.required && (await onDeletedKeg(again.pid, q.keg)) === false) return { kind: "already", line: `already on the new keg: ${shown(q.label)}` };
+      if (tries >= REPLACED_MAX) return { kind: "busy", line: `held: ${shown(q.label)} keeps being replaced (pid ${again.pid})` };
       pid = again.pid;
     }
     await hooks.restarting?.(plist);
     const why = (await restartJob(q)) ?? (await health(q, pid));
-    if (why === undefined) return { kind: "restarted", line: `restarted ${q.label}` };
+    if (why === undefined) return { kind: "restarted", line: `restarted ${shown(q.label)}` };
     await markFailed(q.label);
-    return { kind: "failed", line: `FAILED: ${q.label} not healthy after restart (${why}) — ${rollback(q, plist)}` };
+    return { kind: "failed", line: `FAILED: ${shown(q.label)} not healthy after restart (${why}) — ${rollback(q, plist)}` };
   };
-  return { job, markFailed };
+  return { job, markFailed, derive };
 }
 
 async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<number> {
@@ -413,7 +489,7 @@ async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<nu
       } catch {
         // named by its file
       }
-      await outcome(`not tried: ${label} (queue stopped after ${after} failed)`);
+      await outcome(`not tried: ${shown(label)} (queue stopped after ${shown(after)} failed)`);
     }
   };
 
@@ -432,7 +508,7 @@ async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<nu
       // The restart may have half happened: never retried, the operator decides. As any failure, it
       // stops the queue for this run; the rest stay queued for a later run.
       await ops.markFailed(p.item.label);
-      await outcome(`FAILED: ${p.item.label} restart interrupted (the waiter stopped mid-restart) — ${rollback(p.item, p.path)}`);
+      await outcome(`FAILED: ${shown(p.item.label)} restart interrupted (the waiter stopped mid-restart) — ${rollback(p.item, p.path)}`);
       await env.remove(f.inprogress);
       return 1;
     } else {
@@ -450,12 +526,24 @@ async function workQueue(env: OwnerWaiterEnv, o: OwnerWaiterOptions): Promise<nu
     let q: QueuedOwner;
     try {
       q = JSON.parse(text ?? "") as QueuedOwner;
-      if (!q.label || !q.target || !q.pid || !q.keg) throw new Error("incomplete");
+      if (!q.label || !q.target || !q.pid || !q.keg || !restartReadable(q.restart)) throw new Error("incomplete");
     } catch {
       await env.remove(file);
       await outcome(`FAILED: unreadable queue entry ${names[0]}`);
       continue;
     }
+    // A queue entry never says it is a release check's (named, required): those are set only inline, from the config.
+    delete q.named;
+    delete q.required;
+    // The job as the config names it now: what runs, and what a stopped waiter's record names, is that.
+    const d = ops.derive(q);
+    if (!d) {
+      // Its entry was removed or narrowed: dropped, no failed marker, the queue goes on.
+      await env.remove(file);
+      await outcome(`not tried: ${shown(q.label)} (no longer in staleOwners)`);
+      continue;
+    }
+    q = d;
     // Recorded before the entry goes, so a stop from here on never loses the job.
     await setProgress({ phase: "waiting", item: q });
     await env.remove(file);

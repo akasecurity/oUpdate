@@ -310,6 +310,14 @@ describe("owner waiter", () => {
     kegOf?: Record<string, string>;
     probeRc?: number[];
     kickRc?: number;
+    /** An argv restart (its first word /usr/bin/sudo or /opt/restart.test/restart): rc, a timeout; it restarts restartTarget. */
+    argvRc?: number;
+    argvTimedOut?: boolean;
+    /** The argv restart throws (the waiter killed mid-restart). */
+    argvThrows?: boolean;
+    /** Records the timeoutMs each hang call was given. */
+    hangTimeouts?: (number | undefined)[];
+    restartTarget?: string;
     http?: number;
     lockHeld?: boolean;
     /** Successive takeLock answers (overrides lockHeld). */
@@ -337,9 +345,17 @@ describe("owner waiter", () => {
     let emptyHook = s.onEmptyQueue;
     let t = 0;
     let released = false;
-    const exec: Exec = async (argv) => {
+    const exec: Exec = async (argv, eo) => {
       const line = argv.join(" ");
       calls.push(line);
+      // A helper that never exits: it ends only by the caller's own timeout (as realExec kills on timeoutMs).
+      if (argv[0] === "/opt/restart.test/hang") {
+        s.hangTimeouts?.push(eo?.timeoutMs);
+        return new Promise((done) => {
+          if (eo?.timeoutMs !== undefined) setTimeout(() => done({ rc: 143, out: "", err: "", timedOut: true }), eo.timeoutMs);
+          else setTimeout(() => done({ rc: 0, out: "NO TIMEOUT GIVEN", err: "" }), 1500);
+        });
+      }
       if (argv[0] === "launchctl" && argv[1] === "print") {
         const target = argv[2]!;
         const [before, after] = s.pids?.[target] ?? ["20", "30"];
@@ -353,6 +369,12 @@ describe("owner waiter", () => {
         return { rc: 0, out: "", err: "" };
       }
       if (line.includes("launchctl bootstrap")) return { rc: s.bootstrapRc ?? 0, out: "", err: "" };
+      if (argv[0] === "/usr/bin/sudo" || argv[0] === "/opt/restart.test/restart") {
+        if (s.argvThrows) throw new Error("waiter killed mid-restart");
+        if (s.argvTimedOut) return { rc: 143, out: "", err: "", timedOut: true };
+        if ((s.argvRc ?? 0) === 0) kicked.add(s.restartTarget ?? "gui/501/org.example.svc");
+        return { rc: s.argvRc ?? 0, out: "", err: "" };
+      }
       if (line.includes("kickstart -k")) {
         if (s.kickThrows) throw new Error("waiter killed mid-restart");
         kicked.add(argv.at(-1)!);
@@ -645,6 +667,193 @@ describe("owner waiter", () => {
       expect(await runOwnerWaiter(b.env, { ...opts, idleMs: 0 })).toBe(1);
       expect(b.clock()).toBeGreaterThanOrEqual(60_000);
       expect(b.clock()).toBeLessThan(65_000);
+    });
+  });
+  describe("restart mode argv: the argv runs in place of kickstart or bootout+bootstrap, the rest unchanged", () => {
+    const T = "system/org.example.host";
+    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/fleet-restart", "example-host"];
+    const host = (over: Partial<QueuedOwner> = {}) => item({ label: "org.example.host", target: T, restart: [...ARGV], ...over });
+    test("the argv runs as given (no sudo added), never launchctl kickstart, bootout or bootstrap, then health", async () => {
+      const w = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T });
+      w.queue(host());
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(0);
+      expect(w.calls).toContain(ARGV.join(" "));
+      expect(w.calls.some((c) => c.includes("kickstart") || c.includes("launchctl boot"))).toBe(false);
+      expect(w.outcome()).toEqual(["restarted org.example.host"]);
+    });
+    test("a non-zero exit: FAILED, its rollback line is the same argv, the label marked failed", async () => {
+      const w = owEnv({ argvRc: 3, restartTarget: T });
+      w.queue(host());
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(w.outcome()[0]).toBe(`FAILED: org.example.host not healthy after restart (restart rc 3) — rollback: ${JSON.stringify(ARGV)}`);
+      expect(w.files.get(`${Q}/failed`)).toBe("org.example.host\n");
+    });
+    test("a timeout: FAILED", async () => {
+      const w = owEnv({ argvTimedOut: true, restartTarget: T });
+      w.queue(host());
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(w.outcome()[0]).toStartWith("FAILED: org.example.host not healthy after restart (restart timed out)");
+    });
+    test("health is still checked after an argv restart that exits 0: the same pid is FAILED", async () => {
+      const w = owEnv({ pids: { [T]: ["20", "20"] }, restartTarget: T });
+      w.queue(host({ healthWithinSec: 5 }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(w.outcome()[0]).toStartWith("FAILED: org.example.host not healthy after restart (state running, pid 20)");
+    });
+    test("a helper that never exits: ended by the restart bound (the waiter's own exec timeout), FAILED, the lock and record released", async () => {
+      const w = owEnv({ restartTarget: T });
+      w.queue(host({ restart: ["/opt/restart.test/hang"] }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0, restartTimeoutMs: 20 })).toBe(1);
+      expect(w.outcome()[0]).toBe(`FAILED: org.example.host not healthy after restart (restart timed out) — rollback: ["/opt/restart.test/hang"]`);
+      expect(w.files.get(`${Q}/failed`)).toBe("org.example.host\n");
+      expect(w.files.has(`${Q}/inprogress.json`)).toBe(false);
+    });
+    test("a \";\" in the argv is escaped in the rollback line (the summary parser splits on it)", async () => {
+      const w = owEnv({ argvRc: 1, restartTarget: T });
+      w.queue(host({ restart: ["/opt/restart.test/restart", "a;b"] }));
+      await runOwnerWaiter(w.env, { ...opts, idleMs: 0 });
+      expect(w.outcome()[0]).toEndWith(`rollback: ["/opt/restart.test/restart","a\\u003bb"]`);
+    });
+    test.each([["an empty array", []], ["a non-string entry", ["/usr/bin/sudo", 1]], ["an empty-string entry", ["/usr/bin/sudo", ""]]] as const)("a queue entry whose restart is %s is unreadable: never run", async (_n, restart) => {
+      const w = owEnv({ restartTarget: T });
+      w.queue(host({ restart: restart as never }));
+      await runOwnerWaiter(w.env, { ...opts, idleMs: 0 });
+      expect(w.calls.some((c) => c.startsWith("/usr/bin/sudo"))).toBe(false);
+      expect(w.outcome()[0]).toStartWith("FAILED: unreadable queue entry");
+    });
+    test("with the config's staleOwners: the restart is the entry matching the label now, never the queue file's", async () => {
+      const a = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T });
+      a.queue(host({ restart: ["/opt/restart.test/restart", "from-the-queue-file"] }));
+      expect(await runOwnerWaiter(a.env, { ...opts, idleMs: 0, staleOwners: [{ match: "org.example.*", restart: [...ARGV] }] })).toBe(0);
+      expect(a.calls).toContain(ARGV.join(" "));
+      expect(a.calls.some((c) => c.includes("from-the-queue-file"))).toBe(false);
+      const b = owEnv({ pids: { [T]: ["20", "31"] } });
+      b.queue(host({ restart: [...ARGV] }));
+      expect(await runOwnerWaiter(b.env, { ...opts, idleMs: 0, staleOwners: [{ match: "org.example.*" }] })).toBe(0);
+      expect(b.calls).toContain(`sudo -n launchctl kickstart -k ${T}`);
+      expect(b.calls.some((c) => c.startsWith("/usr/bin/sudo"))).toBe(false);
+    });
+    test("with staleOwners: a queued job no entry matches is not tried (dropped, no failed marker) and the queue goes on", async () => {
+      const w = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T });
+      const kept = item();
+      w.queue(host(), kept);
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0, staleOwners: [{ match: "org.example.svc" }] })).toBe(0);
+      // The queue runs in file-name order (gui/... before system/...).
+      expect(w.outcome()).toEqual(["restarted org.example.svc", "not tried: org.example.host (no longer in staleOwners)"]);
+      expect(w.files.has(`${Q}/failed`)).toBe(false);
+      expect(w.calls.some((c) => c.startsWith("/usr/bin/sudo") || c.includes(`kickstart -k ${T}`))).toBe(false);
+    });
+    test("with staleOwners: a release check's named owner (required) no entry matches keeps the kickstart default", async () => {
+      const w = owEnv();
+      // The restart method is the point here (the fixture's maps carry no lsof header, so a required job's strict health fails).
+      await ownerOps(w.env, { ...opts, idleMs: 0, staleOwners: [], keepUnmatched: true }).job(host({ required: true, named: true }), { ignoreFailed: true });
+      expect(w.calls).toContain(`sudo -n launchctl kickstart -k ${T}`);
+      expect(w.calls.some((c) => c.startsWith("/usr/bin/sudo"))).toBe(false);
+    });
+    test("a release check's other owner (found, not named) no entry matches: its recorded method runs (as on main), never kickstart, never dropped", async () => {
+      const w = owEnv();
+      const PL = "/Library/LaunchDaemons/org.example.host.plist";
+      const r = await ownerOps(w.env, { ...opts, idleMs: 0, staleOwners: [], keepUnmatched: true }).job(host({ required: true, restart: { bootstrap: PL } }), { ignoreFailed: true });
+      expect(r.line ?? "").not.toContain("not tried");
+      expect(w.calls).toContain(`sudo -n launchctl bootstrap system ${PL}`);
+      expect(w.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    });
+    test("a release check's other owner no entry matches, its record holding an argv restart: the argv never runs, kickstart does (as on main)", async () => {
+      const w = owEnv();
+      await ownerOps(w.env, { ...opts, idleMs: 0, staleOwners: [], keepUnmatched: true }).job(host({ required: true, restart: [...ARGV] }), { ignoreFailed: true });
+      expect(w.calls.some((c) => c.startsWith("/usr/bin/sudo"))).toBe(false);
+      expect(w.calls).toContain(`sudo -n launchctl kickstart -k ${T}`);
+    });
+    test("a release check's other owner no entry matches, its record holding a relative argv0: never run (no PATH lookup), kickstart does", async () => {
+      const w = owEnv();
+      await ownerOps(w.env, { ...opts, idleMs: 0, staleOwners: [], keepUnmatched: true }).job(host({ required: true, restart: ["fleet-restart", "x"] }), { ignoreFailed: true });
+      expect(w.calls.some((c) => c.startsWith("fleet-restart"))).toBe(false);
+      expect(w.calls).toContain(`sudo -n launchctl kickstart -k ${T}`);
+    });
+    test("a release check's other owner no entry matches: a recorded restartTimeoutSec is never taken; a recorded bootstrap is", () => {
+      const ops = ownerOps(owEnv().env, { ...opts, staleOwners: [], keepUnmatched: true });
+      const PL = "/Library/LaunchDaemons/org.example.host.plist";
+      const d = ops.derive(host({ required: true, restart: [...ARGV], restartTimeoutSec: 9 }));
+      expect(d?.restart).toBeUndefined();
+      expect(d?.restartTimeoutSec).toBeUndefined();
+      const b = ops.derive(host({ required: true, restart: { bootstrap: PL }, restartTimeoutSec: 9 }));
+      expect(b?.restart).toEqual({ bootstrap: PL });
+      expect(b?.restartTimeoutSec).toBeUndefined();
+    });
+    test("a queue entry's named and required are never taken: a forged required job already on the new keg is not restarted", async () => {
+      const w = owEnv({ pids: { [T]: ["31", "31"] }, restartTarget: T });
+      w.queue(host({ required: true, named: true }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0, staleOwners: [{ match: "org.example.host", restart: [...ARGV] }] })).toBe(0);
+      expect(w.outcome()).toEqual(["already on the new keg: org.example.host"]);
+      expect(w.calls.some((c) => c.startsWith("/usr/bin/sudo"))).toBe(false);
+    });
+    test("a label with a newline, ESC or \";\" is escaped in its outcome line", async () => {
+      const w = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T });
+      w.queue(host({ label: "org.example.host\n\u001b[2Jx;y" }));
+      await runOwnerWaiter(w.env, { ...opts, idleMs: 0, staleOwners: [] });
+      expect(w.outcome()).toEqual(["not tried: org.example.host\\n\\u001b[2Jx\\u003by (no longer in staleOwners)"]);
+    });
+    test("a busy label with \";\" is escaped in its held line and read back raw by the report: it stays busy", async () => {
+      const L = "org.example;x";
+      const w = owEnv({ probeRc: [1] });
+      w.queue(item({ label: L, target: `gui/501/${L}`, probe: ["/opt/svc.test/idle"] }));
+      expect(await runOwnerWaiter(w.env, { ...opts, busyBoundMs: 30_000, idleMs: 10_000 })).toBe(0);
+      expect(w.outcome()).toEqual(["held: busy org.example\\u003bx (busy past 1 min)"]);
+      expect([...(await ownerWaiterReport(w.env, Q, true)).busy]).toEqual([L]);
+    });
+    test("a FAILED line escapes the label and the launchctl rollback's target; the failed note escapes it too", async () => {
+      const L = "org.example.h;x\n";
+      const TT = `gui/501/${L}`;
+      const w = owEnv({ pids: { [TT]: ["20", "20"] } });
+      w.queue(item({ label: L, target: TT }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      const line = w.outcome()[0]!;
+      expect(line).toStartWith("FAILED: org.example.h\\u003bx\\n not healthy after restart");
+      expect(line).toContain("launchctl bootout gui/501/org.example.h\\u003bx\\n");
+      expect(line).not.toContain(";");
+      expect(line).not.toContain("\n");
+      expect((await ownerWaiterReport(w.env, Q, true)).note).toContain("owner restart FAILED earlier for org.example.h\\u003bx — ");
+    });
+    test("a queue entry's forged named:true is never taken: an unmatched queued label is not tried, never kickstarted", async () => {
+      const w = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T });
+      w.queue(host({ named: true, restart: "kickstart" }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0, staleOwners: [] })).toBe(0);
+      expect(w.outcome()).toEqual(["not tried: org.example.host (no longer in staleOwners)"]);
+      expect(w.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    });
+    test("with staleOwners: every owner field comes from the matching entry (probe, health window, restart), none from the queue file", async () => {
+      const w = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T });
+      w.queue(host({ probe: ["/opt/queue.test/probe"], restart: "kickstart", healthWithinSec: 999 }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0, staleOwners: [{ match: "org.example.host", probe: ["/opt/svc.test/idle"], restart: [...ARGV] }] })).toBe(0);
+      expect(w.calls).toContain("/opt/svc.test/idle");
+      expect(w.calls.some((c) => c.startsWith("/opt/queue.test/probe"))).toBe(false);
+      expect(w.calls).toContain(ARGV.join(" "));
+      expect(w.calls.some((c) => c.includes("kickstart"))).toBe(false);
+    });
+    test("a waiter killed mid-restart records the job it ran (config argv, queue kickstart): recovery names the argv", async () => {
+      const w = owEnv({ argvThrows: true, restartTarget: T });
+      w.queue(host({ restart: "kickstart" }));
+      const so = [{ match: "org.example.host", restart: [...ARGV] }];
+      await expect(runOwnerWaiter(w.env, { ...opts, idleMs: 0, staleOwners: so })).rejects.toThrow("waiter killed mid-restart");
+      const next = owEnv({ files: Object.fromEntries(w.files) });
+      expect(await runOwnerWaiter(next.env, { ...opts, idleMs: 0, staleOwners: so })).toBe(1);
+      expect(next.outcome()).toEqual([`FAILED: org.example.host restart interrupted (the waiter stopped mid-restart) — rollback: ${JSON.stringify(ARGV)}`]);
+    });
+    test("restartTimeoutSec bounds the argv restart (in place of the 120 s default)", async () => {
+      const seen: (number | undefined)[] = [];
+      const w = owEnv({ restartTarget: T, hangTimeouts: seen });
+      w.queue(host());
+      await runOwnerWaiter(w.env, { ...opts, idleMs: 0, staleOwners: [{ match: "org.example.host", restart: ["/opt/restart.test/hang"], restartTimeoutSec: 1 }] });
+      expect(seen).toEqual([1000]);
+      expect(w.outcome()[0]).toStartWith("FAILED: org.example.host not healthy after restart (restart timed out)");
+    });
+    test("a queue entry whose argv restart is not an absolute argv is unreadable: never run", async () => {
+      const w = owEnv({ restartTarget: T });
+      w.queue(host({ restart: ["fleet-restart", "x"] }));
+      // The entry is dropped and reported; the waiter goes on (and exits 0 with nothing left), as for any unreadable entry.
+      await runOwnerWaiter(w.env, { ...opts, idleMs: 0 });
+      expect(w.calls.some((c) => c.startsWith("fleet-restart"))).toBe(false);
+      expect(w.outcome()[0]).toStartWith("FAILED: unreadable queue entry");
     });
   });
   test("another waiter holds the lock: nothing runs, the queue is kept", async () => {
