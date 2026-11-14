@@ -19,6 +19,8 @@ export interface HostScript {
   verbose?: string;
   formulaTaps?: Record<string, string>;
   caskTaps?: Record<string, string>;
+  /** A cask's app artifacts (default ["X.app"]). */
+  caskApps?: Record<string, string[]>;
   /** Casks whose artifacts include a pkg. */
   sudoCasks?: string[];
   pinned?: string;
@@ -83,7 +85,7 @@ export function fakeHost(s: HostScript = {}) {
       if (rest.startsWith("info --json=v2 --cask ")) {
         const ks = a.slice(3);
         if (ks.length === 1 && (s.sudoCasks ?? []).includes(ks[0]!)) return ok(JSON.stringify({ casks: [{ token: ks[0], artifacts: [{ pkg: ["x.pkg"] }] }] }));
-        return ok(JSON.stringify({ casks: ks.filter((k) => s.caskTaps?.[k]).map((k) => ({ token: k, tap: s.caskTaps![k], artifacts: [{ app: ["X.app"] }], ...(upgraded.has(k) ? { installed: installedOf(k) } : {}) })) }));
+        return ok(JSON.stringify({ casks: ks.filter((k) => s.caskTaps?.[k]).map((k) => ({ token: k, tap: s.caskTaps![k], artifacts: [{ app: s.caskApps?.[k] ?? ["X.app"] }], ...(upgraded.has(k) ? { installed: installedOf(k) } : {}) })) }));
       }
       if (rest.startsWith("info --json=v2 ")) {
         const fs = a.slice(2);

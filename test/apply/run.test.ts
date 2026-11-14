@@ -318,6 +318,13 @@ describe("a cask with a running process is deferred (oupdate#4)", () => {
     expect(r.files.get("/state.test/pending-state.tsv") ?? "").not.toContain("app=9.9");
     expect(r.text).toContain("waiting, not stuck (a process is running from it, or the reviewer cannot read the formula): app=9.9");
   });
+  test("a running app with a space in its name holds its cask (lsof's NAME read whole)", async () => {
+    const spaced = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nMy 77 u txt REG 1,4 1 2 /Applications/My App.app/Contents/MacOS/My App\n";
+    const r = await run({ ...base, caskApps: { app: ["My App.app"] }, lsof: [spaced, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nlaunchd 1 root txt REG 1,4 1 2 /sbin/launchd\n"] });
+    expect(r.calls).not.toContain("brew upgrade --cask --greedy app");
+    expect(r.text).toContain("app: deferred — a process is running from it (pid 77)");
+    expect(r.brew).toContain("casks held (running): app");
+  });
   test("a cask held only because a process runs from it is never counted as stuck, and its old row clears", async () => {
     const seed = `brew${T}app=9.9${T}9${T}2026-10-01\n`;
     const r = await run({ ...base, lsof: [RUN, LSOF_NONE], files: { "/state.test/pending-state.tsv": seed } }, { cfg: { stuckAfter: 3 } });
