@@ -186,3 +186,50 @@ describe("the lexer reads the forms the audits named", () => {
     expect(view("index.js", b, a)).toBe(`=== index.js (changed) ===\n` + renderLineDiff(b, a));
   });
 });
+
+describe("the last lexer round", () => {
+  const plainView = (f: string, b: string, a: string) => `=== ${f} (changed) ===\n` + renderLineDiff(b, a);
+  test("a slash after a property named return is a division: the block comment after it is seen", () => {
+    expect(added(view("index.js", `obj.return / 2; /*\n${P}\n*/\n`, `obj.return / 2;\n${P}\n\n`))).toBe(true);
+  });
+  test("a slash after x++ is a division: the block comment after it is seen", () => {
+    expect(added(view("index.js", `x++ / 2; /*\n${P}\n*/\n`, `x++ / 2;\n${P}\n\n`))).toBe(true);
+    expect(added(view("index.js", `x-- / 2; /*\n${P}\n*/\n`, `x-- / 2;\n${P}\n\n`))).toBe(true);
+  });
+  test("a block comment between return and a regex does not hide the regex", () => {
+    const b = `return /* c */ /[/*]/;\nconst a=1;\nconst b=2;\n`;
+    const a = `return /* c */ /ok/;\nconst a=1;\nconst b=2;\n`;
+    expect(view("index.js", b, a)).toBe(plainView("index.js", b, a));
+  });
+  test("a line comment between return and a regex does not hide the regex", () => {
+    const b = `return // c\n/[/*]/;\nconst a=1;\nconst b=2;\n`;
+    const a = `return // c\n/ok/;\nconst a=1;\nconst b=2;\n`;
+    expect(view("index.js", b, a)).toBe(plainView("index.js", b, a));
+  });
+  test("U+2028 and U+2029 end a line comment", () => {
+    for (const t of [" ", " "]) expect(added(view("index.js", `// c${t}/*\n${P}\n*/\n`, `// c${t}\n${P}\n\n`))).toBe(true);
+  });
+  test("a lone CR ends a line comment", () => {
+    expect(added(view("index.js", `// c\r/*\n${P}\n*/\n`, `// c\r\n${P}\n\n`))).toBe(true);
+  });
+  test("a shifted line with U+2028 prints it escaped", () => {
+    const line = `${P} `;
+    const out = view("index.js", `/*\n${line}\n*/\n`, `\n${line}\n\n`);
+    expect(out).toContain("\\u2028");
+    expect(out.includes(" ")).toBe(false);
+  });
+  test("JSX and TSX files keep the plain diff", () => {
+    for (const f of ["a.jsx", "a.tsx"]) {
+      const b = `/*\n${P}\n*/\n`;
+      const a = `\n${P}\n\n`;
+      expect(view(f, b, a)).toBe(plainView(f, b, a));
+    }
+  });
+  test("one 1 MB line of nested template holes stays fast", () => {
+    const line = "`${".repeat(333_333);
+    const t0 = performance.now();
+    const out = view("index.js", `${line}\nx();\n`, `${line}\ny();\n`);
+    expect(performance.now() - t0).toBeLessThan(5000);
+    expect(out).toContain("+y();");
+  });
+});

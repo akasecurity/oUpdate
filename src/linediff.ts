@@ -160,66 +160,78 @@ export function renderLineDiff(before: string | undefined, after: string | undef
 
 // The lexical context each line starts in: code, or inside a block comment, a template literal (with its `${` holes and the
 // braces inside them), a string continued over a line end, or a Python triple-quoted string. One light pass; a regex literal
-// is guessed from what comes before the slash (a keyword, an operator, or the `)` of an if/while/for/with head). A misread
-// cannot hide a line: a line is shown as changed when its start context differs between the two versions, and both are read
-// the same way. Contexts are interned (a stack of kinds as a chain of ids), so equal stacks have equal ids, depth is not capped
-// and nothing grows with the number of lines but one id per line.
+// is guessed from the previous token (a keyword that is not a property, an operator that is not `++`/`--`, or the `)` of an
+// if/while/for/with head), and a comment is transparent to that guess. A misread cannot hide a line that both versions read the
+// same way wrongly, and a line is shown as changed when its start context differs between the two versions. The context of a
+// line is the stack depth plus two running hashes of the stack's kinds under a per-run random seed (so a text cannot be built
+// to collide), kept as one short string per line: nothing is interned and nothing grows beyond the stack itself.
 const REGEX_AFTER = /[(,=:[!&|?{};+\-*%<>~^}]/;
 const REGEX_WORDS = new Set(["return", "typeof", "case", "in", "of", "void", "delete", "throw", "new", "else", "do", "yield", "await", "instanceof"]);
 const PAREN_WORDS = new Set(["if", "while", "for", "with"]);
+const TERMINATOR = /[\u2028\u2029\r]/;
 
 export type LexMode = "js" | "py";
 
-/** The lexer a path gets: the JS family and Python only. Any other file keeps the plain diff. */
+/** The lexer a path gets: .js .mjs .cjs .ts .mts .cts and .py. Any other file (JSX and TSX included: no text state for them) keeps the plain diff. */
 export function lexMode(path: string): LexMode | undefined {
-  if (/\.(?:[cm]?[jt]s|[jt]sx)$/i.test(path)) return "js";
+  if (/\.(?:[cm]?[jt]s)$/i.test(path)) return "js";
   if (/\.py$/i.test(path)) return "py";
   return undefined;
 }
 
-type Interner = Map<string, number>;
+export type LexSeed = [number, number];
+export const newSeed = (): LexSeed => {
+  const r = crypto.getRandomValues(new Uint32Array(2));
+  return [r[0]!, r[1]!];
+};
 
-export function lineStates(lines: string[], mode: LexMode, interner: Interner): number[] {
+export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): string[] {
   const py = mode === "py";
-  const out: number[] = [];
-  // the stack is a chain of interned nodes: id -> (parent id, kind) is the key, so equal stacks share an id
-  const kinds: string[] = []; // node id -> kind (for the top)
-  const parents: number[] = [];
-  const nodeOf = (parent: number, kind: string): number => {
-    const key = `${parent}|${kind}`;
-    let id = interner.get(key);
-    if (id === undefined) {
-      id = interner.size + 1;
-      interner.set(key, id);
-    }
-    kinds[id] = kind;
-    parents[id] = parent;
-    return id;
+  const out: string[] = [];
+  const stk: string[] = []; // "/*", "`", "${" (a hole), "{" (a brace in a hole), a triple quote, or a quote kept over a line end
+  const h1: number[] = [seed[0]];
+  const h2: number[] = [seed[1]];
+  const push = (kind: string) => {
+    let c = 0;
+    for (let k = 0; k < kind.length; k++) c = (c * 31 + kind.charCodeAt(k)) | 0;
+    stk.push(kind);
+    h1.push(Math.imul(h1[h1.length - 1]! ^ c, 0x9e3779b1) + 0x7f4a7c15 | 0);
+    h2.push(Math.imul(h2[h2.length - 1]! + c + 1, 0x85ebca6b) ^ (h2.length << 7) | 0);
   };
-  let cur = 0; // the current top node, 0 for plain code
-  const push = (kind: string) => { cur = nodeOf(cur, kind); };
-  const pop = () => { cur = parents[cur] ?? 0; };
-  const top = () => (cur === 0 ? "" : kinds[cur]!);
+  const pop = () => { stk.pop(); h1.pop(); h2.pop(); };
+  const top = () => (stk.length === 0 ? "" : stk[stk.length - 1]!);
   let prev = ""; // the last significant character of code
+  let prev2 = ""; // the one before it
   let word = ""; // the identifier that ends at prev
-  let gap = false; // whitespace since the last token: the next word starts a new one
+  let wordDot = false; // that identifier is a property (`.return`)
+  let gap = false; // whitespace or a comment since the last token: the next word starts a new one
   const parens: boolean[] = []; // per open paren: did an if/while/for/with head open it
   let parenRegex = false; // the last token was the `)` that closes such a head: a slash after it starts a regex
-  const reset = () => { prev = ")"; word = ""; parenRegex = false; gap = false; };
+  let cmt: [string, string, string, boolean, boolean] | undefined; // the token state a block comment was opened in
+  const reset = () => { prev2 = prev; prev = ")"; word = ""; wordDot = false; parenRegex = false; gap = false; };
+  let last = "";
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li]!.endsWith("\r") ? lines[li]!.slice(0, -1) : lines[li]!;
-    out.push(cur);
+    const now = stk.length === 0 ? "" : `${stk.length}:${h1[h1.length - 1]}:${h2[h2.length - 1]}`;
+    out.push(now === last ? last : (last = now));
+    gap = true;
     let i = 0;
     if (li === 0 && !py && line.startsWith("#!")) continue; // a hashbang line is a comment
     while (i < line.length) {
       const t = top();
       const c = line[i]!;
       if (t === "/*") {
-        if (c === "*" && line[i + 1] === "/") { pop(); i += 2; reset(); } else i++;
+        if (c === "*" && line[i + 1] === "/") {
+          pop();
+          i += 2;
+          // a comment is transparent: the token before it is still the previous token
+          if (cmt) [prev, prev2, word, wordDot, parenRegex] = cmt;
+          gap = true;
+        } else i++;
       } else if (t === "`") {
         if (c === "\\") i += 2;
         else if (c === "`") { pop(); i++; reset(); }
-        else if (c === "$" && line[i + 1] === "{") { push("${"); i += 2; prev = "{"; word = ""; parenRegex = false; }
+        else if (c === "$" && line[i + 1] === "{") { push("${"); i += 2; prev2 = prev; prev = "{"; word = ""; wordDot = false; parenRegex = false; }
         else i++;
       } else if (t === '"""' || t === "'''") {
         if (c === "\\") i += 2;
@@ -232,15 +244,20 @@ export function lineStates(lines: string[], mode: LexMode, interner: Interner): 
       } else {
         // code: the top is empty, a hole or a brace inside one
         const inHole = t === "${" || t === "{";
-        if (c === "/" && line[i + 1] === "*") { push("/*"); i += 2; }
-        else if (c === "/" && line[i + 1] === "/" && !py) break;
-        else if (c === "#" && py) break;
+        if (c === "/" && line[i + 1] === "*") { cmt = [prev, prev2, word, wordDot, parenRegex]; push("/*"); i += 2; }
+        else if ((c === "/" && line[i + 1] === "/" && !py) || (c === "#" && py)) {
+          // a line comment ends at a line terminator: LF, CR, U+2028, U+2029
+          const m = TERMINATOR.exec(line.slice(i));
+          if (!m) break;
+          i += m.index + 1;
+          gap = true;
+        } else if (TERMINATOR.test(c)) { i++; gap = true; }
         else if (c === "`") { push("`"); i++; }
         else if (py && (line.startsWith('"""', i) || line.startsWith("'''", i))) { push(line.slice(i, i + 3)); i += 3; }
         else if (c === '"' || c === "'") { push(c); i++; }
-        else if (inHole && c === "{") { push("{"); i++; prev = "{"; word = ""; parenRegex = false; }
-        else if (inHole && c === "}") { pop(); i++; prev = "}"; word = ""; parenRegex = false; }
-        else if (c === "/" && !py && (prev === "" || REGEX_AFTER.test(prev) || (prev === ")" && parenRegex) || (/[\w$]/.test(prev) && REGEX_WORDS.has(word)))) {
+        else if (inHole && c === "{") { push("{"); i++; prev2 = prev; prev = "{"; word = ""; wordDot = false; parenRegex = false; }
+        else if (inHole && c === "}") { pop(); i++; prev2 = prev; prev = "}"; word = ""; wordDot = false; parenRegex = false; }
+        else if (c === "/" && !py && (prev === "" || (REGEX_AFTER.test(prev) && !((prev === "+" || prev === "-") && prev2 === prev)) || (prev === ")" && parenRegex) || (/[\w$]/.test(prev) && !wordDot && REGEX_WORDS.has(word)))) {
           // a regex literal: to the closing slash on this line, a class kept whole
           let j = i + 1;
           let cls = false;
@@ -253,13 +270,16 @@ export function lineStates(lines: string[], mode: LexMode, interner: Interner): 
           i = j + 1;
           reset();
         } else {
-          if (c === "(") parens.push(PAREN_WORDS.has(word));
+          if (c === "(") parens.push(PAREN_WORDS.has(word) && !wordDot);
           const closed = c === ")" ? parens.pop() === true : false;
           if (/\s/.test(c)) gap = true;
           else {
-            if (/[\w$]/.test(c)) word = !gap && /[\w$]/.test(prev) && word ? word + c : c;
-            else word = "";
+            if (/[\w$]/.test(c)) {
+              if (!gap && /[\w$]/.test(prev) && word) word += c;
+              else { word = c; wordDot = prev === "."; }
+            } else { word = ""; wordDot = false; }
             gap = false;
+            prev2 = prev;
             prev = c;
             parenRegex = closed;
           }
@@ -279,9 +299,9 @@ export function lineStates(lines: string[], mode: LexMode, interner: Interner): 
 // diff and never token-rendered, so everything the plain rendering shows is still shown.
 export function renderShifted(a: string[], b: string[], ops: Op[] | undefined, mode: LexMode | undefined): string {
   if (!ops || !mode || !ops.some((o) => o.op !== "=")) return "";
-  const interner: Interner = new Map();
-  const sa = lineStates(a, mode, interner);
-  const sb = lineStates(b, mode, interner);
+  const seed = newSeed();
+  const sa = lineStates(a, mode, seed);
+  const sb = lineStates(b, mode, seed);
   let oi = 0;
   let ni = 0;
   let out = "";
@@ -290,8 +310,8 @@ export function renderShifted(a: string[], b: string[], ops: Op[] | undefined, m
     else if (o.op === "+") ni++;
     else {
       if (sa[oi] !== sb[ni]) {
-        const q = needsQuote(o.v);
-        const show = q ? JSON.stringify(o.v) : o.v;
+        const q = needsQuote(o.v) || /[\u2028\u2029]/.test(o.v);
+        const show = q ? JSON.stringify(o.v).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029") : o.v;
         out += `@@ -${oi + 1} +${ni + 1} @@ [context changed: the line is the same text, now read differently]${q ? QUOTE_NOTE : ""}\n-${show}\n+${show}\n`;
       }
       oi++;
