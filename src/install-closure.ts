@@ -2808,6 +2808,87 @@ export function regexQuotesBlanked(text: string): string | undefined {
   return regexBlanked(text)?.quotes;
 }
 
+// The text with the backticks of each template literal that holds no ${}, backslash or line break made quotes (same length, same lines):
+// double quotes, or single quotes when the body holds a double quote (a body holding both is left alone). Undefined when there is none. Comments and quoted strings are skipped; a template's ${} parts are skipped with their
+// nested braces and templates. A misread (a backtick in a regular expression) only adds a reading: the other readings are kept.
+export function templatesQuoted(text: string): string | undefined {
+  jsStep(text.length);
+  const n = text.length;
+  // Each changed template: its two backtick positions and the quote they become.
+  const at: [number, number, string][] = [];
+  // From the character after an opening backtick: the index after its closing backtick (n when unclosed).
+  const template = (i: number, depth: number): number => {
+    const open = i - 1;
+    let clean = true;
+    let dq = false;
+    let sq = false;
+    while (i < n && text[i] !== "`") {
+      const c = text[i]!;
+      if (c === "\\") {
+        clean = false;
+        i += 2;
+        continue;
+      }
+      if (c === "$" && text[i + 1] === "{") {
+        clean = false;
+        i = code(i + 2, depth + 1, true);
+        continue;
+      }
+      if (c === '"') dq = true;
+      else if (c === "'") sq = true;
+      else if (c === "\n") clean = false;
+      i++;
+    }
+    if (i < n && clean && !(dq && sq) && i - open - 1 <= 512) at.push([open, i, dq ? "'" : '"']);
+    return i + 1;
+  };
+  // Code from i: in a ${} part (inner) up to its closing brace, else to the end. Returns the index after it.
+  const code = (i: number, depth: number, inner: boolean): number => {
+    let braces = 0;
+    while (i < n) {
+      const c = text[i]!;
+      if (c === "/" && text[i + 1] === "/") {
+        const e = text.indexOf("\n", i);
+        i = e < 0 ? n : e;
+      } else if (c === "/" && text[i + 1] === "*") {
+        const e = text.indexOf("*/", i + 2);
+        i = e < 0 ? n : e + 2;
+      } else if (c === "'" || c === '"') {
+        let j = i + 1;
+        while (j < n && text[j] !== c && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+        i = j + 1;
+      } else if (c === "`") {
+        // Past the nesting cap a template is skipped to its next backtick, unread, and the scan goes on.
+        if (depth < 32) i = template(i + 1, depth);
+        else {
+          const e = text.indexOf("`", i + 1);
+          i = e < 0 ? n : e + 1;
+        }
+      }
+      else if (inner && c === "{") {
+        braces++;
+        i++;
+      } else if (inner && c === "}") {
+        if (braces === 0) return i + 1;
+        braces--;
+        i++;
+      } else i++;
+    }
+    return n;
+  };
+  code(0, 0, false);
+  if (!at.length) return undefined;
+  at.sort((a, b) => a[0] - b[0]);
+  const parts: string[] = [];
+  let from = 0;
+  for (const [open, close, q] of at) {
+    parts.push(text.slice(from, open), q, text.slice(open + 1, close), q);
+    from = close + 1;
+  }
+  parts.push(text.slice(from));
+  return parts.join("");
+}
+
 function addScannedLiterals(ctx: Ctx): void {
   const keys = [...ctx.scanned];
   for (const key of keys) {
@@ -2825,7 +2906,11 @@ function addScannedLiterals(ctx: Ctx): void {
         // regex reading), and both readings are kept: the plain reading is unchanged, so the result is never narrower than it.
         // A / or * there opens no comment either: that reading is a third one, added to the other two, never in place of them.
         const blanked = regexBlanked(text);
-        for (const other of [blanked?.quotes, blanked?.all]) {
+        const readings = [blanked?.quotes, blanked?.all];
+        // A template literal with no ${} (`./docs/evil.js`) is a string: each reading is read again with those templates' backticks
+        // made quotes (double, or single where the body holds a double quote), besides itself.
+        if (text.includes("`")) for (const r of [text, blanked?.quotes, blanked?.all]) if (r !== undefined) readings.push(templatesQuoted(r));
+        for (const other of readings) {
           if (other === undefined) continue;
           jsStep(other.length);
           quoted.push(...quotedTokens(other));
