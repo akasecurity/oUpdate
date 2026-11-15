@@ -26,6 +26,36 @@ const growth = (gen: (bytes: number) => string, base: number): number => {
 };
 
 describe("JS scan cost stays linear", () => {
+  test("many Reflect aliases", () => {
+    expect(growth((bytes) => Array.from({ length: Math.ceil(bytes / 20) }, (_, i) => `const R${i} = Reflect;\n`).join(""), 40 * 1024)).toBeLessThan(LIMIT);
+  }, 120000);
+  test("an unclosed destructuring repeated (var{var{...)", () => {
+    expect(growth((bytes) => fill("var{", bytes) + "} = Reflect;", 50 * 1024)).toBeLessThan(LIMIT);
+  }, 120000);
+  test("many destructuring ends with no pattern (} = Reflect, } = require.cache)", () => {
+    expect(growth((bytes) => fill("} = Reflect;\n", bytes), 64 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("} = require.cache;\n", bytes), 64 * 1024)).toBeLessThan(LIMIT);
+  }, 120000);
+  test("spaces inside require( before an unrelated _load", () => {
+    expect(growth((bytes) => "const M=require(" + " ".repeat(bytes) + "x); const a=obj._load;", 16 * 1024)).toBeLessThan(LIMIT);
+  }, 120000);
+  test("one long expression naming a stored cache value many times", () => {
+    expect(growth((bytes) => "const c = require.cache;\nf(" + fill("c, ", bytes) + ");", 64 * 1024)).toBeLessThan(LIMIT);
+  }, 120000);
+  test("many require( calls and strings read for the module literal", () => {
+    expect(growth((bytes) => fill('require( "x"); var s = "a\\"b"; ', bytes) + "obj._load(x);", 64 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "require(" + " ".repeat(bytes) + '"module")._load(f);', 16 * 1024)).toBeLessThan(LIMIT);
+  }, 120000);
+  test("chains of members with spaces (a. a., module. module., exports. exports.) are read in linear time", () => {
+    for (const unit of ["a. ", "module. ", "exports. "]) {
+      expect(growth((bytes) => fill(unit, bytes) + "z; obj._load(x);", 24 * 1024)).toBeLessThan(LIMIT);
+      expect(growth((bytes) => fill(unit, bytes) + "x = require; obj._load(x);", 24 * 1024)).toBeLessThan(LIMIT);
+    }
+    expect(growth((bytes) => fill("a ?. ", bytes) + 'require("module")._load(f);', 24 * 1024)).toBeLessThan(LIMIT);
+  }, 240000);
+  test("many names stored from require.cache", () => {
+    expect(growth((bytes) => fill("const c = require.cache; const d = c; const e = d;\n", bytes), 40 * 1024)).toBeLessThan(LIMIT);
+  }, 120000);
   test("repeated Object.assign({}, c.settings)", () => {
     expect(growth((n) => "const c = { settings: {} };\n" + fill("x = Object.assign({}, c.settings);\n", n), 128 * 1024)).toBeLessThan(LIMIT);
   }, 120000);

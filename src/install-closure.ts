@@ -4630,6 +4630,251 @@ const CALL_OK = new Set(["require", "fs", "path", "readFileSync", "readFile", "o
 export function hasUnbounded(text: string, source: string): boolean {
   return budgeted(source.length, () => hasUnboundedScan(text, source), () => true);
 }
+// The loader reached in ways the named checks do not read, each as unbounded as require(variable) (a computed member of module, require or
+// Module already is):
+// - a module cache entry's loader: a value read from require.cache, Module._cache or module.constructor._cache, or a name it is stored
+//   in, whose require, constructor, _load or load is taken in the same expression (Object.values(require.cache)[0].constructor._load(f));
+//   a value reduced to a count (Object.keys(require.cache).length, .size) is not followed, and neither is a delete of cache keys.
+//   Module._load, x.constructor._load and _load of require("module") (or of a name holding it) also load any path.
+// - the loader handed to a function as `this` (p[k].call(module, ...), g.apply(module, ...)), except Object.prototype's read-only checks
+//   (hasOwnProperty.call(module, k)) and the module's data members (module.exports, module.filename, module.id, ...);
+// - Reflect, an alias of it (const R = Reflect) or a function destructured from it (const { apply } = Reflect): apply or construct with
+//   the loader first, or get of the loader whose result is called (R.get(module, "require")(f)). Other Reflect calls (has, ownKeys,
+//   defineProperty) only read or define.
+// Every scan is charged to the JS budget; the receiver chain and the assignment's left side are walked by hand, and spaced member chains were
+// measured to stay linear.
+// Members of module or require that are data, not a loader: filename, id, path, paths, loaded, require.resolve and require.extensions,
+// and exports or a member of it not named like a loader (module.exports.require may hold one). parent, children and the cache hold modules.
+const LOADER_DATA = String.raw`(?!\s*(?:\?\.|\.)\s*(?:filename|id|path|paths|loaded|resolve|extensions)(?![\w$])|\s*(?:\?\.|\.)\s*exports(?![\w$])(?!\s*(?:\?\.|\.)\s*(?:require|_load|load|constructor)(?![\w$])))`;
+const LOADER_HEAD = String.raw`\s*(?:module|require|Module)${LOADER_DATA}(?:\s*(?:\?\.|\.)\s*[\w$]+)*\s*`;
+// apply / construct: the loader is the first argument. get: the loader is the first argument and the result is called.
+const loaderCalls = (head: string): Record<string, RegExp> => ({
+  apply: new RegExp(`^${head}[,)]`),
+  construct: new RegExp(`^${head}[,)]`),
+  get: new RegExp(`^${head},[^()]{0,200}\\)\\s*(?:\\(|(?:\\?\\.|\\.)\\s*(?:call|apply|bind)\\s*\\()`),
+});
+const LOADER_CALL = loaderCalls(LOADER_HEAD);
+// A file that assigns require or module to a member of module or require (module.exports = require, module.exports.box = module,
+// require.resolve = module.require) can hold a loader in any data member: there the data exceptions are off.
+const LOADER_CALL_STRICT = loaderCalls(String.raw`\s*(?:module|require|Module)(?:\s*(?:\?\.|\.)\s*[\w$]+)*\s*`);
+// The "= module" or "= require" of an assignment, found by regex from the "=" (each tried once); its left side is walked back by hand,
+// one member per step (charged), so no regex backtracks over a chain of members.
+const LOADER_RHS = /(?<![=!<>+\-*/%&|^?])=(?!=)\s*(?:module|require)(?![\w$])(?!\s*\()(?!\s*(?:\?\.|\.)\s*(?:exports|filename|id|path|paths|loaded|resolve|extensions)(?![\w$]))/g;
+function loaderAssigned(code: string): boolean {
+  for (const m of code.matchAll(LOADER_RHS)) {
+    jsStep();
+    let k = m.index ?? 0;
+    const back = () => {
+      const from = k;
+      while (k > 0 && /\s/.test(code[k - 1]!)) k--;
+      jsStep(1 + (from - k) / 16);
+    };
+    // The members, last first: "a.b.c =" gives c, b, a. A member that is not the last and is module, require or exports roots a chain.
+    for (let n = 0; ; n++) {
+      back();
+      const end = k;
+      while (k > 0 && /[\w$]/.test(code[k - 1]!)) k--;
+      jsStep(1 + (end - k) / 16);
+      if (k === end) break;
+      if (n > 0 && /^(?:module|require|exports)$/.test(code.slice(k, end))) return true;
+      back();
+      if (code[k - 1] !== ".") break;
+      k--;
+      if (code[k - 1] === "?") k--;
+    }
+  }
+  return false;
+}
+const CACHE_READ = /(?<![\w$.])(?:require\s*(?:\?\.|\.)\s*cache|(?:Module|module\s*(?:\?\.|\.)\s*constructor)\s*(?:\?\.|\.)\s*_cache)(?![\w$])/g;
+const LOADER_TAKE = /(?:\?\.|\.)\s*(?:require|constructor|_load|load)(?![\w$])|\brequire\s*:/;
+// A value reduced to a count right after it: Object.keys(require.cache).length, c.size.
+const COUNTED = /^[\s)]*(?:\?\.|\.)\s*(?:length|size)(?![\w$])/;
+// The "{" opening a pattern that ends at close, looked for only in the 512 characters before it.
+function patternOpen(code: string, close: number): number {
+  const from = Math.max(0, close - 512);
+  jsStep(1 + (close - from) / 64);
+  const rel = code.slice(from, close).lastIndexOf("{");
+  return rel < 0 ? -1 : from + rel;
+}
+// The statement around index i: from after the last ; { } or newline before it to the next ; or newline, at most 2000 characters each
+// way, and its top-level commas (const n = a, x = b), which cut it into expressions. A walk cut short by the 2000-character limit starts
+// inside an unknown nesting, so it is not cut. Every character walked is charged.
+function statementAt(code: string, i: number, len: number): { a: number; b: number; cuts: number[] } {
+  let a = i;
+  while (a > 0 && i - a < 2000 && !/[;{}\n]/.test(code[a - 1]!)) a--;
+  let b = i + len;
+  while (b < code.length && b - i < 2000 && !/[;\n]/.test(code[b]!)) b++;
+  jsStep(1 + (b - a));
+  const cuts: number[] = [];
+  if (a > 0 && i - a >= 2000) return { a, b, cuts };
+  let depth = 0;
+  for (let k = a; k < b; k++) {
+    const c = code[k]!;
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth = Math.max(0, depth - 1);
+    else if (c === "," && depth === 0) cuts.push(k);
+  }
+  return { a, b, cuts };
+}
+// Names bound to require("module") or require("node:module") (also module.require(...)), and whether its _load is called directly. Read
+// from the code text, which drops comments and keeps strings and regex bodies, without telling code from strings: a require("module")
+// inside a string reads as one too, which only widens (the caller runs this when the code has a _load or a cache read). White space
+// before and after is walked without a limit, and a receiver chain before it (module., require.main., a.b.) is walked back by hand, one
+// step per member, so no regex backtracks over it; every match and every step is charged.
+const MODULE_REQUIRE = /(?<![\w$])require\s*\(\s*(["'`])(?:node:)?module\1\s*\)/g;
+const LOAD_AFTER = /\s*(?:\?\.|\.)\s*_load\s*(?:\?\.\s*)?(?:\(|(?:\?\.|\.)\s*(?:call|apply|bind)\s*\()/y;
+function moduleRequires(text: string): { names: string[]; direct: boolean } {
+  const names: string[] = [];
+  let direct = false;
+  jsStep(1 + text.length / 16);
+  for (const m of text.matchAll(MODULE_REQUIRE)) {
+    jsStep(1 + m[0].length / 16);
+    const end = (m.index ?? 0) + m[0].length;
+    LOAD_AFTER.lastIndex = end;
+    if (LOAD_AFTER.test(text)) direct = true;
+    const back = (k: number) => {
+      const from = k;
+      while (k > 0 && /\s/.test(text[k - 1]!)) k--;
+      jsStep(1 + (from - k) / 16);
+      return k;
+    };
+    // The receiver chain before require( (module.require, require.main.require, a.b.require): back over ".", the member name, repeated.
+    let at = m.index ?? 0;
+    for (;;) {
+      let q = back(at);
+      if (text[q - 1] !== ".") break;
+      q = back(text[q - 2] === "?" ? q - 2 : q - 1);
+      const idEnd = q;
+      while (q > 0 && /[\w$]/.test(text[q - 1]!)) q--;
+      jsStep(1 + (idEnd - q) / 16);
+      if (q === idEnd) break;
+      at = q;
+    }
+    // const NAME = require("module"): walk back over white space, "=", white space, the name, white space, the keyword.
+    let k = back(at);
+    if (text[k - 1] !== "=" || /[=!<>+\-*/%&|^?]/.test(text[k - 2] ?? "")) continue;
+    k = back(k - 1);
+    const nameEnd = k;
+    while (k > 0 && /[\w$]/.test(text[k - 1]!)) k--;
+    const name = text.slice(k, nameEnd);
+    if (!/^[A-Za-z_$][\w$]*$/.test(name)) continue;
+    k = back(k);
+    if (/(?<![\w$.])(?:const|let|var)$/.test(text.slice(Math.max(0, k - 6), k))) names.push(name.replace(/\$/g, "\\$"));
+  }
+  return { names, direct };
+}
+function cacheEntryLoader(code: string, text: string): boolean {
+  // Module._load, x.constructor._load, require("module")._load, or _load of a name holding require("module").
+  const mods = moduleRequires(text);
+  if (mods.direct) return true;
+  const receivers = ["Module", ...mods.names.slice(0, 64)].join("|");
+  if (new RegExp(`(?:(?<![\\w$.])(?:${receivers})|(?:\\?\\.|\\.)\\s*constructor)\\s*(?:\\?\\.|\\.)\\s*_load\\s*(?:\\?\\.\\s*)?(?:\\(|(?:\\?\\.|\\.)\\s*(?:call|apply|bind)\\s*\\()`).test(code)) return true;
+  // Expressions holding a cache read, then expressions naming a value stored from one; a loader taken there loads any path.
+  const names = new Set<string>();
+  const todo: [number, number][] = [];
+  for (const m of code.matchAll(CACHE_READ)) todo.push([m.index ?? 0, m[0].length]);
+  // Expressions already read, by start: a later round's match of a stored name in one (its own declaration) is not read again.
+  const read = new Set<number>();
+  for (let round = 0; todo.length && round < 6; round++) {
+    const batch = todo.splice(0);
+    const found = new Set<string>();
+    // Matches come in order: the statement of the previous one is reused, and each of its expressions is read once.
+    let st0: { a: number; b: number; cuts: number[] } | undefined;
+    let done = new Set<number>();
+    for (const [i, len] of batch) {
+      if (!st0 || i < st0.a || i >= st0.b) {
+        st0 = statementAt(code, i, len);
+        done = new Set();
+      }
+      let lo = 0;
+      let hi = st0.cuts.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (st0.cuts[mid]! < i) lo = mid + 1;
+        else hi = mid;
+      }
+      if (done.has(lo)) continue;
+      done.add(lo);
+      jsStep();
+      const a = lo === 0 ? st0.a : st0.cuts[lo - 1]! + 1;
+      const b = lo < st0.cuts.length ? st0.cuts[lo]! : st0.b;
+      if (read.has(a)) continue;
+      read.add(a);
+      // A value reduced to a count is not followed; the rest of the expression is still read.
+      let counted = COUNTED.test(code.slice(i + len, Math.min(b, i + len + 64)));
+      // The value is stored unless every cache read in the expression is counted.
+      if (counted) {
+        jsStep(1 + (b - a) / 16);
+        for (const r of code.slice(a, b).matchAll(CACHE_READ)) {
+          if (!COUNTED.test(code.slice(a + (r.index ?? 0) + r[0].length, Math.min(b, a + (r.index ?? 0) + r[0].length + 64)))) counted = false;
+        }
+      }
+      // A destructuring of it (const { require: r } = m): the pattern before "} =".
+      const close = /\}\s*=\s*$/.test(code.slice(Math.max(0, i - 24), i)) ? code.lastIndexOf("}", i) : -1;
+      const open = close >= 0 ? patternOpen(code, close) : -1;
+      const pattern = open >= 0 ? code.slice(open, close + 1) : "";
+      // The read itself (module.constructor._cache), and any other cache read in the expression, is no take.
+      const st = (pattern + code.slice(a, i) + " _ " + code.slice(i + len, b)).replace(CACHE_READ, " _ ");
+      if (LOADER_TAKE.test(st)) return true;
+      const decl = /^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?!=)/.exec(code.slice(a, i));
+      if (decl && !counted && !names.has(decl[1]!)) found.add(decl[1]!);
+    }
+    for (const n of found) names.add(n);
+    // Past 16 stored names the names are not followed further: a take anywhere in the file reads every file, none is main's reading.
+    if (names.size > 16) return LOADER_TAKE.test(code);
+    if (!found.size) break;
+    const re = new RegExp(`(?<![\\w$.])(?:${[...found].map((n) => n.replace(/\$/g, "\\$")).join("|")})(?![\\w$])`, "g");
+    for (const m of code.matchAll(re)) {
+      jsStep();
+      todo.push([m.index ?? 0, m[0].length]);
+    }
+  }
+  // Names still to follow after six rounds: not followed further, a take anywhere in the file reads every file.
+  if (todo.length) return LOADER_TAKE.test(code);
+  return false;
+}
+function loaderReach(code: string, text: string): boolean {
+  if (CACHE_READ.test(code) || /_load/.test(code)) {
+    CACHE_READ.lastIndex = 0;
+    if (cacheEntryLoader(code, text)) return true;
+  }
+  CACHE_READ.lastIndex = 0;
+  const strict = loaderAssigned(code);
+  const calls = strict ? LOADER_CALL_STRICT : LOADER_CALL;
+  const data = strict ? "" : LOADER_DATA;
+  if (new RegExp(`(?<!\\b(?:hasOwnProperty|propertyIsEnumerable|isPrototypeOf|toString|toLocaleString|valueOf)\\s*)${strict ? "" : String.raw`(?<!(?<![\w$.])require\s*(?:\?\.|\.)\s*resolve\s*)`}(?:\\?\\.|\\.)\\s*(?:call|apply|bind)\\s*\\(\\s*(?:module|require)\\b${data}`).test(code)) return true;
+  if (!/Reflect/.test(code)) return false;
+  const holders = new Set(["Reflect"]);
+  // Local name -> Reflect method, for a function destructured from Reflect.
+  const fns = new Map<string, string>();
+  const src = String.raw`(?:(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*)?Reflect(?![\w$])`;
+  for (const m of code.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*${src}\s*(?=[;,)\n]|$)`, "g"))) {
+    jsStep();
+    holders.add(m[1]!);
+  }
+  // A destructuring pattern ending at "} = Reflect": its "{" within the 512 characters before it, no nested braces.
+  for (const m of code.matchAll(new RegExp(String.raw`\}\s*=\s*${src}`, "g"))) {
+    jsStep();
+    const close = m.index ?? 0;
+    const open = patternOpen(code, close);
+    if (open < 0 || !/\b(?:const|let|var)\s*$/.test(code.slice(Math.max(0, open - 12), open))) continue;
+    for (const part of code.slice(open + 1, close).split(",")) {
+      const [key, local] = part.split("=")[0]!.split(":").map((x) => x.trim());
+      const name = local ?? key;
+      if (key && name && /^[A-Za-z_$][\w$]*$/.test(name) && Object.hasOwn(calls, key)) fns.set(name, key);
+    }
+  }
+  // holder.method( for a known holder, and a destructured function called by its local name.
+  for (const m of code.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)\s*)?\(/g)) {
+    const method = m[2] !== undefined ? (holders.has(m[1]!) ? m[2] : undefined) : fns.get(m[1]!);
+    if (method === undefined || !Object.hasOwn(calls, method)) continue;
+    jsStep();
+    const at = (m.index ?? 0) + m[0].length;
+    if (calls[method]!.test(code.slice(at, at + 400))) return true;
+  }
+  return false;
+}
+
 function hasUnboundedScan(text: string, source: string): boolean {
   if (processHazard(source)) return true;
   // Indirect and optional eval, new Function, the global object's eval, a computed member of a global, and a timer given code.
@@ -4637,6 +4882,7 @@ function hasUnboundedScan(text: string, source: string): boolean {
   if (/(?<![\w$.])(?<!instanceof\s+)(?:eval|Function)\b(?!\s*\()/.test(plain)) return true;
   if (/(?<![\w$.])(?:globalThis|global|window|self)\s*(?:\?\.|\.)\s*(?:eval|Function)\b|(?<![\w$.])window\s*(?:\?\.)?\s*\[/.test(plain)) return true;
   if (timerGetsCode(plain) || computedCallChain(plain)) return true;
+  if (loaderReach(plain, text)) return true;
   // .constructor.constructor and .constructor[ reach Function; .constructor( is read like Function( below.
   if (/(?:\?\.|\.)\s*constructor\s*(?:\?\.|\.)\s*constructor\b|(?:\?\.|\.)\s*constructor\s*(?:\?\.\s*)?\[/.test(plain)) return true;
   // A pattern that binds a constructor key ({ constructor: { constructor: F } }) reaches Function without a dot.
