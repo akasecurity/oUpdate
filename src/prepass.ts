@@ -636,7 +636,25 @@ function reachedFiles(files: FileMap, view: ReturnType<typeof installView>): Set
   for (const k of view.gypFiles) found.add(k);
   if (view.gyp) found.add(view.gyp);
   for (const k of mentionFiles(files, view.scripts)) found.add(k);
+  for (const k of mentionFiles(files, view.selfScripts ?? {})) found.add(k);
   return found;
+}
+
+// What only a self-run reached: its files, and what only the scripts it alone followed mention.
+function selfReached(files: FileMap, view: ReturnType<typeof installView>): Set<string> {
+  const self = new Set(view.selfOnly ?? []);
+  const regular = new Set<string>(view.files.filter((k) => !self.has(k)));
+  for (const k of view.gypFiles) if (!self.has(k)) regular.add(k);
+  if (view.gyp) {
+    regular.add(view.gyp);
+    self.delete(view.gyp);
+  }
+  for (const k of mentionFiles(files, view.scripts)) {
+    regular.add(k);
+    self.delete(k);
+  }
+  for (const k of mentionFiles(files, view.selfScripts ?? {})) if (!regular.has(k)) self.add(k);
+  return self;
 }
 
 function configStamp(files: FileMap, manifest: string): string {
@@ -984,9 +1002,14 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   };
   const inert =
     prepareInert(oldV.scripts, otherInstallEntry(oldFiles, oldV.manifest)) && prepareInert(newV.scripts, otherInstallEntry(newFiles, newV.manifest));
-  for (const k of new Set([...Object.keys(oldV.scripts), ...Object.keys(newV.scripts)])) {
+  // A script only a self-run followed is compared too (its body still runs).
+  const oldScripts = { ...oldV.selfScripts, ...oldV.scripts };
+  const newScripts = { ...newV.selfScripts, ...newV.scripts };
+  for (const k of new Set([...Object.keys(oldScripts), ...Object.keys(newScripts)])) {
     if (k === "prepare" && inert) continue;
-    if (oldV.scripts[k] !== newV.scripts[k]) push(`script ${k}`);
+    if (oldScripts[k] !== newScripts[k]) push(`script ${k}`);
+    // main's own test: a key followed regularly on one side only.
+    if (Object.hasOwn(oldV.scripts, k) !== Object.hasOwn(newV.scripts, k)) push(`script ${k}`);
   }
   const missN = new Set(newV.missing);
   for (const p of oldV.missing) if (!missN.has(p)) push(`file ${p}`);
@@ -997,6 +1020,14 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   const newReached = reachedFiles(newFiles, newV);
   for (const k of oldReached) if (!newReached.has(k)) push(`file ${k}`);
   for (const k of newReached) if (!oldReached.has(k)) push(`file ${k}`);
+  // A file only a self-run read reached on one side but another read reaches on the other is a retarget (`npx . ; node .` with main moved).
+  const oldSelf = selfReached(oldFiles, oldV);
+  const newSelf = selfReached(newFiles, newV);
+  for (const k of oldReached) if (oldSelf.has(k) !== newSelf.has(k)) push(`file ${k}`);
+  // The same for a path that is missing: a self-run read alone reached it on one side only.
+  const oldMissSelf = new Set(oldV.selfMissing ?? []);
+  const newMissSelf = new Set(newV.selfMissing ?? []);
+  for (const p of oldV.missing) if (missN.has(p) && oldMissSelf.has(p) !== newMissSelf.has(p)) push(`file ${p}`);
   for (const k of oldReached) {
     if (!newReached.has(k)) continue;
     const a = oldFiles.get(k);

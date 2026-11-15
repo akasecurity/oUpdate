@@ -23,7 +23,7 @@ describe("npx options that carry node options or a shell", () => {
   ])("%s: the file it runs is read", (hook) => {
     expect(reaches(hook)).toBe(true);
   });
-  test.each(["npx --registry https://r.invalid/ x", "npx --yes cowsay hi", "npx --cache /tmp/c x"])("control, as on main: %s reads no docs file", (hook) => {
+  test.each(["npx --registry https://r.invalid/ y", "npx --yes cowsay hi", "npx --cache /tmp/c y"])("control, as on main: %s reads no docs file", (hook) => {
     expect(reaches(hook)).toBe(false);
   });
 });
