@@ -24,6 +24,22 @@ describe("a command that names one of the package's own bins runs that bin's fil
     "npx --no-install tool",
     "npx --cache /tmp/c tool",
     "npx --shell sh tool",
+    "npx --tag latest tool",
+    "npx --scope @s tool",
+    "npx --tag --registry r tool",
+    "npx --scope --registry r tool",
+    "npx --tag -p x tool",
+    "npx --tag tool",
+    "npx --tag pnpm exec tool",
+    "npx --tag npm exec tool",
+    "bunx --scope npm exec tool",
+    "npm --tag exec tool",
+    "corepack --tag pnpm exec tool",
+    "npx --scope yarn tool",
+    "npx --scope tool",
+    "bunx --tag tool",
+    "npx --tag tool other",
+    "npx --script-shell sh --tag latest tool",
     "npm exec tool",
     "yarn tool",
     "pnpm tool",
@@ -54,6 +70,11 @@ describe("a command that names one of the package's own bins runs that bin's fil
     'require("child_process").execFileSync("tool");',
     'require("child_process").execSync("npx tool");',
     'require("child_process").execSync("npx --shell sh tool");',
+    'require("child_process").execSync("npx --tag tool");',
+    'require("child_process").execSync("npx --tag pnpm exec tool");',
+    'require("child_process").spawnSync("npx", ["--tag", "pnpm", "exec", "tool"]);',
+    'require("child_process").execSync("npx --scope npm exec tool");',
+    'require("child_process").spawnSync("npx", ["--scope", "tool"]);',
     'require("child_process").execSync("pnpm exec tool");',
     'require("child_process").execSync("bunx tool");',
     'require("child_process").spawnSync("bunx", ["tool"]);',
@@ -159,6 +180,9 @@ describe("a script of the same name runs first where the package manager says so
   );
   test("npx runs the bin even when a script has its name", () => {
     expect(reaches(withScript, { "hook.js": 'require("child_process").execSync("npx tool");\n' })).toBe(true);
+  });
+  test.each(['require("child_process").execSync("npx --tag tool yarn tool");', 'require("child_process").execSync("npx --scope tool yarn tool");'])("%s with a script named tool still reads the bin", (code) => {
+    expect(reaches(withScript, { "hook.js": `${code}\n` })).toBe(true);
   });
 });
 
