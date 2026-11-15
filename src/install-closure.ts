@@ -8,9 +8,15 @@ export interface InstallView {
   hold?: string;
   manifest: string;
   files: string[];
+  // The files only a self-run read (a runner that runs the package itself) reached.
+  selfOnly?: string[];
+  // The missing paths only a self-run read reached.
+  selfMissing?: string[];
   gypFiles: string[];
   missing: string[];
   scripts: Record<string, string>;
+  // Scripts only a self-run read followed.
+  selfScripts?: Record<string, string>;
   gyp?: string;
   // Set when a preinstall, install, postinstall, or prepare script is non-empty.
   hook: boolean;
@@ -113,6 +119,20 @@ interface Ctx {
   bins: Map<string, string[]>;
   // Bin files already read.
   binsRead: Set<string>;
+  // Bin files a self-run read (no read marks kept) has read.
+  selfBinsRead: Set<string>;
+  // A self-run read is open: a named bin read made inside it is a self-run read too.
+  inSelf?: boolean;
+  // The binsRead record under which a self-run pass last found every target already read (O(1) repeat triggers).
+  selfClear?: Set<string>;
+  // What the self-run reads have read so far (read-once records, and the files they reached that no other read reached).
+  selfMarks?: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> };
+  selfFiles?: Set<string>;
+  selfMissing?: Set<string>;
+  selfScripts?: Record<string, string>;
+  selfGyp?: boolean;
+  // The package's own name and what running the package itself runs (npx ., npm exec -- <name>): every bin, or main with no bin.
+  self: { name: string; targets: string[] };
   // The command being dispatched is only looked up, listed or asked for help (command -v tool, sudo -l tool, npm exec --help tool):
   // nothing in it runs, so no bin of this package is read for it or for what it would redispatch. Set and restored around it.
   noBinLookup?: boolean;
@@ -9508,6 +9528,10 @@ const CWD_MARK = "\u0000";
 const BIN_MARK = "\u0001";
 // A runner's command that a script of the same name would take first (yarn tool): a bin only when the package has no such script.
 const SCRIPT_MARK = "\u0002";
+// A package runner's command in a command string a scanned file runs: a bin name, or this package itself (npx .).
+const RUN_MARK = "\u0004";
+// A package spec a runner installs for its command (-p <spec>): only this package itself counts.
+const PKG_MARK = "\u0006";
 // The shell runs its own builtin for these words, never a bin of that name.
 const SHELL_BUILTINS = new Set(["echo", "printf", "cd", "pushd", "popd", "test", "[", "[[", "true", "false", "export", "set", "unset", "read", "readonly", "local", "declare",
   "typeset", "eval", "exec", "source", ".", ":", "exit", "return", "shift", "alias", "unalias", "wait", "trap", "umask", "ulimit", "kill", "pwd", "type", "hash", "command",
@@ -9540,16 +9564,16 @@ const PM_OWN: Record<string, Set<string>> = {
 // exec / dlx and bun x, the first word that is not an option (a known option's value is skipped; a `--` before it is allowed); after
 // yarn, yarn run, pnpm, bun and bun run with no subcommand of their own, that word unless a script of that name runs first. A nested
 // runner (npx yarn tool, corepack pnpm exec tool) is followed. npm run, pnpm run and the words after the command are never commands.
-function runnerCommand(argv: string[], i: number, hasScript: (name: string) => boolean): string[] {
-  const found = runnerCommandRead(argv, i, hasScript, false);
+function runnerCommand(argv: string[], i: number, hasScript: (name: string) => boolean, pkgs?: string[]): string[] {
+  const found = runnerCommandRead(argv, i, hasScript, false, pkgs);
   // With --tag or --scope on the line, main's whole reading (neither takes a value there) is run as well and both results are used, so
   // nothing main found, however far into a nested runner, is dropped.
   if (!argv.slice(i).some((w) => NPX_NO_DASH_VALUE.has(w))) return found;
-  const old = runnerCommandRead(argv, i, hasScript, true);
+  const old = runnerCommandRead(argv, i, hasScript, true, pkgs);
   return [...found, ...old.filter((w) => !found.includes(w))];
 }
 // legacy: main's reading, where --tag and --scope take no value.
-function runnerCommandRead(argv: string[], i: number, hasScript: (name: string) => boolean, legacy: boolean): string[] {
+function runnerCommandRead(argv: string[], i: number, hasScript: (name: string) => boolean, legacy: boolean, pkgs?: string[]): string[] {
   let runner = runnerName(binName(argv[i] ?? ""));
   let k = i + 1;
   let exec = runner === "npx" || runner === "bunx" || runner === "pnpx";
@@ -9562,6 +9586,10 @@ function runnerCommandRead(argv: string[], i: number, hasScript: (name: string) 
       // For --tag and --scope npm (nopt) takes the next word as the value unless it starts with a dash (`--tag --registry r tool` is --tag
       // alone, then --registry r); the legacy reading takes no value for them.
       const noValue = NPX_NO_DASH_VALUE.has(w) && (legacy || argv[k + 1]?.startsWith("-"));
+      // The package a runner installs for the command (-p <spec>, --package=<spec>) is collected for the caller.
+      if ((w === "-p" || w === "--package") && argv[k + 1] !== undefined) pkgs?.push(argv[k + 1]!);
+      else if (w.startsWith("--package=")) pkgs?.push(w.slice(10));
+      else if (/^-p[^-]/.test(w)) pkgs?.push(w.slice(2));
       k += RUNNER_VALUE_OPTS.has(w) && !noValue ? 2 : 1;
     }
     if (argv[k] === "--") {
@@ -9671,6 +9699,8 @@ function underLookup(ctx: Ctx, run: () => void): void {
 function capCount(ctx: Ctx, key: "ranSh" | "scanned"): number {
   const real = (ctx.realSets ?? ctx)[key];
   const lk = ctx.lookupSets?.[key];
+  // A self-run read under a lookup works on copies the two records above do not hold: its own count joins them.
+  if (ctx.inSelf && ctx.realSets) return new Set([...real, ...(lk ?? []), ...ctx[key], ...(ctx.selfMarks?.[key] ?? [])]).size;
   if (!lk || lk.size === 0) return real.size;
   let n = real.size;
   for (const k of lk) if (!real.has(k)) n++;
@@ -9685,6 +9715,8 @@ function scriptSets(ctx: Ctx): Set<string>[] {
   const real = ctx.realSets ?? ctx;
   const out = [real.seen, real.seenNoHooks];
   if (ctx.lookupSets) out.push(ctx.lookupSets.seen, ctx.lookupSets.seenNoHooks);
+  // A self-run read under a lookup works on copies of its own: its records count too.
+  if (ctx.inSelf && ctx.realSets) out.push(ctx.seen, ctx.seenNoHooks, ...(ctx.selfMarks ? [ctx.selfMarks.seen, ctx.selfMarks.seenNoHooks] : []));
   return out;
 }
 function wrapperLookup(wrapper: string, o: string): boolean {
@@ -9717,17 +9749,23 @@ const WRAPPER_VALUE_OPTS: Record<string, Set<string>> = {
 function runnerMarks(ws: string[], k: number): string[] {
   // Each reading (see runnerCommand) is marked on its own: the same word can be a script's in one and a bin's in the other.
   const out: string[] = [];
+  const has = new Set<string>();
+  const put = (m: string) => { if (!has.has(m)) { has.add(m); out.push(m); } };
   for (const legacy of [false, true]) {
     if (legacy && !ws.slice(k).some((w) => NPX_NO_DASH_VALUE.has(w))) break;
     const scriptFirst = new Set<string>();
+    const pkgs: string[] = [];
     const found = runnerCommandRead(ws, k, (n) => {
       scriptFirst.add(n);
       return false;
-    }, legacy);
+    }, legacy, pkgs);
     for (const w of found) {
       const marked = (scriptFirst.has(w) ? SCRIPT_MARK : BIN_MARK) + w;
-      if (!out.includes(marked)) out.push(marked);
+      put(marked);
+      // A runner's command may also name this package itself (npx ., npm exec -- <own name>): its bins run.
+      put(RUN_MARK + w);
     }
+    for (const p of pkgs) put(PKG_MARK + p);
   }
   return out;
 }
@@ -9940,6 +9978,10 @@ function settled(ctx: Ctx, key: string | undefined): boolean {
 }
 
 function addLiteralToken(ctx: Ctx, token: string, operand = false): void {
+  if (token.startsWith(RUN_MARK) || token.startsWith(PKG_MARK)) {
+    readSelfTargets(ctx, selfTargets(ctx, token.slice(1)));
+    return;
+  }
   if (token.startsWith(BIN_MARK) || token.startsWith(SCRIPT_MARK)) {
     const w = token.slice(1);
     if (token.startsWith(SCRIPT_MARK) && typeof ctx.raw[w] === "string") return;
@@ -13559,8 +13601,15 @@ function dispatch(ctx: Ctx, cmd: string): void {
   // pnpm exec tool, yarn tool, bun x tool). The bin's file is read as its own process; the word keeps its own reading too.
   const runnerLine = /^(?:npx|bunx|pnpx|npm|yarn|yarnpkg|pnpm|bun|corepack)$/.test(runnerName(bin));
   // A bin named like the runner itself (bin {npm: ...}) runs in its place: node_modules/.bin comes first on the scripts' PATH.
-  if (!ctx.noBinLookup) for (const w of runnerLine ? [argv[i]!, ...runnerCommand(argv, i, (n) => typeof ctx.raw[n] === "string")] : SHELL_BUILTINS.has(argv[i]!) ? [] : [argv[i]!]) {
-    for (const target of ownBinTargets(ctx, w)) readOwnBin(ctx, target);
+  const runPkgs: string[] = [];
+  const runWords = runnerLine ? runnerCommand(argv, i, (n) => typeof ctx.raw[n] === "string", runPkgs) : [];
+  if (!ctx.noBinLookup) {
+    for (const w of runnerLine ? [argv[i]!, ...runWords] : SHELL_BUILTINS.has(argv[i]!) ? [] : [argv[i]!]) {
+      for (const target of ownBinTargets(ctx, w)) readOwnBin(ctx, target);
+    }
+    // A runner whose command or package spec names the package itself (npx ., npm exec -- <own name>, npx -p . tool) runs its bins.
+    // Its reads run from the package root, so they leave no read marks: the same file run later from another folder is read again.
+    if ([...runWords, ...runPkgs].some((w) => selfTargets(ctx, w).length > 0)) readSelfTargets(ctx, ctx.self.targets);
   }
   if (ctx.hold) return;
   // An unresolved command word may be any runner: every file is read, docs and tests included.
@@ -14250,10 +14299,13 @@ function finish(ctx: Ctx, manifest: string, gyp: string | undefined, hook: boole
   return {
     hold: ctx.hold,
     manifest,
-    files: [...ctx.files].sort(),
+    files: [...new Set([...ctx.files, ...(ctx.selfFiles ?? [])])].sort(),
+    selfOnly: [...(ctx.selfFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     gypFiles: [...ctx.gypFiles].sort(),
-    missing: [...ctx.missing].sort(),
+    missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? [])])].sort(),
+    selfMissing: [...(ctx.selfMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
     scripts: ctx.scripts,
+    selfScripts: Object.fromEntries(Object.entries(ctx.selfScripts ?? {}).filter(([k]) => !Object.hasOwn(ctx.scripts, k))),
     gyp,
     hook,
     binStamp,
@@ -14326,9 +14378,12 @@ function inPackage(raw: string): string | undefined {
 // system runs it by its shebang: a node, nodejs or bun interpreter is read as `node <its shebang words> <file>` reads it (NODE_OPTIONS=,
 // --require, -e), any other as a script run by its path is. With no shebang the extension decides (.js, .cjs, .mjs as node reads it,
 // any other as a script); a shebang whose interpreter cannot be read is read both ways. Each bin is read once.
-function readOwnBin(ctx: Ctx, target: string): void {
-  if (ctx.hold || ctx.binsRead.has(target)) return;
-  ctx.binsRead.add(target);
+// A self-run read (self) leaves no read marks, so it keeps its own once-record: it skips a bin either kind has read, and a named read of the
+// same bin still runs after it (each bin is read at most twice).
+function readOwnBin(ctx: Ctx, target: string, selfRun = false): void {
+  const self = selfRun || ctx.inSelf === true;
+  if (ctx.hold || ctx.binsRead.has(target) || (self && ctx.selfBinsRead.has(target))) return;
+  (self ? ctx.selfBinsRead : ctx.binsRead).add(target);
   const key = findKey(ctx, target);
   if (!key) return;
   const saved = ctx.cwd;
@@ -14428,6 +14483,90 @@ export function shebangCommand(first: string): string[] | undefined {
   return [...out, ...ws.slice(k)];
 }
 
+// Runs a self-run read: from the package root, on copies of what the read changes, dropped after, so it counts only inside it. Copied
+// and restored: the read-once records, the file set, the files and folders it names or moves to (hookNamed, movedDirs), the lookup
+// records, and the flags widenInert, sawRunner and rootRuns. The read-once copies start from what earlier self-run reads read (the same
+// root folder), so the depth caps count them. The files and the missing paths it reached that no other read reached are kept apart
+// (selfFiles, selfMissing), so a retarget to one of them still shows. The scripts it followed (selfScripts) and a gyp reach
+// (selfGyp) are kept apart too, and the gyp read of a package only a self-run reached gyp for runs as a self-run.
+// The self-run reads of one trigger: each target once, and none that a read already took in, in a single copy of the records.
+function readSelfTargets(ctx: Ctx, targets: string[]): void {
+  // Nothing left to read: every target self-read (selfBinsRead holds only self.targets), or a pass under this same binsRead found none left
+  // (neither record ever drops an entry, so that stays true).
+  if (ctx.hold || ctx.selfBinsRead.size >= ctx.self.targets.length || ctx.selfClear === ctx.binsRead) return;
+  const todo = [...new Set(targets)].filter((t) => !ctx.binsRead.has(t) && !ctx.selfBinsRead.has(t));
+  if (ctx.hold) return;
+  if (todo.length === 0) {
+    if (targets === ctx.self.targets) ctx.selfClear = ctx.binsRead;
+    return;
+  }
+  underOwnMarks(ctx, () => {
+    for (const t of todo) readOwnBin(ctx, t, true);
+  });
+}
+function underOwnMarks(ctx: Ctx, run: () => void): void {
+  const keep = (ctx.selfMarks ??= { seen: new Set(), seenNoHooks: new Set(), scanned: new Set(), gypScanned: new Set(), ranSh: new Set() });
+  const real = { seen: ctx.seen, seenNoHooks: ctx.seenNoHooks, scanned: ctx.scanned, gypScanned: ctx.gypScanned, ranSh: ctx.ranSh };
+  const realFiles = ctx.files;
+  const realNamed = ctx.hookNamed;
+  const realMoved = ctx.movedDirs;
+  ctx.movedDirs = new Set(realMoved);
+  const realMissing = ctx.missing;
+  ctx.missing = new Set(realMissing);
+  const realLookup = ctx.lookupSets;
+  if (realLookup) ctx.lookupSets = { seen: new Set(realLookup.seen), seenNoHooks: new Set(realLookup.seenNoHooks), scanned: new Set(realLookup.scanned), gypScanned: new Set(realLookup.gypScanned), ranSh: new Set(realLookup.ranSh), binsRead: new Set(realLookup.binsRead) };
+  const savedRunner = ctx.sawRunner;
+  const savedRoot = ctx.rootRuns;
+  ctx.hookNamed = new Set(realNamed);
+  ctx.seen = new Set([...real.seen, ...keep.seen]);
+  ctx.seenNoHooks = new Set([...real.seenNoHooks, ...keep.seenNoHooks]);
+  ctx.scanned = new Set([...real.scanned, ...keep.scanned]);
+  ctx.gypScanned = new Set([...real.gypScanned, ...keep.gypScanned]);
+  ctx.ranSh = new Set([...real.ranSh, ...keep.ranSh]);
+  ctx.files = new Set(realFiles);
+  const savedSelf = ctx.inSelf;
+  const savedInert = ctx.widenInert;
+  const realScripts = ctx.scripts;
+  ctx.scripts = { ...realScripts };
+  const savedNodeGyp = ctx.sawNodeGyp;
+  const savedReachGyp = ctx.reachGyp;
+  ctx.inSelf = true;
+  try {
+    run();
+  } finally {
+    for (const k of ["seen", "seenNoHooks", "scanned", "gypScanned", "ranSh"] as const) for (const v of ctx[k]) keep[k].add(v);
+    const selfScripts = (ctx.selfScripts ??= {});
+    for (const [k, v] of Object.entries(ctx.scripts)) if (!Object.hasOwn(realScripts, k)) selfScripts[k] = v;
+    ctx.scripts = realScripts;
+    if ((ctx.sawNodeGyp && !savedNodeGyp) || (ctx.reachGyp && !savedReachGyp)) ctx.selfGyp = true;
+    ctx.sawNodeGyp = savedNodeGyp;
+    ctx.reachGyp = savedReachGyp;
+    const selfFiles = (ctx.selfFiles ??= new Set());
+    for (const k of ctx.files) if (!realFiles.has(k)) selfFiles.add(k);
+    const selfMissing = (ctx.selfMissing ??= new Set());
+    for (const k of ctx.missing) if (!realMissing.has(k)) selfMissing.add(k);
+    Object.assign(ctx, real);
+    ctx.files = realFiles;
+    ctx.hookNamed = realNamed;
+    ctx.movedDirs = realMoved;
+    ctx.missing = realMissing;
+    ctx.lookupSets = realLookup;
+    ctx.sawRunner = savedRunner;
+    ctx.rootRuns = savedRoot;
+    ctx.inSelf = savedSelf;
+    ctx.widenInert = savedInert;
+  }
+}
+// What a package runner runs when its command or package spec names this package itself: `.` or `./` (the package folder a hook runs
+// in), or the package's own name, with or without a version (`npx pkg`, `npm exec -- pkg@1`). npm runs the package's bin (the only one,
+// or the one named like the package); every bin is read, and main (or index.js) when the package has no bin: wider.
+function selfTargets(ctx: Ctx, word: string): string[] {
+  if (word === "." || word === "./") return ctx.self.targets;
+  const name = ctx.self.name;
+  if (name && (word === name || (word.startsWith(`${name}@`) && !word.slice(name.length + 1).includes("/")))) return ctx.self.targets;
+  return [];
+}
+
 // The targets of the package's own bin a command word names: a bare name or a path ending in .bin/<name>, else none.
 function ownBinTargets(ctx: Ctx, word: string): string[] {
   if (ctx.bins.size === 0) return [];
@@ -14473,7 +14612,24 @@ export function installView(files: FileMap): InstallView {
     oldBackslash = false;
   }
   const merge = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort();
-  return { ...v, hold: v.hold ?? w.hold, files: merge(v.files, w.files), gypFiles: merge(v.gypFiles, w.gypFiles), missing: merge(v.missing, w.missing), gyp: v.gyp ?? w.gyp };
+  // Only a path no regular read of either reading reached stays self-run only.
+  const only = (a: string[], aSelf: string[] | undefined, b: string[], bSelf: string[] | undefined) => {
+    const aOnly = new Set(aSelf);
+    const bOnly = new Set(bSelf);
+    const real = new Set([...a.filter((k) => !aOnly.has(k)), ...b.filter((k) => !bOnly.has(k))]);
+    return merge(a, b).filter((k) => !real.has(k));
+  };
+  return {
+    ...v,
+    hold: v.hold ?? w.hold,
+    files: merge(v.files, w.files),
+    selfOnly: only(v.files, v.selfOnly, w.files, w.selfOnly),
+    gypFiles: merge(v.gypFiles, w.gypFiles),
+    missing: merge(v.missing, w.missing),
+    selfMissing: only(v.missing, v.selfMissing, w.missing, w.selfMissing),
+    selfScripts: Object.fromEntries(Object.entries({ ...w.selfScripts, ...v.selfScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
+    gyp: v.gyp ?? w.gyp,
+  };
 }
 
 function installViewCore(files: FileMap): InstallView {
@@ -14500,6 +14656,8 @@ function installViewCore(files: FileMap): InstallView {
     hookNamed: new Set(),
     bins: new Map(),
     binsRead: new Set(),
+    selfBinsRead: new Set(),
+    self: { name: "", targets: [] },
     movedDirs: new Set(),
     cwd: "",
     widenInert: false,
@@ -14518,6 +14676,9 @@ function installViewCore(files: FileMap): InstallView {
   const hook = installHook(root);
   const stamp = stampBin(root);
   ctx.bins = ownBins(root, indexed.logical);
+  const binTargets = [...new Set([...ctx.bins.values()].flat())];
+  const mainFile = typeof root.main === "string" ? inPackage(root.main) : undefined;
+  ctx.self = { name: typeof root.name === "string" ? root.name : "", targets: binTargets.length ? binTargets : [mainFile ?? "index.js"] };
   const done = (gyp?: string) => finish(ctx, manifest, gyp, hook, stamp);
   const scripts = root.scripts;
   ctx.raw = scripts && typeof scripts === "object" && !Array.isArray(scripts) ? (scripts as Record<string, unknown>) : {};
@@ -14572,27 +14733,37 @@ function installViewCore(files: FileMap): InstallView {
   // prebuild was loaded or gypfile is false. `node safe.js` does not.
   const implicit = anyBinding && !truthy("install") && !truthy("preinstall") && root.gypfile !== false;
   const reached = ctx.sawNodeGyp || ctx.reachGyp;
-  if (implicit || reached) {
-    gyp = indexed.gyp;
-    if (!gyp) {
+  const pickGyp = (): string | undefined => {
+    let g = indexed.gyp;
+    if (!g) {
       for (const [logical, orig] of indexed.logical) {
         if (logical.slice(logical.lastIndexOf("/") + 1).toLowerCase() === "binding.gyp") {
-          gyp = orig;
+          g = orig;
           break;
         }
       }
     }
+    return g;
+  };
+  const readGyp = (g: string | undefined) => {
     const seen = new Set<string>();
     for (const logical of indexed.logical.keys()) {
       if (!isGypName(logical)) continue;
       const orig = indexed.logical.get(logical)!;
       // binding.gyp itself is byte-compared through the view's gyp field.
-      if (orig !== gyp) {
+      if (orig !== g) {
         ctx.files.add(orig);
         ctx.gypFiles.add(orig);
       }
       scanGyp(ctx, logical, seen);
     }
+  };
+  if (implicit || reached) {
+    gyp = pickGyp();
+    readGyp(gyp);
+  } else if (ctx.selfGyp) {
+    // Only a self-run reached gyp: read it as a self-run, so what it reaches stays self-only (binding.gyp too, through selfFiles).
+    underOwnMarks(ctx, () => readGyp(undefined));
   }
   return done(gyp);
 }
