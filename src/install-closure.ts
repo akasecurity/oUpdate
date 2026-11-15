@@ -3525,6 +3525,500 @@ function computedCallChain(code: string): boolean {
     // A callee in grouping parentheses: (o[k])(...), (0, o[k])(...), (o[k] || f)(...), (c ? o[k] : f)(...), new (o[k]).
     if (groupedCallee(code, ix, i, e, numeric) && !numeric(keyOf(), i)) return true;
   }
+  if (code.indexOf("[") < 0) return false; // no computed member, nothing to store
+  return storedCallee(code, numeric, (index ??= bracketPairs(code)));
+}
+
+// A computed member stored in a name and called later: const f = function () {}[k]; f("return 1")(). A name set from a value that holds
+// a computed member whose key is not a number (also o?.[k], and inside an array or a group: [o[k]], (o[k] || g)) is a computed callee;
+// so is every name of a pattern that takes a computed key (const { [k]: f } = o) or whose value holds one (const [g] = [o[k]]), and a name
+// whose value mentions one (up to four hops, and a fifth is a hold). Calling it is a computed call: f(...), f?.(...), f[...](...)
+// whatever the key (a[0](...), f["call"](...)), a tagged template, new f, f.call / apply / bind, a group that passes it through and is
+// called ((f), (0, f), (f || g), (c ? f : g), read as for a computed member), and f as the first argument of call.call, apply.call, Reflect.apply, Reflect.construct or a
+// name set from one. A function or arrow value is the function: it is read only for its result (the expression of an arrow, each
+// return expression of a block, what follows a function's body) and there only for names that are already computed callees (a
+// wrapper () => f), at the expression's own depth, never for a computed member of its own; only a member taken right after a function's
+// body (function () {}[k]) counts. Each read is charged.
+const NAME = String.raw`[\p{ID_Start}_$][\p{ID_Continue}$\u200c\u200d]*`;
+const NOT_IN_NAME = String.raw`(?<![\p{ID_Continue}$\u200c\u200d.])`;
+const STORE_AT = new RegExp(String.raw`${NOT_IN_NAME}(${NAME})\s*(?:\?\?|\|\||&&)?=(?![=>])`, "gu");
+const ANY_NAME = new RegExp(String.raw`${NOT_IN_NAME}${NAME}`, "gu");
+// A name written as a use: a member's name after a dot is not one, but a spread after three dots is.
+const USE_NAME = new RegExp(String.raw`(?<![\p{ID_Continue}$\u200c\u200d])(?<!(?<!\.\.)\.)${NAME}`, "gu");
+const CALL_AT_END = new RegExp(String.raw`(${NAME})\s*\(\s*$`, "u");
+const PATTERN_END = /[\]}]\s*=(?![=>])/g;
+const ARROW_VALUE = /^(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>/;
+const FUNCTION_VALUE = /^(?:async\s+)?(?:function|class)(?![\w$])/;
+// A reference to call or apply (also Reflect.apply, or call or apply bound to one): a name set from it runs its first argument.
+const INVOKER_REF = String.raw`(?:(?:[\w$]+\s*\.\s*)*(?:call|apply)|Reflect\s*\.\s*(?:apply|construct))`;
+const INVOKER_VALUE = new RegExp(String.raw`^(?:${INVOKER_REF}|${INVOKER_REF}\s*\.\s*bind\s*\(\s*${INVOKER_REF}\s*\))$`);
+const INVOKER_PATTERN_VALUE = /^(?:Reflect|Function\s*\.\s*prototype)$/;
+const FIRST_ARGUMENT_OF = /(?:\b(?:call|apply)\s*\.\s*(?:call|apply|bind)|Reflect\s*(?:\.\s*(?:apply|construct)|\[\s*""\s*\]))\s*\(\s*$/;
+const OPERAND_END = /[\w$)\]}"'`\u0080-\uffff]/;
+// A [ after one of these starts an array, not a member (BEFORE_ARRAY, and the words that open a binding or a for-of head).
+const ARRAY_AFTER = /(?:^|[^\w$.])(?:return|typeof|case|in|new|delete|void|throw|else|do|instanceof|export|default|const|let|var|of|yield|await)$/;
+interface Store {
+  names: string[];
+  from: number; // the value, read for a computed member
+  end: number;
+  idFrom: number; // the text read for names that are already computed callees
+  idTo: number;
+  tainted: boolean;
+  fn: boolean; // the value is a function or class: what follows its body is a member taken from it
+  pattern: boolean;
+  at: number; // where the store is written
+  kind: 0 | 1 | 2; // 0 a plain value, 1 an arrow, 2 a function or class
+  bodyFrom: number; // the body of a function or arrow: its first character (the brace of a block)
+  bodyTo: number; // its end (the closing brace of a block)
+  block: boolean;
+}
+interface ValueRange {
+  from: number;
+  end: number;
+  idFrom: number;
+  idTo: number;
+  fn: boolean;
+  kind: 0 | 1 | 2;
+  bodyFrom: number;
+  bodyTo: number;
+  block: boolean;
+}
+function storedCallee(code: string, numeric: (key: string, at: number) => boolean, ix: BracketPairs): boolean {
+  jsStep(code.length);
+  const computedKey = (key: string, at: number) => {
+    const t = key.trim();
+    return !(t === '""' || (t.length <= 64 && /^\d+$/.test(t)) || numeric(t, at));
+  };
+  // A computed member with a key that is not provably a number in [from, end).
+  // The block body that closes at c is a function that is only handed on (TypeScript and Babel helpers: x || function () { ... m[k] ... }),
+  // not one that is called at once: what follows it, or what follows a grouping parenthesis around it (also one operand of a group:
+  // (c ? function () {} : g)()), is not ( . [ a string, a backtick or ?., and it is not the operand of new.
+  const invokedAfter = (at: number): boolean => {
+    let j = at;
+    while (j < code.length && /\s/.test(code[j]!)) j++;
+    jsStep(j - at + 1);
+    const ch = code[j];
+    return ch === "(" || ch === "." || ch === "[" || ch === "`" || ch === '"' || ch === "'" || (ch === "?" && code[j + 1] === ".");
+  };
+  const isCallParen = (o: number): boolean => {
+    let b = o;
+    while (b > 0 && /\s/.test(code[b - 1]!)) b--;
+    jsStep(o - b + 1);
+    return b > 0 && OPERAND_END.test(code[b - 1]!) && !/^(?:return|typeof|void|delete|new|in|of|instanceof|case|throw|else|do|yield|await)$/.test(wordBefore(code, o));
+  };
+  const handedOn = (i: number, c: number): boolean => {
+    if (invokedAfter(c + 1) || wordBefore(code, i) === "new") return false;
+    for (let o = ix.inner[i]!; o >= 0 && code[o] === "(" && !isCallParen(o); o = ix.inner[o]!) {
+      jsStep(8);
+      const q = ix.closer[o]!;
+      if ((q >= 0 && invokedAfter(q + 1)) || wordBefore(code, o) === "new") return false;
+    }
+    return true;
+  };
+  // The closing brace of a function or arrow with a block body that starts at i and is only handed on, or -1.
+  const handedOnBody = (i: number, end: number): number => {
+    if (!((code[i] === "f" && code.startsWith("function", i) && (i === 0 || !/[\w$.]/.test(code[i - 1]!)) && !/[\w$]/.test(code[i + 8] ?? "")) || (code[i] === "=" && code[i + 1] === ">"))) return -1;
+    let k = i + (code[i] === "f" ? 8 : 2);
+    if (code[i] === "f") {
+      for (; k < end && k < i + 4096; k++) {
+        if (code[k] === "(") {
+          const c = ix.closer[k];
+          if (c === undefined || c < 0) break;
+          k = c;
+        } else if (code[k] === "{") break;
+      }
+      jsStep(k - i);
+    } else {
+      while (k < end && /\s/.test(code[k]!)) k++;
+    }
+    const c = code[k] === "{" ? ix.closer[k]! : -1;
+    return c > k && c < end && handedOn(i, c) ? c : -1;
+  };
+  // A plain value's text with the bodies of the functions it hands on left out.
+  const plainText = (from: number, end: number): string => {
+    jsStep(end - from);
+    let out = "";
+    let at = from;
+    for (let i = from; i < end; i++) {
+      const c = handedOnBody(i, end);
+      if (c < 0) continue;
+      out += code.slice(at, i) + " ";
+      at = c + 1;
+      i = c;
+    }
+    return out + code.slice(at, end);
+  };
+  const holdsComputed = (from: number, end: number, fn: boolean): boolean => {
+    for (let i = from; i < end; i++) {
+      // A function or arrow with a block body that is handed on is read for neither its members nor its names here.
+      const body = handedOnBody(i, end);
+      if (body >= 0) {
+        i = body;
+        continue;
+      }
+      if (code[i] !== "[") continue;
+      jsStep(8);
+      let j = i;
+      while (j > from && /\s/.test(code[j - 1]!)) j--;
+      const optional = code[j - 1] === "." && code[j - 2] === "?";
+      if (!optional && !(fn && j <= from) && (j <= from || !OPERAND_END.test(code[j - 1]!) || ARRAY_AFTER.test(code.slice(Math.max(0, j - 12), j)))) continue;
+      const c = ix.closer[i]!;
+      if (c < 0 || code[c] !== "]" || computedKey(code.slice(i + 1, c), i)) return true;
+    }
+    return false;
+  };
+  // The value that starts at "from": a ValueRange: where to read for a member and where it ends, where to read for names and where that ends, whether it is a function, and its body.
+  const plain = (a: number, b: number, c: number, d: number, fn = false): ValueRange => ({ from: a, end: b, idFrom: c, idTo: d, fn, kind: 0, bodyFrom: 0, bodyTo: 0, block: false });
+  const valueRange = (from: number): ValueRange => {
+    let p = from;
+    while (p < code.length && /\s/.test(code[p]!)) p++;
+    jsStep(p - from + 1);
+    const arrow = ARROW_VALUE.exec(code.slice(p, p + 200));
+    if (arrow !== null) {
+      const idTo = valueEnd(code, p, true);
+      let bodyFrom = p + arrow[0].length;
+      while (bodyFrom < idTo && /\s/.test(code[bodyFrom]!)) bodyFrom++;
+      const block = code[bodyFrom] === "{" && ix.closer[bodyFrom]! >= 0;
+      return { ...plain(p, p, p, idTo), kind: 1, bodyFrom, bodyTo: block ? ix.closer[bodyFrom]! : idTo, block };
+    }
+    if (FUNCTION_VALUE.test(code.slice(p, p + 16))) {
+      let k = p;
+      for (; k < code.length && k < p + 4096; k++) {
+        const ch = code[k]!;
+        if (ch === "(") {
+          const c = ix.closer[k]!;
+          if (c < 0) return plain(p, p, p, p);
+          k = c;
+        } else if (ch === "{") break;
+      }
+      jsStep(k - p);
+      const b = code[k] === "{" ? ix.closer[k]! : -1;
+      if (b < 0) return plain(p, p, p, p);
+      const after = b + 1;
+      const fnRange = (end: number): ValueRange => ({ ...plain(after, end, p, end, true), kind: 2, bodyFrom: k, bodyTo: b, block: true });
+      // A function with no semicolon after it ends at its closing brace when the next line does not continue it.
+      let n = after;
+      while (n < code.length && /[ \t]/.test(code[n]!)) n++;
+      jsStep(n - after + 1);
+      if (LINE_END.test(code[n] ?? "")) {
+        let m = n;
+        while (m < code.length && /\s/.test(code[m]!)) m++;
+        jsStep(m - n);
+        if (m >= code.length || !CONTINUES.test(code.slice(m, m + 12))) return fnRange(after);
+      }
+      const end = valueEnd(code, after, true);
+      return fnRange(end);
+    }
+    const end = valueEnd(code, p, true);
+    return plain(p, end, p, end);
+  };
+  const stores: Store[] = [];
+  for (const m of code.matchAll(STORE_AT)) {
+    jsStep(16);
+    stores.push({ names: [m[1]!], ...valueRange(m.index + m[0].length), tainted: false, pattern: false, at: m.index });
+  }
+  for (const m of code.matchAll(PATTERN_END)) {
+    jsStep(16);
+    const close = m.index;
+    const o = ix.opener[close]!;
+    if (o < 0) continue;
+    let t = o;
+    while (t > 0 && /\s/.test(code[t - 1]!)) t--;
+    const keyword = /^(?:const|let|var)$/.test(wordBefore(code, o));
+    if (!keyword && t > 0 && OPERAND_END.test(code[t - 1]!)) continue; // a member assignment (a[0] = v), not a pattern
+    const names = code.slice(o, close + 1).match(ANY_NAME) ?? [];
+    jsStep(close - o + 1);
+    let keyed = false;
+    if (code[o] === "{") {
+      for (let i = o + 1; i < close && !keyed; i++) {
+        if (code[i] !== "[") continue;
+        let j = i;
+        while (j > o && /\s/.test(code[j - 1]!)) j--;
+        if (code[j - 1] !== "{" && code[j - 1] !== ",") continue;
+        const c = ix.closer[i]!;
+        if (c < 0 || computedKey(code.slice(i + 1, c), i)) keyed = true;
+        else i = c;
+      }
+    }
+    stores.push({ names, ...valueRange(close + m[0].length), tainted: keyed, pattern: true, at: o });
+  }
+  const tainted = new Set<string>();
+  const invokers = new Set<string>();
+  for (const st of stores) {
+    jsStep(st.end - st.from + 1);
+    if (!st.tainted && st.end > st.from && holdsComputed(st.from, st.end, st.fn)) st.tainted = true;
+    if (st.tainted) for (const n of st.names) tainted.add(n);
+    if (st.idTo > st.idFrom) {
+      jsStep(Math.min(st.idTo - st.idFrom, 300));
+      const text = code.slice(st.idFrom, Math.min(st.idTo, st.idFrom + 300)).trim();
+      if (INVOKER_VALUE.test(text)) for (const n of st.names) invokers.add(n);
+      else if (st.pattern && INVOKER_PATTERN_VALUE.test(text)) for (const n of st.names) if (/^(?:apply|call|construct)$/.test(n)) invokers.add(n);
+    }
+  }
+  if (tainted.size === 0) return false;
+  // A name set from a name that is one: up to four hops, and a fifth is a hold.
+  // The names a store's value hands on. A plain value: every name in it. A function or arrow is read for its result only: the
+  // expression of an arrow, each return expression of a block, and what follows a function's body (a member taken from it), at the
+  // expression's own depth, leaving out the arguments of calls, braces, names followed by a call and names stored inside the body, and its own name and parameters (in the result of its body).
+  const order = stores.map((_, i) => i).sort((a, b) => stores[a]!.at - stores[b]!.at);
+  const NAME_Y = new RegExp(NAME, "uy");
+  const skipGroup = (i: number, end: number): number => {
+    const c = ix.closer[i]!;
+    return c > i && c < end ? c : i;
+  };
+  // The names a function head binds: its own name and its parameters (also inside patterns), not the keys of an object pattern and not
+  // the default values. A name with a default or a pattern value in the head is left in: it may be set from a computed member.
+  const bindingNames = (st: Store): Set<string> => {
+    const names = new Set<string>();
+    const end = st.bodyFrom;
+    jsStep(end - st.idFrom + 1);
+    const target = (a: number, b: number): void => {
+      let x = a;
+      while (x < b && /\s/.test(code[x]!)) x++;
+      if (code.startsWith("...", x)) x += 3;
+      while (x < b && /\s/.test(code[x]!)) x++;
+      const ch = code[x];
+      if (ch === "{" || ch === "[") {
+        const c = ix.closer[x]!;
+        if (c > x && c < b) items(x + 1, c, ch === "{");
+        return;
+      }
+      NAME_Y.lastIndex = x;
+      const m = NAME_Y.exec(code);
+      if (m !== null && x + m[0].length <= b) names.add(m[0]);
+    };
+    const item = (a: number, b: number, braces: boolean): void => {
+      let eq = -1;
+      let colon = -1;
+      for (let i = a; i < b; i++) {
+        const ch = code[i]!;
+        if (ch === "(" || ch === "[" || ch === "{") i = skipGroup(i, b);
+        else if (ch === "=" && code[i + 1] !== "=" && code[i + 1] !== ">" && eq < 0) eq = i;
+        else if (ch === ":" && braces && colon < 0 && eq < 0) colon = i;
+      }
+      target(colon >= 0 ? colon + 1 : a, eq >= 0 ? eq : b);
+    };
+    const items = (a: number, b: number, braces: boolean): void => {
+      let from = a;
+      for (let i = a; i <= b; i++) {
+        if (i < b) {
+          const ch = code[i]!;
+          if (ch === "(" || ch === "[" || ch === "{") i = skipGroup(i, b);
+          if (code[i] !== ",") continue;
+        }
+        item(from, i, braces);
+        from = i + 1;
+      }
+    };
+    let i = st.idFrom;
+    const skipWs = () => {
+      while (i < end && /\s/.test(code[i]!)) i++;
+    };
+    if (/^async(?![\w$])/.test(code.slice(i, i + 6))) i += 5;
+    skipWs();
+    if (st.kind === 1) {
+      if (code[i] === "(") {
+        const c = ix.closer[i]!;
+        if (c > i && c < end) items(i + 1, c, false);
+      } else target(i, end);
+    } else {
+      // function name(...) or class Name: the name, then the parameters
+      for (let k = 0; k < 4 && i < end; k++) {
+        skipWs();
+        if (code[i] === "(" || code[i] === "{" || code[i] === "*") {
+          if (code[i] === "*") i++;
+          if (code[i] !== "(") continue;
+          break;
+        }
+        NAME_Y.lastIndex = i;
+        const m = NAME_Y.exec(code);
+        if (m === null) break;
+        i += m[0].length;
+        if (m[0] === "function" || m[0] === "class" || m[0] === "async") continue;
+        if (m[0] === "extends") break;
+        names.add(m[0]);
+      }
+      skipWs();
+      if (code[i] === "(") {
+        const c = ix.closer[i]!;
+        if (c > i && c < end) items(i + 1, c, false);
+      }
+    }
+    // A name with a default or a pattern value in the head (a store there) is never dropped: it may be set from a computed member.
+    let lo = 0;
+    let hi = order.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (stores[order[mid]!]!.at < st.idFrom) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let x = lo; x < order.length && stores[order[x]!]!.at < end; x++) {
+      const other = stores[order[x]!]!;
+      jsStep(1 + other.names.length);
+      for (const n of other.names) names.delete(n); // tainted now or by a later hop: a name with a default stays a callee
+    }
+    return names;
+  };
+  const resultNames = (st: Store): string[] => {
+    const parts: [number, number, boolean][] = [];
+    if (st.block) {
+      jsStep(st.bodyTo - st.bodyFrom + 1);
+      for (const m of code.slice(st.bodyFrom + 1, st.bodyTo).matchAll(/(?<![\w$.])return(?![\w$])/g)) {
+        const a = st.bodyFrom + 1 + m.index + m[0].length;
+        let e = a;
+        while (e < st.bodyTo) {
+          const ch = code[e]!;
+          if (ch === ";" || ch === "}" || ch === ")" || ch === "]") break;
+          if (ch === "(" || ch === "[" || ch === "{") {
+            const c = ix.closer[e]!;
+            if (c < 0) break;
+            e = c + 1;
+            continue;
+          }
+          if (ch === "\n") {
+            let q = e;
+            while (q < st.bodyTo && /\s/.test(code[q]!)) q++;
+            if (q >= st.bodyTo || !CONTINUES.test(code.slice(q, q + 12))) break;
+            e = q;
+            continue;
+          }
+          e++;
+        }
+        jsStep(e - a + 1);
+        parts.push([a, e, false]);
+      }
+    } else if (st.kind === 1) parts.push([st.bodyFrom, st.idTo, false]);
+    if (st.kind === 2) parts.push([st.bodyTo + 1, st.idTo, true]); // what follows the body: a member taken from the function
+    const texts = ["", ""]; // the result of the body, and what follows it
+    for (const [a, e, tail] of parts) {
+      let text = "";
+      jsStep(e - a + 1);
+      for (let i = a; i < e; i++) {
+        const ch = code[i]!;
+        if (ch === "(" || ch === "{") {
+          const c = ix.closer[i]!;
+          if (c < 0) {
+            text += ch;
+            continue;
+          }
+          let b = i;
+          while (b > a && /\s/.test(code[b - 1]!)) b--;
+          // Call arguments and braces are not the result; a grouping parenthesis is read.
+          if (ch === "(" && (b <= a || !OPERAND_END.test(code[b - 1]!))) {
+            text += " ";
+            continue;
+          }
+          text += ch === "(" ? "()" : " ";
+          i = c;
+          continue;
+        }
+        text += ch;
+      }
+      texts[tail ? 1 : 0] += text + " ";
+    }
+    const inside = new Set<string>();
+    // The function's own name and parameters are its locals in the result of its body: a parameter that shares a name with a computed
+    // callee elsewhere is not one, unless its own default holds a computed member (a tainted store in the head).
+    const params = st.kind === 0 ? new Set<string>() : bindingNames(st);
+    if (st.kind !== 0) {
+      let lo = 0;
+      let hi = order.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (stores[order[mid]!]!.at < st.bodyFrom) lo = mid + 1;
+        else hi = mid;
+      }
+      for (let x = lo; x < order.length && stores[order[x]!]!.at < st.bodyTo; x++) {
+        jsStep(1 + stores[order[x]!]!.names.length);
+        for (const n of stores[order[x]!]!.names) inside.add(n);
+      }
+    }
+    const out: string[] = [];
+    texts.forEach((text, which) => {
+      for (const m of text.matchAll(ANY_NAME)) {
+        if (inside.has(m[0]) || (which === 0 && params.has(m[0]))) continue;
+        if (/^\s*\(/.test(text.slice(m.index + m[0].length, m.index + m[0].length + 8))) continue;
+        out.push(m[0]);
+      }
+    });
+    return out;
+  };
+  const ids = stores.map((st) => {
+    if (st.tainted || st.idTo <= st.idFrom) return null;
+    if (st.kind !== 0) return resultNames(st);
+    return plainText(st.idFrom, st.idTo).match(ANY_NAME) ?? [];
+  });
+  const grow = () => {
+    let grew = false;
+    stores.forEach((st, i) => {
+      const list = ids[i];
+      if (st.tainted || list === null || list === undefined) return;
+      jsStep(list.length + 1);
+      if (list.some((id) => tainted.has(id))) {
+        st.tainted = true;
+        for (const n of st.names) tainted.add(n);
+        grew = true;
+      }
+    });
+    return grew;
+  };
+  for (let hop = 0; hop < 4; hop++) if (!grow()) break;
+  if (grow()) return true;
+  // The places each tainted name is written in the text (a name with a non-ASCII letter is one too).
+  const uses = new Map<string, number[]>();
+  for (const m of code.matchAll(USE_NAME)) {
+    if (!tainted.has(m[0]) && !invokers.has(m[0])) continue;
+    let a = uses.get(m[0]);
+    if (a === undefined) uses.set(m[0], (a = []));
+    a.push(m.index);
+  }
+  for (const n of tainted) {
+    for (const at of uses.get(n) ?? []) {
+      jsStep(64);
+      if (at > 0 && code[at - 1] === "." && !code.slice(Math.max(0, at - 3), at).startsWith("...")) continue;
+      const w = wordBefore(code, at, true);
+      if (w === "function" || w === "class") continue;
+      if (w === "new") return true;
+      const b = backOverSpace(code, at);
+      const before = code.slice(Math.max(0, b - 48), b);
+      if (FIRST_ARGUMENT_OF.test(before)) return true;
+      const inv = CALL_AT_END.exec(before);
+      if (inv !== null && invokers.has(inv[1]!)) return true;
+      let q = at + n.length;
+      while (q < code.length && /\s/.test(code[q]!)) q++;
+      jsStep(q - at - n.length);
+      let c = code[q];
+      if (c === "(" || c === '"' || c === "`") return true;
+      // f?.(...) is a call; f?.[...] is a member read like f[...]: it holds only when a call, a string or a template follows its bracket.
+      if (c === "?") {
+        const opt = /^\?\.\s*([(\[])/.exec(code.slice(q, q + 16));
+        if (opt !== null && opt[1] === "(") return true;
+        if (opt !== null) {
+          q += opt[0].length - 1;
+          c = "[";
+        }
+      }
+      if (callMethodAt(code, q)) return true;
+      if (c === "[") {
+        // A chain of up to four members: after each closing bracket a call, ?.(, a string, a template or .call / .apply / .bind holds;
+        // another [ or ?.[ is the next link.
+        let open = q;
+        for (let link = 0; link < 4; link++) {
+          const e = ix.closer[open]!;
+          if (e < 0) return true;
+          let k = e + 1;
+          while (k < code.length && /\s/.test(code[k]!)) k++;
+          jsStep(k - e);
+          if (code[k] === "(" || code[k] === '"' || code[k] === "`" || /^\?\.\s*\(/.test(code.slice(k, k + 16)) || callMethodAt(code, k)) return true;
+          const opt = /^\?\.\s*\[/.exec(code.slice(k, k + 16));
+          const next = code[k] === "[" ? k : opt !== null ? k + opt[0].length - 1 : -1;
+          if (next < 0) break;
+          open = next;
+        }
+      }
+      if (groupedCallee(code, ix, at, q, numeric)) return true;
+    }
+  }
   return false;
 }
 
