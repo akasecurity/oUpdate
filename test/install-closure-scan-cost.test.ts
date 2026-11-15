@@ -42,6 +42,24 @@ describe("JS scan cost stays linear", () => {
   test("one long expression naming a stored cache value many times", () => {
     expect(growth((bytes) => "const c = require.cache;\nf(" + fill("c, ", bytes) + ");", 64 * 1024)).toBeLessThan(LIMIT);
   }, 120000);
+  test("repeated blocks of stored cache names with no ; or line break are read in linear time and without a fault", () => {
+    const faults = closure.scannerFaultCount();
+    const gen = (bytes: number) => "const c = require.cache;\n" + fill("{" + "c, ".repeat(700) + "} ", bytes);
+    expect(growth(gen, 64 * 1024)).toBeLessThan(LIMIT);
+    classifyJs("a.js", gen(256 * 1024));
+    expect(closure.scannerFaultCount()).toBe(faults);
+  }, 120000);
+  test("many one-name blocks with no ; or line break (a boundary at every match) are read in linear time and without a fault", () => {
+    const faults = closure.scannerFaultCount();
+    for (const gen of [
+      (bytes: number) => "const c = require.cache;\n" + fill("{c}", bytes),
+      (bytes: number) => "const c = require.cache;\nf([" + fill("{a:c},", bytes) + "]);",
+    ]) {
+      expect(growth(gen, 64 * 1024)).toBeLessThan(LIMIT);
+      classifyJs("a.js", gen(128 * 1024));
+      expect(closure.scannerFaultCount()).toBe(faults);
+    }
+  }, 120000);
   test("many require( calls and strings read for the module literal", () => {
     expect(growth((bytes) => fill('require( "x"); var s = "a\\"b"; ', bytes) + "obj._load(x);", 64 * 1024)).toBeLessThan(LIMIT);
     expect(growth((bytes) => "require(" + " ".repeat(bytes) + '"module")._load(f);', 16 * 1024)).toBeLessThan(LIMIT);
@@ -52,6 +70,48 @@ describe("JS scan cost stays linear", () => {
       expect(growth((bytes) => fill(unit, bytes) + "x = require; obj._load(x);", 24 * 1024)).toBeLessThan(LIMIT);
     }
     expect(growth((bytes) => fill("a ?. ", bytes) + 'require("module")._load(f);', 24 * 1024)).toBeLessThan(LIMIT);
+  }, 240000);
+  test("holders of the loader, index chains before .require( and cache reads in braces are read in linear time", () => {
+    // A long chain of members after "= module" that is no holder, repeated assignments of holders, and spaced chains before require(.
+    expect(growth((bytes) => "a = module" + fill(". parent", bytes) + ".exports; x = 1;", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("a = module; b = a; c = b; ", bytes), 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "x" + fill("[0]", bytes) + ".require(p + '.js');", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("module.children[0].parent.require(p + '.js'); ", bytes), 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("o = { e: Object.values(require.cache)[0] }; ", bytes) + "o.e.x(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("f({ a: { b: Object.values(require.cache)[0] } }); ", bytes), 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("{ ", bytes) + "x = { e: require.cache }; o.e.require(p);", 24 * 1024)).toBeLessThan(LIMIT);
+  }, 240000);
+  test("a cache read's owner is walked out by brace depth in linear time", () => {
+    expect(growth((bytes) => "x = { " + fill("Object.values(require.cache)[0], ", bytes) + "}; y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("z = {\n a: {},\n e: Object.values(require.cache)[0],\n};\n", bytes) + "y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("case 1: { delete require.cache[k]; break; } ", bytes), 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "const o = { x: Object.values(require.cache)[0] }; const m = Object.values(require.cache)[0];\n" + fill("const k = o.length || m.length || o.size;\n", bytes) + "y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("const o = Object.keys(require.cache).length || p;\n", bytes) + "const q = { x: Object.values(require.cache)[0] }; y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "const o = Object.values(require.cache)[0];\n" + fill(" ".repeat(40) + "o;\n", bytes) + "y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "const o = { x: Object.values(require.cache)[0] }; const m = Object.values(require.cache)[0];\n" + fill("if (c) { f(o) } const k = m; ", bytes) + "y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "const o = { x: Object.values(require.cache)[0] };\n" + "if (c) { " + fill("f(o); {} ", bytes) + "} y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "const o = Object.values(require.cache)[0];\n" + fill("const { a }" + " ".repeat(200) + "=\n" + " ".repeat(200) + "o;\n", bytes) + "y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "const o = Object.values(require.cache)[0];\n" + fill("x" + "\u00A0".repeat(100) + ". o;\n", bytes) + "y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "const o = { x: Object.values(require.cache)[0] }; const m = o;\n" + fill("m" + " ".repeat(30) + ". o" + " ".repeat(30) + ".\n", bytes) + "y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("module.children?.[0] . parent ?.[1].require('./a'); ", bytes), 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "x" + fill("?.[0]", bytes) + ".require(p + '.js');", 24 * 1024)).toBeLessThan(LIMIT);
+  }, 240000);
+  test("a Function body that is not one plain string is read in linear time (a run of escaped quotes, 1 MB)", () => {
+    // The scan of a 1 MB body of escaped quotes ends in well under a second (2.3 s when each quote started its own regex run).
+    expect(time("new Function('p', `${a}'" + fill("\\'", 1 << 20) + "`);").took).toBeLessThan(1000);
+    expect(growth((bytes) => "new Function('p', a + '" + fill("\\'", bytes) + "');", 256 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "new Function('p', a + `" + fill("\\\\\\`", bytes) + "`);", 256 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "x = { " + fill("'a', \"b\", ", bytes) + "e: Object.values(require.cache)[0] }; y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("x = { ' ", bytes) + "e: Object.values(require.cache)[0] }; y(1);", 24 * 1024)).toBeLessThan(LIMIT);
+  }, 480000);
+  test("constructor names and literal bodies are read in linear time", () => {
+    expect(growth((bytes) => "const AF = Object.getPrototypeOf(f).constructor; " + fill("new AF('a', 'return a\\n'); ", bytes), 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("const AF = Object.getPrototypeOf(f).constructor; ", bytes), 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => fill("eval('1' + '\\x41'); ", bytes), 24 * 1024)).toBeLessThan(LIMIT);
+  }, 240000);
+  test("Function bodies given as text are read in linear time", () => {
+    expect(growth((bytes) => fill("new Function('p', 'return require(\\'x\\')'); ", bytes), 24 * 1024)).toBeLessThan(LIMIT);
+    expect(growth((bytes) => "Function(".repeat(Math.ceil(bytes / 40)) + "'a'" + ")".repeat(Math.ceil(bytes / 40)), 24 * 1024)).toBeLessThan(LIMIT);
   }, 240000);
   test("many names stored from require.cache", () => {
     expect(growth((bytes) => fill("const c = require.cache; const d = c; const e = d;\n", bytes), 40 * 1024)).toBeLessThan(LIMIT);

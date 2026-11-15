@@ -155,20 +155,20 @@ const P = (stem: string) => `require("path").join(__dirname, "..", ["docs", "${s
 const nested = (body: string, stem: string, v: string) => ({
   "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: "node h.js" } }),
   "h.js": `require("./lib/x.js");\n`,
-  "lib/x.js": `require.main.require(${P("b")});\n${body}\n`,
+  "lib/x.js": `require.main.require("../b.js");\n${body}\n`,
   "b.js": "1\n",
   [`docs/${stem}.js`]: `//${v}\n`,
 });
 const CP = `const cp = require("child_process");`;
 const GO = "const go = (a) => a;";
 const NESTED: [string, (stem: string) => string][] = [
-  ["a user run wrapper around require.main.require", (s) => `const run = (p) => require.main.require(p); run(${P(s)});`],
-  ["a user run call around require.main.require", (s) => `function run(x) { return x; } run(require.main.require(${P(s)}));`],
+  ["a user run wrapper around module.require", (s) => `const run = (p) => module.require(p); run(${P(s)});`],
+  ["a user run call around module.require", (s) => `function run(x) { return x; } run(module.require(${P(s)}));`],
   ["--import beside --require in an argument array", (s) => `${GO} go(["--import", "data:text/javascript,0", "--require", ${P(s)}]);`],
   ["--import beside --require in an options object", (s) => `${GO} go({ execArgv: ["--import", "data:text/javascript,0", "--require", ${P(s)}] });`],
-  ["a --import case label in the enclosing block", (s) => `function f(a) { switch (a) { case "--import": break; default: require.main.require(${P(s)}); } } f(1);`],
-  ["a --loader constant in the enclosing block", (s) => `function f() { const F = "--loader"; require.main.require(${P(s)}); } f();`],
-  ["a program word as a path component", (s) => `require.main.require(${P(s)});`],
+  ["a --import case label in the enclosing block", (s) => `function f(a) { switch (a) { case "--import": break; default: module.require(${P(s)}); } } f(1);`],
+  ["a --loader constant in the enclosing block", (s) => `function f() { const F = "--loader"; module.require(${P(s)}); } f();`],
+  ["a program word as a path component", (s) => `module.require(${P(s)});`],
 ];
 for (const [name, body] of NESTED) {
   test(`${name}: a changed same-stem file holds`, () => {
@@ -202,9 +202,9 @@ test("a --require beside an --import in fork's execArgv holds, also inside a blo
   }
 });
 
-test("a function wrapper around require.main.require holds the path it is handed", () => {
+test("a function wrapper around module.require holds the path it is handed", () => {
   const call = `run(require("path").join(__dirname, "..", ["docs", "evil"].join("/")));`;
-  for (const wrap of [`function run(p) { return require.main.require(p); }`, `const run = (p) => require.main.require(p);`]) {
+  for (const wrap of [`function run(p) { return module.require(p); }`, `const run = (p) => module.require(p);`]) {
     const files = (v: string) => ({ ...rootHook("", v), "package.json": JSON.stringify({ name: "p", version: v, scripts: { postinstall: "node scripts/h.js" } }), "scripts/h.js": `${wrap}\n${call}\n` });
     expect(held(files("1.0.0"), files("1.0.1"))).toBe(true);
   }
