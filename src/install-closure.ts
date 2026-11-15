@@ -2313,16 +2313,17 @@ let identText: string | undefined;
 let identUses: Map<string, number[]> | undefined;
 function usesOf(code: string, n: string): number[] {
   if (identText !== code || identUses === undefined) {
-    identUses = new Map();
-    identText = code;
     jsStep(code.length);
+    const uses = new Map<string, number[]>();
     for (const m of code.matchAll(/(?<![\w$])[A-Za-z_$][\w$]*/g)) {
-      let a = identUses.get(m[0]);
-      if (a === undefined) identUses.set(m[0], (a = []));
+      let a = uses.get(m[0]);
+      if (a === undefined) uses.set(m[0], (a = []));
       a.push(m.index);
     }
+    identUses = uses;
+    identText = code;
   }
-  return identUses.get(n) ?? [];
+  return identUses!.get(n) ?? [];
 }
 
 // The name at [p, q) is a plain parameter of a function (a name alone between commas in the list right before { or =>, or the
@@ -2539,7 +2540,8 @@ function functionHead(code: string, open: number): boolean {
   else {
     while (ns > 0 && ne - ns <= 256 && /[\w$]/.test(code[ns - 1]!)) ns--;
     if (ns === ne || ne - ns > 256 || /[\d]/.test(code[ns]!)) return false;
-    if (/^(?:if|while|for|switch|with|catch|function|return|typeof|new|delete|void|await|yield|extends|super|in|of|instanceof)$/.test(code.slice(ns, ne))) return false;
+    // A private name (#catch(e) {) is a method whatever the word is.
+    if (code[ns - 1] !== "#" && /^(?:if|while|for|switch|with|catch|function|return|typeof|new|delete|void|await|yield|extends|super|in|of|instanceof)$/.test(code.slice(ns, ne))) return false;
     if (code[ns - 1] === "#") ns--;
   }
   jsStep(open - ns + 1);
@@ -2608,7 +2610,21 @@ function wordBefore(code: string, at: number, star = false): string {
   jsStep(at - b + 1);
   let a = b;
   while (a > 0 && a > b - 32 && /[\w$]/.test(code[a - 1]!)) a--;
-  return a > 0 && /[\w$.]/.test(code[a - 1]!) ? "" : code.slice(a, b);
+  if (a > 0 && /[\w$.#]/.test(code[a - 1]!)) return ""; // o.#new is a private name, not the keyword
+  // A word after a dot with blanks or line feeds between (x.\nnew) is a member name, not the keyword; ... before it is a spread.
+  let c = a;
+  while (c > 0 && /\s/.test(code[c - 1]!)) c--;
+  jsStep(a - c);
+  if (c < a && c > 0 && code[c - 1] === "." && code.slice(Math.max(0, c - 3), c) !== "...") {
+    // The dot ends a decimal integer literal (1.\nfor (...)): the word is a keyword on the next line, not a member name.
+    // A run of digits and underscores back to its start (a run of 4096 or more is read as a literal).
+    let w = c - 1;
+    while (w > 0 && c - 1 - w < 4096 && /[\d_]/.test(code[w - 1]!)) w--;
+    jsStep(c - w);
+    const literal = w < c - 1 && (c - 1 - w >= 4096 || (/\d/.test(code[w]!) && (w === 0 || !/[\w$.]/.test(code[w - 1]!))));
+    if (!literal) return "";
+  }
+  return code.slice(a, b);
 }
 
 // The global Math or Symbol is what the file reads: no with statement, and every use of the name is a member read
@@ -2619,6 +2635,8 @@ const MEMBER_AT = /\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*/y;
 const WRITE_AT = /\s*(?:=(?![=>])|[-+*/%&|^]=|\+\+|--|\*\*=|<<=|>>>?=|&&=|\|\|=|\?\?=)/y;
 function trustedGlobal(code: string, name: "Math" | "Symbol"): boolean {
   if (/(?<![\w$.])with\s*\(/.test(code)) return false;
+  jsStep(code.length);
+  if (!builtinsIntact(code)) return false;
   for (const at of usesOf(code, name)) {
     jsStep(64);
     const end = at + name.length;
@@ -2643,6 +2661,7 @@ function trustedGlobal(code: string, name: "Math" | "Symbol"): boolean {
       jsStep(at - lo + k - end);
       WRITE_AT.lastIndex = k;
       if (WRITE_AT.test(code)) return false;
+      if (wordBefore(code, lo) === "delete") return false; // delete Math.max: the name then falls through to Object.prototype
       const rest = code.slice(k, k + 4);
       if (/^(?:of|in)(?![\w$])/.test(rest) && /^(?:for|await)$/.test(wordBefore(code, lo))) return false;
       // A member inside a pattern ([Math.max] = [f], ({ x: Math.max } = o)); a default value (= Math.max) only reads it.
@@ -2664,145 +2683,19 @@ function trustedCached(trust: Map<string, boolean>, code: string, name: "Math" |
   return v;
 }
 
-// The text (a value, or an expression a function returns) is an object literal, or picks one (a || { ... }, c ? { ... } : d, in
-// grouping parentheses), with a key named length at the literal's own depth: length: ..., a shorthand ({ a, length }), a getter
-// or a method. An object or a name inside call arguments, an array, a function or another object is some other value's.
-const NOT_BEFORE_OBJECT = /(?<![\w$.])(?:return|typeof|void|delete|in|of|instanceof|case|yield|await|new|throw|default)$/;
-function blanksBefore(text: string, k: number): number {
-  let b = k;
-  while (b > 0 && /\s/.test(text[b - 1]!)) b--;
-  jsStep(k - b + 1);
-  return k - b;
-}
-function ownLength(text: string, from = 0): boolean {
-  const stack: number[] = []; // per open bracket: 0 a grouping paren, 1 the value's own object literal, 2 anything else
-  let other = 0; // open brackets that are not grouping parens
-  let fn = false; // past a => at the value's own depth: the value is a function, what follows is its body
-  let fnDepth = 0; // the bracket depth the => sat at
-  let prev = ""; // the last character that is not a blank
-  let good = false; // an own object literal with a length key was not picked from or dropped
-  let foundIn = false; // the own literal being read has a length key
-  let cur = false; // the literal that just closed had one, and what follows it has not said what it is for yet
-  let after = false; // right after that literal's } (or the ) of the grouping parens holding it)
-  let numIn = false; // the own literal has a length that is a number literal
-  let riskIn = false; // ... and a spread or a computed key, which can give it another length
-  let stop = -1; // where the value ends, read the first time a line end at its own depth asks
-  for (let k = from; k < text.length; k++) {
-    if (((k - from) & 63) === 0) jsStep(64);
-    const c = text[k]!;
-    if (stack.length === 0) {
-      if (c === "," || c === ";" || c === ")" || c === "]" || c === "}") break; // the value ended
-      if (LINE_END.test(c)) {
-        if (stop < 0) stop = valueEnd(text, from);
-        if (k >= stop) break;
-      }
-    }
-    if (/\s/.test(c)) continue;
-    if (after && !(c === ")" && stack[stack.length - 1] === 0)) {
-      // ({ length: 1 }).a, ({ length: 1 }, b), ({ length: 1 })(...): the value is what that literal picks or is followed by, not
-      // the literal. A pick or a comma elsewhere in the value (c ? { length: 1 } : d.e) is another operand's.
-      if (c === "," || c === "." || c === "(" || c === "[" || (c === "?" && text[k + 1] === ".")) cur = false;
-      else good = good || cur;
-      cur = false;
-      after = false;
-    }
-    if (c === "(" || c === "{" || c === "[") {
-      let kind = 2;
-      if (other === 0 && !fn && c !== "[") {
-        const word = /[\w$]/.test(prev) ? /\.?[\w$]+$/.exec(text.slice(Math.max(0, k - 16), k).trimEnd())?.[0] ?? "" : "";
-        // of( is a call of a function named of; the other words start an operand
-        const afterName = /[\w$]/.test(prev) && (c === "(" && word === "of" ? true : !NOT_BEFORE_OBJECT.test(word));
-        if (c === "(") kind = afterName || prev === ")" || prev === "]" ? 2 : 0;
-        else kind = afterName || prev === ")" || prev === "`" ? 2 : 1;
-      }
-      if (kind === 1) {
-        foundIn = false;
-        numIn = false;
-        riskIn = false;
-      } else if (c === "[" && other === 1 && stack[stack.length - 1] === 1 && (prev === "{" || prev === "," || prev === "*" || /(?<![\w$.])(?:get|set|async|static)$/.test(text.slice(Math.max(0, k - 12 - blanksBefore(text, k)), k).trimEnd()))) riskIn = true; // a computed key, also a computed accessor or method
-      stack.push(kind);
-      if (kind !== 0) other++;
-    } else if (c === ")" || c === "}" || c === "]") {
-      const kd = stack.pop();
-      if (kd !== 0) other--;
-      if (fn && stack.length < fnDepth) fn = false; // (() => 0) || { length: k }: the arrow ended with its parentheses
-      if (c === "}" && kd === 1 && numIn && riskIn) foundIn = true; // a number length that a spread or a computed key can replace
-      if (c === "}" && kd === 1 && foundIn) {
-        foundIn = false;
-        cur = true;
-        after = true;
-      }
-    } else if (c === "=" && text[k + 1] === ">" && other === 0) {
-      fn = true;
-      fnDepth = stack.length;
-    } else if (c === ":" && fn && other === 0 && stack.length === fnDepth) fn = false; // c ? () => 0 : { length: k }
-    else if (c === "." && other === 1 && stack[stack.length - 1] === 1 && text.startsWith("...", k)) riskIn = true; // a spread
-    else if (c === "l" && other === 1 && stack[stack.length - 1] === 1 && text.startsWith("length", k) && !/[\w$]/.test(text[k + 6] ?? "") && !/[\w$.]/.test(text[k - 1] ?? "")) {
-      let b = k;
-      while (b > 0 && /\s/.test(text[b - 1]!)) b--;
-      jsStep(k - b + 1);
-      const before = text.slice(Math.max(0, b - 16), b);
-      let n = k + 6;
-      while (n < text.length && /\s/.test(text[n]!)) n++;
-      jsStep(n - k);
-      // length: 0 is a number whatever else the value is
-      const plainNumber = text[n] === ":" && /^:\s*\d+(?:\.\d+)?\s*[,}]/.test(text.slice(n, n + 48));
-      if ((/[{,*]$/.test(before) || /(?<![\w$])(?:get|set|async|static)$/.test(before)) && /[:(,}]/.test(text[n] ?? "")) {
-        if (plainNumber) numIn = true;
-        else foundIn = true;
-      }
-    }
-    prev = c;
-  }
-  return good || cur;
-}
-// The class body whose { is at "open" declares a member named length at its own depth: a field (length = ..., length;), a
-// method, a getter or setter, static or not. A local or a parameter named length inside a method is not a member.
-function classMemberLength(code: string, open: number): boolean {
-  const end = blockEnd(code, open);
-  let d = 0;
-  let lineEnd = false;
-  for (let k = open + 1; k < end; k++) {
-    if ((k & 255) === 0) jsStep(256);
-    const c = code[k]!;
-    if (/\s/.test(c)) {
-      if (LINE_END.test(c)) lineEnd = true;
-      continue;
-    }
-    if (c === "(" || c === "[" || c === "{") d++;
-    else if (c === ")" || c === "]" || c === "}") d--;
-    else if (d === 0 && c === "l" && code.startsWith("length", k) && !/[\w$]/.test(code[k + 6] ?? "") && !/[\w$.#]/.test(code[k - 1] ?? "")) {
-      let b = k;
-      while (b > 0 && /\s/.test(code[b - 1]!)) b--;
-      jsStep(k - b + 1);
-      jsStep(256);
-      const before = code.slice(Math.max(0, b - 256), b);
-      // A static member is the class's, not its instances'. async and accessor take no line break before the name: after one,
-      // static async / static accessor is a field and the name starts the next member.
-      if (/(?<![\w$#.])static(?:\s+(?:get|set)|[ \t]+(?:async|accessor))?$/.test(before) && !(/(?:async|accessor)$/.test(before) && /[\n\r\u2028\u2029]/.test(code.slice(b, k)))) continue;
-      const head = /[{};*]$/.test(before) || /(?<![\w$])(?:get|set|async|static|accessor)$/.test(before) || (lineEnd && /[\w$)\]"`]$/.test(before));
-      let n = k + 6;
-      while (n < end && /[ \t]/.test(code[n]!)) n++;
-      jsStep(n - k);
-      if (head && (/[(;}\n\r]/.test(code[n] ?? "") || (code[n] === "=" && code[n + 1] !== "=" && code[n + 1] !== ">"))) return true;
-    }
-    lineEnd = false;
-  }
-  return false;
-}
-// x.length as a number: a fixed array or string, or (main's reading) any x the file does not give a length of its own.
+// x.length as a number: x is provably an array or a string. Anything else (a property, this, a parameter, an import, JSON, a call
+// the file does not know, an object of any kind) may have a length of its own made up in a way the text never spells.
 function lengthNumber(code: string, x: string, trust: Map<string, boolean>): boolean {
-  const k = `len:${x}`;
-  let v = trust.get(k);
-  if (v === undefined) trust.set(k, (v = fixedLength(code, x) || !lengthGivenTo(code, x, trust)));
-  return v;
+  if (nameKind(code, x, trust, new Map()) <= 0) return false;
+  // Read once per name and scan: a file that indexes by one name's length many times reads its uses once.
+  const k = `lenwrite:${x}`;
+  let written = trust.get(k);
+  if (written === undefined) trust.set(k, (written = lengthWritten(code, x)));
+  return !written;
 }
-// The file gives x a length of its own: a declaration or assignment of x whose value names length other than as a .length read
-// ({ length: k }, { length }, { get length() {} }), calls a function of the file whose text does, or makes an instance with new
-// when some class of the file has a length member; or a write of x.length other than a number literal. Any other x (a parameter,
-// a name set from elsewhere) keeps main's reading: a value with its own length reaches it only through a call or a property,
-// which main does not follow either.
-function lengthGivenTo(code: string, x: string, trust: Map<string, boolean>): boolean {
+// A write of x.length other than = and a number literal (x.length = k, x.length--, x.length -= 1) makes x's length the file's own, whatever
+// kind x seems to be (an alias, an own method, an arguments of an inner function, += on it): main's reading, kept as it was.
+function lengthWritten(code: string, x: string): boolean {
   for (const at of usesOf(code, x)) {
     jsStep(16);
     if (at > 0 && code[at - 1] === "." && code.slice(Math.max(0, at - 3), at) !== "...") continue; // o.x is another name
@@ -2810,33 +2703,449 @@ function lengthGivenTo(code: string, x: string, trust: Map<string, boolean>): bo
     while (q < code.length && /\s/.test(code[q]!)) q++;
     jsStep(q - at - x.length);
     const member = /^\.\s*length(?![\w$])\s*/.exec(code.slice(q, q + 40));
-    if (member) {
-      WRITE_AT.lastIndex = q + member[0].length;
-      if (!WRITE_AT.test(code)) continue;
-      const eq = /^=(?![=>])\s*/.exec(code.slice(q + member[0].length, q + member[0].length + 40));
-      if (!eq || !valueAt(code, q + member[0].length + eq[0].length, STEP_AT)) return true;
-      continue;
-    }
-    if (code[q] !== "=" || code[q + 1] === "=" || code[q + 1] === ">") continue;
-    // An object in call arguments (Array.from({ length: n }, ...), f({ length })) or an array is not x's value.
-    const value = code.slice(q + 1, valueEnd(code, q + 1));
-    if (ownLength(value)) return true;
-    const made = /^\s*new\s+([A-Za-z_$][\w$]*)/.exec(value);
-    if (made) {
-      const ck = `clslen:${made[1]!}`;
-      let given = trust.get(ck);
-      if (given === undefined) trust.set(ck, (given = classGivesLength(code, made[1]!)));
-      if (given) return true;
-    }
-    const call = /^\s*([A-Za-z_$][\w$]*)\s*\(/.exec(value);
-    if (call) {
-      const fk = `fnlen:${call[1]!}`;
-      let given = trust.get(fk);
-      if (given === undefined) trust.set(fk, (given = functionTextGivesLength(code, call[1]!)));
-      if (given) return true;
+    if (!member) continue;
+    WRITE_AT.lastIndex = q + member[0].length;
+    if (!WRITE_AT.test(code)) continue;
+    const eq = /^=(?![=>])\s*/.exec(code.slice(q + member[0].length, q + member[0].length + 40));
+    if (!eq || !valueAt(code, q + member[0].length + eq[0].length, STEP_AT)) return true;
+  }
+  return false;
+}
+// The built-in names the readings below lean on (Array.from, x.map, Math.max) are the file's own to change only by a write the text
+// spells with the global's name: a write or delete of a member (Object.keys = f, delete Array.prototype.map, Object.prototype.x
+// ??= f), a computed member or a bare use (const O = Object; O[k], const P = Object.prototype), or a declaration of the name. A
+// call (Array(3)), new, instanceof and typeof read it only. Reading a prototype member (Object.prototype.hasOwnProperty.call) is
+// fine; the prototype itself or any computed key is not.
+const BUILTIN_BASES = ["Object", "Array", "String", "RegExp", "Function"];
+const BUILTIN_MEMBER_AT = /\s*\.\s*([A-Za-z_$][\w$]*)/y;
+// A way to reach a built-in prototype that is not spelled X.prototype.name: __proto__, getPrototypeOf / setPrototypeOf, or
+// .constructor.prototype (a computed key, masked in this text, is the one way left; the reading then trusts the built-in).
+const PROTO_PATHS = /(?<![\w$])(?:__proto__|getPrototypeOf|setPrototypeOf|__defineGetter__|__defineSetter__|__lookupGetter__|__lookupSetter__)(?![\w$])|\.\s*constructor\s*\.\s*prototype(?![\w$])/;
+// A with statement can rebind any name and any built-in.
+const WITH_STATEMENT = /(?<![\w$.])with\s*\(/;
+// Scanned left to right with non-overlapping matches (a chain is one match, its end is where a write must follow): a crafted chain of
+// many links costs its length, not its square. A write inside a link of a longer chain (x[0][y[k].p = 1]) is swallowed by that match,
+// so a second pass over the whole text, with links that hold no group, finds it (a link's content holds no bracket the flat pattern cannot read); a += or ++ counts as a write too.
+function computedWrite(code: string): boolean {
+  for (const re of [COMPUTED_CHAIN, FLAT_CHAIN]) {
+    for (const m of code.matchAll(re)) {
+      jsStep(m[0].length + 1);
+      if (writeAt(code, m.index + m[0].length)) return true;
     }
   }
   return false;
+}
+// A write operator after the blanks that start at "at"; the blanks are charged once here, not rescanned by the pattern.
+function writeAt(code: string, at: number): boolean {
+  let k = at;
+  while (k < code.length && /\s/.test(code[k]!)) k++;
+  jsStep(k - at + 1);
+  WRITE_AT.lastIndex = k;
+  return WRITE_AT.test(code);
+}
+// A write to a member of a computed member (a[k].m = f, [][k].map = f, ({})[k].keys = f): the key may name __proto__.
+const COMPUTED_CHAIN = /\](?:\s*\.\s*[A-Za-z_$][\w$]*|\s*\[(?:[^\[\]]|\[[^\[\]]*\])*\])+/g;
+// The same chain with no nested group in a link, so a write inside a link of a longer chain (x[0][y[k].p = 1]) is a match of its own: the
+// first pattern's match swallows it, and this one reads the whole text again, linear because a failing start holds no brackets.
+const FLAT_CHAIN = /\](?:\s*\.\s*[A-Za-z_$][\w$]*|\s*\[[^\[\]]*\])+/g;
+const MEMBERS_AT = /(?:\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*|\s*\[(?:[^\[\]]|\[[^\[\]]*\])*\])+/y;
+const ASSIGN_VALUE = /(?<![\w$.])([A-Za-z_$][\w$]*)\s*=(?![=>])/g;
+const MUTATOR_BEFORE = /(?:defineProperty|defineProperties|assign|setPrototypeOf|set|deleteProperty)\s*\(\s*$/;
+// A name given a computed member (const p = a[k]) or another such name stands for it: a member written through it, or the name
+// given to a call that writes its first argument, may write to a built-in prototype (p = a["__proto__"]).
+function writesThroughAlias(code: string): boolean {
+  jsStep(code.length);
+  const assigns: [string, string][] = [];
+  for (const m of code.matchAll(ASSIGN_VALUE)) {
+    jsStep(16);
+    const from = m.index + m[0].length;
+    const text = code.slice(from, from + 300);
+    const cut = text.search(/[;\n]/);
+    assigns.push([m[1]!, cut < 0 ? text : text.slice(0, cut)]);
+  }
+  const tainted = new Set<string>();
+  for (let pass = 0; pass < 4; pass++) {
+    let grew = false;
+    for (const [n, v] of assigns) {
+      if (tainted.has(n)) continue;
+      jsStep(v.length);
+      if (/[\w$)\]]\s*\[/.test(v) || (tainted.size > 0 && (v.match(/[A-Za-z_$][\w$]*/g) ?? []).some((id) => tainted.has(id)))) {
+        tainted.add(n);
+        grew = true;
+      }
+    }
+    if (!grew) break;
+  }
+  // A [ with no closer makes every member chain that reaches it read to the end of the text: such a text is a hold.
+  if (tainted.size > 0) {
+    const px = pairsOf(code);
+    for (let i = code.indexOf("["); i >= 0; i = code.indexOf("[", i + 1)) {
+      jsStep(1);
+      if (px.closer[i]! < 0) return true;
+    }
+  }
+  for (const n of tainted) {
+    for (const at of usesOf(code, n)) {
+      jsStep(64);
+      if (at > 0 && code[at - 1] === ".") continue;
+      MEMBERS_AT.lastIndex = at + n.length;
+      if (MEMBERS_AT.exec(code)) {
+        jsStep(MEMBERS_AT.lastIndex - at);
+        if (writeAt(code, MEMBERS_AT.lastIndex)) return true;
+      }
+      if (MUTATOR_BEFORE.test(code.slice(Math.max(0, at - 40), at))) return true;
+    }
+  }
+  return false;
+}
+const MUTATOR_CALL = /(?<![\w$.])(?:Object|Reflect)\s*\.\s*(?:defineProperty|defineProperties|assign|setPrototypeOf|set|deleteProperty)\s*\(/g;
+// A call that writes to its first argument whose first argument is not a plain name, a dotted path or a literal (a computed member,
+// a call): it may name a built-in prototype.
+function mutatesComputed(code: string): boolean {
+  jsStep(code.length);
+  for (const m of code.matchAll(MUTATOR_CALL)) {
+    jsStep(32);
+    const from = m.index + m[0].length;
+    let d = 0;
+    let k = from;
+    for (; k < code.length && k < from + 256; k++) {
+      const c = code[k]!;
+      if (c === "(" || c === "[" || c === "{") d++;
+      else if (c === ")" || c === "]" || c === "}") {
+        if (d === 0) break;
+        d--;
+      } else if (c === "," && d === 0) break;
+    }
+    if (k >= from + 256) return true;
+    jsStep(k - from);
+    if (/[\w$)\]]\s*\[|\(|\)/.test(code.slice(from, k))) return true;
+  }
+  return false;
+}
+// A computed member (a key that is not a plain number) of an array, object or function literal, a string or a parenthesized literal:
+// [][k], ({})[k], function () {}[k], ""[k]. A literal key is masked in this text, so a string key counts too ([]["__proto__"]).
+function computedOnLiteral(code: string): boolean {
+  let ix: BracketPairs | undefined;
+  for (let i = code.indexOf("["); i >= 0; i = code.indexOf("[", i + 1)) {
+    jsStep(8);
+    let j = i;
+    while (j > 0 && /\s/.test(code[j - 1]!)) j--;
+    const prev = j > 0 ? code[j - 1]! : "";
+    if (prev !== "]" && prev !== "}" && prev !== ")" && prev !== '"') continue;
+    ix ??= bracketPairs(code);
+    const end = ix.closer[i]!;
+    if (end < 0) return true;
+    if (end - i <= 66 && /^\s*\d+\s*$/.test(code.slice(i + 1, end))) continue;
+    let literal = false;
+    if (prev === '"') literal = code[j - 2] === '"';
+    else if (prev === "}") literal = braceValue(code, ix, j - 1);
+    else {
+      const o = ix.opener[j - 1]!;
+      if (o >= 0) {
+        let t = o;
+        while (t > 0 && /\s/.test(code[t - 1]!)) t--;
+        if (prev === "]") literal = t === 0 || !/[\w$)\]}"'`\u0080-\uffff]/.test(code[t - 1]!) || BEFORE_ARRAY.test(code.slice(Math.max(0, t - 12), t));
+        else {
+          let a = o + 1;
+          while (a < j && /\s/.test(code[a]!)) a++;
+          literal = code[a] === "[" || code[a] === "{";
+        }
+      }
+    }
+    if (literal) return true;
+  }
+  return false;
+}
+// The names an import declaration binds (its from "x" is already cut out of this text): the clause up to that cut.
+let importText: string | undefined;
+let importNames = new Set<string>();
+function importedNames(code: string): Set<string> {
+  if (importText === code) return importNames;
+  jsStep(code.length);
+  const names = new Set<string>();
+  for (const m of code.matchAll(/(?<![\w$.])import\b(?!\s*[(.])/g)) {
+    const from = m.index + 6;
+    // The clause ends at the cut, or (a text whose module string is still there) at the first quote outside braces, or at a ; outside them.
+    let to = code.indexOf(REMOVED, from);
+    if (to < 0 || to > from + 2048) to = Math.min(code.length, from + 2048);
+    let depth = 0;
+    for (let k = from; k < to; k++) {
+      const ch = code[k]!;
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      else if (depth <= 0 && (ch === '"' || ch === "'" || ch === "`" || ch === ";")) {
+        to = k;
+        break;
+      }
+    }
+    jsStep(to - from);
+    for (const id of code.slice(from, to).matchAll(/[A-Za-z_$][\w$]*/g)) names.add(id[0]);
+  }
+  importText = code;
+  importNames = names;
+  return names;
+}
+let withText: string | undefined;
+let withValue = false;
+function hasWith(code: string): boolean {
+  if (withText !== code) {
+    jsStep(code.length);
+    withText = code;
+    withValue = WITH_STATEMENT.test(code);
+  }
+  return withValue;
+}
+let builtinText: string | undefined;
+let builtinValue = true;
+function builtinsIntact(code: string): boolean {
+  if (builtinText === code) return builtinValue;
+  jsStep(code.length);
+  let ok = !PROTO_PATHS.test(code) && !WITH_STATEMENT.test(code) && !computedWrite(code) && !computedOnLiteral(code) && !mutatesComputed(code) && !writesThroughAlias(code);
+  scan: for (const base of ok ? BUILTIN_BASES : []) {
+    for (const at of usesOf(code, base)) {
+      jsStep(64);
+      const end = at + base.length;
+      const before = wordBefore(code, at, true);
+      if (before === "delete" || before === "function" || before === "class") {
+        ok = false;
+        break scan;
+      }
+      BUILTIN_MEMBER_AT.lastIndex = end;
+      const m = BUILTIN_MEMBER_AT.exec(code);
+      if (m) {
+        let k = BUILTIN_MEMBER_AT.lastIndex;
+        if (m[1] === "prototype") {
+          BUILTIN_MEMBER_AT.lastIndex = k;
+          if (!BUILTIN_MEMBER_AT.exec(code)) {
+            ok = false;
+            break scan;
+          }
+          k = BUILTIN_MEMBER_AT.lastIndex;
+        }
+        WRITE_AT.lastIndex = k;
+        if (WRITE_AT.test(code)) {
+          ok = false;
+          break scan;
+        }
+        continue;
+      }
+      let q = end;
+      while (q < code.length && /\s/.test(code[q]!)) q++;
+      jsStep(q - end);
+      if (code[q] === "(" || before === "new" || before === "instanceof" || before === "typeof") continue;
+      ok = false;
+      break scan;
+    }
+  }
+  builtinText = code;
+  builtinValue = ok;
+  return ok;
+}
+// Calls on a provable array or string that give an array or a string back (a fresh one; the receiver's species is read only for a
+// name nothing writes a member of, see nameKind). split is read only with no argument or a literal one (an object argument may
+// bring its own Symbol.split).
+const RESULT_METHODS = new Set(["slice", "map", "filter", "concat", "flat", "flatMap", "toSorted", "toReversed", "join", "split", "toUpperCase", "toLowerCase", "trim", "trimStart", "trimEnd", "repeat", "replace", "replaceAll", "substring", "substr", "padStart", "padEnd", "charAt", "toString", "normalize"]);
+const STATIC_RESULT_AT = /\s*(?:(?:new\s+)?(?:Array|String)|Array\s*\.\s*(?:from|of)|Object\s*\.\s*(?:keys|values|entries))\s*\(/y;
+const NAME_AT = /\s*([A-Za-z_$][\w$]*)/y;
+const METHOD_AT = /\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/y;
+// [from, to) is an array literal, a string (or a template with no substitution, "" in this text), a call that gives an array or a
+// string (Array.from, Array.of, Object.keys / values / entries, String(...), new Array(...)), a name nameKind reads as one, or any of
+// those followed by calls of RESULT_METHODS, and nothing else.
+function provableValue(code: string, from: number, to: number, trust: Map<string, boolean>, reading: Reading): boolean {
+  let p = from;
+  while (p < to && /\s/.test(code[p]!)) p++;
+  jsStep(p - from + 1);
+  let needsUnwritten = false; // a name that a method is called on must have no member written (a species or a method put on it)
+  if (code[p] === "[") {
+    const e = closerAfter(code, p + 1);
+    if (e < 0 || code[e] !== "]" || e >= to) return false;
+    p = e + 1;
+  } else if (code.startsWith('""', p)) p += 2;
+  else if (code.startsWith("`${", p)) {
+    // A template with substitutions is a string: `${a}${b}"" in this text, each ${ read to its closing brace.
+    let k = p;
+    let end = -1;
+    for (let n = 0; n < 64 && end < 0; n++) {
+      const e = closerAfter(code, k + 3);
+      if (e < 0 || code[e] !== "}" || e >= to) return false;
+      let r = e + 1;
+      while (r < to && /\s/.test(code[r]!)) r++;
+      if (code.startsWith('""', r)) end = r + 2;
+      else if (code.startsWith("`${", r)) k = r;
+      else return false;
+    }
+    if (end < 0) return false;
+    p = end;
+  } else {
+    STATIC_RESULT_AT.lastIndex = p;
+    const call = STATIC_RESULT_AT.exec(code);
+    if (call) {
+      if (!builtinsIntact(code)) return false;
+      const e = closerAfter(code, STATIC_RESULT_AT.lastIndex);
+      if (e < 0 || code[e] !== ")" || e >= to) return false;
+      p = e + 1;
+    } else {
+      NAME_AT.lastIndex = p;
+      const m = NAME_AT.exec(code);
+      if (!m) return false;
+      p = NAME_AT.lastIndex;
+      const id = m[1]!;
+      let q = p;
+      while (q < to && /\s/.test(code[q]!)) q++;
+      needsUnwritten = q < to;
+      const kind = nameKind(code, id, trust, reading);
+      if (kind === 0 || (needsUnwritten && kind < 2)) return false;
+    }
+  }
+  for (;;) {
+    while (p < to && /\s/.test(code[p]!)) p++;
+    if (p >= to) return true;
+    METHOD_AT.lastIndex = p;
+    const m = METHOD_AT.exec(code);
+    if (!m || !RESULT_METHODS.has(m[1]!) || !builtinsIntact(code)) return false;
+    jsStep(m[0].length);
+    const open = METHOD_AT.lastIndex;
+    const e = closerAfter(code, open);
+    if (e < 0 || code[e] !== ")" || e >= to) return false;
+    if (m[1] === "split" && !/^\s*(?:""|\/0\/[a-z]*)?\s*$/.test(code.slice(open, e))) return false;
+    // The search value of replace is read for a Symbol.replace of its own: only a string or a regular expression literal is one the file spells.
+    if ((m[1] === "replace" || m[1] === "replaceAll") && !/^\s*(?:""|\/0\/[a-z]*)\s*(?:,|$)/.test(code.slice(open, e))) return false;
+    p = e + 1;
+  }
+}
+const CALLBACK_METHODS = /(?:forEach|map|filter|some|every|find|findIndex|findLast|findLastIndex|reduce|reduceRight|flatMap|sort|toSorted|reverse|fill|copyWithin|__defineGetter__|__defineSetter__|__lookupGetter__|__lookupSetter__)$/;
+const nameKinds = new WeakMap<Map<string, boolean>, Map<string, number>>();
+// 0: x is not provably an array or string. 1: it is (every declaration and assignment of x is provableValue, each use a read or
+// a +=, x never a parameter, a pattern target, a for-in / for-of target, a function or class name), so x.length is a number. 2: also
+// every use is a member read nothing is written to, so a method called on x is the built-in one with the built-in species.
+// Names being read, each with whether a use of it inside its own reading was assumed to be a plain array or string (a = a.concat(b)):
+// the assumption holds only when the name ends up read as 2.
+type Reading = ReadonlyMap<string, { assumed: boolean }>;
+function nameKind(code: string, x: string, trust: Map<string, boolean>, reading: Reading): number {
+  let memo = nameKinds.get(trust);
+  if (memo === undefined) nameKinds.set(trust, (memo = new Map()));
+  const known = reading.size === 0 ? memo.get(x) : undefined; // a reading made under assumptions is not kept
+  if (known !== undefined) return known;
+  const mine = reading.get(x);
+  if (mine !== undefined) {
+    mine.assumed = true;
+    return 2;
+  }
+  if (reading.size >= 8 || hasWith(code) || importedNames(code).has(x)) return 0;
+  const frame = { assumed: false };
+  const inner = new Map(reading).set(x, frame);
+  let kind = 2;
+  let decls = 0;
+  const scopes: [number, number][] = []; // the block each declaration sits in: every use must lie in one, or it names something the file never declares
+  const useAt: number[] = [];
+  const done = (v: number) => {
+    if (frame.assumed && v < 2) v = 0;
+    if (reading.size === 0) memo!.set(x, v);
+    return v;
+  };
+  for (const at of usesOf(code, x)) {
+    jsStep(64);
+    if (at > 0 && code[at - 1] === "." && !code.slice(Math.max(0, at - 3), at).startsWith("...")) continue; // o.x is another name
+    const q = at + x.length;
+    let b = at;
+    while (b > 0 && /\s/.test(code[b - 1]!)) b--;
+    jsStep(at - b);
+    const prev = b > 0 ? code[b - 1]! : "";
+    let qa = q;
+    while (qa < code.length && /\s/.test(code[qa]!)) qa++;
+    jsStep(qa - q);
+    const after = code.slice(qa, qa + 4);
+    if ((prev === "{" || prev === ",") && after[0] === ":") continue; // a key { x: ... } names a property
+    useAt.push(at);
+    const w = wordBefore(code, at, true);
+    if (w === "function" || w === "class" || w === "import") return done(0);
+    if (/^=>/.test(after) || /^(?:\+\+|--)/.test(after) || /(?:\+\+|--)$/.test(code.slice(Math.max(0, b - 2), b))) return done(0);
+    const declared = /^(?:let|var|const)$/.test(w) || (prev === "," && declaratorStarts(code).has(at));
+    if (/^=(?![=>])/.test(after)) {
+      if (!declared && inBinding(code, at, q)) return done(0); // a default value or a pattern default: the name is a parameter or a pattern target
+      const v = qa + 1;
+      if (!provableValue(code, v, valueEnd(code, v), trust, inner)) return done(0);
+      if (declared) {
+        decls++;
+        const px = pairsOf(code);
+        let o = px.inner[at]!;
+        while (o >= 0 && code[o] !== "{") o = px.inner[o]!;
+        if (scopes.length >= 64) return done(0);
+        scopes.push(o < 0 ? [0, code.length] : [o, px.closer[o]! < 0 ? code.length : px.closer[o]!]);
+      }
+      continue;
+    }
+    if (declared) return done(0); // let x; or a destructured declaration
+    if (/^\+=/.test(after)) continue; // a string or an array plus anything is a string
+    if (/^(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-*/%&|^])=/.test(after)) return done(0);
+    if (forHeadTarget(code, b) || inBinding(code, at, q)) return done(0);
+    const member = /^(?:\?\.|\.)\s*[A-Za-z_$][\w$]*/.exec(code.slice(qa, qa + 80));
+    let end = -1;
+    if (member) end = qa + member[0].length;
+    else if (after[0] === "[") {
+      const c = closerAfter(code, qa + 1);
+      if (c >= 0) end = c + 1;
+    }
+    if (end < 0) {
+      kind = 1; // passed on, aliased or called: its length is still a number, a method on it is not read
+      continue;
+    }
+    WRITE_AT.lastIndex = end;
+    if (WRITE_AT.test(code)) kind = 1;
+    // A method that calls back with the array (forEach, map, ...) lets the callback write a species or a method to it; reverse, sort,
+    // fill and copyWithin return the array itself, so a name given that result is a second name for it.
+    if (member && CALLBACK_METHODS.test(member[0])) kind = 1;
+  }
+  if (decls === 0) return done(0);
+  jsStep(useAt.length * scopes.length);
+  for (const u of useAt) if (!scopes.some(([lo, hi]) => u >= lo && u <= hi)) return done(0);
+  return done(kind);
+}
+// The start of each declarator after the first in a declaration list (const x = 1, a = [...]): the name there is declared like one that
+// follows let, var or const. Read once per text; each initializer is read to its end with valueEnd (charged).
+let declListText: string | undefined;
+let declListStarts = new Set<number>();
+function declaratorStarts(code: string): Set<number> {
+  if (declListText === code) return declListStarts;
+  const starts = new Set<number>();
+  for (const m of code.matchAll(/(?<![\w$.])(?:let|var|const)(?![\w$])/g)) {
+    jsStep(16);
+    let p = m.index + m[0].length;
+    if (wordBefore(code, p) !== m[0]) continue; // o.#var, o.\nvar: a member name, not a declaration
+    for (let n = 0; n < 4096; n++) {
+      while (p < code.length && /\s/.test(code[p]!)) p++;
+      const open = code[p];
+      if (open === "{" || open === "[") {
+        const c = closerAfter(code, p + 1);
+        if (c < 0) break;
+        p = c + 1;
+      } else {
+        NAME_AT.lastIndex = p;
+        const id = NAME_AT.exec(code);
+        if (!id) break;
+        p = NAME_AT.lastIndex;
+      }
+      while (p < code.length && /\s/.test(code[p]!)) p++;
+      if (code[p] === "=" && code[p + 1] !== "=" && code[p + 1] !== ">") p = valueEnd(code, p + 1, true);
+      while (p < code.length && /\s/.test(code[p]!)) p++;
+      if (code[p] !== ",") break;
+      p++;
+      while (p < code.length && /\s/.test(code[p]!)) p++;
+      starts.add(p);
+    }
+  }
+  declListText = code;
+  declListStarts = starts;
+  return starts;
+}
+let pairsText: string | undefined;
+let pairsValue: BracketPairs | undefined;
+function pairsOf(code: string): BracketPairs {
+  if (pairsText !== code || pairsValue === undefined) {
+    pairsValue = bracketPairs(code);
+    pairsText = code;
+  }
+  return pairsValue;
 }
 // Where the value that starts at "from" ends: the first , or ; or unmatched closer at its own depth, or a line end where ASI
 // ends the statement (the text end when none). A line end ends it only when the line's last token can end an expression (not an
@@ -2879,103 +3188,6 @@ function canEnd(code: string, at: number): boolean {
   if ((c === "+" || c === "-") && code[at - 1] === c) return true;
   return c === "/" && code[at - 1] === "0" && code[at - 2] === "/";
 }
-// A class of the file named c (class c ..., or c = class ...) whose body declares a length member (a field, getter or method).
-function classGivesLength(code: string, c: string): boolean {
-  for (const at of usesOf(code, c)) {
-    jsStep(16);
-    if (at > 0 && code[at - 1] === ".") continue;
-    let from = -1;
-    if (wordBefore(code, at) === "class") from = at + c.length;
-    else {
-      let q = at + c.length;
-      while (q < code.length && /\s/.test(code[q]!)) q++;
-      jsStep(q - at - c.length);
-      if (code[q] === "=" && code[q + 1] !== "=" && code[q + 1] !== ">") {
-        const m = /^\s*class(?![\w$])/.exec(code.slice(q + 1, q + 257));
-        if (m) from = q + 1 + m[0].length;
-      }
-    }
-    if (from < 0) continue;
-    // The body's { : the first one past the name and the base (extends f(x) [y]), outside parentheses and brackets.
-    let k = from;
-    let d = 0;
-    for (; k < code.length; k++) {
-      if ((k & 255) === 0) jsStep(256);
-      const ch = code[k]!;
-      if (ch === "(" || ch === "[") d++;
-      else if (ch === ")" || ch === "]") d--;
-      else if (ch === "{" && d === 0) break;
-    }
-    if (k < code.length && classMemberLength(code, k)) return true;
-  }
-  return false;
-}
-// A function of the file named f (function f, or f = a function or arrow) whose returned expressions name length other than as
-// a .length read: the expression body of an arrow, or each return in a block body. A local named length that is not returned does
-// not count.
-function functionTextGivesLength(code: string, f: string): boolean {
-  for (const at of usesOf(code, f)) {
-    jsStep(16);
-    if (at > 0 && code[at - 1] === ".") continue;
-    let q = at + f.length;
-    while (q < code.length && /\s/.test(code[q]!)) q++;
-    jsStep(q - at - f.length);
-    let body: string | undefined;
-    if (code[q] === "(" && wordBefore(code, at, true) === "function") {
-      const c = closerAfter(code, q + 1);
-      let o = c + 1;
-      while (o > 0 && o < code.length && /\s/.test(code[o]!)) o++;
-      jsStep(o - c);
-      if (c >= 0 && code[o] === "{") body = code.slice(o, blockEnd(code, o) + 1);
-      else return true; // unsure: count it
-    } else if (code[q] === "=" && code[q + 1] !== "=" && code[q + 1] !== ">") body = code.slice(q + 1, valueEnd(code, q + 1));
-    if (body !== undefined && returnsGiveLength(body)) return true;
-  }
-  return false;
-}
-function returnsGiveLength(text: string): boolean {
-  jsStep(text.length);
-  // f = (...) => expression: the expression is what it returns (a block body is read through its returns below).
-  const arrow = /^\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>(?!\s*\{)\s*/.exec(text);
-  if (arrow) return ownLength(text, arrow[0].length);
-  // Every return in the text counts, a nested function's too (its result may be what this one returns, called or not).
-  for (const m of text.matchAll(/(?<![\w$.])return(?![\w$])/g)) if (ownLength(text, m.index + m[0].length)) return true;
-  return false;
-}
-// A const array literal or string, never rebound and only read as x.y or x[...]: its length is a number.
-function fixedLength(code: string, x: string): boolean {
-  let decl = 0;
-  for (const at of usesOf(code, x)) {
-    jsStep(64);
-    if (at > 0 && code[at - 1] === "." && !code.slice(Math.max(0, at - 3), at).startsWith("...")) continue; // o.x is another name
-    const after = code.slice(at + x.length);
-    if (/(?<![\w$.])const\s+$/.test(code.slice(Math.max(0, at - 12), at)) && decl === 0) {
-      const eq = /^\s*=\s*/.exec(after);
-      if (!eq) return false;
-      const v = at + x.length + eq[0].length;
-      if (code.startsWith('""', v)) {
-        if (!valueEnds(code, v + 2)) return false;
-      } else if (code[v] === "[") {
-        let d = 0;
-        let e = -1;
-        for (let k = v; k < code.length && k < v + 65536; k++) {
-          if ((k & 255) === 0) jsStep(256);
-          if (code[k] === "[") d++;
-          else if (code[k] === "]" && --d === 0) {
-            e = k;
-            break;
-          }
-        }
-        if (e < 0 || !valueEnds(code, e + 1)) return false;
-      } else return false;
-      decl++;
-      continue;
-    }
-    if (!/^\s*(?:\?\.|[.[])/.test(after)) return false; // a read of a member or an element only
-  }
-  return decl === 1;
-}
-
 // The first unmatched closer after "from" and the first unmatched opener before "to", within a bound; -1 when there is none
 // before a ; at the same depth or the bound.
 const SCAN_BOUND = 4096;
@@ -3954,7 +4166,7 @@ function scanJs(ctx: Ctx, key: string): void {
     ctx.scanned.add(key);
     if (stripPkgJsonEnv(text).includes("npm_package_")) fail(ctx, "unresolved: manifest");
     if (!provablyStatic(text)) widenJs(ctx, key, text);
-    else followLoads(ctx, key, text); // a large static file still names the files it loads
+    followLoads(ctx, key, text); // a large file still names the files it loads, whether or not it is static
     return;
   }
   if (capCount(ctx, "scanned") >= DEPTH && !(ctx.realSets ?? ctx).scanned.has(key) && !ctx.lookupSets?.scanned.has(key)) {
@@ -4973,6 +5185,12 @@ function budgeted<T>(len: number, run: () => T, closed: () => T): T {
       moduleNames = undefined;
       identText = undefined;
       identUses = undefined;
+      builtinText = undefined;
+      importText = undefined;
+      withText = undefined;
+      pairsText = undefined;
+      declListText = undefined;
+      pairsValue = undefined;
     } else if (jsStepsOverride === undefined) {
       jsSteps = outerSteps;
       jsLimit = outerLimit;

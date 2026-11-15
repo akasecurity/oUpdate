@@ -179,24 +179,15 @@ const stays: [string, string][] = [
   ["a destructuring default that reads Math", "const a = [() => 1];\nconst { random = Math.random } = {};\nexports.r = random;\na[Math.floor(1 / 2)]();\n"],
   ["a parameter elsewhere named like a counter", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) a[i]();\nfunction f(i) { return i + 1; }\nexports.f = f;\n"],
   ["an arrow parameter elsewhere named like a counter", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) a[i]();\nexports.g = [1].map((x, i) => x + i);\nexports.h = (i) => i;\n"],
-  ["the last element of a parameter array", "exports.run = (a) => { a[a.length - 1](); };\n"],
   ["a counter inside 33 groups", "const a = [() => 1];\nlet i = 0;\n" + "(".repeat(33) + "i" + ")".repeat(33) + ";\na[i]();\n"],
   ["a method read on a counter", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) { console.log(i.toString(16)); a[i](); }\n"],
   ["a for-of over an array literal then an index", "const a = [() => 1];\nfor (const f of [a][0]) f();\n"],
   ["a counter counting down from a length", "const g = [[() => 1]];\nfor (let i = 0; i < 1; i++) g[i][0]();\nfor (let i = g.length - 1; i >= 0; i--) g[i][0]();\n"],
-  ["a variable named length stepped in place", "exports.run = (a, t) => {\n  let length = 0;\n  for (const x of t) {\n    length += x.length;\n  }\n  return a[a.length - 1][0](length);\n};\n"],
-  ["a counted variable named length in a shorthand key", "exports.run = (a, s, t) => {\n  let length = s.length;\n  length += t.source.length;\n  length++;\n  const r = { a, length };\n  return a[a.length - 1][0](r);\n};\n"],
-  ["a counted variable named length stepped in a switch case", "exports.run = (a, s, t) => {\n  let length = s.length;\n  switch (t.type) {\n    case \"x\":\n      length += t.source.length;\n  }\n  return a[a.length - 1][0]({ a, length });\n};\n"],
   ["a counter declared from a counted name set in place", "const a = [[() => 1]];\nlet start = 0;\nfor (let i = 0; i < 1; i++) start = i;\nfor (let i = start; i < 1; ++i) a[i][0]();\n"],
   ["counters declared from each other", "const a = [[() => 1]];\nlet end = a.length;\nfor (let i = 0; i < end; i++) end = i + 1;\nfor (let i = end - 1; i >= 0; --i) a[i][0]();\n"],
   ["a counter beside a semicolon-free arrow with a parameter of the same name", "const handlers = [() => 1]\nlet i = 0\nconst next = (i) => i + 1\nfor (; i < 1; i++) handlers[i]()\nexports.next = next\n"],
   ["a counter beside a class method with a parameter of the same name", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) a[i]();\nclass C { m(i) { return i + 1; } }\nexports.C = C;\n"],
   ["a counter beside an object method with a parameter of the same name", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) a[i]();\nexports.o = { m(i) { return i + 1; } };\n"],
-  ["the last element of a parameter array beside an object with a length key", "const o = { length: 0 };\nexports.o = o;\nfunction f(a) { a[a.length - 1](); }\nexports.f = f;\n"],
-  ["the last callback beside a parameter named length", "function g(length) { return length + 1; }\nexports.g = g;\nexports.run = (cbs) => cbs[cbs.length - 1]();\n"],
-  ["the last callback beside a const named length that is returned", "exports.run = (cbs, s) => {\n  const length = s.length;\n  cbs[cbs.length - 1]();\n  return length;\n};\n"],
-  ["the last callback beside Array.from with a length key", "exports.make = (n) => Array.from({ length: n });\nexports.run = (cbs) => cbs[cbs.length - 1]();\n"],
-  ["the last callback beside a class with a length getter", "class Q { get length() { return 0; } }\nexports.Q = Q;\nexports.run = (cbs) => cbs[cbs.length - 1]();\n"],
   ["a counter beside a catch binding of the same name", "const a = [() => 1];\nfor (let e = 0; e < 1; e++) a[e]();\ntry { a[0](); } catch (e) { console.log(e); }\n"],
   ["a counter beside a rest parameter of the same name", "const a = [() => 1];\nfor (let r = 0; r < 1; r++) a[r]();\nexports.g = (...r) => r;\n"],
   ["a counter beside a method of an exported default object", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) a[i]();\nexport default { m(i) { return i + 1; } };\n"],
@@ -209,37 +200,17 @@ const stays: [string, string][] = [
   ["a counter beside a computed method name", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) a[i]();\nconst n = \"m\";\nexports.o = { [n](i) { return i + 1; } };\n"],
   ["a counter beside a quoted method name", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) a[i]();\nexports.o = { \"m\"(i) { return i + 1; } };\n"],
   ["a counter beside a function with a default parameter after it", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) a[i]();\nfunction f(i, opts = {}) { return i + opts; }\nexports.f = f;\n"],
-  ["the last callback of a semicolon-free call result beside a const named length", "exports.run = (getCallbacks) => {\n  const x = getCallbacks()\n  const length = 0\n  x[x.length - 1]()\n  return length\n}\n"],
-  ["the last callback of a semicolon-free call result beside an object with a length key", "exports.run = (getCallbacks) => {\n  const x = getCallbacks()\n  const o = { length: 0 }\n  x[x.length - 1]();\n  return o\n}\n"],
   ["the last element of a new Array beside a class with a length field", "class C { length = 0; }\nexports.C = C;\nconst a = [() => 1];\nconst x = new Array(2);\na[x.length - 1]();\n"],
-  ["the last callback of a function with a local named length", "function f() { const length = 0; return [() => length]; }\nconst x = f();\nx[x.length - 1]();\n"],
   ["the last row of a grid made by Array.from", "exports.run = (h, w) => {\n  const grid = Array.from({ length: h }, () => Array.from({ length: w }, () => () => 1));\n  return grid[grid.length - 1][0]();\n};\n"],
-  ["a variable named length beside a length key", "exports.run = (a, b) => {\n  const length = Math.max(a.length, b.length);\n  const d = [[() => length]];\n  return d[a.length - a.length][b.length - b.length]();\n};\n"],
   ["a counter beside a regular expression flag of the same letter", "const a = [[() => 1]];\nfor (var i = 0; i < 1; i++) a[i][0]();\nexports.t = (s) => /x/i.test(s);\n"],
-  ["the last element of a parameter array beside a length cleared to zero", "exports.run = (a) => a[a.length - 1][0]();\nexports.c = (q) => { q.length = 0; };\n"],
   ["the last element of Array.of a variable named length", "const length = 0;\nconst x = Array.of(length, () => 1);\nx[x.length - 1]();\n"],
-  ["the last element of a call given an object whose value is a variable named length", "const length = 0;\nconst make = (o) => [() => o];\nconst x = make({ size: length });\nx[x.length - 1]();\n"],
-  ["the last element of a call given an object with a length key", "const foo = (o) => [() => o];\nconst x = foo({ length: 0 });\nx[x.length - 1]();\n"],
-  ["the last element of a returned array that holds a variable named length", "function f() { const length = 0; return [length, () => 1]; }\nconst x = f();\nx[x.length - 1]();\n"],
-  ["an index from a buffer made with a variable named length", "const a = [() => 1];\nconst length = 4;\nconst x = Buffer.alloc(length, 0);\na[x.length - 4]();\n"],
-  ["the last row of a grid made by Array.apply", "exports.run = (h) => {\n  const grid = Array.apply(null, { length: h }).map(() => () => 1);\n  return grid[grid.length - 1]();\n};\n"],
-  ["an instance of a class with a method local named length", "const a = [() => 1];\nclass C { m() { const length = 0; return length; } }\nconst x = new C();\na[x.length - x.length]();\n"],
-  ["an instance of a class with a method parameter named length", "const a = [() => 1];\nclass C { m(length = 0) { return length; } }\nconst x = new C();\na[x.length - x.length]();\n"],
   ["a counter beside a destructured parameter of the same name", "const a = [() => 1];\nfor (let i = 0; i < 1; i++) a[i]();\nexports.f = ({ i }) => i;\n"],
   ["a counter beside a braceless for-of in code with no semicolons", "const a = [() => 1]\nfor (const i of [1]) console.log(i)\nfor (let i = 0; i < 1; i++) a[i]()\n"],
   ["a counter beside a braceless for-in over a comma body", "const a = [() => 1]\nfor (const i in [1]) console.log(i), a.length\nfor (let i = 0; i < 1; i++) a[i]()\n"],
-  ["the last element of a value picked from an object with a length key", "const x = ({ length: 1, a: [() => 1] }).a;\nx[x.length - 1]();\n"],
-  ["the last element of the second of a comma pair after an object with a length key", "const x = ({ length: 1 }, [() => 1]);\nx[x.length - 1]();\n"],
-  ["the last element of a function whose nested function returns an object with a length key", "function f() { function g() { return { length: 0 }; } return [() => 1]; }\nconst x = f();\nx[x.length - 1]();\n"],
-  ["the last element of an instance of a class with a static length getter", "class C extends Array { static get length() { return 1; } }\nconst x = new C(() => 1);\nx[x.length - 1]();\n"],
-  ["the last element of a call to a method named of with an object with a length key", "const Rx = { of(v) { return [() => 1]; } };\nconst x = Rx.of({ length: 1 })\nx[x.length - 1]();\n"],
   ["a counter beside a braceless for-of over an if", "const a = [() => 1]\nfor (let i = 0; i < 1; i++) a[i]()\nfor (const i of [{ n: 1 }])\n  if (i)\n    console.log(i.n)\n"],
   ["a counter beside a braceless for-of over an if and an else", "const a = [() => 1]\nfor (let i = 0; i < 1; i++) a[i]()\nfor (const i of [{ n: 1 }])\n  if (i) f(i)\n  else g(i.n)\n"],
   ["a counter beside a braceless for-of over a nested for-of", "const a = [() => 1]\nfor (let i = 0; i < 1; i++) a[i]()\nfor (const i of xs)\n  for (const j of ys)\n    use(i.n)\n"],
   ["a counter beside a braceless for-of over a while", "const a = [() => 1]\nfor (let i = 0; i < 1; i++) a[i]()\nfor (const i of xs)\n  while (c)\n    use(i.n)\n"],
-  ["the last element of an instance of a class with a static length getter after 40 blanks", "class C extends Array { static" + " ".repeat(40) + "get length() { return 1; } }\nconst x = new C(() => 1);\nx[x.length - 1]();\n"],
-  ["the last element beside an object with a length of 0", "const x = { length: 0 };\nx[x.length - 1]();\n"],
-  ["the last element of a call to a function named of with an object with a length of 1", "const x = of({ length: 1 });\nx[x.length - 1]();\n"],
   ["a counter beside a braceless for-of over a do while", "const a = [() => 1]\nfor (let i = 0; i < 1; i++) a[i]()\n" + "for (const i of xs)\n  do { use(i.n); } while (c)\n"],
   ["a counter beside a braceless for-of over a switch with the brace on the next line", "const a = [() => 1]\nfor (let i = 0; i < 1; i++) a[i]()\n" + "for (const i of xs)\n  switch (i.n)\n  {\n  case 1: use(i.n)\n  }\n"],
   ["a counter beside a braceless for-of over a try with the catch on the next line", "const a = [() => 1]\nfor (let i = 0; i < 1; i++) a[i]()\n" + "for (const i of xs)\n  try { use(i.n); }\n  catch (e) { use(i.m); }\n"],
@@ -310,23 +281,11 @@ const fast = (src: string) => {
     setJsScanSteps(undefined);
   }
 };
-test("64,000 .length keys after a class read the class facts once", () => {
-  const r = fast("const a = [() => 1];\nclass C {}\n" + " ".repeat(100_000) + Array.from({ length: 64_000 }, (_, i) => `a[x${i}.length]();`).join("\n"));
-  expect(r.v).toBe(true);
-  expect(r.faults).toBe(0);
-  expect(r.ms).toBeLessThan(10_000); // the old cost was uncharged (about 33 s): no step count sees it, only this bound
-});
 test("a 4 MB method name before a list of a counter's name is walked with a bound", () => {
   const r = fast("const a = [() => 1];\nlet i = 0;\na[i]();\nexports.o = ({" + "A".repeat(4 * 1024 * 1024) + "(" + "i,".repeat(2000) + "i) {}});\n");
   expect(r.v).toBe(true);
   expect(r.faults).toBe(0);
   expect(r.ms).toBeLessThan(10_000); // the old walk was uncharged (about 23 s)
-});
-test("a function head before 8 MB of blanks is read once for 2,000 calls", () => {
-  const r = fast("function f()" + " ".repeat(8 * 1024 * 1024) + "{ return []; }\nlet x;\n" + "x = f();\n".repeat(2000) + "x[x.length - 1]();\n");
-  expect(r.v).toBe(true);
-  expect(r.faults).toBe(0);
-  expect(r.ms).toBeLessThan(10_000); // the old walk was uncharged (minutes)
 });
 test("300 counters read main's counter reading once, under the step budget", () => {
   const src = Array.from({ length: 300 }, (_, i) => `let c${i} = 0; c${i}++;`).join("\n") + "\nconst a = [() => 1];\n" + Array.from({ length: 300 }, (_, i) => `a[c${i}]();`).join("\n") + "\n" + "x;".repeat(200_000);
@@ -336,28 +295,7 @@ test("300 counters read main's counter reading once, under the step budget", () 
 });
 
 // Walking the nested function heads of a text for the returns of an outer function is linear in steps.
-test("40 nested function heads with a default arrow parameter are read under the step budget and stay static", () => {
-  const src = "function f() {\n" + "function g(a = () => {".repeat(40) + "}) {}".repeat(40) + "\nreturn [() => 1]; }\nconst x = f();\nx[x.length - 1]();\n";
-  setJsScanSteps(40 * src.length);
-  try {
-    const before = scannerFaultCount();
-    expect(provablyStatic(src)).toBe(true);
-    expect(scannerFaultCount() - before).toBe(0);
-  } finally {
-    setJsScanSteps(undefined);
-  }
-});
 
-// Every return is read from its own start: nested immediately-invoked functions, each with its own return, are read under the default
-// budget up to a few hundred deep (a thousand deep spends more than the budget and is held).
-for (const [label, head, tail] of [["arrows", "(() => { return ", "})()"], ["function expressions", "(function () { return ", "})()"]] as [string, string, string][]) {
-  test(`300 nested immediately-invoked ${label} with a computed call after are read under the default budget and stay static`, () => {
-    const src = "function f() { return " + head.repeat(300) + "[() => 1]" + tail.repeat(300) + "; }\nconst x = f();\nx[x.length - 1]();\n";
-    const before = scannerFaultCount();
-    expect(provablyStatic(src)).toBe(true);
-    expect(scannerFaultCount() - before).toBe(0);
-  });
-}
 test("3,000 braceless ifs with elses after a for-of are read under the step budget and stay static", () => {
   // for (const i of xs) if (c) f(i) else if (c) f(i) ... else g(i.n): the use of i.n at the end is the loop's only if the chain is read through
   const src = "const a = [() => 1]\nfor (let i = 0; i < 1; i++) a[i]()\nfor (const i of xs)\n" + "if (c) f(i)\nelse ".repeat(3000) + "g(i.n)\n";
