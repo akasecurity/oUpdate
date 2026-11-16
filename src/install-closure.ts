@@ -1015,12 +1015,12 @@ const STEERING_STRONG_RE = /^(?:NODE_OPTIONS|NODE_PATH|LD_PRELOAD|DYLD_INSERT_LI
 const STEERING_NAME = { test: (v: string) => STEERING_STRONG_RE.test(v) };
 // True when the object literal that holds position "at" spreads process.env or is the value of an env key: PATH and ENV
 // steer the next process there.
-function envObjectLiteral(code: string, at: number, raw?: string): boolean {
-  const chain = bracketChain(code, at);
+function envObjectLiteral(code: string, at: number, raw?: string, idx = bracketIndex(code)): boolean {
+  const chain = bracketChain(code, at, idx);
   const top = chain[0];
   if (top && top[0] < 0) return true;
   if (!top || code[top[0]] !== "{") return false;
-  const memo = bracketIndex(code).memo;
+  const memo = idx.memo;
   const spreadKey = "s" + top[0];
   let spreads = memo.get(spreadKey);
   if (spreads === undefined) {
@@ -1067,8 +1067,8 @@ function maskSpans(out: string, spans: SpanNote[]): string {
 
 // True when the brace or bracket that holds "at" is a destructuring pattern, not an object or array literal: it follows const,
 // let or var, it is closed by = or of or in, or it is a parameter or a catch binding. Unmatched brackets count as a pattern.
-function inPattern(code: string, at: number): boolean {
-  const chain = bracketChain(code, at);
+function inPattern(code: string, at: number, idx = bracketIndex(code)): boolean {
+  const chain = bracketChain(code, at, idx);
   if (chain.length === 0 || code[chain[0]![0]] === "(") return false;
   if (chain.some((e) => e[0] === -1)) return true;
   let top = chain[0]!;
@@ -1113,6 +1113,7 @@ function dangerousStringUse(source: string): boolean {
   const out = codeOnly(source, [], true, spans);
   if (out === undefined) return false;
   const masked = maskSpans(out, spans);
+  const maskedIdx = bracketIndex(masked);
   for (const s of spans) {
     if (s.mask) continue;
     const v = s.raw.includes("\\") ? decodeJsString(s.raw, true) : s.raw;
@@ -1126,7 +1127,7 @@ function dangerousStringUse(source: string): boolean {
     const after = codeAfter(masked, s.at + s.len, 40);
     const key = (q === 0 || /[{,]$/.test(before)) && after.startsWith(":");
     if (!steering && !danger) {
-      if (key && /[{,]$/.test(before) && envObjectLiteral(masked, s.at, out)) return true;
+      if (key && /[{,]$/.test(before) && envObjectLiteral(masked, s.at, out, maskedIdx)) return true;
       // An entries pair ["PATH", dir] in a file that handles the environment.
       if (/\[$/.test(before) && after.startsWith(",") && !/[\w$)\]]/.test(prevTok(masked, q - 1)[0]) && /(?:^|[^\w$.]|\.\.\.)process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(masked)) return true;
       continue;
@@ -1144,7 +1145,7 @@ function dangerousStringUse(source: string): boolean {
     }
     if (/[!=]==?$/.test(before) || /^[!=]==?/.test(after)) continue;
     if (/(?:^|[^\w$.])case$/.test(before) || /^in(?![\w$])/.test(after)) continue;
-    if (key && !inPattern(masked, s.at)) continue;
+    if (key && !inPattern(masked, s.at, maskedIdx)) continue;
     return true;
   }
   return false;
@@ -1738,9 +1739,19 @@ function prevTok(code: string, at: number): [string, number] {
 // One pass over a text gives, for every position, the innermost bracket around it, and each bracket's partner. Kept for the last few
 // texts scanned, so the many lookups of one scan never walk the file again.
 type BracketIndex = { inner: Int32Array; closer: Int32Array; opener: Int32Array; memo: Map<string, boolean>; mismatch: boolean };
-const bracketCache: Array<{ code: string; idx: BracketIndex }> = [];
+const bracketCache = new Map<string, BracketIndex>();
+let bracketLookups = 0;
+/** Bracket-index lookups so far (the work a scan spends asking for its text's index), for tests. */
+export function bracketLookupCount(): number {
+  return bracketLookups;
+}
 function bracketIndex(code: string): BracketIndex {
-  for (const e of bracketCache) if (e.code === code) return e.idx;
+  bracketLookups++;
+  // Keyed by the text: a lookup hashes the string (the hash stays on the string object) and compares content only on a hash match, so
+  // two long texts asked for in turn are not compared against each other. A lookup with a different copy of the same text still
+  // reads it whole, so a loop takes the index once and passes it down.
+  const hit = bracketCache.get(code);
+  if (hit) return hit;
   const inner = new Int32Array(code.length);
   const closer = new Int32Array(code.length).fill(-1);
   const opener = new Int32Array(code.length).fill(-1);
@@ -1761,15 +1772,14 @@ function bracketIndex(code: string): BracketIndex {
   }
   if (stack.length > 0) mismatch = true;
   const idx: BracketIndex = { inner, closer, opener, memo: new Map(), mismatch };
-  bracketCache.push({ code, idx });
-  if (bracketCache.length > 4) bracketCache.shift();
+  bracketCache.set(code, idx);
+  if (bracketCache.size > 4) bracketCache.delete(bracketCache.keys().next().value!);
   return idx;
 }
 const CHAIN_CAP = 64;
 // The brackets that enclose a position, innermost first, as [opener, closer] pairs. A chain deeper than the cap ends in the
 // pair [-1, length]: callers read it as "unknown" and take the cautious answer.
-function bracketChain(code: string, at: number): Array<[number, number]> {
-  const idx = bracketIndex(code);
+function bracketChain(code: string, at: number, idx = bracketIndex(code)): Array<[number, number]> {
   if (idx.mismatch) return [[-1, code.length]];
   const chain: Array<[number, number]> = [];
   let o = at >= 0 && at < code.length ? idx.inner[at]! : -1;
@@ -1783,15 +1793,15 @@ function bracketChain(code: string, at: number): Array<[number, number]> {
   }
   return chain;
 }
-function enclosingBrackets(code: string, at: number[]): Map<number, Array<[number, number]>> {
+function enclosingBrackets(code: string, at: number[], idx = bracketIndex(code)): Map<number, Array<[number, number]>> {
   const out = new Map<number, Array<[number, number]>>();
-  for (const a of at) out.set(a, bracketChain(code, a));
+  for (const a of at) out.set(a, bracketChain(code, a, idx));
   return out;
 }
 
 // True when a member of process at "at" (its chain ends at "end") is written other than by a plain assignment: a destructuring
 // target, a for-in or for-of head, an operand of ++, -- or delete. The target rule then applies to the write.
-function writtenOddly(code: string, at: number, end: number, around: Array<[number, number]>): { chain: string } | undefined {
+function writtenOddly(code: string, at: number, end: number, around: Array<[number, number]>, idx = bracketIndex(code)): { chain: string } | undefined {
   let chain = /^(?:\s*(?:\?\.|\.)\s*[A-Za-z_$][\w$]*)*/.exec(code.slice(end))![0];
   let after = end + chain.length;
   // An index after the chain (process.env[k]) names a key the file does not show.
@@ -1799,7 +1809,7 @@ function writtenOddly(code: string, at: number, end: number, around: Array<[numb
     let k = after;
     while (k < code.length && /\s/.test(code[k]!)) k++;
     if (code[k] !== "[") break;
-    const e = bracketIndex(code).closer[k]! >= 0 ? bracketIndex(code).closer[k]! : code.length;
+    const e = idx.closer[k]! >= 0 ? idx.closer[k]! : code.length;
     if (e >= code.length) return { chain: chain + "[]" };
     chain += "[]";
     after = e + 1;
@@ -1853,7 +1863,7 @@ function writtenOddly(code: string, at: number, end: number, around: Array<[numb
     let p = o;
     while (p > 0 && /\s/.test(code[p - 1]!)) p--;
     if (code[p - 1] !== ")") return false;
-    const open = bracketIndex(code).opener[p - 1]!;
+    const open = idx.opener[p - 1]!;
     return open >= 0 && /^(?:if|while|for|switch|with)$/.test(prevTok(code, open)[0]);
   };
   const indexes = (o: number) => /[\w$)\]]/.test(sig(o)) && !STATEMENT_KEYWORDS.has(wordBefore(o)) && !afterHeader(o);
@@ -1984,7 +1994,12 @@ function processValueUse(code: string, names: string[], lenient = false, strict 
   const re = new RegExp(`${L}(?:${alt})${R}`, "g");
   // Object.assign(process.env, ...) and its relatives write through a bare argument.
   if (new RegExp(`(?<![\\w$.])(?:Object|Reflect)\\s*\\.\\s*(?:assign|defineProperty|defineProperties|set|deleteProperty|setPrototypeOf)\\s*\\(\\s*(?:${alt})${R}`).test(rest)) return true;
-  const around = enclosingBrackets(rest, [...rest.matchAll(re)].map((x) => x.index ?? 0));
+  const restIdx = bracketIndex(rest);
+  const around = enclosingBrackets(
+    rest,
+    [...rest.matchAll(re)].map((x) => x.index ?? 0),
+    restIdx,
+  );
   for (const m of rest.matchAll(re)) {
     const at = m.index ?? 0;
     const end = at + m[0].length;
@@ -1992,7 +2007,7 @@ function processValueUse(code: string, names: string[], lenient = false, strict 
       let q = at;
       while (q > 0 && /\s/.test(rest[q - 1]!)) q--;
       if (rest[q - 1] !== "." || rest.slice(0, q).endsWith("...")) {
-        const w = writtenOddly(rest, at, end, around.get(at) ?? []);
+        const w = writtenOddly(rest, at, end, around.get(at) ?? [], restIdx);
         if (w && !harmlessTarget(w.chain)) return true;
       }
     }
@@ -5402,18 +5417,19 @@ function timerGetsCode(code: string): boolean {
 
 // An identifier key that names a variable steering the next process, as the key of an object literal ({ NODE_OPTIONS: x }).
 function steeringKey(code: string): boolean {
+  const brIdx = bracketIndex(code);
   for (const m of code.matchAll(/(?<![\w$.?])([A-Za-z_$][\w$]*)\s*:(?!:)/g)) {
     const strong = STEERING_NAME.test(m[1]!);
     if (!strong && !/^(?:PATH|Path|ENV)$/.test(m[1]!)) continue;
     let q = m.index ?? 0;
     while (q > 0 && /\s/.test(code[q - 1]!)) q--;
-    if ((q === 0 || /[{,]/.test(code[q - 1]!)) && (strong || envObjectLiteral(code, m.index ?? 0))) return true;
+    if ((q === 0 || /[{,]/.test(code[q - 1]!)) && (strong || envObjectLiteral(code, m.index ?? 0, undefined, brIdx))) return true;
   }
   // A computed key in an object literal that spreads process.env or sits under env: the name is not shown.
   for (const m of code.matchAll(/[{,]\s*\[/g)) {
     const open = (m.index ?? 0) + m[0].length - 1;
-    const close = bracketIndex(code).closer[open]! >= 0 ? bracketIndex(code).closer[open]! : code.length;
-    if (close < code.length && codeAfter(code, close + 1, 1) === ":" && envObjectLiteral(code, open)) return true;
+    const close = brIdx.closer[open]! >= 0 ? brIdx.closer[open]! : code.length;
+    if (close < code.length && codeAfter(code, close + 1, 1) === ":" && envObjectLiteral(code, open, undefined, brIdx)) return true;
   }
   const mentionsEnv = /(?:^|[^\w$.]|\.\.\.)process\s*(?:\?\.|\.)\s*env(?![\w$])/.test(code);
   // Any assignment to a member with such a name (env.NODE_OPTIONS = x on a copied environment); PATH and ENV where the file
@@ -5423,7 +5439,7 @@ function steeringKey(code: string): boolean {
   }
   // A shorthand key ({ ...process.env, PATH }).
   for (const m of code.matchAll(/[{,]\s*(PATH|Path|ENV)\s*(?=[,}])/g)) {
-    if (envObjectLiteral(code, (m.index ?? 0) + m[0].indexOf(m[1]!))) return true;
+    if (envObjectLiteral(code, (m.index ?? 0) + m[0].indexOf(m[1]!), undefined, brIdx)) return true;
   }
   return false;
 }
@@ -6050,7 +6066,8 @@ function hasUnboundedScan(text: string, source: string): boolean {
   // .constructor.constructor and .constructor[ reach Function; .constructor( is read like Function( below.
   if (/(?:\?\.|\.)\s*constructor\s*(?:\?\.|\.)\s*constructor\b|(?:\?\.|\.)\s*constructor\s*(?:\?\.\s*)?\[/.test(plain)) return true;
   // A pattern that binds a constructor key ({ constructor: { constructor: F } }) reaches Function without a dot.
-  for (const m of plain.matchAll(/(?<![\w$.])constructor(?![\w$])\s*:/g)) if (inPattern(plain, m.index ?? 0)) return true;
+  const plainIdx = bracketIndex(plain);
+  for (const m of plain.matchAll(/(?<![\w$.])constructor(?![\w$])\s*:/g)) if (inPattern(plain, m.index ?? 0, plainIdx)) return true;
   // .constructor( is read like Function(: the comment-free text, so a comment or a message does not count.
   for (const m of plain.matchAll(/(?:\?\.|\.)\s*constructor\s*\(/g)) {
     const args = argsOf(plain, (m.index ?? 0) + m[0].length - 1);
