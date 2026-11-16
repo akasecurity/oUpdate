@@ -94,17 +94,25 @@ const nestFix = (hook: string, changed = false): Fix => (v) => ({
   "lib/a.js": changed && v !== "1.0.0" ? js(v) : "console.log(1);\n",
 });
 test("eval nested fourteen levels with an escaped word reads in a small multiple of the line without it", () => {
-  const time = (esc: boolean): number => {
-    const hook = nested(14, esc);
+  // One warm-up read per side, then five samples taken in turn (plain, escaped, plain, ...) so a burst of noise hits both sides, and the
+  // smallest of each: a slow run (a busy machine) only adds time. Reading each level twice makes fourteen levels thousands of times
+  // slower, so a multiple of 15 still catches it.
+  const hooks = { plain: nested(14, false), escaped: nested(14, true) };
+  const read = (hook: string): number => {
     const t = performance.now();
     held(nestFix(hook));
     return performance.now() - t;
   };
-  time(false);
-  const plain = Math.max(time(false), 5);
-  const escaped = time(true);
-  expect(escaped).toBeLessThan(plain * 6 + 100);
-});
+  read(hooks.plain);
+  read(hooks.escaped);
+  let plain = Infinity;
+  let escaped = Infinity;
+  for (let i = 0; i < 5; i++) {
+    plain = Math.min(plain, read(hooks.plain));
+    escaped = Math.min(escaped, read(hooks.escaped));
+  }
+  expect(escaped).toBeLessThan(Math.max(plain, 5) * 15 + 100);
+}, 30_000);
 test("eval nested three levels with an escaped word holds the changed file it runs", () => {
   expect(held(nestFix(nested(3, true), true))).toBe(true);
 });
