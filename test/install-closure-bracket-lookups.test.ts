@@ -28,6 +28,15 @@ const shapes: [string, string, unknown][] = [
   ["an indexed process.env chain", "process.env[a][b] = `x`;\n", HOLD],
   ["a computed key in an object literal", "const o = { [k]: 1 };\n", []],
   ["a constructor key in an object literal", "const o = { constructor: 1 };\n", []],
+  ["a quoted PATH key in an object literal", 'const o = { "PATH": d };\n', []],
+  ["a quoted constructor key in an object literal", 'const o = { "constructor": 1 };\n', []],
+  ["a PATH key in an object literal", "const o = { PATH: d };\n", []],
+  ["a PATH shorthand in an object literal", "const o = { PATH };\n", []],
+  // A string that holds a bracket does not unbalance the text the keys are read in: the index is of the text with strings blanked.
+  ["a quoted constructor key after a string that holds a parenthesis", 'const o = { a: "(", "constructor": 1 };\n', []],
+  ["a quoted PATH key after a string that holds a parenthesis", 'const o = { a: "(", "PATH": d };\n', []],
+  ["a PATH key after a string that holds a parenthesis", 'const o = { a: "(", PATH: d };\n', []],
+  ["a PATH shorthand after a string that holds a parenthesis", 'const o = { a: "(", PATH };\n', []],
   ["pin: a constructor key in a destructuring pattern", "const { constructor: c } = o;\n", HOLD],
 ];
 for (const [name, unit, hard] of shapes) {
