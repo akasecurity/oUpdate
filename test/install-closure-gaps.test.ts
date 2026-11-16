@@ -286,12 +286,17 @@ for (const [label, hook] of round6Held) {
 const round6Quiet: [string, string][] = [
   // Same on main: a variable set on one line is not carried into the arguments of another command on the next.
   ["a variable set on one line and given to a wrapper that runs node on the next", 'F=$(cat name.txt)\ncross-env A=1 node "$F" | cat'],
-  // A design limit, also on main: a line that does not split and holds no unresolved expansion is never read for evaluation.
-  ["a count in a variable evaluated by an arithmetic command on the next line", "COUNT=$(ls dist | wc -l | tr -d ' ')\nif (( COUNT == 0 )); then node lib/ok.js; fi"],
   ["a temp dir from mktemp used as an argument on the next line", 'TMP=$(mktemp -d)\ncurl -fsSL https://example.com/x.tgz | tar -xz -C "$TMP"'],
   ["a path from pwd used as an argument on the next line", 'ROOT=$(pwd)\nmake -C "$ROOT/native" 2>&1 | tee build.log'],
   ["a temp dir from mktemp used by git clone on the next line", 'DIR=$(mktemp -d)\ngit clone --depth 1 https://example.com/r.git "$DIR" >/dev/null'],
 ];
+
+// A bare (( )) command evaluates a variable set from a substitution as arithmetic, as `echo $((COUNT))` and `let` do (both hold this count
+// on main): it was quiet only because a line that holds no placeholder was never read for evaluation.
+test("a count in a variable evaluated by an arithmetic command on the next line holds like $((COUNT)) does", () => {
+  const hook = "COUNT=$(ls dist | wc -l | tr -d ' ')\nif (( COUNT == 0 )); then node lib/ok.js; fi";
+  expect(holds(releaseDir("1.0.0", hook, "none"), releaseDir("1.0.1", hook, "docs")).length).toBeGreaterThan(0);
+});
 
 for (const [label, hook] of round6Quiet) {
   test(`${label} stays quiet: a changed docs/evil.js is not an install change`, () => {

@@ -15,12 +15,16 @@ export interface InstallView {
   // The same for what only the backslash reading reached (kept apart from the self-run reads: a retarget shows against either).
   escOnly?: string[];
   escMissing?: string[];
+  // The same for what only the bare `((` widening reached (a third kind: it must not mask a retarget the backslash reading shows).
+  arOnly?: string[];
+  arMissing?: string[];
   gypFiles: string[];
   missing: string[];
   scripts: Record<string, string>;
   // Scripts only a self-run read followed.
   selfScripts?: Record<string, string>;
   escScripts?: Record<string, string>;
+  arScripts?: Record<string, string>;
   gyp?: string;
   // Set when a preinstall, install, postinstall, or prepare script is non-empty.
   hook: boolean;
@@ -150,6 +154,7 @@ interface Ctx {
   escMissing?: Set<string>;
   escScripts?: Record<string, string>;
   escGyp?: boolean;
+  arRec?: { marks: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> }; bins: Set<string>; files: Set<string>; missing: Set<string>; scripts: Record<string, string>; gyp: boolean };
   // The package's own name and what running the package itself runs (npx ., npm exec -- <name>): every bin, or main with no bin.
   self: { name: string; targets: string[] };
   // The command being dispatched is only looked up, listed or asked for help (command -v tool, sudo -l tool, npm exec --help tool):
@@ -11488,9 +11493,20 @@ function stageHazard(line: string, depth: number, inherited?: HotLookup, arithOn
 // stage and each substitution body is read as a command, and a stage that runs a command or file named by the expansion, or
 // reads its standard input, may run any file of the package, so every file is read.
 function unreadableUnresolved(ctx: Ctx, loose: string, orig: string, carry?: HotLookup): void {
-  if (!loose.includes(UNRESOLVED)) return;
+  // A bare `((` command holds no placeholder when it names a variable (`(( x == 0 ))`): its words are still evaluated as arithmetic.
+  const bare = !loose.includes(UNRESOLVED);
+  if (bare && !ARITH_COMMAND.test(loose)) return;
   const r = stageHazard(orig, 0, undefined, false, carry);
   if (!r.hit) return;
+  if (bare) {
+    // A line main did not read: its widening runs on records of a kind of its own (files kept apart from the other kinds), so a retarget
+    // of main to a file only that widening reached, or one the backslash reading shows, is not hidden by it.
+    underOwnMarks(ctx, () => {
+      if (r.inert) ctx.widenInert = true;
+      widenAll(ctx);
+    }, true, true);
+    return;
+  }
   if (r.inert) ctx.widenInert = true;
   widenAll(ctx);
 }
@@ -11584,6 +11600,8 @@ function heredocHazardAt(ctx: Ctx, text: string): void {
 
 // A line that can put a value in a variable: an assignment, a declaration, a loop or a read.
 const SETS_VAR = /(?:^|[\s;&|(])(?:[A-Za-z_]\w*\+?=|(?:export|local|declare|typeset|readonly|read|for|printf)\s)/;
+// A `((` that opens a command (the start of the line or after a separator, a keyword or an open parenthesis).
+const ARITH_COMMAND = /(?:^|[\s;&|(])\(\(/;
 const ARITH_WORDS = /\$\(\(|(?:^|[\s;&|(])(?:declare|typeset|local|readonly|export|unset|read|hash|printf|test|let|eval|\[\[|\[)\s/;
 // A line that split into commands, read once more for what the splitter does not see: a command that evaluates a value.
 // A command of plain words (no quote, expansion, redirect or separator) that is not one of the forms evalHazard reads: it is read
@@ -14505,16 +14523,19 @@ function finish(ctx: Ctx, manifest: string, gyp: string | undefined, hook: boole
   return {
     hold: ctx.hold,
     manifest,
-    files: [...new Set([...ctx.files, ...(ctx.selfFiles ?? []), ...(ctx.escFiles ?? [])])].sort(),
+    files: [...new Set([...ctx.files, ...(ctx.selfFiles ?? []), ...(ctx.escFiles ?? []), ...(ctx.arRec?.files ?? [])])].sort(),
     selfOnly: [...(ctx.selfFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     escOnly: [...(ctx.escFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
+    arOnly: [...(ctx.arRec?.files ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     gypFiles: [...ctx.gypFiles].sort(),
-    missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? []), ...(ctx.escMissing ?? [])])].sort(),
+    missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? []), ...(ctx.escMissing ?? []), ...(ctx.arRec?.missing ?? [])])].sort(),
     selfMissing: [...(ctx.selfMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
     escMissing: [...(ctx.escMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
+    arMissing: [...(ctx.arRec?.missing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
     scripts: ctx.scripts,
     selfScripts: Object.fromEntries(Object.entries(ctx.selfScripts ?? {}).filter(([k]) => !Object.hasOwn(ctx.scripts, k))),
     escScripts: Object.fromEntries(Object.entries(ctx.escScripts ?? {}).filter(([k]) => !Object.hasOwn(ctx.scripts, k))),
+    arScripts: Object.fromEntries(Object.entries(ctx.arRec?.scripts ?? {}).filter(([k]) => !Object.hasOwn(ctx.scripts, k))),
     gyp,
     hook,
     binStamp,
@@ -14772,14 +14793,16 @@ function syncInto(keep: Set<string>, real: Set<string>): void {
 }
 // `esc`: the same for the backslash reading, on records of its own: a pure addition to the main reading (its files kept apart as
 // selfFiles too, so a retarget to a file only it reached still shows), never a self-run (inSelf unchanged).
-function underOwnMarks(ctx: Ctx, run: () => void, esc = false): void {
+// `bare`: the widening of a bare `((` line, on a third set of records (its files compared apart, so it hides no retarget the other kinds show).
+function underOwnMarks(ctx: Ctx, run: () => void, esc = false, bare = false): void {
   const fresh = () => ({ seen: new Set<string>(), seenNoHooks: new Set<string>(), scanned: new Set<string>(), gypScanned: new Set<string>(), ranSh: new Set<string>() });
-  const keep = esc ? (ctx.escMarks ??= fresh()) : (ctx.selfMarks ??= fresh());
+  const rec = bare ? (ctx.arRec ??= { marks: fresh(), bins: new Set<string>(), files: new Set<string>(), missing: new Set<string>(), scripts: {}, gyp: false }) : undefined;
+  const keep = rec ? rec.marks : esc ? (ctx.escMarks ??= fresh()) : (ctx.selfMarks ??= fresh());
   const real = { seen: ctx.seen, seenNoHooks: ctx.seenNoHooks, scanned: ctx.scanned, gypScanned: ctx.gypScanned, ranSh: ctx.ranSh };
   // The backslash reading's bins are read on a record of its own: a bin it read must not skip the plain run of the same bin.
   const realBins = ctx.binsRead;
   if (esc) {
-    const keepBins = (ctx.escBinsRead ??= new Set());
+    const keepBins = rec ? rec.bins : (ctx.escBinsRead ??= new Set());
     syncInto(keepBins, realBins);
     ctx.binsRead = keepBins;
   }
@@ -14851,7 +14874,7 @@ function underOwnMarks(ctx: Ctx, run: () => void, esc = false): void {
     run();
   } finally {
     if (!esc) for (const k of ["seen", "seenNoHooks", "scanned", "gypScanned", "ranSh"] as const) for (const v of ctx[k]) keep[k].add(v);
-    const selfScripts = esc ? (ctx.escScripts ??= {}) : (ctx.selfScripts ??= {});
+    const selfScripts = rec ? rec.scripts : esc ? (ctx.escScripts ??= {}) : (ctx.selfScripts ??= {});
     if (esc) {
       for (const k of scriptLog) {
         selfScripts[k] = ctx.scripts[k]!;
@@ -14861,12 +14884,13 @@ function underOwnMarks(ctx: Ctx, run: () => void, esc = false): void {
     ctx.scripts = realScripts;
     ctx.scriptLog = savedScriptLog;
     if ((ctx.sawNodeGyp && !savedNodeGyp) || (ctx.reachGyp && !savedReachGyp)) {
-      if (esc) ctx.escGyp = true;
+      if (rec) rec.gyp = true;
+      else if (esc) ctx.escGyp = true;
       else ctx.selfGyp = true;
     }
     ctx.sawNodeGyp = savedNodeGyp;
     ctx.reachGyp = savedReachGyp;
-    const selfFiles = esc ? (ctx.escFiles ??= new Set()) : (ctx.selfFiles ??= new Set());
+    const selfFiles = rec ? rec.files : esc ? (ctx.escFiles ??= new Set()) : (ctx.selfFiles ??= new Set());
     if (esc) {
       ctx.filesLog = parentLog;
       for (const k of filesLog) {
@@ -14874,7 +14898,7 @@ function underOwnMarks(ctx: Ctx, run: () => void, esc = false): void {
         selfFiles.add(k);
       }
     } else for (const k of ctx.files) if (!realFiles.has(k)) selfFiles.add(k);
-    const selfMissing = esc ? (ctx.escMissing ??= new Set()) : (ctx.selfMissing ??= new Set());
+    const selfMissing = rec ? rec.missing : esc ? (ctx.escMissing ??= new Set()) : (ctx.selfMissing ??= new Set());
     if (esc) {
       takeMissing(selfMissing);
       for (const close of closers) close();
@@ -14950,14 +14974,14 @@ export function installView(files: FileMap): InstallView {
   const merge = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort();
   // Only a path no regular read of either reading reached stays self-run only.
   // A path is regular when either reading reached it by neither kind of reach; each kind then keeps what it alone reached.
-  const only = (a: string[], aSelf: string[] | undefined, aEsc: string[] | undefined, b: string[], bSelf: string[] | undefined, bEsc: string[] | undefined) => {
-    const aOnly = new Set([...(aSelf ?? []), ...(aEsc ?? [])]);
-    const bOnly = new Set([...(bSelf ?? []), ...(bEsc ?? [])]);
+  const only = (a: string[], aSelf: string[] | undefined, aEsc: string[] | undefined, aAr: string[] | undefined, b: string[], bSelf: string[] | undefined, bEsc: string[] | undefined, bAr: string[] | undefined) => {
+    const aOnly = new Set([...(aSelf ?? []), ...(aEsc ?? []), ...(aAr ?? [])]);
+    const bOnly = new Set([...(bSelf ?? []), ...(bEsc ?? []), ...(bAr ?? [])]);
     const real = new Set([...a.filter((k) => !aOnly.has(k)), ...b.filter((k) => !bOnly.has(k))]);
     return (self: string[] | undefined, other: string[] | undefined) => merge(self ?? [], other ?? []).filter((k) => !real.has(k));
   };
-  const onlyFiles = only(v.files, v.selfOnly, v.escOnly, w.files, w.selfOnly, w.escOnly);
-  const onlyMissing = only(v.missing, v.selfMissing, v.escMissing, w.missing, w.selfMissing, w.escMissing);
+  const onlyFiles = only(v.files, v.selfOnly, v.escOnly, v.arOnly, w.files, w.selfOnly, w.escOnly, w.arOnly);
+  const onlyMissing = only(v.missing, v.selfMissing, v.escMissing, v.arMissing, w.missing, w.selfMissing, w.escMissing, w.arMissing);
   return {
     ...v,
     hold: v.hold ?? w.hold,
@@ -14968,6 +14992,9 @@ export function installView(files: FileMap): InstallView {
     selfMissing: onlyMissing(v.selfMissing, w.selfMissing),
     escOnly: onlyFiles(v.escOnly, w.escOnly),
     escMissing: onlyMissing(v.escMissing, w.escMissing),
+    arOnly: onlyFiles(v.arOnly, w.arOnly),
+    arMissing: onlyMissing(v.arMissing, w.arMissing),
+    arScripts: Object.fromEntries(Object.entries({ ...w.arScripts, ...v.arScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
     escScripts: Object.fromEntries(Object.entries({ ...w.escScripts, ...v.escScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
     selfScripts: Object.fromEntries(Object.entries({ ...w.selfScripts, ...v.selfScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
     gyp: v.gyp ?? w.gyp,
@@ -15111,6 +15138,8 @@ function installViewCore(files: FileMap): InstallView {
     underOwnMarks(ctx, () => readGyp(undefined));
   } else if (ctx.escGyp) {
     underOwnMarks(ctx, () => readGyp(undefined), true);
+  } else if (ctx.arRec?.gyp) {
+    underOwnMarks(ctx, () => readGyp(undefined), true, true);
   }
   return done(gyp);
 }
