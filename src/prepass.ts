@@ -638,14 +638,16 @@ function reachedFiles(files: FileMap, view: ReturnType<typeof installView>): Set
   for (const k of mentionFiles(files, view.scripts)) found.add(k);
   for (const k of mentionFiles(files, view.selfScripts ?? {})) found.add(k);
   for (const k of mentionFiles(files, view.escScripts ?? {})) found.add(k);
+  for (const k of mentionFiles(files, view.arScripts ?? {})) found.add(k);
   return found;
 }
 
 // What only a self-run reached (kind "self"), or only the backslash reading reached (kind "esc"): its files, and what only the
 // scripts it alone followed mention. Each kind is compared on its own, so one cannot hide a retarget the other shows.
-function selfReached(files: FileMap, view: ReturnType<typeof installView>, kind: "self" | "esc" = "self"): Set<string> {
-  const other = new Set(kind === "self" ? view.escOnly ?? [] : view.selfOnly ?? []);
-  const self = new Set(kind === "self" ? view.selfOnly ?? [] : view.escOnly ?? []);
+function selfReached(files: FileMap, view: ReturnType<typeof installView>, kind: "self" | "esc" | "ar" = "self"): Set<string> {
+  const sets = { self: view.selfOnly ?? [], esc: view.escOnly ?? [], ar: view.arOnly ?? [] };
+  const other = new Set(Object.entries(sets).flatMap(([k, v]) => (k === kind ? [] : v)));
+  const self = new Set(sets[kind]);
   const regular = new Set<string>(view.files.filter((k) => !self.has(k) && !other.has(k)));
   for (const k of view.gypFiles) if (!self.has(k)) regular.add(k);
   if (view.gyp) {
@@ -656,7 +658,7 @@ function selfReached(files: FileMap, view: ReturnType<typeof installView>, kind:
     regular.add(k);
     self.delete(k);
   }
-  for (const k of mentionFiles(files, (kind === "self" ? view.selfScripts : view.escScripts) ?? {})) if (!regular.has(k)) self.add(k);
+  for (const k of mentionFiles(files, (kind === "self" ? view.selfScripts : kind === "esc" ? view.escScripts : view.arScripts) ?? {})) if (!regular.has(k)) self.add(k);
   return self;
 }
 
@@ -1006,8 +1008,8 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   const inert =
     prepareInert(oldV.scripts, otherInstallEntry(oldFiles, oldV.manifest)) && prepareInert(newV.scripts, otherInstallEntry(newFiles, newV.manifest));
   // A script only a self-run followed is compared too (its body still runs).
-  const oldScripts = { ...oldV.escScripts, ...oldV.selfScripts, ...oldV.scripts };
-  const newScripts = { ...newV.escScripts, ...newV.selfScripts, ...newV.scripts };
+  const oldScripts = { ...oldV.arScripts, ...oldV.escScripts, ...oldV.selfScripts, ...oldV.scripts };
+  const newScripts = { ...newV.arScripts, ...newV.escScripts, ...newV.selfScripts, ...newV.scripts };
   for (const k of new Set([...Object.keys(oldScripts), ...Object.keys(newScripts)])) {
     if (k === "prepare" && inert) continue;
     if (oldScripts[k] !== newScripts[k]) push(`script ${k}`);
@@ -1016,6 +1018,7 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
     // The same for a script only the self-runs followed, and only the backslash reading followed: each kind on its own.
     if (Object.hasOwn(oldV.selfScripts ?? {}, k) !== Object.hasOwn(newV.selfScripts ?? {}, k)) push(`script ${k}`);
     if (Object.hasOwn(oldV.escScripts ?? {}, k) !== Object.hasOwn(newV.escScripts ?? {}, k)) push(`script ${k}`);
+    if (Object.hasOwn(oldV.arScripts ?? {}, k) !== Object.hasOwn(newV.arScripts ?? {}, k)) push(`script ${k}`);
   }
   const missN = new Set(newV.missing);
   for (const p of oldV.missing) if (!missN.has(p)) push(`file ${p}`);
@@ -1033,12 +1036,17 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   const oldEsc = selfReached(oldFiles, oldV, "esc");
   const newEsc = selfReached(newFiles, newV, "esc");
   for (const k of oldReached) if (oldEsc.has(k) !== newEsc.has(k)) push(`file ${k}`);
+  const oldAr = selfReached(oldFiles, oldV, "ar");
+  const newAr = selfReached(newFiles, newV, "ar");
+  for (const k of oldReached) if (oldAr.has(k) !== newAr.has(k)) push(`file ${k}`);
   // The same for a path that is missing: a self-run read alone reached it on one side only.
   const oldMissSelf = new Set(oldV.selfMissing ?? []);
   const newMissSelf = new Set(newV.selfMissing ?? []);
   const oldMissEsc = new Set(oldV.escMissing ?? []);
   const newMissEsc = new Set(newV.escMissing ?? []);
-  for (const p of oldV.missing) if (missN.has(p) && (oldMissSelf.has(p) !== newMissSelf.has(p) || oldMissEsc.has(p) !== newMissEsc.has(p))) push(`file ${p}`);
+  const oldMissAr = new Set(oldV.arMissing ?? []);
+  const newMissAr = new Set(newV.arMissing ?? []);
+  for (const p of oldV.missing) if (missN.has(p) && (oldMissSelf.has(p) !== newMissSelf.has(p) || oldMissEsc.has(p) !== newMissEsc.has(p) || oldMissAr.has(p) !== newMissAr.has(p))) push(`file ${p}`);
   for (const k of oldReached) {
     if (!newReached.has(k)) continue;
     const a = oldFiles.get(k);
