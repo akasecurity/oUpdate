@@ -91,7 +91,7 @@ test("every held form runs the changed file under bash, sh and dash", () => {
 const quiet: [string, (d: string) => string, Mode[]?][] = [
   ["an escaped space in an argument", () => "echo a\\ b\nnode lib/a.js"],
   ["a line continuation in an unrelated command", () => "echo one \\\n  two && node lib/a.js", ["inline"]],
-  ["an escaped space in an argument of a package script", () => "node lib/a.js --name=a\\ b"],
+  ["an escaped space in an argument of a package script", () => "node lib/a.js a\\ b"],
   ["a doubled backslash in the file name, a different file", (d) => `node ${d}/ev\\\\il.js`],
   ["a backslash inside double quotes, a different file", (d) => `node "${d}/ev\\il.js"`],
   ["a backslash inside single quotes, a different file", (d) => `node '${d}/ev\\il.js'`],

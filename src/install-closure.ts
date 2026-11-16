@@ -12,11 +12,15 @@ export interface InstallView {
   selfOnly?: string[];
   // The missing paths only a self-run read reached.
   selfMissing?: string[];
+  // The same for what only the backslash reading reached (kept apart from the self-run reads: a retarget shows against either).
+  escOnly?: string[];
+  escMissing?: string[];
   gypFiles: string[];
   missing: string[];
   scripts: Record<string, string>;
   // Scripts only a self-run read followed.
   selfScripts?: Record<string, string>;
+  escScripts?: Record<string, string>;
   gyp?: string;
   // Set when a preinstall, install, postinstall, or prepare script is non-empty.
   hook: boolean;
@@ -93,7 +97,7 @@ interface Ctx {
   seenNoHooks: Set<string>;
   scanned: Set<string>;
   // The quoted and operand tokens of each scanned file, read once.
-  literals?: Map<string, { quoted: string[]; operand: string[] }>;
+  literals?: Map<string, { quoted: string[]; operand: string[]; esc?: string[] }>;
   // Files scanned while a gyp command was the caller: a file the hook walk scanned first is scanned again under gyp, so the files it reaches count as gyp files too.
   gypScanned: Set<string>;
   ranSh: Set<string>;
@@ -127,10 +131,25 @@ interface Ctx {
   selfClear?: Set<string>;
   // What the self-run reads have read so far (read-once records, and the files they reached that no other read reached).
   selfMarks?: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> };
+  // What the backslash reading (the commands a split reads only by taking a backslash, a JS string read by its decoded value) has
+  // read: its own read-once records, so it never marks a script or file read for the main reading after it.
+  // The backslash reading is open (underOwnMarks esc), and the eval texts already read from a cwd (`cwd\0text`): inside that reading an
+  // eval text another reading already read from the same cwd is not read again (the two passes would double per nested level).
+  inEsc?: boolean;
+  evalRead?: Set<string>;
+  escBinsRead?: Set<string>;
+  escRun?: Map<string, string>;
+  widenDone?: Set<string>;
+  filesLog?: Set<string>;
+  escMarks?: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> };
   selfFiles?: Set<string>;
   selfMissing?: Set<string>;
   selfScripts?: Record<string, string>;
   selfGyp?: boolean;
+  escFiles?: Set<string>;
+  escMissing?: Set<string>;
+  escScripts?: Record<string, string>;
+  escGyp?: boolean;
   // The package's own name and what running the package itself runs (npx ., npm exec -- <name>): every bin, or main with no bin.
   self: { name: string; targets: string[] };
   // The command being dispatched is only looked up, listed or asked for help (command -v tool, sudo -l tool, npm exec --help tool):
@@ -139,6 +158,8 @@ interface Ctx {
   // The read-once records of looked-up commands (see underLookup), and the real ones while a looked-up command is read.
   lookupSets?: LookupSets;
   realSets?: LookupSets;
+  // Script names the open backslash scope added to the shared record (taken back when it closes).
+  scriptLog?: Set<string>;
   logical: Map<string, string>;
   raw: Record<string, unknown>;
   config: Record<string, unknown>;
@@ -588,12 +609,40 @@ function substRead(ctx: Ctx, body: string, loose: boolean): string | null {
   return out;
 }
 
+// Set when splitCommands passed a backslash outside quotes. A caller that reads the commands it returns also reads the text the way
+// it was read before (noteUnreadable), so a line with a backslash reaches everything it reached when the split gave up on it.
+let splitEscaped = false;
+// Whether main's split took a backslash outside quotes: the same walk, comments not skipped, so a quote in a comment pairs as it did.
+function unquotedBackslash(body: string): boolean {
+  if (!body.includes("\\")) return false;
+  let quote: string | undefined;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]!;
+    if (quote) {
+      if (c === "\\" && quote === '"') i++;
+      else if (c === quote) quote = undefined;
+    } else if (c === "'" || c === '"') quote = c;
+    else if (c === "\\") return true;
+  }
+  return false;
+}
+// Commands that read nothing whatever their words (the dispatch of echo, true, false and : reaches no file): the backslash reading has nothing to add for them.
+const INERT_HEADS = new Set(["echo", "true", "false", ":"]);
+const allInert = (cmds: string[]): boolean => cmds.every((c) => INERT_HEADS.has(c.trimStart().split(/\s/, 1)[0]!));
 function splitCommands(ctx: Ctx, body: string): string[] | null {
   const out: string[] = [];
   let cur = "";
   let quote: string | undefined;
+  let before = "";
+  // A # comment is skipped only in a body with a backslash outside quotes (the backslash reading, the split that sets splitEscaped);
+  // any other body is split as before, comments dispatched. A backslash only inside quotes is no such body.
+  const hasBs = unquotedBackslash(body);
+  // main's split (comments not skipped, quotes paired as it pairs them) took a backslash here: main's read of the body comes first.
+  if (hasBs) splitEscaped = true;
   for (let i = 0; i < body.length; i++) {
     const c = body[i]!;
+    const prior = before;
+    before = c;
     if (quote) {
       cur += c;
       // In double quotes a backslash escapes the next character: `\"` does not close the quote.
@@ -606,7 +655,25 @@ function splitCommands(ctx: Ctx, body: string): string[] | null {
       cur += c;
       continue;
     }
-    if (c === "`" || c === "(" || c === ")" || c === "<" || c === ">" || c === "\\") {
+    // A # that starts a word starts a comment: the shell runs nothing up to the newline (a backslash in it is not a continuation).
+    if (hasBs && c === "#" && (cur.length === 0 || prior === " " || prior === "\t")) {
+      while (i + 1 < body.length && body[i + 1] !== "\n") i++;
+      continue;
+    }
+    if (c === "\\") {
+      // Outside quotes a backslash makes the next character literal (`a\;b` is one word, `a\ b` too); words() removes it.
+      splitEscaped = true;
+      // Before a newline both vanish (a line continuation), as words() reads them: the old reading of the command never sees them.
+      if (body[i + 1] === "\n") {
+        i++;
+        before = prior;
+        continue;
+      }
+      cur += c;
+      if (i + 1 < body.length) cur += body[++i]!;
+      continue;
+    }
+    if (c === "`" || c === "(" || c === ")" || c === "<" || c === ">") {
       fail(ctx, "unresolved: shell");
       return null;
     }
@@ -5131,7 +5198,8 @@ function addScannedLiterals(ctx: Ctx): void {
         jsStep(text.length);
         const quoted = quotedTokens(text);
         const commands: string[] = [];
-        const operand = operandTokens(text, commands);
+        const escCommands: string[] = [];
+        const operand = operandTokens(text, commands, escCommands);
         // A quote inside a regular expression (`/"/`) opens no string. The text is read again with those quotes blanked (the main scan's own
         // regex reading), and both readings are kept: the plain reading is unchanged, so the result is never narrower than it.
         // A / or * there opens no comment either: that reading is a third one, added to the other two, never in place of them.
@@ -5144,9 +5212,9 @@ function addScannedLiterals(ctx: Ctx): void {
           if (other === undefined) continue;
           jsStep(other.length);
           quoted.push(...quotedTokens(other));
-          operand.push(...operandTokens(other, commands));
+          operand.push(...operandTokens(other, commands, escCommands));
         }
-        return { quoted, operand: [...operand, ...commands] };
+        return { quoted, operand: [...operand, ...commands], esc: escCommands };
       }, () => undefined);
       // A file whose literals could not be read is held, and not remembered as having none.
       if (!read) {
@@ -5158,6 +5226,10 @@ function addScannedLiterals(ctx: Ctx): void {
     }
     for (const tok of lits.quoted) addLiteralToken(ctx, tok);
     for (const tok of lits.operand) addLiteralToken(ctx, tok, true);
+    const esc = lits.esc ?? [];
+    if (esc.length > 0 && !ctx.hold) underOwnMarks(ctx, () => {
+      for (const tok of esc) addLiteralToken(ctx, tok, true);
+    }, true);
   }
 }
 
@@ -9388,7 +9460,9 @@ const NODE_FLAGS = new Set(["-v", "--version", "-h", "--help", "-c", "--check", 
 const SHELL_PROGRAMS = new Set(["sh", "bash", "zsh", "dash"]);
 // A shell's words: quotes group and are removed, an operator outside quotes is a word of its own (op: true); a quoted `;` is a plain
 // word. One pass over the text.
-function commandWords(raw: string): { text: string; op: boolean }[] {
+// `esc`: a backslash outside quotes makes the next character literal and is removed (`l\ib/x.js` is lib/x.js, `a;b` is one word), and
+// in double quotes one before a quote, a backslash, a dollar or a backtick is; a backslash before a newline vanishes with it.
+function commandWords(raw: string, esc = false): { text: string; op: boolean }[] {
   const words: { text: string; op: boolean }[] = [];
   let w = "";
   let has = false;
@@ -9401,7 +9475,26 @@ function commandWords(raw: string): { text: string; op: boolean }[] {
   };
   while (i < n) {
     const c = raw[i]!;
-    if (c === "'" || c === '"') {
+    if (esc && c === "\\" && i + 1 < n) {
+      if (raw[i + 1] !== "\n") {
+        w += raw[i + 1]!;
+        has = true;
+      }
+      i += 2;
+    } else if (esc && c === '"') {
+      // Double quotes: scan to the closing quote that no backslash escapes.
+      let j = i + 1;
+      let part = "";
+      while (j < n && raw[j] !== '"') {
+        if (raw[j] === "\\" && j + 1 < n && /["\\$`\n]/.test(raw[j + 1]!)) {
+          if (raw[j + 1] !== "\n") part += raw[j + 1]!;
+          j += 2;
+        } else part += raw[j++]!;
+      }
+      w += part;
+      has = true;
+      i = j + 1;
+    } else if (c === "'" || c === '"') {
       const e = raw.indexOf(c, i + 1);
       const end = e < 0 ? n : e;
       w += raw.slice(i + 1, end);
@@ -9424,9 +9517,14 @@ function commandWords(raw: string): { text: string; op: boolean }[] {
   flush();
   return words;
 }
+// A string with a backslash is read twice: as the shell reads it, and as it was read before the backslash was removed.
 function commandTokens(raw: string, out: string[], depth = 0): void {
+  commandTokensAt(raw, out, depth, true);
+  if (raw.includes("\\")) commandTokensAt(raw, out, depth, false);
+}
+function commandTokensAt(raw: string, out: string[], depth: number, esc: boolean): void {
   jsStep(raw.length);
-  const read = commandWords(raw);
+  const read = commandWords(raw, esc);
   const words = read.map((x) => x.text);
   const cwd = (w: string): void => {
     let t = w;
@@ -9459,7 +9557,7 @@ function commandTokens(raw: string, out: string[], depth = 0): void {
     while (k < end && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]!) || /^(?:env|npx|exec)$/.test(words[k]!))) k++;
     // The command this segment runs may be one of the package's own bins: the word at command position, or a package runner's command.
     for (const t of commandWordsOf(words.slice(at, end))) out.push(t);
-    if (k < end && SHELL_PROGRAMS.has(programName(words[k]!)) && words[k + 1] === "-c" && k + 2 < end && depth < 4) commandTokens(words[k + 2]!, out, depth + 1);
+    if (k < end && SHELL_PROGRAMS.has(programName(words[k]!)) && words[k + 1] === "-c" && k + 2 < end && depth < 4) commandTokensAt(words[k + 2]!, out, depth + 1, esc);
     else if (k < end && NODE_PROGRAMS.has(programName(words[k]!))) {
       let wide = false;
       for (let j = k + 1; j < end; j++) {
@@ -9784,7 +9882,7 @@ const SHELL_STRING_CALLS = new Set(["exec", "execSync", "execFile", "execFileSyn
 // commands (when given) takes the files named by the command strings the code executes (see commandTokens): the first argument of a
 // SHELL_STRING_CALLS call, and the argument after "-c" in the args array of a call whose program is a shell. Both are read here, at
 // real call syntax, never from text inside another string.
-function operandTokens(text: string, commands?: string[]): string[] {
+function operandTokens(text: string, commands?: string[], escCommands?: string[]): string[] {
   const out: string[] = [];
   type Frame = { open: string; callee: string; pending: string[]; extra: string[]; lit: number; litMark: number; quiet: boolean; node: boolean; plain: boolean; args: number; prev?: string; shell?: 1 | 2 };
   // A word joins a frame's pending list, or its extra list: the words only a node command's args array adds (flag stems, working-directory
@@ -9823,20 +9921,29 @@ function operandTokens(text: string, commands?: string[]): string[] {
         j++;
       }
       const top = stack[stack.length - 1];
-      if (commands && plain && top && j < n && text[j] === c && j - i - 1 <= 512) {
-        const raw = text.slice(i + 1, j);
+      // A string with an escape is read by its value (`"node l\\ib/x.js"` runs node on lib/x.js), as long as it holds no ${ hole.
+      let cmdRaw: string | undefined;
+      if (commands && top && j < n && text[j] === c && j - i - 1 <= 512) {
+        const lit = text.slice(i + 1, j);
+        cmdRaw = plain ? lit : c === "`" && lit.includes("${") ? undefined : decodeJsString(lit);
+      }
+      if (commands && cmdRaw !== undefined && top) {
+        const raw = cmdRaw;
+        // A decoded string's commands are the backslash reading's: kept apart, read on records of their own.
+        const sink = plain ? commands : (escCommands ?? commands);
         const caller = stack[stack.length - 2];
-        if (top.open === "(" && SHELL_STRING_CALLS.has(top.callee) && top.args === 0 && top.prev === undefined && top.pending.length === 0) commandTokens(raw, commands);
+        if (top.open === "(" && SHELL_STRING_CALLS.has(top.callee) && top.args === 0 && top.prev === undefined && top.pending.length === 0) commandTokens(raw, sink);
         else if (top.open === "[" && top.shell !== 2 && caller?.open === "(" && COMMAND_CALLS.has(caller.callee) && caller.pending[0] !== undefined
           && SHELL_PROGRAMS.has(programName(caller.pending[0]))) {
           // After -c the shell takes options (-e, -c again, --) up to its first word that is not one: that is the command. The strings
           // after the command are its positional parameters ($0, $1, ...), never commands.
           if (top.shell === 1 && !raw.startsWith("-")) {
-            commandTokens(raw, commands);
-            top.shell = 2;
-          } else if (raw === "-c") top.shell = 1;
+            commandTokens(raw, sink);
+            if (plain) top.shell = 2;
+          } else if (plain && raw === "-c") top.shell = 1;
         }
-        top.prev = raw;
+        // Only a plain string moves the frame (as before): a decoded string is read too, but leaves the next string to be read as well.
+        if (plain) top.prev = raw;
       }
       if (plain && top && j < n && text[j] === c && j - i - 1 <= 512) {
         for (const tok of text.slice(i + 1, j).split(/\s+/)) {
@@ -10193,6 +10300,14 @@ function movedInto(ctx: Ctx, logical: string): boolean {
 const PKG_DIRS = new WeakMap<object, string[]>();
 
 function widenAll(ctx: Ctx): void {
+  // The backslash reading widens once for the same state: what a widen adds depends on widenInert, the gyp flag and the moved folders
+  // (which only grow), and a widen it already did is kept in its own records.
+  if (ctx.inEsc) {
+    const key = `${ctx.widenInert ? 1 : 0}${ctx.fromGyp ? 1 : 0}${ctx.movedDirs.size}`;
+    const done = (ctx.widenDone ??= new Set());
+    if (done.has(key)) return;
+    done.add(key);
+  }
   // A directory that holds a nested manifest is another package: a run can land there, so its files are not
   // inert whatever folder name they sit under (tests/pkg, docs/pkg).
   let pkgDirs = PKG_DIRS.get(ctx.logical);
@@ -11503,13 +11618,18 @@ function evalHazard(ctx: Ctx, line: string, carry?: HotLookup): void {
         readSimple(ctx, inner);
         continue;
       }
+      const key = `${ctx.cwd}\0${inner}`;
+      const read = (ctx.evalRead ??= new Set());
+      if (ctx.inEsc && read.has(key)) continue;
+      read.add(key);
       ctx.depth++;
       runBody(ctx, inner);
       ctx.depth--;
     }
   }
 }
-function readParts(ctx: Ctx, body: string): void {
+// `old`: a line the split reads only by taking a backslash is not split, as before (the reading main had of it).
+function readParts(ctx: Ctx, body: string, old = false): void {
   if (body.includes(UNRESOLVED)) {
     // The placeholder is a character the body itself holds: a command could not be told from an unresolved one. Read every file.
     ctx.widenInert = true;
@@ -11535,27 +11655,74 @@ function readParts(ctx: Ctx, body: string): void {
       stageHazard(line, 0, undefined, true, carry).hot.forEach((x) => carry.add(x));
     }
     const whole = subst(ctx, line);
-    if (whole !== null && splitCommands(ctx, whole)) {
+    splitEscaped = false;
+    const wholeCmds = whole !== null ? splitCommands(ctx, whole) : null;
+    const wholeEscaped = splitEscaped;
+    if (wholeCmds && !(old && wholeEscaped)) {
+      // Main's reading of a line split only by taking a backslash comes first, from this cwd: its split gave up, so the line went
+      // to unreadableUnresolved and was noted raw (`$npm_package_config_x` unsubstituted). Then the new reading.
+      if (wholeEscaped) {
+        const loose0 = subst(ctx, line, true);
+        if (loose0 !== null) unreadableUnresolved(ctx, loose0, line, carry);
+        if (!ctx.hold && lines.length > 1) noteUnreadable(ctx, line);
+        if (ctx.hold) return;
+        // The new reading of that line runs on the records of the backslash reading, as a pure addition to what main read.
+        const cwdLine = ctx.cwd;
+        try {
+          underOwnMarks(ctx, () => runBody(ctx, line, carry), true);
+        } finally {
+          ctx.cwd = cwdLine;
+        }
+        continue;
+      }
       runBody(ctx, line, carry);
       continue;
     }
     const loose = subst(ctx, line, true);
-    const cmds = loose === null ? null : splitCommands(ctx, loose);
+    splitEscaped = false;
+    const split = loose === null ? null : splitCommands(ctx, loose);
+    const escaped = splitEscaped;
+    const cmds = old && escaped ? null : split;
+    // A cd on a line read only by taking a backslash does not carry to the next line: before, that line was never split.
+    const cwd0 = ctx.cwd;
     if (cmds && ctx.depth < DEPTH) {
-      ctx.depth++;
-      for (const cmd of cmds) {
-        // An unresolved command word may be any runner: every file is read. An unresolved argument is dispatched as an argument.
-        if (headUnresolved(cmd)) {
-          // A bare unresolved command word (`$npm_execpath run x`) may run anything: tests and docs are read too. A path word
-          // (`./tools/$N.sh`) keeps the directory-scoped read.
-          const head = cmd.split(/\s+/).find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) ?? "";
-          if (!head.includes("/")) ctx.widenInert = true;
-          widenAll(ctx);
-        } else dispatch(ctx, cmd);
+      // Main's reading of the line first (its split gave up on the backslash), before the dispatch can mark ranSh/seen under a cd.
+      if (escaped) {
+        // As main read it: a body of one line is noted whole by the caller, not here.
+        if (lines.length > 1) noteUnreadable(ctx, line);
+        if (!ctx.hold) unreadableUnresolved(ctx, loose!, line, carry);
+        if (ctx.hold) return;
       }
-      ctx.depth--;
-      substBodiesHazard(ctx, line, carry);
-      evalHazard(ctx, line, carry);
+      const read = () => {
+        ctx.depth++;
+        for (const cmd of cmds) {
+          // An unresolved command word may be any runner: every file is read. An unresolved argument is dispatched as an argument.
+          if (headUnresolved(cmd)) {
+            // A bare unresolved command word (`$npm_execpath run x`) may run anything: tests and docs are read too. A path word
+            // (`./tools/$N.sh`) keeps the directory-scoped read.
+            const head = cmd.split(/\s+/).find((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) ?? "";
+            if (!head.includes("/")) ctx.widenInert = true;
+            widenAll(ctx);
+          } else dispatch(ctx, cmd);
+        }
+        ctx.depth--;
+        substBodiesHazard(ctx, line, carry);
+        evalHazard(ctx, line, carry);
+      };
+      if (!escaped) read();
+      else {
+        // The same line read again from the same cwd adds nothing the first read did not (the marks only grow): read it once.
+        const key = `${ctx.cwd}\0line\0${line}`;
+        const done = (ctx.evalRead ??= new Set());
+        if (!done.has(key) && !allInert(cmds)) {
+          done.add(key);
+          try {
+            underOwnMarks(ctx, read, true);
+          } finally {
+            ctx.cwd = cwd0;
+          }
+        }
+      }
     } else if (loose !== null) unreadableUnresolved(ctx, loose, line, carry);
     if (ctx.hold) return;
     if (lines.length > 1) noteUnreadable(ctx, line); // a body of one line is noted whole by the caller
@@ -11570,6 +11737,13 @@ function noteClasses(ctx: Ctx, body: string): void {
 
 function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
   if (ctx.hold) return;
+  // The backslash reading reads a body from a cwd once: the bodies of nested sh -c, bash -c and the like are not read again by it.
+  if (ctx.inEsc) {
+    const key = `${ctx.cwd}\0body\0${body}`;
+    const read = (ctx.evalRead ??= new Set());
+    if (read.has(key)) return;
+    read.add(key);
+  }
   noteClasses(ctx, body);
   if (ctx.depth >= DEPTH) {
     ctx.widenInert = true;
@@ -11594,17 +11768,48 @@ function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
     if (sub === null && noteBody(ctx, body)) widenAll(ctx);
     return;
   }
+  splitEscaped = false;
   const cmds = splitCommands(ctx, sub);
+  const escaped = splitEscaped;
   if (!cmds) {
     readParts(ctx, body);
     noteUnreadable(ctx, sub);
     return;
   }
   if (ctx.hold) return;
-  evalHazard(ctx, body, carry);
-  ctx.depth++;
-  for (const cmd of cmds) dispatch(ctx, cmd);
-  ctx.depth--;
+  // A body the split read only by taking a backslash is first read whole as main read it when the split gave up on it
+  // (readParts line by line from this cwd, comments dropped, no line split on a backslash, then noteUnreadable on the body),
+  // before evalHazard or the dispatch can mark ranSh/seen under another cwd. The cwd it leaves is the one the body leaves.
+  const cwd0 = ctx.cwd;
+  let cwd1 = cwd0;
+  if (escaped) {
+    readParts(ctx, body, true);
+    if (!ctx.hold) noteUnreadable(ctx, sub);
+    if (ctx.hold) return;
+    cwd1 = ctx.cwd;
+    ctx.cwd = cwd0;
+  }
+  const read = () => {
+    evalHazard(ctx, body, carry);
+    ctx.depth++;
+    for (const cmd of cmds) dispatch(ctx, cmd);
+    ctx.depth--;
+  };
+  if (!escaped) read();
+  else {
+    // The same body read again from the same cwd adds nothing the first read did not (the marks only grow) and leaves the same cwd.
+    const key = `${cwd0}\0${body}`;
+    const prior = (ctx.escRun ??= new Map()).get(key);
+    if (prior !== undefined || allInert(cmds)) ctx.cwd = cwd1;
+    else {
+      try {
+        underOwnMarks(ctx, read, true);
+      } finally {
+        ctx.cwd = cwd1;
+      }
+      ctx.escRun.set(key, cwd1);
+    }
+  }
 }
 
 function distinctScripts(ctx: Ctx): number {
@@ -11636,6 +11841,7 @@ function runScript(ctx: Ctx, name: string, optional: boolean): void {
     return;
   }
   (ctx.ignoreHooks ? ctx.seenNoHooks : ctx.seen).add(name);
+  if (ctx.scriptLog && !Object.hasOwn(ctx.scripts, name)) ctx.scriptLog.add(name);
   ctx.scripts[name] = raw;
   if (raw.length === 0) return;
   ctx.depth++;
@@ -14299,13 +14505,16 @@ function finish(ctx: Ctx, manifest: string, gyp: string | undefined, hook: boole
   return {
     hold: ctx.hold,
     manifest,
-    files: [...new Set([...ctx.files, ...(ctx.selfFiles ?? [])])].sort(),
+    files: [...new Set([...ctx.files, ...(ctx.selfFiles ?? []), ...(ctx.escFiles ?? [])])].sort(),
     selfOnly: [...(ctx.selfFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
+    escOnly: [...(ctx.escFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     gypFiles: [...ctx.gypFiles].sort(),
-    missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? [])])].sort(),
+    missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? []), ...(ctx.escMissing ?? [])])].sort(),
     selfMissing: [...(ctx.selfMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
+    escMissing: [...(ctx.escMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
     scripts: ctx.scripts,
     selfScripts: Object.fromEntries(Object.entries(ctx.selfScripts ?? {}).filter(([k]) => !Object.hasOwn(ctx.scripts, k))),
+    escScripts: Object.fromEntries(Object.entries(ctx.escScripts ?? {}).filter(([k]) => !Object.hasOwn(ctx.scripts, k))),
     gyp,
     hook,
     binStamp,
@@ -14381,7 +14590,8 @@ function inPackage(raw: string): string | undefined {
 // A self-run read (self) leaves no read marks, so it keeps its own once-record: it skips a bin either kind has read, and a named read of the
 // same bin still runs after it (each bin is read at most twice).
 function readOwnBin(ctx: Ctx, target: string, selfRun = false): void {
-  const self = selfRun || ctx.inSelf === true;
+  // Inside the backslash reading a bin is recorded on that reading's record (binsRead there), never on the real self-run one.
+  const self = !ctx.inEsc && (selfRun || ctx.inSelf === true);
   if (ctx.hold || ctx.binsRead.has(target) || (self && ctx.selfBinsRead.has(target))) return;
   (self ? ctx.selfBinsRead : ctx.binsRead).add(target);
   const key = findKey(ctx, target);
@@ -14493,6 +14703,15 @@ export function shebangCommand(first: string): string[] | undefined {
 function readSelfTargets(ctx: Ctx, targets: string[]): void {
   // Nothing left to read: every target self-read (selfBinsRead holds only self.targets), or a pass under this same binsRead found none left
   // (neither record ever drops an entry, so that stays true).
+  // Inside the backslash reading a self-run reads on the records of that reading only: the real self-run records are left alone.
+  if (ctx.inEsc) {
+    const left = [...new Set(targets)].filter((t) => !ctx.binsRead.has(t));
+    if (ctx.hold || left.length === 0) return;
+    underOwnMarks(ctx, () => {
+      for (const t of left) readOwnBin(ctx, t, false);
+    }, true);
+    return;
+  }
   if (ctx.hold || ctx.selfBinsRead.size >= ctx.self.targets.length || ctx.selfClear === ctx.binsRead) return;
   const todo = [...new Set(targets)].filter((t) => !ctx.binsRead.has(t) && !ctx.selfBinsRead.has(t));
   if (ctx.hold) return;
@@ -14504,47 +14723,163 @@ function readSelfTargets(ctx: Ctx, targets: string[]): void {
     for (const t of todo) readOwnBin(ctx, t, true);
   });
 }
-function underOwnMarks(ctx: Ctx, run: () => void): void {
-  const keep = (ctx.selfMarks ??= { seen: new Set(), seenNoHooks: new Set(), scanned: new Set(), gypScanned: new Set(), ranSh: new Set() });
+// Records an esc scope shares with main's reading instead of copying: adds are logged per set (the scope takes back what it added), and
+// a journal of every add lets the persistent esc marks take only what is new since the last scope.
+const SCOPE_LOG = new WeakMap<Set<string>, Set<string>>();
+const JOURNAL = new WeakMap<Set<string>, string[]>();
+function patchAdd(set: Set<string>): void {
+  if (Object.hasOwn(set, "add")) return;
+  const add = Set.prototype.add;
+  set.add = function (this: Set<string>, k: string) {
+    if (!this.has(k)) {
+      // An add inside a scope is the scope's own and is taken back: it is not journaled.
+      const log = SCOPE_LOG.get(this);
+      if (log) log.add(k);
+      else JOURNAL.get(this)?.push(k);
+    }
+    return add.call(this, k);
+  };
+}
+// Opens a log on a shared set; the returned function takes back what the scope added and restores the outer log.
+function openScope(set: Set<string>): (take?: Set<string>) => void {
+  patchAdd(set);
+  const parent = SCOPE_LOG.get(set);
+  const log = new Set<string>();
+  SCOPE_LOG.set(set, log);
+  return (take) => {
+    if (parent) SCOPE_LOG.set(set, parent);
+    else SCOPE_LOG.delete(set);
+    for (const k of log) {
+      set.delete(k);
+      take?.add(k);
+    }
+  };
+}
+// Adds to `keep` what `real` holds that an earlier sync did not take: all of it the first time, then the journal since.
+const SYNCED = new WeakMap<Set<string>, number>();
+function syncInto(keep: Set<string>, real: Set<string>): void {
+  let j = JOURNAL.get(real);
+  if (!j) {
+    j = [];
+    JOURNAL.set(real, j);
+    patchAdd(real);
+    for (const v of real) keep.add(v);
+    SYNCED.set(real, 0);
+    return;
+  }
+  for (let i = SYNCED.get(real) ?? 0; i < j.length; i++) keep.add(j[i]!);
+  SYNCED.set(real, j.length);
+}
+// `esc`: the same for the backslash reading, on records of its own: a pure addition to the main reading (its files kept apart as
+// selfFiles too, so a retarget to a file only it reached still shows), never a self-run (inSelf unchanged).
+function underOwnMarks(ctx: Ctx, run: () => void, esc = false): void {
+  const fresh = () => ({ seen: new Set<string>(), seenNoHooks: new Set<string>(), scanned: new Set<string>(), gypScanned: new Set<string>(), ranSh: new Set<string>() });
+  const keep = esc ? (ctx.escMarks ??= fresh()) : (ctx.selfMarks ??= fresh());
   const real = { seen: ctx.seen, seenNoHooks: ctx.seenNoHooks, scanned: ctx.scanned, gypScanned: ctx.gypScanned, ranSh: ctx.ranSh };
+  // The backslash reading's bins are read on a record of its own: a bin it read must not skip the plain run of the same bin.
+  const realBins = ctx.binsRead;
+  if (esc) {
+    const keepBins = (ctx.escBinsRead ??= new Set());
+    syncInto(keepBins, realBins);
+    ctx.binsRead = keepBins;
+  }
   const realFiles = ctx.files;
   const realNamed = ctx.hookNamed;
   const realMoved = ctx.movedDirs;
-  ctx.movedDirs = new Set(realMoved);
+  const closers: Array<(take?: Set<string>) => void> = [];
+  let takeMissing: (take?: Set<string>) => void = () => {};
   const realMissing = ctx.missing;
-  ctx.missing = new Set(realMissing);
   const realLookup = ctx.lookupSets;
-  if (realLookup) ctx.lookupSets = { seen: new Set(realLookup.seen), seenNoHooks: new Set(realLookup.seenNoHooks), scanned: new Set(realLookup.scanned), gypScanned: new Set(realLookup.gypScanned), ranSh: new Set(realLookup.ranSh), binsRead: new Set(realLookup.binsRead) };
+  if (esc) {
+    // Shared with main's records, and the adds of the scope taken back (a copy per line costs the size of the records).
+    closers.push(openScope(realMoved), openScope(realNamed));
+    takeMissing = openScope(realMissing);
+    if (realLookup) for (const k of ["seen", "seenNoHooks", "scanned", "gypScanned", "ranSh", "binsRead"] as const) closers.push(openScope(realLookup[k]));
+  } else {
+    ctx.movedDirs = new Set(realMoved);
+    ctx.missing = new Set(realMissing);
+    if (realLookup) ctx.lookupSets = { seen: new Set(realLookup.seen), seenNoHooks: new Set(realLookup.seenNoHooks), scanned: new Set(realLookup.scanned), gypScanned: new Set(realLookup.gypScanned), ranSh: new Set(realLookup.ranSh), binsRead: new Set(realLookup.binsRead) };
+  }
   const savedRunner = ctx.sawRunner;
   const savedRoot = ctx.rootRuns;
-  ctx.hookNamed = new Set(realNamed);
-  ctx.seen = new Set([...real.seen, ...keep.seen]);
-  ctx.seenNoHooks = new Set([...real.seenNoHooks, ...keep.seenNoHooks]);
-  ctx.scanned = new Set([...real.scanned, ...keep.scanned]);
-  ctx.gypScanned = new Set([...real.gypScanned, ...keep.gypScanned]);
-  ctx.ranSh = new Set([...real.ranSh, ...keep.ranSh]);
-  ctx.files = new Set(realFiles);
+  if (!esc) ctx.hookNamed = new Set(realNamed);
+  if (esc) {
+    // The backslash reading's marks are one persistent set per kind: what main read since the last scope is added to it, and the read
+    // runs on it directly, so a read costs what main read since, not what main or the backslash reading has read before.
+    for (const k of ["seen", "seenNoHooks", "scanned", "gypScanned", "ranSh"] as const) {
+      syncInto(keep[k], real[k]);
+      ctx[k] = keep[k];
+    }
+  } else {
+    ctx.seen = new Set([...real.seen, ...keep.seen]);
+    ctx.seenNoHooks = new Set([...real.seenNoHooks, ...keep.seenNoHooks]);
+    ctx.scanned = new Set([...real.scanned, ...keep.scanned]);
+    ctx.gypScanned = new Set([...real.gypScanned, ...keep.gypScanned]);
+    ctx.ranSh = new Set([...real.ranSh, ...keep.ranSh]);
+  }
+  // The backslash reading runs on the real file set and takes back what it added afterwards (a logged add), not on a copy of it: a copy
+  // per line costs the size of the set for each line. The files it reached go to its own record.
+  const filesLog = new Set<string>();
+  const parentLog = ctx.filesLog;
+  if (esc) {
+    ctx.filesLog = filesLog;
+    if (!Object.hasOwn(realFiles, "add")) {
+      const add = Set.prototype.add;
+      realFiles.add = function (this: Set<string>, k: string) {
+        const log = ctx.filesLog;
+        if (log && !this.has(k)) log.add(k);
+        return add.call(this, k);
+      };
+    }
+  } else ctx.files = new Set(realFiles);
   const savedSelf = ctx.inSelf;
   const savedInert = ctx.widenInert;
   const realScripts = ctx.scripts;
-  ctx.scripts = { ...realScripts };
+  const savedScriptLog = ctx.scriptLog;
+  const scriptLog = new Set<string>();
+  if (esc) ctx.scriptLog = scriptLog;
+  else {
+    ctx.scripts = { ...realScripts };
+    ctx.scriptLog = undefined;
+  }
   const savedNodeGyp = ctx.sawNodeGyp;
   const savedReachGyp = ctx.reachGyp;
-  ctx.inSelf = true;
+  if (!esc) ctx.inSelf = true;
+  const savedEsc = ctx.inEsc;
+  if (esc) ctx.inEsc = true;
   try {
     run();
   } finally {
-    for (const k of ["seen", "seenNoHooks", "scanned", "gypScanned", "ranSh"] as const) for (const v of ctx[k]) keep[k].add(v);
-    const selfScripts = (ctx.selfScripts ??= {});
-    for (const [k, v] of Object.entries(ctx.scripts)) if (!Object.hasOwn(realScripts, k)) selfScripts[k] = v;
+    if (!esc) for (const k of ["seen", "seenNoHooks", "scanned", "gypScanned", "ranSh"] as const) for (const v of ctx[k]) keep[k].add(v);
+    const selfScripts = esc ? (ctx.escScripts ??= {}) : (ctx.selfScripts ??= {});
+    if (esc) {
+      for (const k of scriptLog) {
+        selfScripts[k] = ctx.scripts[k]!;
+        delete ctx.scripts[k];
+      }
+    } else for (const [k, v] of Object.entries(ctx.scripts)) if (!Object.hasOwn(realScripts, k)) selfScripts[k] = v;
     ctx.scripts = realScripts;
-    if ((ctx.sawNodeGyp && !savedNodeGyp) || (ctx.reachGyp && !savedReachGyp)) ctx.selfGyp = true;
+    ctx.scriptLog = savedScriptLog;
+    if ((ctx.sawNodeGyp && !savedNodeGyp) || (ctx.reachGyp && !savedReachGyp)) {
+      if (esc) ctx.escGyp = true;
+      else ctx.selfGyp = true;
+    }
     ctx.sawNodeGyp = savedNodeGyp;
     ctx.reachGyp = savedReachGyp;
-    const selfFiles = (ctx.selfFiles ??= new Set());
-    for (const k of ctx.files) if (!realFiles.has(k)) selfFiles.add(k);
-    const selfMissing = (ctx.selfMissing ??= new Set());
-    for (const k of ctx.missing) if (!realMissing.has(k)) selfMissing.add(k);
+    const selfFiles = esc ? (ctx.escFiles ??= new Set()) : (ctx.selfFiles ??= new Set());
+    if (esc) {
+      ctx.filesLog = parentLog;
+      for (const k of filesLog) {
+        realFiles.delete(k);
+        selfFiles.add(k);
+      }
+    } else for (const k of ctx.files) if (!realFiles.has(k)) selfFiles.add(k);
+    const selfMissing = esc ? (ctx.escMissing ??= new Set()) : (ctx.selfMissing ??= new Set());
+    if (esc) {
+      takeMissing(selfMissing);
+      for (const close of closers) close();
+    } else for (const k of ctx.missing) if (!realMissing.has(k)) selfMissing.add(k);
+    ctx.binsRead = realBins;
     Object.assign(ctx, real);
     ctx.files = realFiles;
     ctx.hookNamed = realNamed;
@@ -14554,6 +14889,7 @@ function underOwnMarks(ctx: Ctx, run: () => void): void {
     ctx.sawRunner = savedRunner;
     ctx.rootRuns = savedRoot;
     ctx.inSelf = savedSelf;
+    ctx.inEsc = savedEsc;
     ctx.widenInert = savedInert;
   }
 }
@@ -14613,20 +14949,26 @@ export function installView(files: FileMap): InstallView {
   }
   const merge = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort();
   // Only a path no regular read of either reading reached stays self-run only.
-  const only = (a: string[], aSelf: string[] | undefined, b: string[], bSelf: string[] | undefined) => {
-    const aOnly = new Set(aSelf);
-    const bOnly = new Set(bSelf);
+  // A path is regular when either reading reached it by neither kind of reach; each kind then keeps what it alone reached.
+  const only = (a: string[], aSelf: string[] | undefined, aEsc: string[] | undefined, b: string[], bSelf: string[] | undefined, bEsc: string[] | undefined) => {
+    const aOnly = new Set([...(aSelf ?? []), ...(aEsc ?? [])]);
+    const bOnly = new Set([...(bSelf ?? []), ...(bEsc ?? [])]);
     const real = new Set([...a.filter((k) => !aOnly.has(k)), ...b.filter((k) => !bOnly.has(k))]);
-    return merge(a, b).filter((k) => !real.has(k));
+    return (self: string[] | undefined, other: string[] | undefined) => merge(self ?? [], other ?? []).filter((k) => !real.has(k));
   };
+  const onlyFiles = only(v.files, v.selfOnly, v.escOnly, w.files, w.selfOnly, w.escOnly);
+  const onlyMissing = only(v.missing, v.selfMissing, v.escMissing, w.missing, w.selfMissing, w.escMissing);
   return {
     ...v,
     hold: v.hold ?? w.hold,
     files: merge(v.files, w.files),
-    selfOnly: only(v.files, v.selfOnly, w.files, w.selfOnly),
+    selfOnly: onlyFiles(v.selfOnly, w.selfOnly),
     gypFiles: merge(v.gypFiles, w.gypFiles),
     missing: merge(v.missing, w.missing),
-    selfMissing: only(v.missing, v.selfMissing, w.missing, w.selfMissing),
+    selfMissing: onlyMissing(v.selfMissing, w.selfMissing),
+    escOnly: onlyFiles(v.escOnly, w.escOnly),
+    escMissing: onlyMissing(v.escMissing, w.escMissing),
+    escScripts: Object.fromEntries(Object.entries({ ...w.escScripts, ...v.escScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
     selfScripts: Object.fromEntries(Object.entries({ ...w.selfScripts, ...v.selfScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
     gyp: v.gyp ?? w.gyp,
   };
@@ -14705,7 +15047,10 @@ function installViewCore(files: FileMap): InstallView {
   const ran = prepareInert(ctx.raw, otherInstallEntry(files, manifest)) ? INSTALL.filter((name) => name !== "prepare") : INSTALL;
   for (const name of ran) {
     const raw = ctx.raw[name];
-    if (typeof raw === "string") ctx.scripts[name] = raw;
+    if (typeof raw === "string") {
+      if (ctx.scriptLog && !Object.hasOwn(ctx.scripts, name)) ctx.scriptLog.add(name);
+      ctx.scripts[name] = raw;
+    }
   }
   for (const name of ran) {
     const raw = ctx.raw[name];
@@ -14764,6 +15109,8 @@ function installViewCore(files: FileMap): InstallView {
   } else if (ctx.selfGyp) {
     // Only a self-run reached gyp: read it as a self-run, so what it reaches stays self-only (binding.gyp too, through selfFiles).
     underOwnMarks(ctx, () => readGyp(undefined));
+  } else if (ctx.escGyp) {
+    underOwnMarks(ctx, () => readGyp(undefined), true);
   }
   return done(gyp);
 }
