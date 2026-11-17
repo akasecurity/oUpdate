@@ -656,7 +656,7 @@ describe("release checks: review round 2 (b8c02f7)", () => {
 });
 
 describe("release checks: owners (custom launchd labels)", () => {
-  const LABEL = "com.max.gadget-server";
+  const LABEL = "com.example.gadget-server";
   const PLIST = `/Library/LaunchDaemons/${LABEL}.plist`;
   const OWNED = { releaseChecks: [{ ...CHECK, owners: [LABEL] }] };
   const daemon = (o: { gone?: boolean; shell?: boolean } = {}) => {
@@ -701,7 +701,7 @@ describe("release checks: owners (custom launchd labels)", () => {
 });
 
 describe("release checks: review round 3 (3b26f7e)", () => {
-  const LABEL = "com.max.gadget-server";
+  const LABEL = "com.example.gadget-server";
   const PLIST = `/Library/LaunchDaemons/${LABEL}.plist`;
   test("1: a named owner whose own process maps no keg (a shell or supervisor) is still restarted and health-checked", async () => {
     let prints = 0;
@@ -725,7 +725,7 @@ describe("release checks: review round 3 (3b26f7e)", () => {
     expect(r.res.log).toContain(`  release check owner: restarted ${LABEL}`);
   });
   test("an owner whose staleOwners entry restarts by argv: the inline restart runs the argv (no launchctl kickstart), then health and the check", async () => {
-    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/fleet-restart", "gadget-server"];
+    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "gadget-server"];
     let restarted = false;
     const r = await rcRun({
       cfg: { releaseChecks: [{ ...CHECK, owners: [LABEL] }], staleOwners: [{ match: LABEL, restart: ARGV }] },
@@ -1150,7 +1150,7 @@ describe("release checks: review round 5 (4b24ca6)", () => {
 });
 
 describe("release checks: review round 6 (2eeb039)", () => {
-  const LABEL = "com.max.gadget-server";
+  const LABEL = "com.example.gadget-server";
   const PLIST = `/Library/LaunchDaemons/${LABEL}.plist`;
   const STALE = `${LSOF_HEAD}gadget 78 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.2.0/bin/gadget\n`;
   const FRESH = `${LSOF_HEAD}gadget 79 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.3.0/bin/gadget\n`;
@@ -1371,7 +1371,7 @@ describe("release checks: review round 7 (5912cdf)", () => {
 });
 
 describe("release checks: an older retained keg (Codex review of 3ee8ffa)", () => {
-  const LABEL = "com.max.gadget-server";
+  const LABEL = "com.example.gadget-server";
   const PLIST = `/Library/LaunchDaemons/${LABEL}.plist`;
   const OLD = "/brew/Cellar/gadget/1.1.0";
   const line = (pid: string, v: string) => `gadget ${pid} u txt REG 1,4 1 2 /brew/Cellar/gadget/${v}/bin/gadget\n`;
@@ -1491,7 +1491,7 @@ describe("release checks: owners on any keg of the formula but the expected one 
 });
 
 describe("OUP-78: a formula whose check owner is not running is held, and an unfinished check keeps its keg", () => {
-  const LABEL = "com.max.gadget-server";
+  const LABEL = "com.example.gadget-server";
   const PLIST = `/Library/LaunchDaemons/${LABEL}.plist`;
   const OWNED = { releaseChecks: [{ ...CHECK, owners: [LABEL] }] };
   /** The owner's launchd job: running for its first `upFor` prints, then not loaded. */
@@ -1896,7 +1896,7 @@ describe("a check whose owner is left unloaded on purpose (ownerUnloaded: upgrad
     held(r);
   });
   test("a working directory elsewhere: not a holder, upgraded unchecked", async () => {
-    const cwd = `${CLEAN}python3 66 u cwd DIR 1,4 736 2 /Users/someone/project\n`;
+    const cwd = `${CLEAN}python3 66 u cwd DIR 1,4 736 2 /home.test/project\n`;
     const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "unloaded" } }, { lsof: { rc: 0, out: cwd } }) });
     expect(r.flow).toEqual(["brew upgrade example/tap/gadget"]);
   });
