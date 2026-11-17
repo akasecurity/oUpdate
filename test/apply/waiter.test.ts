@@ -671,7 +671,7 @@ describe("owner waiter", () => {
   });
   describe("restart mode argv: the argv runs in place of kickstart or bootout+bootstrap, the rest unchanged", () => {
     const T = "system/org.example.host";
-    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/fleet-restart", "example-host"];
+    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "example-host"];
     const host = (over: Partial<QueuedOwner> = {}) => item({ label: "org.example.host", target: T, restart: [...ARGV], ...over });
     test("the argv runs as given (no sudo added), never launchctl kickstart, bootout or bootstrap, then health", async () => {
       const w = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T });
@@ -766,8 +766,8 @@ describe("owner waiter", () => {
     });
     test("a release check's other owner no entry matches, its record holding a relative argv0: never run (no PATH lookup), kickstart does", async () => {
       const w = owEnv();
-      await ownerOps(w.env, { ...opts, idleMs: 0, staleOwners: [], keepUnmatched: true }).job(host({ required: true, restart: ["fleet-restart", "x"] }), { ignoreFailed: true });
-      expect(w.calls.some((c) => c.startsWith("fleet-restart"))).toBe(false);
+      await ownerOps(w.env, { ...opts, idleMs: 0, staleOwners: [], keepUnmatched: true }).job(host({ required: true, restart: ["restart-helper", "x"] }), { ignoreFailed: true });
+      expect(w.calls.some((c) => c.startsWith("restart-helper"))).toBe(false);
       expect(w.calls).toContain(`sudo -n launchctl kickstart -k ${T}`);
     });
     test("a release check's other owner no entry matches: a recorded restartTimeoutSec is never taken; a recorded bootstrap is", () => {
@@ -849,10 +849,10 @@ describe("owner waiter", () => {
     });
     test("a queue entry whose argv restart is not an absolute argv is unreadable: never run", async () => {
       const w = owEnv({ restartTarget: T });
-      w.queue(host({ restart: ["fleet-restart", "x"] }));
+      w.queue(host({ restart: ["restart-helper", "x"] }));
       // The entry is dropped and reported; the waiter goes on (and exits 0 with nothing left), as for any unreadable entry.
       await runOwnerWaiter(w.env, { ...opts, idleMs: 0 });
-      expect(w.calls.some((c) => c.startsWith("fleet-restart"))).toBe(false);
+      expect(w.calls.some((c) => c.startsWith("restart-helper"))).toBe(false);
       expect(w.outcome()[0]).toStartWith("FAILED: unreadable queue entry");
     });
   });

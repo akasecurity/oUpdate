@@ -89,8 +89,8 @@ describe("parseApplyConfig", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: ["/usr/local/sbin/x", "a".repeat(4096)] }] }), "hosta").staleOwners?.[0]?.restart).toHaveLength(2);
   });
   test("staleOwners restart: an argv whose first entry is an absolute path is kept as given", () => {
-    const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [{ match: "org.example.host", restart: ["/usr/bin/sudo", "-n", "/usr/local/sbin/fleet-restart", "example-host"] }] }), "hosta");
-    expect(c.staleOwners).toEqual([{ match: "org.example.host", restart: ["/usr/bin/sudo", "-n", "/usr/local/sbin/fleet-restart", "example-host"] }]);
+    const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [{ match: "org.example.host", restart: ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "example-host"] }] }), "hosta");
+    expect(c.staleOwners).toEqual([{ match: "org.example.host", restart: ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "example-host"] }]);
   });
   test("staleOwners restart: kickstart (default) or bootout+bootstrap of an absolute plist; healthWithinSec", () => {
     const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [

@@ -44,7 +44,7 @@ const TO = "1.3.0";
 const PENDING = "/state.test/release-checks/pending/gadget.json";
 const HOLD = "/state.test/release-checks/holds/gadget.json";
 const LSOF_HEAD = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n";
-const LABEL = "com.max.gadget-server";
+const LABEL = "com.example.gadget-server";
 const RUNS = 5;
 
 type Hooks = "both" | "after" | "none";
