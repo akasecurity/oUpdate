@@ -1412,6 +1412,11 @@ function isOperandCode(c: number): boolean {
   return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95 || c === 36 || c === 41 || c === 93;
 }
 // regexes (when given) takes the source offsets of each regular expression literal the scan reads: its opening and closing slash.
+let operandReads = 0;
+/** Characters the end-of-span read has gone over so far (a span ending a possible division), for tests. */
+export function operandReadCount(): number {
+  return operandReads;
+}
 function codeOnly(text: string, watch: string[] = [], keep = false, strings?: SpanNote[], regexes?: number[]): string | undefined {
   type Tok = { k: "word" | "num" | "str" | "tpl" | "regex" | "punct" | "priv"; t: string };
   let out = "";
@@ -1495,9 +1500,26 @@ function codeOnly(text: string, watch: string[] = [], keep = false, strings?: Sp
   };
   // A span ends in a name or a number. The keyword exclusion is defense in depth: a keyword is also in "danger", so a span
   // ending in one is already refused.
+  // Read from the end, once: a pattern anchored only at the end tries every start inside a run of word characters and reads the run to its end
+  // each time, which grows with the square of the span. The token is the leftmost one that runs to the end: a name inside the trailing run of
+  // name characters, or a number inside the trailing run of number characters.
   const endsInOperand = (span: string): boolean => {
-    const m = /([A-Za-z_$][\w$]*|\d[\w.]*)\s*$/.exec(span);
-    return m !== null && !KEYWORD_REGEX.has(m[1]!) && !KEYWORD_MAYBE.has(m[1]!);
+    let e = span.length;
+    while (e > 0 && /\s/.test(span[e - 1]!)) e--;
+    let a = e;
+    while (a > 0 && /[\w$]/.test(span[a - 1]!)) a--;
+    let b = e;
+    while (b > 0 && /[\w.]/.test(span[b - 1]!)) b--;
+    const from = Math.min(a, b);
+    operandReads += span.length - from + 1;
+    jsStep(span.length - from + 1);
+    for (let k = from; k < e; k++) {
+      if ((k >= a && /[A-Za-z_$]/.test(span[k]!)) || (k >= b && /\d/.test(span[k]!))) {
+        const tok = span.slice(k, e);
+        return !KEYWORD_REGEX.has(tok) && !KEYWORD_MAYBE.has(tok);
+      }
+    }
+    return false;
   };
   // What follows a closing / must not be a name, a flag, a number or another / : only the end of an expression.
   const closesCleanly = (at: number): boolean => {
