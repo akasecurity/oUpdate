@@ -5346,6 +5346,11 @@ export type JsTier = { all: boolean; pkg: boolean; tests: boolean; flows: boolea
 // A string literal or a read of a literal path is not that shape.
 // The local names bound to the path module and to its join and resolve: const path = require("path"), import path from "node:path",
 // const { join } = require("path"), import { resolve as r } from "path", const { join } = path.
+let pathScans = 0;
+/** Passes pathNames has made over a text for the names bound to the path module, for tests. */
+export function pathScanCount(): number {
+  return pathScans;
+}
 function pathNames(keep: string): { mods: Set<string>; fns: Set<string> } {
   const mods = new Set<string>();
   const fns = new Set<string>();
@@ -5362,11 +5367,26 @@ function pathNames(keep: string): { mods: Set<string>; fns: Set<string> } {
   };
   for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*require\(\s*${SPEC}\s*\)`, "g"))) members(m[1]!);
   for (const m of keep.matchAll(new RegExp(String.raw`\bimport\s*\{([^{}]*)\}\s*from\s*${SPEC}`, "g"))) members(m[1]!);
-  for (const name of mods) {
-    for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*${name.replace(/\$/g, "\\$")}(?![\w$])`, "g"))) members(m[1]!);
+  // The names bound to the module are read off the text in one pass each, not one pass per name (a pass per name reads the whole text once per
+  // alias, which grows with the square of the file). A match is kept when the name it reads is a bound one, and it is skipped when it starts inside
+  // the text an earlier match of that same name read (the name included), as a pass of its own would: the statement can start inside a name that
+  // ends in a keyword (p$var).
+  pathScans += 2;
+  const resumeAt = new Map<string, number>();
+  for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s*\{([^{}]*)\}\s*=\s*(?=(${id})(?![\w$]))`, "g"))) {
+    const name = m[2]!;
+    const at = m.index ?? 0;
+    if (!mods.has(name) || at < (resumeAt.get(name) ?? 0)) continue;
+    resumeAt.set(name, at + m[0].length + name.length);
+    members(m[1]!);
   }
-  for (const name of mods) {
-    for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*${name.replace(/\$/g, "\\$")}\s*\.\s*(?:(?:posix|win32)\s*\.\s*)?(?:join|resolve)(?=[ \t]*(?:;|,|\r?\n|$|\}))`, "g"))) fns.add(m[1]!);
+  const resumeFn = new Map<string, number>();
+  for (const m of keep.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+(${id})\s*=\s*(?=((${id})\s*\.\s*(?:(?:posix|win32)\s*\.\s*)?(?:join|resolve))(?=[ \t]*(?:;|,|\r?\n|$|\})))`, "g"))) {
+    const name = m[3]!;
+    const at = m.index ?? 0;
+    if (!mods.has(name) || at < (resumeFn.get(name) ?? 0)) continue;
+    resumeFn.set(name, at + m[0].length + m[2]!.length);
+    fns.add(m[1]!);
   }
   return { mods, fns };
 }
