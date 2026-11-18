@@ -5,11 +5,11 @@ import { realpathSync } from "node:fs";
 import type { AppNet } from "./appbundle.ts";
 import type { Reviewer } from "../review.ts";
 import type { ApplyConfig } from "./config.ts";
-import type { Exec } from "./exec.ts";
+import { groupAlive, type Exec } from "./exec.ts";
 import type { ApplyFs } from "./fs.ts";
 import type { KegEnv } from "./kegs.ts";
 import type { GkPrior } from "./gatekeeper.ts";
-import type { OwnerReport, QueuedOwner } from "./owner-waiter.ts";
+import { matchOwner, type OwnerReport, type QueuedOwner, type StaleOwner } from "./owner-waiter.ts";
 import type { PendingCheck, ReleaseEnv } from "./release-checks.ts";
 import { restartUpgraded } from "./restarts.ts";
 import { awaitingTapApproval, typeBUpgrades, type TypeBEnv, type TypeBOptions } from "./typeb.ts";
@@ -71,6 +71,31 @@ export const DECLARED_DEPS = ["--include-build", "--include-optional"];
 export const PKG_NAME = /^[\w@.+-]+(\/[\w@.+-]+){0,2}$/;
 export const uniq = (xs: string[]) => [...new Set(xs)];
 export const last = (n: string) => n.split("/").at(-1)!;
+/** The key an owner argv restart still running is recorded under in the run's helperRunning map (the key is no package name). */
+const OWNER_ARGV_PREFIX = "owner restart argv ";
+export const ownerArgvKey = (argv: readonly string[]) => `${OWNER_ARGV_PREFIX}${JSON.stringify(argv)}`;
+/** The restart argvs the staleOwners entries give these owner labels (a glob entry gives the same argv to every label it matches). */
+export const ownerArgvs = (staleOwners: readonly StaleOwner[] | undefined, labels: readonly string[]): string[][] => {
+  const seen = new Map<string, string[]>();
+  for (const label of labels) {
+    const r = matchOwner(staleOwners, label)?.restart;
+    if (Array.isArray(r)) seen.set(JSON.stringify(r), r);
+  }
+  return [...seen.values()];
+};
+/**
+ * The pid of a root restart process still running after its bound that holds this formula, else undefined: the formula's
+ * own helper (by package), or a running owner argv restart that is the argv of one of this check's owners (`argvs`: a
+ * glob staleOwners entry shared between checks runs the same root argv for each, and the host is shared). A restart of an
+ * unrelated owner holds nothing.
+ */
+export const liveRestartPid = (running: ReadonlyMap<string, number> | undefined, formula: string, argvs: readonly (readonly string[])[] = []): number | undefined => {
+  for (const key of [last(formula), ...argvs.map(ownerArgvKey)]) {
+    const pid = running?.get(key);
+    if (pid !== undefined && groupAlive(pid)) return pid;
+  }
+  return undefined;
+};
 
 /**
  * True when `execPath` is Homebrew's bun formula: a Cellar keg, or the stable bin link that
@@ -228,6 +253,8 @@ export interface RunCtx {
   kegEnv: KegEnv;
   /** Labels the restart step handed to their owner command: the stale-keg check never hands them again. */
   ownerHanded: Map<string, string>;
+  /** Packages whose restart helper still ran after its bound (package → pid). */
+  helperRunning: Map<string, number>;
   /** Stuck tracking for a lane: the packages pending for the configured number of runs, undefined when the state is unreadable. */
   track: (lane: string, pending: string[]) => string[] | undefined;
   recoverTo: (p: PendingCheck, said: string) => Promise<void>;

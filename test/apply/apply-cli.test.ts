@@ -4,7 +4,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeRc, isStopping, KILL_GRACE_MS, killLive, liveGroups, onStop, killTree, realExec, resetStopping, snapshotTree, type Exec } from "../../src/apply/exec.ts";
+import { closeRc, isStopping, KILL_GRACE_MS, killLive, liveGroups, onStop, killTree, realExec, resetStopping, snapshotTree, stillRunningAfterTimeout, type Exec } from "../../src/apply/exec.ts";
 import { realReleaseLock, realTakeLock } from "../../src/apply/owner-waiter.ts";
 import { applyMain, logPath, ownerWaiterArgv, ownerWaiterMain, parseHostCommand } from "../../src/host/cli.ts";
 import { parsePrevSummary } from "../../src/host/prev-log.ts";
@@ -496,6 +496,53 @@ const until = async (f: () => boolean, ms: number) => {
   while (!f() && Date.now() < end) await Bun.sleep(25);
   return f();
 };
+
+describe("realExec: a timed-out command's pid and what is left of it", () => {
+  const ignoreTerm = ["/bin/sh", "-c", 'trap "" TERM; sleep 30 & wait'];
+  test("a timeout returns the pid of the command's group", async () => {
+    // Mutant caught: `pid` dropped from the timed-out result (the waiter then cannot see a survivor).
+    const r = await realExec(ignoreTerm, { timeoutMs: 200 });
+    expect(r.timedOut).toBe(true);
+    expect(typeof r.pid).toBe("number");
+    expect(r.pid).toBeGreaterThan(1);
+    await new Promise((res) => setTimeout(res, KILL_GRACE_MS + 200));
+  });
+  test("stillRunningAfterTimeout waits out the kill grace: a SIGTERM-ignoring command SIGKILLed at it reads gone, an instant check would read running", async () => {
+    // Mutant caught: sleep(KILL_GRACE_MS + 500) -> sleep(0).
+    const r = await realExec(ignoreTerm, { timeoutMs: 200 });
+    const t0 = Date.now();
+    expect(await stillRunningAfterTimeout(r, (ms) => new Promise((res) => setTimeout(res, ms)))).toBeUndefined();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(KILL_GRACE_MS);
+  });
+  test("an over-bound result (truncated) carries the pid too, and is checked like a timeout", async () => {
+    // Mutant caught: `pid` dropped from the over-bound result, or stillRunningAfterTimeout reading only timedOut.
+    const r = await realExec(["/bin/sh", "-c", "yes | head -c 5000; sleep 30"], { timeoutMs: 30_000, maxBytes: 100 });
+    expect(r.truncated).toBe(true);
+    expect(typeof r.pid).toBe("number");
+    const child = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      expect(await stillRunningAfterTimeout({ rc: 125, out: "", err: "", truncated: true, pid: child.pid }, async () => {})).toBe(child.pid);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  });
+  test("a command that did not time out reads as not running even with a live pid; a pid of 1 or less is never probed", async () => {
+    // Mutants caught: the timedOut/truncated gate removed; the `pid <= 1` guard removed (kill(-1, 0) / kill(0, 0)).
+    const child = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      expect(await stillRunningAfterTimeout({ rc: 0, out: "", err: "", pid: child.pid }, async () => {})).toBeUndefined();
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+    for (const pid of [1, 0, -1]) expect(await stillRunningAfterTimeout({ rc: 124, out: "", err: "", timedOut: true, pid }, async () => {})).toBeUndefined();
+  });
+  test("no pid, or no timeout: nothing is running by this check", async () => {
+    expect(await stillRunningAfterTimeout({ rc: 0, out: "", err: "" }, async () => {})).toBeUndefined();
+    expect(await stillRunningAfterTimeout({ rc: 124, out: "", err: "", timedOut: true }, async () => {})).toBeUndefined();
+  });
+});
 
 describe("realExec: process groups (slice 7 re-review)", () => {
   test("killLive stops a running command's whole group: TERM, then KILL for what ignores TERM", async () => {

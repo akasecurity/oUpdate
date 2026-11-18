@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import type { ReleaseCheck } from "../../src/apply/config.ts";
 import type { Exec } from "../../src/apply/exec.ts";
 import type { ApplyFs } from "../../src/apply/fs.ts";
-import { LSOF_STREAM_BYTES, isStopping, killLive, resetStopping, runStopTasks } from "../../src/apply/exec.ts";
+import { LSOF_STREAM_BYTES, isStopping, killLive, realExec, resetStopping, runStopTasks } from "../../src/apply/exec.ts";
 import { applyHost } from "../../src/apply/run.ts";
 import { fakeHost, fakeTypeB, testConfig, type HostScript } from "./host-fixture.ts";
 import { scripted } from "./helpers.ts";
@@ -27,7 +27,7 @@ interface Rc {
   files?: Record<string, string>;
   dryRun?: boolean;
   /** Extra answers, by exact command line. */
-  answer?: (line: string, argv: string[]) => { rc: number; out: string; err: string; truncated?: true } | undefined;
+  answer?: (line: string, argv: string[], opt: Parameters<Exec>[1]) => { rc: number; out: string; err: string; truncated?: true } | Promise<{ rc: number; out: string; err: string; timedOut?: boolean; pid?: number } | undefined> | undefined;
   /** Keg-only: brew info says linked_keg null; the opt link is the version. */
   kegOnly?: boolean;
   /** The opt link cannot be read (and brew info names no linked keg). */
@@ -100,7 +100,7 @@ async function rcRun(o: Rc = {}) {
       await killLive(0);
       return { rc: 143, out: "", err: "" };
     }
-    const extra = o.answer?.(line, argv);
+    const extra = await o.answer?.(line, argv, opt);
     if (extra) {
       h.calls.push(line);
       return extra;
@@ -221,6 +221,24 @@ describe("release checks in the run", () => {
     expect(r.notices().some((n) => n.includes("release check FAILED: gadget 1.3.0 — rolled back to 1.2.0") && n.includes("score 1.3.0 0.1"))).toBe(true);
     expect(r.res.rc).toBe(1);
   });
+  test("the restored-version restart's helper call, past restartHelper.timeoutSec through the real wrapper and real exec, is named in the log, not a phase timeout", async () => {
+    // Mutant caught: restartExec dropped from the restored-phase restartUpgraded (run-release.ts): the helper call then ends the phase ("FAILED: timeout:helper.test").
+    const HELPER = "/usr/local/sbin/helper.test";
+    let rolledBack = false;
+    const r = await rcRun({
+      check: { "1.3.0": [1, 1] },
+      files: { "/Library/LaunchDaemons/sh.brew.gadget.plist": "", [HELPER]: "" },
+      cfg: { restartHelper: { path: HELPER, packages: ["gadget"], timeoutSec: 1 } },
+      // Only the call after the rollback runs past its bound: the restored restart.
+      answer: (line, _argv, opt) => {
+        if (line === "brew uninstall example/tap/gadget") rolledBack = true;
+        return rolledBack && line === `sudo -n ${HELPER} gadget` ? realExec(["/bin/sh", "-c", "sleep 30"], opt) : undefined;
+      },
+    });
+    expect(rolledBack).toBe(true);
+    expect(r.brew).not.toContain("timeout:");
+    expect(r.res.log).toContain(`  TIMEOUT after 1000 ms: sudo -n ${HELPER} gadget — restart helper killed (a root process may not be signalled)`);
+  }, 20_000);
   test("the restored version fails too: after is not run, loud notice", async () => {
     const r = await rcRun({ check: { "1.3.0": [1, 1], "1.2.0": [1, 1] } });
     expect(r.flow.includes("svcctl on")).toBe(false);
@@ -547,6 +565,33 @@ describe("release checks: review fixes (OUP review of feat/release-checks)", () 
     expect(r.flow.includes("svcctl on")).toBe(false);
     expect(r.notices().some((n) => n.includes("owner restart failed"))).toBe(true);
   });
+  test("restored phase: the formula's helper still running as root: no owner restart (kickstart) races it, the restored version is not checked", async () => {
+    // Mutant caught: the restored phase running its owner jobs although the helper it just started is still running.
+    const HELPER = "/usr/local/sbin/helper.test";
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      const o = owner();
+      let rolledBack = false;
+      const r = await rcRun({
+        ...o, cfg: { ...SVC, restartHelper: { path: HELPER, packages: ["gadget"] } }, script: o.script, check: { "1.3.0": [1, 1] },
+        files: { "/Library/LaunchDaemons/sh.brew.gadget.plist": "", [HELPER]: "" },
+        answer: (line, argv, opt) => {
+          if (line === "brew uninstall example/tap/gadget") rolledBack = true;
+          if (rolledBack && line === `sudo -n ${HELPER} gadget`) return Promise.resolve({ rc: 143, out: "", err: "", timedOut: true, pid: child.pid });
+          return o.answer(line, argv);
+        },
+      });
+      expect(rolledBack).toBe(true);
+      expect(r.calls.filter((c) => c === `sudo -n ${HELPER} gadget`).length).toBeGreaterThanOrEqual(1);
+      // Only the restart before the check; none after the rollback.
+      expect(r.flow.filter((c) => c.includes("kickstart")).length).toBe(1);
+      expect(r.flow.filter((c) => c.startsWith("/opt/gate.test/check"))).toEqual(["/opt/gate.test/check GATE_VERSION=1.3.0", "/opt/gate.test/check GATE_VERSION=1.3.0"]);
+      expect(r.res.log.some((l) => l.includes("owner restarts not made: a root restart process") || l.includes("still running"))).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 20_000);
 });
 
 describe("release checks: review round 2 (b8c02f7)", () => {
@@ -694,6 +739,142 @@ describe("release checks: owners (custom launchd labels)", () => {
     const r = await rcRun({ cfg: OWNED, ...daemon() });
     expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", `sudo -n launchctl kickstart -k system/${LABEL}`, "/opt/gate.test/check GATE_VERSION=1.3.0", "svcctl on"]);
   });
+  test("new phase: step 2's helper still running as root: the named owner's restart (kickstart) does not race it, the check does not run", async () => {
+    // Mutant caught: the owner-job skip limited to the restored phase (the new-phase restart then ran `sudo -n launchctl kickstart -k` beside the root helper).
+    const HELPER = "/usr/local/sbin/helper.test";
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      const d = daemon();
+      const r = await rcRun({
+        cfg: { ...OWNED, restartHelper: { path: HELPER, packages: ["gadget"] } }, onFs: d.onFs,
+        files: { "/Library/LaunchDaemons/sh.brew.gadget.plist": "", [HELPER]: "" },
+        answer: (line, argv) => (line === `sudo -n ${HELPER} gadget` ? Promise.resolve({ rc: 143, out: "", err: "", timedOut: true, pid: child.pid }) : d.answer(line, argv)),
+      });
+      expect(r.calls.filter((c) => c === `sudo -n ${HELPER} gadget`).length).toBeGreaterThanOrEqual(1);
+      expect(r.flow.filter((c) => c.includes("kickstart"))).toEqual([]);
+      expect(r.flow.some((c) => c.startsWith("/opt/gate.test/check"))).toBe(false);
+      // The root helper still runs: `after` is not run (the host is not put back in rotation) and stays owed on the kept record; the lock is released as usual.
+      expect(r.flow).not.toContain("svcctl on");
+      expect(r.res.log.some((l) => l.includes("after not run — a restart process"))).toBe(true);
+      expect(r.files.has(PENDING)).toBe(true);
+      expect(r.calls.some((c) => c.startsWith("unlock "))).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 20_000);
+  for (const [alive, exitsLate] of [[true, false], [false, false], [true, true]] as const) {
+    test(`the owner restart waiter ${alive && !exitsLate ? "is not started" : "is started"} after the release checks ${alive && !exitsLate ? "while a restart process still runs as root" : exitsLate ? "once the root restart process has exited by then" : "when no restart process ever ran past its bound"}`, async () => {
+      // Mutants caught: the waiter-start gate forced off, or without groupAlive; the owner argv restart's pid not recorded for the gate.
+      const HELPER = "/usr/local/sbin/helper.test";
+      const WAITER = ["/brew/bin/bun", "/app.test/src/cli.ts", "host", "--stale-owners-waiter", "--config", "/conf.test/config.json"];
+      const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+      if (!alive) {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+      try {
+        const d = daemon();
+        const guiOther = "gui/501 = {\n\tservices = {\n\t\t      66      - \torg.example.serving\n\t}\n}\n";
+        const r = await rcRun({
+          cfg: { ...OWNED, restartHelper: { path: HELPER, packages: ["gadget"] }, staleOwners: [{ match: "org.example.serv*", probe: ["/opt/svc.test/idle"] }] }, cfgArgv: WAITER, onFs: d.onFs,
+          script: { lsof: [`${LSOF_HEAD}bun 66 u txt REG 1,4 1 2 /brew/Cellar/bun/1.0_old/bin/bun\n`], ps: { "66": { comm: "bun", command: "bun serve.ts", ppid: "1" } } },
+          files: { "/Library/LaunchDaemons/sh.brew.gadget.plist": "", [HELPER]: "" },
+          answer: async (line, argv) => {
+            if (line === `sudo -n ${HELPER} gadget`) return { rc: alive ? 143 : 0, out: "", err: "", ...(alive ? { timedOut: true, pid: child.pid } : {}) };
+            if (line === "launchctl print gui/501") return { rc: 0, out: guiOther, err: "" };
+            // exitsLate: the root process finishes after the owner step and before the waiter gate (the gate rechecks the pid).
+            if (exitsLate && /^send-notice/.test(line) && !child.killed) {
+              child.kill("SIGKILL");
+              await child.exited;
+            }
+            return d.answer(line, argv);
+          },
+        });
+        const started = r.spawned.some((s) => s.join(" ") === WAITER.join(" "));
+        expect(started).toBe(!alive || exitsLate);
+        // The summary says "deferred", never that a start is certain (the deferred start may be withheld).
+        expect(`${r.res.log.join("\n")}\n${r.res.summary.join("\n")}`).toContain("owner restart waiter deferred to the end of the release checks for org.example.serving (started there unless a restart process is still running as root)");
+        if (alive && !exitsLate) expect(r.res.log.some((l) => l.includes("owner restart waiter not started") && l.includes("still running as root"))).toBe(true);
+      } finally {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+    }, 20_000);
+  }
+  test("a stop signal while step 2's helper still runs as root: the stop path does not run after (the host stays out of rotation), after stays owed on the record", async () => {
+    // Mutant caught: oweAfter running after without checking the root restart process (the host back in rotation while it runs).
+    const HELPER = "/usr/local/sbin/helper.test";
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      const d = daemon();
+      let seen = false;
+      let signalled = false;
+      const r = await rcRun({
+        cfg: { ...OWNED, restartHelper: { path: HELPER, packages: ["gadget"] } }, onFs: d.onFs,
+        files: { "/Library/LaunchDaemons/sh.brew.gadget.plist": "", [HELPER]: "" },
+        answer: async (line, argv) => {
+          if (line === `sudo -n ${HELPER} gadget`) {
+            seen = true;
+            return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+          }
+          // The signal arrives once the helper has run past its bound (as stopAt does for a command line).
+          if (seen && !signalled && /^send-notice/.test(line)) {
+            signalled = true;
+            await killLive(0);
+            return { rc: 143, out: "", err: "" };
+          }
+          return d.answer(line, argv);
+        },
+      });
+      expect(signalled).toBe(true);
+      const lines: string[] = [];
+      await runStopTasks((l) => lines.push(l));
+      expect(r.calls.filter((c) => c === "svcctl on")).toEqual([]);
+      expect(lines.some((l) => l.includes("after not run: a restart process") && l.includes("still running as root"))).toBe(true);
+      expect(JSON.parse(r.files.get(PENDING)!).afterRan).not.toBe(true);
+    } finally {
+      resetStopping();
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 20_000);
+  test("two owners one glob entry restarts with the same root argv: the second is not run while the first still runs", async () => {
+    // Mutant caught: the owner loop going on after a restart process still running (the same root helper argv invoked a second time).
+    const A = "com.example.gadget-a";
+    const B = "com.example.gadget-b";
+    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "gadget"];
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      const pids = new Map<string, number>();
+      const r = await rcRun({
+        cfg: { releaseChecks: [{ ...CHECK, owners: [A, B] }], staleOwners: [{ match: "com.example.gadget-*", restart: ARGV }] },
+        onFs: (fs: ApplyFs) => {
+          const exists = fs.exists;
+          fs.exists = async (p: string) => p === `/Library/LaunchDaemons/${A}.plist` || p === `/Library/LaunchDaemons/${B}.plist` || exists(p);
+        },
+        answer: (line, argv) => {
+          const m = /^launchctl print system\/(com\.example\.gadget-[ab])$/.exec(line);
+          if (m) {
+            const n = (pids.get(m[1]!) ?? 0) + 1;
+            pids.set(m[1]!, n);
+            return { rc: 0, out: `\tstate = running\n\tpid = ${n <= 3 ? 77 : 88}\n\tpath = /Library/LaunchDaemons/${m[1]}.plist\n`, err: "" };
+          }
+          if (line === ARGV.join(" ")) return Promise.resolve({ rc: 143, out: "", err: "", timedOut: true, pid: child.pid });
+          if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+          if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: `${LSOF_HEAD}gadget ${argv[argv.indexOf("-p") + 1]} u txt REG 1,4 1 2 /brew/Cellar/gadget/1.2.0/bin/gadget\n`, err: "" };
+          return undefined;
+        },
+      });
+      expect(r.calls.filter((c) => c === ARGV.join(" ")).length).toBe(1);
+      expect(r.res.log.some((l) => l.includes("not tried: com.example.gadget-b") && l.includes("is still running"))).toBe(true);
+      // The note the release check's notice carries names the owner left untried.
+      expect(r.notices().some((n) => n.includes("not tried: com.example.gadget-b"))).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 20_000);
   test("a named owner not running or not found is held before the upgrade (OUP-78): no before, no upgrade, notified", async () => {
     const r = await rcRun({ cfg: OWNED, ...daemon({ gone: true }) });
     expect(r.flow).toEqual([]);
@@ -1250,6 +1431,469 @@ describe("release checks: review round 6 (2eeb039)", () => {
     expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", `sudo -n launchctl kickstart -k system/${LABEL}`, "/opt/gate.test/check GATE_VERSION=1.3.0", "svcctl on"]);
     expect(r.files.has(PENDING)).toBe(false);
   });
+  test("route (a): a pending check resumed (step 2 skipped): the stale-keg step's own hung helper is seen by the release check: no owner restart, no after, the helper is not run a second time", async () => {
+    // Mutant caught: the stale-keg step keeping its hung helper in a local flag (the release check then ran its owner jobs and after beside it).
+    const HELPER = "/usr/local/sbin/helper.test";
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      let helperCalls = 0;
+      const r = await rcRun({
+        cfg: { restartHelper: { path: HELPER, packages: ["gadget"] }, staleOwners: [{ match: "org.example.custom" }], releaseChecks: [{ ...CHECK, owners: [LABEL] }] },
+        startLinked: "1.3.0", script: { formulas: "", verbose: "", lsof: [STALE], ps: { "78": { comm: "gadget", command: "gadget serve", ppid: "1" } } },
+        files: { [PENDING]: `${JSON.stringify({ ...waited(0), afterRan: false })}\n`, "/Library/LaunchDaemons/sh.brew.gadget.plist": "", [HELPER]: "" },
+        onFs: (fs: ApplyFs) => {
+          const listDir = fs.listDir;
+          fs.listDir = async (d) => (d === "/Library/LaunchDaemons" ? ["sh.brew.gadget.plist"] : listDir(d));
+        },
+        answer: async (line) => {
+          if (line === "launchctl print system/sh.brew.gadget") return { rc: 0, out: "\tstate = running\n\tpid = 78\n", err: "" };
+          if (line === `sudo -n ${HELPER} gadget`) {
+            helperCalls++;
+            return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+          }
+          return undefined;
+        },
+      });
+      expect(helperCalls).toBe(1);
+      expect(r.flow.filter((c) => c.includes("kickstart"))).toEqual([]);
+      expect(r.flow).not.toContain("svcctl on");
+      expect(r.files.has(PENDING)).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 20_000);
+  const hungRun = async (record: object, check: ReleaseCheck, hook?: (line: string) => Promise<void>) => {
+    const HELPER = "/usr/local/sbin/helper.test";
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      return await rcRun({
+        cfg: { restartHelper: { path: HELPER, packages: ["gadget"] }, staleOwners: [{ match: "org.example.custom" }], releaseChecks: [check] }, noPrevKeg: true,
+        startLinked: "1.3.0", script: { formulas: "", verbose: "", lsof: [STALE], ps: { "78": { comm: "gadget", command: "gadget serve", ppid: "1" } } },
+        files: { [PENDING]: `${JSON.stringify(record)}\n`, "/Library/LaunchDaemons/sh.brew.gadget.plist": "", [HELPER]: "" },
+        onFs: (fs: ApplyFs) => {
+          const listDir = fs.listDir;
+          fs.listDir = async (d) => (d === "/Library/LaunchDaemons" ? ["sh.brew.gadget.plist"] : listDir(d));
+        },
+        answer: async (line) => {
+          await hook?.(line);
+          if (line === "launchctl print system/sh.brew.gadget") return { rc: 0, out: "\tstate = running\n\tpid = 78\n", err: "" };
+          if (line === `sudo -n ${HELPER} gadget`) return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+          return undefined;
+        },
+      });
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  };
+  test("a stop during the withheld notice keeps this run's count on the record", async () => {
+    // Mutant caught: the count saved only when not stopping (the notice said 1/3, the record kept none).
+    let stopped = false;
+    const r = await hungRun({ ...waited(0), afterRan: false, ended: true, after: "run" }, CHECK, async (line) => {
+      if (!stopped && line.includes("after withheld (1/3)")) {
+        stopped = true;
+        await killLive(0);
+      }
+    });
+    try {
+      expect(stopped).toBe(true);
+      expect(JSON.parse(r.files.get(PENDING)!).afterWithheld).toBe(1);
+    } finally {
+      resetStopping();
+    }
+  }, 20_000);
+  /** A fresh upgrade of gadget whose old keg (pid 78, plist-named job) the stale-keg step restarts through a root helper that hangs; `helper` answers its calls in order. */
+  const routeRun = async (o: { plist: string; helper: (n: number, pid: number) => { rc: number; timedOut?: boolean; pid?: number }; timeoutPrefix?: boolean }) => {
+    const HELPER = "/usr/local/sbin/helper.test";
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      let helperCalls = 0;
+      let upgraded = false;
+      const r = await rcRun({
+        cfg: { restartHelper: { path: HELPER, packages: ["gadget"] }, staleOwners: [{ match: "org.example.custom" }], releaseChecks: [CHECK] },
+        script: { lsof: [STALE], ps: { "78": { comm: "gadget", command: "gadget serve", ppid: "1" } } },
+        files: { [`/Library/LaunchDaemons/${o.plist}.plist`]: "", [HELPER]: "" },
+        onFs: (fs: ApplyFs) => {
+          const listDir = fs.listDir;
+          fs.listDir = async (d) => (d === "/Library/LaunchDaemons" ? [`${o.plist}.plist`] : listDir(d));
+        },
+        answer: async (line) => {
+          if (line === `launchctl print system/${o.plist}`) return { rc: 0, out: "\tstate = running\n\tpid = 78\n", err: "" };
+          if (line === `sudo -n ${HELPER} gadget`) {
+            helperCalls++;
+            const a = o.helper(helperCalls, child.pid);
+            return { out: "", err: "", ...a };
+          }
+          if (line === "brew upgrade example/tap/gadget") upgraded = true;
+          // Only the relink step's `brew --prefix` runs through the phase-stopping exec: its timeout is a phase timeout there.
+          if (o.timeoutPrefix && upgraded && line === "brew --prefix") return { rc: 124, out: "", err: "", timedOut: true };
+          return undefined;
+        },
+      });
+      return { r, helperCalls: () => helperCalls };
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  };
+  const heldChecks = (r: Awaited<ReturnType<typeof routeRun>>["r"]) => {
+    expect(r.flow.filter((c) => c.includes("kickstart"))).toEqual([]);
+    expect(r.flow.some((c) => c.startsWith("/opt/gate.test/check"))).toBe(false);
+    expect(r.flow).not.toContain("svcctl on");
+  };
+  test("route (b): a daemon plist named com.acme.gadget (step 2 checks only sh.brew / homebrew.mxcl): the stale-keg step's hung helper holds the check", async () => {
+    // Mutant caught: the stale-keg step's hung helper kept in a local flag only.
+    const { r, helperCalls } = await routeRun({ plist: "com.acme.gadget", helper: (_n, pid) => ({ rc: 143, timedOut: true, pid }) });
+    expect(helperCalls()).toBe(1);
+    heldChecks(r);
+  }, 20_000);
+  test("route (d): step 2's helper failed fast (rc 1), the stale-keg step falls back to the plist name and its helper hangs: the second call is the last, the check is held", async () => {
+    const { r, helperCalls } = await routeRun({ plist: "sh.brew.gadget", helper: (n, pid) => (n === 1 ? { rc: 1 } : { rc: 143, timedOut: true, pid }) });
+    expect(helperCalls()).toBe(2);
+    heldChecks(r);
+  }, 20_000);
+  test("route (c): the relink step timed out before step 2's restart (a phase timeout): the stale-keg step's hung helper still holds the check", async () => {
+    const { r, helperCalls } = await routeRun({ plist: "sh.brew.gadget", timeoutPrefix: true, helper: (_n, pid) => ({ rc: 143, timedOut: true, pid }) });
+    expect(helperCalls()).toBe(1);
+    heldChecks(r);
+  }, 20_000);
+  for (const decided of [false, true]) {
+    test(`PB (${decided ? "ii" : "i"}): two pending checks sharing an owner label${decided ? ", the second already decided" : ", the second undecided"}: while the first's root argv restart still runs, the second runs neither the argv again nor its ${decided ? "after" : "owner restart"}`, async () => {
+      // Mutants caught: the hold read per formula only (the second check re-ran the glob argv / ran its after beside the first's root restart).
+      const L = "com.example.svc-a";
+      const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "svc"];
+      const ZETA: ReleaseCheck = { formula: "example/tap/zeta", command: ["/opt/gate.test/zeta"], retries: 0, timeoutSec: 60, after: ["svcctl", "on-zeta"], owners: [L] };
+      const zetaRec = { formula: "zeta", full: "example/tap/zeta", rack: "/brew/Cellar/zeta", from: "1.0.0", to: "1.1.0", beforeRan: true, upgraded: true, afterRan: false, unresolvedWaits: 0, at: "2026-10-25 04:00", ...(decided ? { verdict: "pass", ownerRestarted: true, ended: false, after: "run" } : {}) };
+      const gadgetRec = { ...waited(0), afterRan: false, beforeRan: true };
+      const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+      try {
+        let prints = 0;
+        const r = await rcRun({
+          cfg: { releaseChecks: [{ ...CHECK, owners: [L] }, ZETA], staleOwners: [{ match: L, restart: ARGV }] }, startLinked: "1.3.0", script: { formulas: "", verbose: "", lsof: [LSOF_HEAD] },
+          files: { [PENDING]: `${JSON.stringify(gadgetRec)}\n`, "/state.test/release-checks/pending/zeta.json": `${JSON.stringify(zetaRec)}\n` },
+          onFs: (fs: ApplyFs) => {
+            const exists = fs.exists;
+            fs.exists = async (p: string) => p === `/Library/LaunchDaemons/${L}.plist` || exists(p);
+            const isDir = fs.isDir;
+            fs.isDir = async (p: string) => p.startsWith("/brew/Cellar/zeta") || isDir(p);
+          },
+          answer: async (line, argv) => {
+            if (line === ARGV.join(" ")) return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+            if (line === `launchctl print system/${L}`) {
+              prints++;
+              return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 3 ? 77 : 88}\n\tpath = /Library/LaunchDaemons/${L}.plist\n`, err: "" };
+            }
+            if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+            if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: `${LSOF_HEAD}svc ${argv[argv.indexOf("-p") + 1]} u txt REG 1,4 1 2 /brew/Cellar/gadget/1.3.0/bin/gadget\n`, err: "" };
+            if (argv[0]!.endsWith("lsof")) return { rc: 0, out: LSOF_HEAD, err: "" };
+            return undefined;
+          },
+        });
+        expect(r.calls.filter((c) => c === ARGV.join(" ")).length).toBe(1);
+        expect(r.calls).not.toContain("svcctl on-zeta");
+      } finally {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+    }, 20_000);
+  }
+  for (const decided of [true]) {
+    test(`PB (record only): zeta's owner is only on its record (not in its config): two pending checks sharing an owner label${decided ? ", the second already decided" : ", the second undecided"}: while the first's root argv restart still runs, the second runs neither the argv again nor its ${decided ? "after" : "owner restart"}`, async () => {
+      // Mutant caught: the hold reading the config's owners only, not the record's (also: the hold read per formula only (the second check re-ran the glob argv / ran its after beside the first's root restart)).
+      const L = "com.example.svc-a";
+      const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "svc"];
+      const ZETA: ReleaseCheck = { formula: "example/tap/zeta", command: ["/opt/gate.test/zeta"], retries: 0, timeoutSec: 60, after: ["svcctl", "on-zeta"], };
+      const zetaRec = { formula: "zeta", full: "example/tap/zeta", rack: "/brew/Cellar/zeta", from: "1.0.0", to: "1.1.0", beforeRan: true, upgraded: true, afterRan: false, unresolvedWaits: 0, at: "2026-10-25 04:00", owners: [{ label: L, target: `system/${L}`, pid: "77", keg: "/brew/Cellar/zeta/1.0.0" }], ...(decided ? { verdict: "pass", ownerRestarted: true, ended: false, after: "run" } : {}) };
+      const gadgetRec = { ...waited(0), afterRan: false, beforeRan: true };
+      const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+      try {
+        let prints = 0;
+        const r = await rcRun({
+          cfg: { releaseChecks: [{ ...CHECK, owners: [L] }, ZETA], staleOwners: [{ match: L, restart: ARGV }] }, startLinked: "1.3.0", script: { formulas: "", verbose: "", lsof: [LSOF_HEAD] },
+          files: { [PENDING]: `${JSON.stringify(gadgetRec)}\n`, "/state.test/release-checks/pending/zeta.json": `${JSON.stringify(zetaRec)}\n` },
+          onFs: (fs: ApplyFs) => {
+            const exists = fs.exists;
+            fs.exists = async (p: string) => p === `/Library/LaunchDaemons/${L}.plist` || exists(p);
+            const isDir = fs.isDir;
+            fs.isDir = async (p: string) => p.startsWith("/brew/Cellar/zeta") || isDir(p);
+          },
+          answer: async (line, argv) => {
+            if (line === ARGV.join(" ")) return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+            if (line === `launchctl print system/${L}`) {
+              prints++;
+              return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 3 ? 77 : 88}\n\tpath = /Library/LaunchDaemons/${L}.plist\n`, err: "" };
+            }
+            if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+            if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: `${LSOF_HEAD}svc ${argv[argv.indexOf("-p") + 1]} u txt REG 1,4 1 2 /brew/Cellar/gadget/1.3.0/bin/gadget\n`, err: "" };
+            if (argv[0]!.endsWith("lsof")) return { rc: 0, out: LSOF_HEAD, err: "" };
+            return undefined;
+          },
+        });
+        expect(r.calls.filter((c) => c === ARGV.join(" ")).length).toBe(1);
+        expect(r.calls).not.toContain("svcctl on-zeta");
+      } finally {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+    }, 20_000);
+  }
+  for (const phase of ["restored", "new"] as const) {
+    test(`an unrelated check (own owner label, plain kickstart, no shared argv) in its ${phase} phase is not held, ended or misreported by gadget's hung owner argv restart`, async () => {
+      // Mutant caught: the hold scan over every check's owner argv (zeta's kickstart never tried, its record ended with "owner restart failed" naming gadget's pid).
+      const L = "com.example.svc-a";
+      const LZ = "com.example.zeta-server";
+      const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "svc"];
+      const ZETA: ReleaseCheck = { formula: "example/tap/zeta", command: ["/opt/gate.test/zeta"], retries: 0, timeoutSec: 60, owners: [LZ] };
+      const base = { formula: "zeta", full: "example/tap/zeta", rack: "/brew/Cellar/zeta", from: "1.0.0", to: "1.1.0", beforeRan: true, upgraded: true, afterRan: false, unresolvedWaits: 0, at: "2026-10-25 04:00" };
+      const zetaRec = phase === "restored" ? { ...base, verdict: "fail", rolledBack: true, ownerRestarted: true, after: "skip", tail: [], restoredOwnerRestarted: false } : base;
+      const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+      try {
+        const pr = new Map<string, number>();
+        const r = await rcRun({
+          cfg: { releaseChecks: [{ ...CHECK, owners: [L] }, ZETA], staleOwners: [{ match: L, restart: ARGV }] }, startLinked: "1.3.0", script: { formulas: "", verbose: "", lsof: [LSOF_HEAD] },
+          files: { [PENDING]: `${JSON.stringify({ ...waited(0), afterRan: false, beforeRan: true })}\n`, "/state.test/release-checks/pending/zeta.json": `${JSON.stringify(zetaRec)}\n` },
+          onFs: (fs: ApplyFs) => {
+            const exists = fs.exists;
+            fs.exists = async (p: string) => p === `/Library/LaunchDaemons/${L}.plist` || p === `/Library/LaunchDaemons/${LZ}.plist` || exists(p);
+            const isDir = fs.isDir;
+            fs.isDir = async (p: string) => p.startsWith("/brew/Cellar/zeta") || isDir(p);
+          },
+          answer: async (line, argv) => {
+            if (line === ARGV.join(" ")) return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+            const m = /^launchctl print system\/(com\.example\.[a-z-]+)$/.exec(line);
+            if (m) {
+              const n = (pr.get(m[1]!) ?? 0) + 1;
+              pr.set(m[1]!, n);
+              return { rc: 0, out: `\tstate = running\n\tpid = ${n <= 3 ? 77 : 88}\n\tpath = /Library/LaunchDaemons/${m[1]}.plist\n`, err: "" };
+            }
+            if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+            if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: `${LSOF_HEAD}svc ${argv[argv.indexOf("-p") + 1]} u txt REG 1,4 1 2 /brew/Cellar/${phase === "restored" ? "zeta/1.0.0" : "zeta/1.1.0"}/bin/svc\n`, err: "" };
+            if (argv[0]!.endsWith("lsof")) return { rc: 0, out: LSOF_HEAD, err: "" };
+            return undefined;
+          },
+        });
+        expect(r.calls).toContain(`sudo -n launchctl kickstart -k system/${LZ}`);
+        expect(r.notices().some((n) => /release check (FAILED: )?zeta [^\n]*(owner restart failed|not run, the owner restart failed)/.test(n))).toBe(false);
+        expect(r.res.log.some((l) => l.includes("owner restarts not made: a root restart process") && l.includes("zeta"))).toBe(false);
+      } finally {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+    }, 20_000);
+  }
+  test("s2: a stop signal while gadget's glob owner argv restart still runs: the stop path does not run another check's after (zeta shares the argv, decided, after owed)", async () => {
+    // Mutant caught: the stop path checking only the formula's own helper (zeta's after run beside gadget's root restart).
+    const L = "com.example.svc-a";
+    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "svc"];
+    const ZETA: ReleaseCheck = { formula: "example/tap/zeta", command: ["/opt/gate.test/zeta"], retries: 0, timeoutSec: 60, after: ["svcctl", "on-zeta"], owners: [L] };
+    const zetaRec = { formula: "zeta", full: "example/tap/zeta", rack: "/brew/Cellar/zeta", from: "1.0.0", to: "1.1.0", beforeRan: true, upgraded: true, afterRan: false, unresolvedWaits: 0, at: "2026-10-25 04:00", verdict: "pass", ownerRestarted: true, ended: false, after: "run" };
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      let prints = 0;
+      let seen = false;
+      let signalled = false;
+      const r = await rcRun({
+        cfg: { releaseChecks: [{ ...CHECK, owners: [L] }, ZETA], staleOwners: [{ match: L, restart: ARGV }] }, startLinked: "1.3.0", script: { formulas: "", verbose: "", lsof: [LSOF_HEAD] },
+        files: { [PENDING]: `${JSON.stringify({ ...waited(0), afterRan: false, beforeRan: true })}\n`, "/state.test/release-checks/pending/zeta.json": `${JSON.stringify(zetaRec)}\n` },
+        onFs: (fs: ApplyFs) => {
+          const exists = fs.exists;
+          fs.exists = async (p: string) => p === `/Library/LaunchDaemons/${L}.plist` || exists(p);
+          const isDir = fs.isDir;
+          fs.isDir = async (p: string) => p.startsWith("/brew/Cellar/zeta") || isDir(p);
+        },
+        answer: async (line, argv) => {
+          if (line === ARGV.join(" ")) {
+            seen = true;
+            return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+          }
+          // The signal arrives once gadget's root restart has run past its bound, before zeta's record is finished.
+          if (seen && !signalled && /^send-notice/.test(line)) {
+            signalled = true;
+            await killLive(0);
+            return { rc: 143, out: "", err: "" };
+          }
+          if (line === `launchctl print system/${L}`) {
+            prints++;
+            return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 3 ? 77 : 88}\n\tpath = /Library/LaunchDaemons/${L}.plist\n`, err: "" };
+          }
+          if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+          if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: `${LSOF_HEAD}svc ${argv[argv.indexOf("-p") + 1]} u txt REG 1,4 1 2 /brew/Cellar/gadget/1.3.0/bin/gadget\n`, err: "" };
+          if (argv[0]!.endsWith("lsof")) return { rc: 0, out: LSOF_HEAD, err: "" };
+          return undefined;
+        },
+      });
+      expect(signalled).toBe(true);
+      await runStopTasks(() => {});
+      expect(r.calls).not.toContain("svcctl on-zeta");
+    } finally {
+      resetStopping();
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 20_000);
+  test("s2 (record only): a stop signal while gadget's glob owner argv restart still runs: zeta's owner is only on its record (not in its config): the stop path still does not run zeta's after", async () => {
+    // Mutant caught: the stop path reading the config's owners only, not the record's (zeta's after run beside gadget's root restart).
+    const L = "com.example.svc-a";
+    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "svc"];
+    const ZETA: ReleaseCheck = { formula: "example/tap/zeta", command: ["/opt/gate.test/zeta"], retries: 0, timeoutSec: 60, after: ["svcctl", "on-zeta"] };
+    const zetaRec = { formula: "zeta", full: "example/tap/zeta", rack: "/brew/Cellar/zeta", from: "1.0.0", to: "1.1.0", beforeRan: true, upgraded: true, afterRan: false, unresolvedWaits: 0, at: "2026-10-25 04:00", owners: [{ label: L, target: `system/${L}`, pid: "77", keg: "/brew/Cellar/zeta/1.0.0" }], verdict: "pass", ownerRestarted: true, ended: false, after: "run" };
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      let prints = 0;
+      let seen = false;
+      let signalled = false;
+      const r = await rcRun({
+        cfg: { releaseChecks: [{ ...CHECK, owners: [L] }, ZETA], staleOwners: [{ match: L, restart: ARGV }] }, startLinked: "1.3.0", script: { formulas: "", verbose: "", lsof: [LSOF_HEAD] },
+        files: { [PENDING]: `${JSON.stringify({ ...waited(0), afterRan: false, beforeRan: true })}\n`, "/state.test/release-checks/pending/zeta.json": `${JSON.stringify(zetaRec)}\n` },
+        onFs: (fs: ApplyFs) => {
+          const exists = fs.exists;
+          fs.exists = async (p: string) => p === `/Library/LaunchDaemons/${L}.plist` || exists(p);
+          const isDir = fs.isDir;
+          fs.isDir = async (p: string) => p.startsWith("/brew/Cellar/zeta") || isDir(p);
+        },
+        answer: async (line, argv) => {
+          if (line === ARGV.join(" ")) {
+            seen = true;
+            return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+          }
+          // The signal arrives once gadget's root restart has run past its bound, before zeta's record is finished.
+          if (seen && !signalled && /^send-notice/.test(line)) {
+            signalled = true;
+            await killLive(0);
+            return { rc: 143, out: "", err: "" };
+          }
+          if (line === `launchctl print system/${L}`) {
+            prints++;
+            return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 3 ? 77 : 88}\n\tpath = /Library/LaunchDaemons/${L}.plist\n`, err: "" };
+          }
+          if (argv[0]!.endsWith("lsof") && argv.includes("-iTCP")) return { rc: 1, out: "", err: "" };
+          if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: `${LSOF_HEAD}svc ${argv[argv.indexOf("-p") + 1]} u txt REG 1,4 1 2 /brew/Cellar/gadget/1.3.0/bin/gadget\n`, err: "" };
+          if (argv[0]!.endsWith("lsof")) return { rc: 0, out: LSOF_HEAD, err: "" };
+          return undefined;
+        },
+      });
+      expect(signalled).toBe(true);
+      await runStopTasks(() => {});
+      expect(r.calls).not.toContain("svcctl on-zeta");
+    } finally {
+      resetStopping();
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 20_000);
+  test("M4: a helper held but no after owed (it already ran): nothing is withheld, counted or marked FAILED, the ended record goes", async () => {
+    // Mutant caught: the withhold test without `wanted &&` (the record kept one more run, "after stays owed" said wrongly).
+    const r = await hungRun({ ...waited(0), afterRan: true, ended: true, after: "run" }, CHECK);
+    expect(r.files.has(PENDING)).toBe(false);
+    expect(r.res.log.some((l) => l.includes("after not run — a restart process"))).toBe(false);
+    expect(r.brew).not.toContain("release-check-after");
+  }, 20_000);
+  test("M8: a check with no after configured and a helper held: no withhold, no count, no FAILED, no hook call", async () => {
+    // Mutant caught: `!!rc.after` removed from `wanted` (a check without after counted as owing one).
+    const { after: _after, ...noAfter } = CHECK;
+    const r = await hungRun({ ...waited(0), afterRan: false, ended: true, after: "run" }, noAfter);
+    expect(r.files.has(PENDING)).toBe(false);
+    expect(r.res.log.some((l) => l.includes("after not run — a restart process"))).toBe(false);
+    expect(r.brew).not.toContain("release-check-after");
+    expect(r.flow.filter((c) => c.startsWith("svcctl on"))).toEqual([]);
+  }, 20_000);
+  test("PC: an ended record with after owed and a stale-keg helper that hangs every run: after withheld with FAILED and a notice in runs 1 and 2, run in run 3 (the record then goes)", async () => {
+    // Mutant caught: no counter on the record (after withheld for ever, the host out of rotation).
+    const HELPER = "/usr/local/sbin/helper.test";
+    const child = Bun.spawn(["/bin/sleep", "120"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      let record = `${JSON.stringify({ ...waited(0), afterRan: false, ended: true, after: "run" })}\n`;
+      const results = [];
+      for (let run = 1; run <= 3; run++) {
+        const r = await rcRun({
+          cfg: { restartHelper: { path: HELPER, packages: ["gadget"] }, staleOwners: [{ match: "org.example.custom" }], releaseChecks: [CHECK] }, noPrevKeg: true,
+          startLinked: "1.3.0", script: { formulas: "", verbose: "", lsof: [STALE], ps: { "78": { comm: "gadget", command: "gadget serve", ppid: "1" } } },
+          files: { [PENDING]: record, "/Library/LaunchDaemons/sh.brew.gadget.plist": "", [HELPER]: "" },
+          onFs: (fs: ApplyFs) => {
+            const listDir = fs.listDir;
+            fs.listDir = async (d) => (d === "/Library/LaunchDaemons" ? ["sh.brew.gadget.plist"] : listDir(d));
+          },
+          answer: async (line) => {
+            if (line === "launchctl print system/sh.brew.gadget") return { rc: 0, out: "\tstate = running\n\tpid = 78\n", err: "" };
+            if (line === `sudo -n ${HELPER} gadget`) return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+            return undefined;
+          },
+        });
+        results.push(r);
+        if (r.files.has(PENDING)) record = r.files.get(PENDING)!;
+      }
+      const [r1, r2, r3] = results as [typeof results[0], typeof results[0], typeof results[0]];
+      for (const [r, n] of [[r1, 1], [r2, 2]] as const) {
+        expect(r.flow).not.toContain("svcctl on");
+        expect(r.res.log.some((l) => l.includes(`after stays owed to a later run (${n}/3)`))).toBe(true);
+        expect(r.brew).toContain("FAILED: release-check-after:gadget");
+        expect(r.notices().some((m) => m.includes(`after withheld (${n}/3)`) && m.includes("pid"))).toBe(true);
+        expect(JSON.parse(r.files.get(PENDING)!).afterWithheld).toBe(n);
+      }
+      expect(r3.flow).toContain("svcctl on");
+      expect(r3.res.log.some((l) => l.includes("after run anyway — withheld 3 runs"))).toBe(true);
+      // Mutant caught: the notice dropped (an operator would never be told the host went back in rotation beside a root process).
+      expect(r3.notices().some((m) => m.includes("after runs anyway after 3 withheld runs") && m.includes("pid"))).toBe(true);
+      expect(r3.files.has(PENDING)).toBe(false);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 60_000);
+  test("a check ended at the wait limit while an owner's root restart still runs: after is withheld, never lost: the record stays with after owed (the next run runs it)", async () => {
+    // Mutant caught: the record removed although after was withheld (the host would stay out of rotation for good).
+    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "gadget"];
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      const w = wrapper(false);
+      const r = await rcRun({
+        cfg: { staleOwners: [{ match: LABEL, restart: ARGV }], releaseChecks: [{ ...CHECK, owners: [LABEL] }] }, ...w, startLinked: "1.3.0", script: { formulas: "", verbose: "", ...w.script },
+        files: { [PENDING]: `${JSON.stringify({ ...waited(2), afterRan: false })}\n` },
+        answer: (line, argv) => (line === ARGV.join(" ") ? Promise.resolve({ rc: 143, out: "", err: "", timedOut: true, pid: child.pid }) : w.answer(line, argv)),
+      });
+      expect(r.calls).toContain(ARGV.join(" "));
+      expect(r.flow).not.toContain("svcctl on");
+      expect(r.res.log.some((l) => l.includes("after not run — a restart process") && l.includes("after stays owed to a later run"))).toBe(true);
+      expect(r.files.has(PENDING)).toBe(true);
+      expect(JSON.parse(r.files.get(PENDING)!)).toMatchObject({ ended: true, after: "run" });
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 20_000);
+  test("an owner's root restart that exited before after: it does not withhold after: it runs and the record goes", async () => {
+    // Mutant caught: helperHeld without the groupAlive check (a helper long gone would still withhold after).
+    const ARGV = ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "gadget"];
+    const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    let seen = false;
+    let killed = false;
+    try {
+      const w = wrapper(false);
+      const r = await rcRun({
+        cfg: { staleOwners: [{ match: LABEL, restart: ARGV }], releaseChecks: [{ ...CHECK, owners: [LABEL] }] }, ...w, startLinked: "1.3.0", script: { formulas: "", verbose: "", ...w.script },
+        files: { [PENDING]: `${JSON.stringify({ ...waited(2), afterRan: false })}\n` },
+        answer: async (line, argv) => {
+          if (line === ARGV.join(" ")) {
+            seen = true;
+            return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+          }
+          // The root process finishes by itself right after the owner step (the grace wait has already read it alive), before the check's end.
+          if (seen && /^send-notice/.test(line) && !killed) {
+            killed = true;
+            child.kill("SIGKILL");
+            await child.exited;
+          }
+          return w.answer(line, argv);
+        },
+      });
+      expect(r.flow).toContain("svcctl on");
+      expect(r.files.has(PENDING)).toBe(false);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 20_000);
   test("1: bounded: the run that reaches the wait limit notifies and ends the record (no verdict, the new version kept), never waiting forever", async () => {
     const w = wrapper(false);
     const r = await rcRun({ cfg: NAMED, ...w, startLinked: "1.3.0", script: { formulas: "", verbose: "", ...w.script }, files: { [PENDING]: `${JSON.stringify(waited(2))}\n` } });

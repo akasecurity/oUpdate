@@ -53,7 +53,7 @@ import { handoff, waiterReport, type DeferredService, type WaiterEnv } from "./w
 import { brewSection, casksSection, appBundlesSection, cleanup, gkEnv } from "./run-brew.ts";
 import { releaseChecksSection } from "./run-release.ts";
 import { claudeCodeStep, finishRun, npmStep, postUpgradeChecks, staleKegStep } from "./run-steps.ts";
-import { PhaseTimeout, last, makeNotify, newBrewState, type ApplyOptions, type ApplyResult, type RunCtx, type RunState } from "./run-ctx.ts";
+import { PhaseTimeout, last, liveRestartPid, makeNotify, ownerArgvs, newBrewState, type ApplyOptions, type ApplyResult, type RunCtx, type RunState } from "./run-ctx.ts";
 export { runsUnderBrewBun, holdRunningBun, named, makeNotify } from "./run-ctx.ts";
 export type { GkOps, ApplyOptions, ApplyResult } from "./run-ctx.ts";
 
@@ -152,6 +152,8 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   // the exception: its timeout is returned, the caller records it, and the run goes on to the next package.
   // Labels the restart step handed to their owner command: the stale-keg check never hands them again.
   const ownerHanded = new Map<string, string>();
+  // Packages whose restart helper was still running as root after its bound (package → pid): no later step restarts them again this run.
+  const helperRunning = new Map<string, number>();
   let phase: "brew" | "npm" = "brew";
   const x: Exec = async (argv, o = {}) => {
     const env = argv[0] === cfg.brew ? { HOMEBREW_NO_AUTO_UPDATE: "1", ...o.env } : o.env;
@@ -228,7 +230,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     spawnDetached: fs.spawnDetached,
   };
   // The launchctl label queries: not `x` either, a timed-out query falls back to the plist name.
-  const kegEnv: KegEnv = { exec: x, query: waiterEnv.exec, spawnDetached: fs.spawnDetached, isDir: fs.isDir, exists: fs.exists, listDir: fs.listDir, home: fs.home, uid: fs.uid };
+  const kegEnv: KegEnv = { exec: x, query: waiterEnv.exec, restartExec: waiterEnv.exec, spawnDetached: fs.spawnDetached, isDir: fs.isDir, exists: fs.exists, listDir: fs.listDir, home: fs.home, uid: fs.uid };
   const tbEnv: TypeBEnv = {
     brew: async (args) => {
       const res = await x([cfg.brew, ...args]);
@@ -312,6 +314,12 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
         return;
       }
       if (!afterOwed(p)) return;
+      // A root restart process still running (oupdate cannot signal it): the host is not put back in rotation; after stays owed on the record.
+      const rootRestart = liveRestartPid(helperRunning, p.formula, ownerArgvs(cfg.staleOwners, [...(rc.owners ?? []), ...(p.owners ?? []).map((q) => q.label)]));
+      if (rootRestart !== undefined) {
+        lg(`  release check ${p.formula}: stopped — after not run: a restart process (pid ${rootRestart}) is still running as root, after stays owed to the next run (log only: the withheld count does not move on the stop path)`);
+        return;
+      }
       const lines: string[] = [];
       const ok = await runHook({ ...rcEnv, exec: (a, o = {}) => rcEnv.exec(a, { ...o, force: true }), log: lines, notify: async () => {} }, rc, "after");
       for (const l of lines) lg(l);
@@ -361,14 +369,14 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   const ownerLock = opts.ownerLock ?? { take: realTakeLock, release: realReleaseLock };
   const clock = opts.ownerClock ?? { now: () => Date.now(), sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)), httpStatus: realHttpStatus };
   const restartOpts = {
-    deferred: cfg.deferred, helper: cfg.restartHelper, labelRestart: cfg.labelRestart, staleKegUnlisted: cfg.staleKegUnlisted, detachedLog: join(cfg.stateDir, "restart.log"), ownerHanded,
-    staleOwners: cfg.staleOwners,
+    deferred: cfg.deferred, helper: cfg.restartHelper, labelRestart: cfg.labelRestart, staleKegUnlisted: cfg.staleKegUnlisted, detachedLog: join(cfg.stateDir, "restart.log"), ownerHanded, helperRunning,
+    staleOwners: cfg.staleOwners, log,
   };
 
   const rt: RunCtx = {
     opts, cfg, fs, exec, dryRun, now, host, r, tb, log, stamp, b, brewHeld, x, notify, step, tbEnv, tbOpts, brewFailed, quarantined, installEnv,
     rcEnv, rcPending, rcBroken, rcThisRun, rcUnchecked, rcJobs, mergeOwners, rcStopOff, stoppingNow, afterOwed, oweAfter, expectedKeg, retiredFor, gatedOutdated,
-    ownerLock, clock, restartOpts, waiterEnv, kegEnv, ownerHanded, track, recoverTo, releaseRacks, npmFailed, st,
+    ownerLock, clock, restartOpts, waiterEnv, kegEnv, ownerHanded, helperRunning, track, recoverTo, releaseRacks, npmFailed, st,
   };
 
   // ── waiter report: a drain a dead waiter left behind is recovered before any long brew build ──
@@ -407,7 +415,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     const rl = await relinkUpgraded(kegEnv, b.upgraded, { brew: cfg.brew, log });
     b.relinkNote = rl.note;
     // A formula upgraded unchecked (its owner unloaded on purpose) is never restarted: no kickstart, helper or owner command.
-    await restartUpgraded({ exec: x, exists: fs.exists, spawnDetached: fs.spawnDetached, home: fs.home, uid: fs.uid }, b.upgraded.filter((n) => !rcUnchecked.has(last(n))), { ...restartOpts, into: b.restarted });
+    await restartUpgraded({ exec: x, restartExec: waiterEnv.exec, exists: fs.exists, spawnDetached: fs.spawnDetached, home: fs.home, uid: fs.uid }, b.upgraded.filter((n) => !rcUnchecked.has(last(n))), { ...restartOpts, into: b.restarted });
     if (b.restarted.length) log.push(`restarted: ${b.restarted.join(" ")}`);
   });
   await step("brew", "cleanup", async () => {

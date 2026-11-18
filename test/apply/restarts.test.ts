@@ -1,6 +1,6 @@
 // Step 7 of the previous updater's brew phase: restart the services of upgraded packages (slice 7).
 import { describe, expect, test } from "bun:test";
-import { killLive, resetStopping, type Exec } from "../../src/apply/exec.ts";
+import { killLive, LOG_ONLY, resetStopping, type Exec } from "../../src/apply/exec.ts";
 import { restartUpgraded, type RestartEnv } from "../../src/apply/restarts.ts";
 
 const SVC = { name: "svc", waiter: "/w.test", holdFile: "/hold.test", quarantineFile: "/q.test", outcomeFile: "/o.test", restartLog: "/r.test" };
@@ -39,6 +39,78 @@ describe("restartUpgraded", () => {
     expect(calls).toEqual([`sudo -n ${HELPER} a`]);
     const gone = env(["/Library/LaunchDaemons/sh.brew.a.plist"]);
     expect(await restartUpgraded(gone.e, ["a"], { deferred: [], helper: { path: HELPER, packages: ["a"] }, detachedLog: "/log.test" })).toEqual(["a(FAILED to restart)"]);
+  });
+  test("the helper call carries restartHelper.timeoutSec as its bound, none when unset, and goes through restartExec", async () => {
+    // Mutant caught: the timeout removed from the helper call (step 2 then waits the run limit on a stuck helper).
+    const files = ["/Library/LaunchDaemons/sh.brew.a.plist", HELPER];
+    const seen: Record<string, number | undefined>[] = [];
+    const mk = () => {
+      const { e } = env(files);
+      return { ...e, exec: (async () => { throw new Error("through exec"); }) as Exec, restartExec: (async (argv, o) => (seen.push({ [argv.join(" ")]: o?.timeoutMs }), { rc: 0, out: "", err: "" })) as Exec };
+    };
+    await restartUpgraded(mk(), ["a"], { deferred: [], helper: { path: HELPER, packages: ["a"], timeoutSec: 30 }, detachedLog: "/log.test" });
+    await restartUpgraded(mk(), ["a"], { deferred: [], helper: { path: HELPER, packages: ["a"] }, detachedLog: "/log.test" });
+    expect(seen).toEqual([{ [`sudo -n ${HELPER} a`]: 30_000 }, { [`sudo -n ${HELPER} a`]: undefined }]);
+  });
+  test("the helper call is log-only; a helper still running is recorded by package and not run again", async () => {
+    // Mutants caught: ...LOG_ONLY removed from the helper call; helperRunning not filled (the stale-keg step then restarts it again).
+    const child = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      const { e } = env(["/Library/LaunchDaemons/sh.brew.a.plist", HELPER]);
+      const seen: Parameters<Exec>[1][] = [];
+      const running = new Map<string, number>();
+      const log: string[] = [];
+      const ex: RestartEnv = { ...e, sleep: async () => {}, exec: async (_a, o) => (seen.push(o), { rc: 143, out: "", err: "", timedOut: true, pid: child.pid }) };
+      const o = { deferred: [], helper: { path: HELPER, packages: ["a"] }, detachedLog: "/log.test", helperRunning: running, log };
+      expect(await restartUpgraded(ex, ["a"], o)).toEqual([`a(FAILED to restart, helper pid ${child.pid} still running)`]);
+      expect(seen[0]).toMatchObject(LOG_ONLY);
+      expect(running.get("a")).toBe(child.pid);
+      // A second restart of the same package this run (the restored phase) does not run the helper again.
+      expect(await restartUpgraded(ex, ["a"], o)).toEqual([`a(FAILED to restart, helper pid ${child.pid} still running)`]);
+      expect(seen.length).toBe(1);
+      expect(log.some((l) => l.includes("for a is still running (pid") && l.includes("not run again"))).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  });
+  test("a passing helper logs no TIMEOUT line", async () => {
+    // Mutant caught: `if (hr.timedOut)` -> `if (true)` in restarts.ts.
+    const { e } = env(["/Library/LaunchDaemons/sh.brew.a.plist", HELPER]);
+    const log: string[] = [];
+    await restartUpgraded(e, ["a"], { deferred: [], helper: { path: HELPER, packages: ["a"] }, detachedLog: "/log.test", log });
+    expect(log).toEqual([]);
+  });
+  test("a recorded helper pid that has exited is not blocking: the helper runs", async () => {
+    // Mutant caught: the recorded pid not rechecked.
+    const gone = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    gone.kill("SIGKILL");
+    await gone.exited;
+    const { e, calls } = env(["/Library/LaunchDaemons/sh.brew.a.plist", HELPER]);
+    const out = await restartUpgraded(e, ["a"], { deferred: [], helper: { path: HELPER, packages: ["a"] }, detachedLog: "/log.test", helperRunning: new Map([["a", gone.pid]]) });
+    expect(calls).toEqual([`sudo -n ${HELPER} a`]);
+    expect(out).toEqual(["a(sys)"]);
+  });
+  test("a helper that timed out is FAILED to restart, even with rc 0, and its timeout is named in the log", async () => {
+    const { e } = env(["/Library/LaunchDaemons/sh.brew.a.plist", HELPER]);
+    const log: string[] = [];
+    const out = await restartUpgraded({ ...e, exec: async () => ({ rc: 0, out: "", err: "", timedOut: true }) }, ["a"], { deferred: [], helper: { path: HELPER, packages: ["a"], timeoutSec: 7 }, detachedLog: "/log.test", log });
+    expect(out).toEqual(["a(FAILED to restart)"]);
+    expect(log).toEqual([`  TIMEOUT after 7000 ms: sudo -n ${HELPER} a — restart helper killed (a root process may not be signalled)`]);
+  });
+  test("a helper still running after its bound (a real process) is named with its pid in the token and the log", async () => {
+    // Mutant caught: restarts.ts without the stillRunningAfterTimeout check (a root helper still going reads as a plain failure).
+    const child = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      const { e } = env(["/Library/LaunchDaemons/sh.brew.a.plist", HELPER]);
+      const log: string[] = [];
+      const out = await restartUpgraded({ ...e, sleep: async () => {}, exec: async () => ({ rc: 143, out: "", err: "", timedOut: true, pid: child.pid }) }, ["a"], { deferred: [], helper: { path: HELPER, packages: ["a"] }, detachedLog: "/log.test", log });
+      expect(out).toEqual([`a(FAILED to restart, helper pid ${child.pid} still running)`]);
+      expect(log.some((l) => l.includes(`helper.test still running after its time bound (pid ${child.pid})`))).toBe(true);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
   });
   test("a detached restart runs later through the helper, its arguments positional", async () => {
     const { e, calls, spawned } = env(["/Library/LaunchDaemons/sh.brew.net.plist", HELPER]);

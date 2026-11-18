@@ -91,6 +91,8 @@ export interface PendingCheck {
    * verdict, notified; a decided one is notified and goes on.
    */
   unresolvedWaits?: number;
+  /** Runs in which after was withheld because a restart process was still running as root (at AFTER_WITHHELD_RUNS it runs anyway; the count grows only while a fresh helper hangs in each run, as the pid is not kept across runs). */
+  afterWithheld?: number;
   /** The new keg was removed and `from` is in use again (the release is held). */
   rolledBack?: boolean;
   /** The owner was restarted onto the restored version (as ownerRestarted: the gate scans regardless). */

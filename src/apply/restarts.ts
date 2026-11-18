@@ -12,7 +12,7 @@
 // not listed. staleKegUnlisted "report" applies here too: a label with a plist not in labelRestart is reported only.
 // A staleOwners label comes before all of these: it is left to the stale-keg check, which queues it for the idle waiter.
 
-import { isStopping, type Exec } from "./exec.ts";
+import { groupAlive, helperTimeoutLine, isStopping, LOG_ONLY, stillRunningAfterTimeout, type Exec } from "./exec.ts";
 import { basename } from "node:path";
 import type { RestartHelper } from "./config.ts";
 import type { LabelRestart } from "./kegs.ts";
@@ -21,10 +21,14 @@ import { matchOwner, type StaleOwner } from "./owner-waiter.ts";
 
 export interface RestartEnv {
   exec: Exec;
+  /** Runs the restart helper, returning its timeout instead of stopping the phase (the run's `exec` throws). Defaults to `exec`. */
+  restartExec?: Exec;
   exists(path: string): Promise<boolean>;
   spawnDetached(argv: string[], stderrFile: string): Promise<number>;
   home: string;
   uid: number;
+  /** Waits (the grace after a timed-out helper's kill); a real timer by default. */
+  sleep?(ms: number): Promise<void>;
 }
 
 export async function restartUpgraded(
@@ -35,6 +39,10 @@ export async function restartUpgraded(
     staleOwners?: StaleOwner[];
     /** Filled with each label handed to its owner command (label → command name), for the stale-keg check. */
     ownerHanded?: Map<string, string>;
+    /** Packages whose helper is still running as root after its bound (package → pid): filled here, read by the stale-keg step and the restored phase. */
+    helperRunning?: Map<string, number>;
+    /** The run's log: a helper that passed its bound is named there. */
+    log?: string[];
   },
 ): Promise<string[]> {
   // `into`: the caller's list, filled as each restart is made, so a stop part-way keeps them.
@@ -105,7 +113,30 @@ export async function restartUpgraded(
     if (await env.exists(`${daemons}/${label}.plist`)) {
       let ok = false;
       if (h?.packages.includes(pkg)) {
-        if (await env.exists(h.path)) ok = (await env.exec(["sudo", "-n", h.path, pkg])).rc === 0;
+        const recorded = o.helperRunning?.get(pkg);
+        const running = recorded !== undefined && groupAlive(recorded) ? recorded : undefined;
+        if (running !== undefined) {
+          // Its helper from earlier this run is still going: no second one alongside it.
+          o.log?.push(`  ${basename(h.path)} for ${pkg} is still running (pid ${running}) — not run again`);
+          out.push(`${pkg}(FAILED to restart, helper pid ${running} still running)`);
+          continue;
+        }
+        if (await env.exists(h.path)) {
+          const argv = ["sudo", "-n", h.path, pkg];
+          const hr = await (env.restartExec ?? env.exec)(argv, { ...(h.timeoutSec !== undefined ? { timeoutMs: h.timeoutSec * 1000 } : {}), ...LOG_ONLY });
+          ok = hr.rc === 0 && !hr.timedOut && !hr.truncated;
+          if (hr.timedOut || hr.truncated) {
+            o.log?.push(helperTimeoutLine(argv, h.timeoutSec));
+            // A helper under sudo runs as root: oupdate cannot kill it, and it may still finish.
+            const alive = await stillRunningAfterTimeout(hr, env.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))));
+            if (alive !== undefined) {
+              o.log?.push(`  ${basename(h.path)} still running after its time bound (pid ${alive}) — oupdate cannot signal a root process, check ${label} once \`ps -g ${alive}\` shows it gone`);
+              o.helperRunning?.set(pkg, alive);
+              out.push(`${pkg}(FAILED to restart, helper pid ${alive} still running)`);
+              continue;
+            }
+          }
+        }
       } else ok = (await env.exec(["sudo", "-n", "launchctl", "kickstart", "-k", `system/${label}`])).rc === 0;
       out.push(`${pkg}(${ok ? "sys" : "FAILED to restart"})`);
     } else if (await env.exists(`${agents}/${label}.plist`)) {
