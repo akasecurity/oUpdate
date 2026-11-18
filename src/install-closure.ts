@@ -6729,6 +6729,29 @@ function closeAt(s: string, open: number): number {
   }
   return -1;
 }
+// Whether the argument list of the run call opened at s[open] and closed at s[close] must keep the old step over it (a jump to the bracket after
+// it) instead of being read inside. closeAt and the scan below read the list differently where (1) it holds a template (closeAt ends one at its
+// next backtick); (2) it holds a slash outside a quoted string: whether a slash divides or opens a regular expression is read one way by closeAt
+// and the scan and another by codeOnly, and a bracket or a quote in a regular expression ends closeAt in the wrong place; (3) its brackets are
+// not typed-balanced outside quoted strings (closeAt counts ( [ { alike, so a list like `"a", { )` closes at its parenthesis, which can happen when
+// a regular expression opened before the call encloses it); a balanced list cannot disturb the scan's depth. Quoted strings are skipped by the rule
+// closeAt uses. Comments are removed by codeOnly before this runs. A file codeOnly cannot read, or that holds mixed brackets or a backslash
+// outside a string, is held by processHazard before this matters, so the check decides for the files that pass it. The `)` test catches a list that
+// closeAt ends at a } or a ]; the final stack test is a backup (an untyped zero of closeAt's count leaves the stack empty once no pair mismatches).
+function keepsOldStep(s: string, open: number, close: number): boolean {
+  if (close < 0 || s[close] !== ")") return true;
+  const stack: string[] = [];
+  for (let i = open + 1; i < close; i++) {
+    const c = s[i]!;
+    if (c === '"' || c === "'") i = litEnd(s, i);
+    else if (c === "/" || c === "`") return true;
+    else if (c === "(" || c === "[" || c === "{") stack.push(c);
+    else if (c === ")" || c === "]" || c === "}") {
+      if (stack.pop() !== (c === ")" ? "(" : c === "]" ? "[" : "{")) return true;
+    }
+  }
+  return stack.length > 0;
+}
 function constPartsWiden(text: string): boolean {
   const c = cls!;
   const budget = 8 * text.length + 100000;
@@ -6806,7 +6829,7 @@ function constPartsWiden(text: string): boolean {
   for (let r = 0; r < 3 && new RegExp(`\\b(?:${RUN_FN})\\b`).test(text); r++) for (const [k, list] of inits) if (list.some((x) => RUN_END.test(x) || runs.has(x))) runs.add(k);
   const loaders = new Set(loaderNames(text).filter((n) => /^[\w$]+$/.test(n)));
   // Whether src is made only of literals and the runtime values: a name counts when every value it is given does.
-  const seen = new Map<string, boolean>();
+  let seen = new Map<string, boolean>();
   const prog: string[] = []; // names being read: a name that mentions itself (`bin = bin + ".exe"`) adds nothing
   const modIs = (base: string, spec: string): boolean => {
     const re = new RegExp(`^require\\(["'](?:node:)?${spec}["']\\)$`);
@@ -6931,7 +6954,7 @@ function constPartsWiden(text: string): boolean {
   };
   const notFn = new Map<string, boolean>(); // per callee name: bound to a parameter or to something that is not a function
   // One call: a load, a run, or (in a file that names child_process) a callee the scan cannot resolve. Returns true to widen.
-  const visit = (segs: string[], dotted: boolean, paren: number): boolean => {
+  const visitCore = (segs: string[], dotted: boolean, paren: number): boolean => {
     const norm = segs.join(".");
     const last = segs[segs.length - 1]!;
     const viaCall = segs.length > 1 && /^(?:call|apply|bind)$/.test(last);
@@ -6964,6 +6987,19 @@ function constPartsWiden(text: string): boolean {
     if ((!/^exec(?:Sync)?$/.test(fn) || runs.has(fn)) && v !== undefined && !v.startsWith("{") && !/=>|^(?:async\s+)?function\b/.test(v)) need.push(v);
     return need.some((x) => !ok(x.replace(/^\.\.\./, ""), 0));
   };
+  // A call read inside the arguments of a run call (main steps over them) reads names on a copy of `seen`: ok() caches a name by name alone, not by
+  // depth, so a name first read here at one depth would answer a later read after the run call at a deeper depth, where main reads it first.
+  const runOpen = new Set<number>();
+  const visit = (segs: string[], dotted: boolean, paren: number): boolean => {
+    if (!runOpen.size) return visitCore(segs, dotted, paren);
+    const saved = seen;
+    seen = new Map(saved);
+    try {
+      return visitCore(segs, dotted, paren);
+    } finally {
+      seen = saved;
+    }
+  };
   const TOK = /["'`{}()[\]/]|(?<![\w$])[A-Za-z_$][\w$]*/g;
   const stack: number[] = [];
   const opens: number[] = []; // the ( and [ not yet closed
@@ -6994,6 +7030,7 @@ function constPartsWiden(text: string): boolean {
     } else if (t === "(" || t === "[") opens.push(at);
     else if (t === "]" || t === ")") {
       const k = opens.pop() ?? -1;
+      runOpen.delete(k);
       CALL.lastIndex = pos;
       if (!cp || !CALL.test(text)) continue;
       const inner = text.slice(k + 1, Math.min(at, k + 201));
@@ -7028,8 +7065,14 @@ function constPartsWiden(text: string): boolean {
       }
       if (visit(segs, text[q] === ".", paren)) return true;
       pos = paren + 1;
-      if (LOAD_CALLS.has(segs.join(".")) || RUN_NAME.test(segs[segs.length - 1]!)) pos = Math.max(pos, closeAt(text, paren) + 1);
-      else opens.push(paren);
+      if (LOAD_CALLS.has(segs.join(".")) || RUN_NAME.test(segs[segs.length - 1]!)) {
+        // visit read the arguments of a load or a run. The arguments of a run call are read inside as well (a callback, an option value, a
+        // wrapped call). Where closeAt and this read can disagree about where the arguments end, the old step jumps over the whole list: a
+        // template in them (closeAt ends a template at its next backtick), a slash outside a string, or brackets that are not typed-balanced (keepsOldStep).
+        const close = closeAt(text, paren);
+        if (LOAD_CALLS.has(segs.join(".")) || keepsOldStep(text, paren, close)) pos = Math.max(pos, close + 1);
+        else (opens.push(paren), runOpen.add(paren));
+      } else opens.push(paren);
     }
   }
   return spent > budget;
