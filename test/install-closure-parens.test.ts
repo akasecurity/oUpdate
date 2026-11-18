@@ -80,12 +80,24 @@ const time = (src: string, run: (s: string) => unknown): number => {
   run(src);
   return performance.now() - t0;
 };
+// The faster of two runs: a pause in one (a collection, a loaded runner) does not decide the row. The full quadratic (a walk back at every bracket) is
+// hours at 8 MB and is caught at 128 KiB by the 1 s row below, which runs classifyJs only: a full quadratic in a step only provablyStatic takes is
+// caught by this 8 MB row alone. The 20 s bound at 8 MB is a backstop for slower regressions: it catches a slowdown of about 4x on the slowest shape on a
+// dev machine (4.9 s) to about 7x on a build host (2.8 to 3.1 s), and about 1.5x on a runner 2.6x slower than a dev machine (the slowest single
+// CI run seen is 13 s). The builder's mutant (a walk back from every 1024th { or ( in the code reader) takes 31 to 180 s at 8 MB on its slower
+// call on five of the six shapes (the long parameter list has one bracket pair) and 100 ms at 128 KiB. A slower-growing one is not caught on a
+// dev machine: a walk back at every 1024th call in thisOrArgumentsLeaks took 10 to 13 s there (it is caught on a runner about 2.6x slower).
+// Each timed read is of its own text: the two reads of a call take the text with `pad` and `pad + 1` spaces at the end (the shape does not change),
+// and the two calls take different pads. The scan keeps caches keyed by the text (the bracket index, the pair tables and the memo maps keyed by
+// them), so a text read twice would be found warm and a slowdown in building them would not show.
+const fastest = (src: string, run: (s: string) => unknown, pad: number): number =>
+  Math.min(time(src + " ".repeat(pad), run), time(src + " ".repeat(pad + 1), run));
 for (const [name, make] of SHAPES) {
   test(`128 KiB of ${name} reads in under 1 s`, () => {
     expect(time(make(128 * 1024), (s) => classifyJs("pkg/lib/x.js", s))).toBeLessThan(1000);
   });
-  test(`8 MB of ${name} reads in under 10 s`, () => {
-    expect(time(make(8 * 1024 * 1024), (s) => classifyJs("pkg/lib/x.js", s))).toBeLessThan(10000);
-    expect(time(make(8 * 1024 * 1024), (s) => provablyStatic(s))).toBeLessThan(10000);
-  }, 60000);
+  test(`8 MB of ${name} reads in under 20 s`, () => {
+    expect(fastest(make(8 * 1024 * 1024), (s) => classifyJs("pkg/lib/x.js", s), 0)).toBeLessThan(20000);
+    expect(fastest(make(8 * 1024 * 1024), (s) => provablyStatic(s), 2)).toBeLessThan(20000);
+  }, 120_000);
 }

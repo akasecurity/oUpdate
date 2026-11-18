@@ -390,14 +390,19 @@ test("repeated quotes, node: prefixes and backticks grow with the file from 0.12
   let prevMb = 0;
   for (const mb of [0.125, 1, 8]) {
     const src = body(mb);
-    const ms = mb < 8 ? median(() => all(src).ms) : all(src).ms;
+    // The median of three at every size: one run decides nothing, so a pause in one of them (a collection, a loaded runner) does not fail the row.
+    // Each sample reads its own text (one and two spaces at the end, which do not change the shape): a text read again is found in the caches the
+    // scan keeps by text (the bracket index and what hangs off it), so a second read would not time that work.
+    const texts = [src, src + " ", src + "  "];
+    let next = 0;
+    const ms = median(() => all(texts[next++]!).ms);
     const control = all(plain(mb)).ms;
     expect(ms).toBeLessThan(3 * control + 50 * mb);
     if (prev > 0) expect(grows(prev, ms, mb / prevMb)).toBe(true);
     prev = ms;
     prevMb = mb;
   }
-}, 60_000);
+}, 120_000);
 test("many require calls hold from 0.25 to 8 MB and grow with the file", () => {
   const body = (mb: number) => rep(mb, `require("./lib/" + process.platform);\nrequire("./a.js");\n`);
   const small = median(() => all(body(0.25)).ms);
