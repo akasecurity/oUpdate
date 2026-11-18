@@ -6816,6 +6816,10 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
   const inits = new Map<string, string[]>(); // every value a name is given
   const other = new Set<string>(); // names bound any other way: parameter, destructure, loop, import, function, mutation
   const params = new Set<string>();
+  const otherNew = new Set<string>(); // names bound by a parameter list or destructuring only once the strings in it are stepped over
+  let useNew = false;
+  let widenNew = false; // main's: what the reading inside the arguments of a run call finds
+  let widenStr = false; // the second read's own: what only it finds, read at the exit alone, so main's flag and counter stay as they were
   let poison = false;
   const ids = (s: string): string[] => s.match(/[A-Za-z_$][\w$]*(?![\w$])(?!\s*:)/g) ?? []; // an object key is no binding
   const back = (close: number, cap: number): number => {
@@ -6826,6 +6830,31 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
       else if ((ch === "(" || ch === "[" || ch === "{") && --d === 0) return (spent += close - k), k;
     }
     return (spent += cap), -1;
+  };
+  // The same scan back from a closing bracket, with a quoted string on the line stepped over whole: a bracket inside a default value
+  // (`f(n, q = "(")`, `{ x = "{" } = o`) is no opener. The scan above stops at it, one bracket too late. Its work is counted apart (`xs2`),
+  // never in `spent`: the budget stops of main stay where they were. Once `xs2` is over the budget the scan is not run, and the result is main's.
+  let xs2 = 0;
+  const backStr = (close: number, cap: number): number => {
+    let d = 0;
+    for (let k = close; k >= 0 && close - k < cap; k--) {
+      if (xs2 > budget) return -1;
+      xs2++;
+      const ch = text[k]!;
+      if (ch === '"' || ch === "'") {
+        let j = k - 1;
+        for (; j >= 0 && close - j < cap && text[j] !== "\n"; j--) {
+          xs2++;
+          if (text[j] !== ch) continue;
+          let b = j;
+          while (b > 0 && text[b - 1] === "\\") (b--, xs2++);
+          if ((j - b) % 2 === 0) break;
+        }
+        if (j >= 0 && text[j] === ch && text[j] !== "\n") k = j;
+      } else if (ch === ")" || ch === "]" || ch === "}") d++;
+      else if ((ch === "(" || ch === "[" || ch === "{") && --d === 0) return k;
+    }
+    return -1;
   };
   const NEXT = /\s*(?=[+.?:&|])/y;
   for (const m of text.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\+|\|\||\?\?|&&)?=(?![=>])/g)) {
@@ -6874,9 +6903,16 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
       const close = m.index ?? 0;
       const k = back(close, 2000);
       if (spent > budget) return true;
-      if (k < 0) poison = true;
-      else if (m[0][0] === ")" && /\b(?:if|while|for|switch|with)\s*$/.test(text.slice(Math.max(0, k - 12), k))) continue;
-      else for (const n of ids(text.slice(k, close))) (other.add(n), m[0][0] === ")" && params.add(n));
+      // An opener found earlier once the strings are stepped over binds its names too, in `otherNew`: the scan below reads every call once as main
+      // does (with `other`) and, when `otherNew` holds a name, once more with it. A widening that only the second read gives is kept to the end, so
+      // the stops main reaches later in the scan (its budget) are still reached. Only the opener above adds parameters: `params` lets a load of one
+      // bare name through, and it has no scope.
+      const ks = k >= 0 && /["']/.test(text.slice(k, close)) ? backStr(close, 2000) : -1;
+      for (const kk of ks >= 0 && ks < k ? [k, ks] : [k]) {
+        if (kk < 0) poison = true;
+        else if (m[0][0] === ")" && /\b(?:if|while|for|switch|with)\s*$/.test(text.slice(Math.max(0, kk - 12), kk))) continue;
+        else for (const n of ids(text.slice(kk, close))) kk === k ? (other.add(n), m[0][0] === ")" && params.add(n)) : otherNew.add(n);
+      }
     }
   }
   // Run functions renamed or held by a name (`{ execSync: run }`, `import { exec as run }`, `const run = cp.execSync`, `promisify(cp.exec)`).
@@ -6914,7 +6950,7 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
         let r = seen.get(p);
         if (r === undefined) {
           const list = inits.get(p);
-          if (seen.size >= 200 || poison || other.has(p) || !list) return false;
+          if (seen.size >= 200 || poison || other.has(p) || (useNew && otherNew.has(p)) || !list) return false;
           seen.set(p, false);
           prog.push(p);
           r = list.every((x) => ok(x, d + 1));
@@ -7047,12 +7083,11 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
   // A call read inside the arguments of a run call (main steps over them) reads names on a copy of `seen`: ok() caches a name by name alone, not by
   // depth, so a name first read here at one depth would answer a later read after the run call at a deeper depth, where main reads it first.
   const runOpen = new Set<number>();
+  let xs = 0;
   // What is read inside the arguments of a run call is read only by this scan (main steps over it). Its work is counted apart (`xs`), never in
   // `spent`: the budget stops of main stay where they were. What it finds, or the budget it passes, widens late (`widenNew`): an early return would
   // skip the scans after it that main reaches, and a file those scans fault on would be released.
-  let widenNew = false;
-  let xs = 0;
-  const visit = (segs: string[], dotted: boolean, paren: number): boolean => {
+  const visitRead = (segs: string[], dotted: boolean, paren: number): boolean => {
     if (!runOpen.size) return visitCore(segs, dotted, paren);
     if (widenNew) return false;
     if (spent + xs > budget) {
@@ -7071,6 +7106,25 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
     }
     // The work of main and the work inside the run calls together past the budget: the release before this one widened there.
     if (spent + xs > budget) widenNew = true;
+    return false;
+  };
+  const visit = (segs: string[], dotted: boolean, paren: number): boolean => {
+    if (visitRead(segs, dotted, paren)) return true;
+    if (!otherNew.size || widenStr || xs2 > budget) return false;
+    // The second read, with the names of `otherNew` bound, on its own memo: its steps are counted in `xs2` (never in `spent` or `xs`), and it sets
+    // `widenStr`, not `widenNew`, so the arguments of the run calls after it are read as without it.
+    const s0 = spent;
+    const saved = seen;
+    seen = new Map();
+    useNew = true;
+    try {
+      if (visitCore(segs, dotted, paren)) widenStr = true;
+    } finally {
+      useNew = false;
+      seen = saved;
+      xs2 += spent - s0;
+      spent = s0;
+    }
     return false;
   };
   const TOK = /["'`{}()[\]/]|(?<![\w$])[A-Za-z_$][\w$]*/g;
@@ -7159,7 +7213,7 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
   }
   // The work of main and the work inside run calls, taken together, past the budget: checked at the exit too, where either kind may have grown
   // after the last read inside a run call.
-  late.all = widenNew || spent + xs > budget;
+  late.all = widenNew || widenStr || spent + xs > budget;
   return spent > budget;
 }
 
