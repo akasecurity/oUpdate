@@ -27,6 +27,8 @@ export interface InstallView {
   // The files the stage pass reached that the main reading did not: compared as the self-run and backslash readings are (selfReached).
   stageOnly?: string[];
   arMissing?: string[];
+  // The files an npm-run-all --npm-path value names: a changed one holds, and they are in no reach comparison.
+  npmFiles?: string[];
   gypFiles: string[];
   missing: string[];
   scripts: Record<string, string>;
@@ -184,6 +186,9 @@ interface Ctx {
   escBinsRead?: Set<string>;
   escRun?: Map<string, string>;
   widenDone?: Set<string>;
+  // The files a --npm-path value names (a record of its own), and whether one widened to every file.
+  npmFiles?: Set<string>;
+  npmWidened?: boolean;
   filesLog?: Set<string>;
   escMarks?: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> };
   selfFiles?: Set<string>;
@@ -12627,7 +12632,51 @@ function selfDirFlag(ctx: Ctx, bin: "yarn" | "pnpm" | "bun", argv: string[], j: 
   return 0;
 }
 
+// npm-run-all sets the npm path from the word --npm-path and the word after it, whatever that word is (`--` and a dash-prefixed word too),
+// and runs that file as npm. --npm-path=x is only a config value there; it is read too. The file only has to count as a read file, so a
+// text change to it is a change the release shows. Nothing is scanned: no scanned mark, no literals, no budget and no hold from a scan,
+// so every later command sees the state it had before (a cd already reads the folder it moves to). The files go to a record of their
+// own (ctx.npmFiles, carried as `npmFiles`): the prepass holds a change of their bytes, and never folds them into a reach comparison,
+// so they neither mask a retarget of main nor make one (every other record kind is read by some other path). A value that leaves the
+// package, is unresolved or is a glob names every file once, however many flags and commands there are, and takes no widenDone key.
+function noteNpmPaths(ctx: Ctx, argv: string[], i: number): void {
+  const values: string[] = [];
+  for (let j = i; j < argv.length; j++) {
+    const w = argv[j]!;
+    if (w === "--") break;
+    if (w === "--npm-path") {
+      if (argv[j + 1] !== undefined) values.push(argv[++j]!);
+    } else if (w.startsWith("--npm-path=")) values.push(w.slice("--npm-path=".length));
+  }
+  // A gyp command as the caller keeps its own file set (gypFiles) that the scope does not take back: base reads nothing there, so nothing is read.
+  if (values.length === 0 || ctx.fromGyp) return;
+  const rec = (ctx.npmFiles ??= new Set<string>());
+  // Every file but the root manifest (read on its own path), inert folders included; a nested manifest is a file like any other.
+  const widen = () => {
+    if (ctx.npmWidened) return;
+    ctx.npmWidened = true;
+    for (const [logical, key] of ctx.logical) if (!isManifest(logical) || logical.includes("/")) rec.add(key);
+  };
+  for (const value of values) {
+    if (!value || value.includes(UNRESOLVED) || /[*?[$~\\]/.test(value) || value.startsWith("/") || /^[A-Za-z]:/.test(value)) {
+      widen();
+      continue;
+    }
+    const logical = normalize(value);
+    const rel = logical ? joinDir("", logical) : undefined;
+    if (rel === undefined || rel === "") {
+      widen();
+      continue;
+    }
+    // The root manifest is read on its own path: naming it must not make every version bump hold.
+    if (isManifest(rel) && !rel.includes("/")) continue;
+    const key = ctx.logical.get(rel);
+    if (key !== undefined) rec.add(key);
+  }
+}
+
 function dispatchRuns(ctx: Ctx, argv: string[], i: number): void {
+  noteNpmPaths(ctx, argv, i);
   for (let j = i; j < argv.length; j++) {
     if (ctx.hold) return;
     const word = argv[j]!;
@@ -14962,6 +15011,7 @@ function finish(ctx: Ctx, manifest: string, gyp: string | undefined, hook: boole
     arAll: [...(ctx.arRec?.files ?? [])].sort(),
     stageAll: [...(ctx.stageFiles ?? [])].sort(),
     stageOnly: [...(ctx.stageFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
+    npmFiles: [...(ctx.npmFiles ?? [])].sort(),
     gypFiles: [...ctx.gypFiles].sort(),
     missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? []), ...(ctx.escMissing ?? []), ...(ctx.arRec?.missing ?? [])])].sort(),
     selfMissing: [...(ctx.selfMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
@@ -15447,6 +15497,7 @@ function installViewBackslash(files: FileMap): InstallView {
     arAll: merge(v.arAll ?? [], w.arAll ?? []),
     stageAll: merge(v.stageAll ?? [], w.stageAll ?? []),
     stageOnly: onlyFiles(v.stageOnly, w.stageOnly),
+    npmFiles: merge(v.npmFiles ?? [], w.npmFiles ?? []),
     arMissing: onlyMissing(v.arMissing, w.arMissing),
     arScripts: Object.fromEntries(Object.entries({ ...w.arScripts, ...v.arScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
     escScripts: Object.fromEntries(Object.entries({ ...w.escScripts, ...v.escScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
