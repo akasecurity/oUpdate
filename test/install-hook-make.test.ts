@@ -23,7 +23,6 @@ describe("make in a body that is not split into commands is still read", () => {
     `${P} < /dev/null`,
     `echo hi > log; ${P}`,
     `echo a\\ b; ${P}`,
-    `echo a(b); ${P}`,
     `(${P})`,
     `${P} | tee log`,
     `${P} &`,
@@ -59,6 +58,13 @@ describe("make in a body that is not split into commands is still read", () => {
       expect(details(f, [])).toEqual([]);
     });
   }
+  // Accepted over-hold (OUP-309): the syntax error `echo a(b)` leaves a stage `b`, which reads as a tool, so the twin is no longer quiet.
+  test("`echo a(b); make -C sub`: the payload is read; accepted over-hold, the twin holds (stage `b` widens); an unchanged package is quiet", () => {
+    const f = `echo a(b); ${P}`;
+    expect(details(f)).toContain("file sub/x.js");
+    expect(details(f.replace(/make -C sub/, "echo ok")).length).toBeGreaterThan(0);
+    expect(details(f, [])).toEqual([]);
+  });
   test("make with no -C reads every changed file", () => {
     expect(details("make > build.log", ["Makefile"])).toContain("file Makefile");
   });

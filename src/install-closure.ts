@@ -6,6 +6,8 @@ import { gypCommands, starMatch, STAR_KEY_MAX, STAR_PATTERN_MAX, STAR_TEXT_MAX, 
 
 export interface InstallView {
   hold?: string;
+  // every cap the two readings stopped on (hold is the first)
+  holds?: string[];
   manifest: string;
   files: string[];
   // The files only a self-run read (a runner that runs the package itself) reached.
@@ -17,6 +19,13 @@ export interface InstallView {
   escMissing?: string[];
   // The same for what only the bare `((` widening reached (a third kind: it must not mask a retarget the backslash reading shows).
   arOnly?: string[];
+  // Every file the bare-line and stage reads (records of their own) reached, those the main read reached too: a widening of the main read puts
+  // every file on both sides in `files`, and a main the stage read reaches by name (`node . | cat`) moved between two of them shows here.
+  arAll?: string[];
+  // The files the stage pass reached, compared apart from every other read.
+  stageAll?: string[];
+  // The files the stage pass reached that the main reading did not: compared as the self-run and backslash readings are (selfReached).
+  stageOnly?: string[];
   arMissing?: string[];
   gypFiles: string[];
   missing: string[];
@@ -92,7 +101,34 @@ interface LookupSets {
   ranSh: Set<string>;
   binsRead: Set<string>;
 }
+// A command as the reading was given it, with the context it was read in (the place and the script switches), so a replay reads it the same way.
+interface LineOrigin {
+  cmd: string;
+  cwd: string;
+  ignoreHooks?: boolean;
+  noEnvIgnore?: boolean;
+}
 interface Ctx {
+  // A stage of an unsplit line is being read as a bare command (dispatchPlain).
+  stageRead?: boolean;
+  // This is the context of the stage pass (runStageJobs).
+  stagePass?: boolean;
+  // reQuote gave a word the legacy single-quote form (set there, taken by the next dispatch); legacyText counts the dispatches in flight whose text holds it.
+  legacyQ?: boolean;
+  legacyText?: number;
+  // the last command dispatched as written, and the one that led to the legacy-form text being read
+  plainCmd?: LineOrigin;
+  legacyOrigin?: LineOrigin;
+  originsQueued?: Set<LineOrigin>;
+  // The root manifest as parsed by noteRootMain.
+  rootManifest?: { json: ReturnType<typeof parseJson> };
+  // The stages of unsplit lines already read (dispatchPlain), by place, reading kind and words.
+  stagesRead?: Set<string>;
+  // The unsplit lines the reading met, for the stage pass that runs after the reading (runStageJobs), and the maker of its context.
+  stageJobs?: Map<string, { text: string; cwd: string; ignoreHooks?: boolean; noEnvIgnore?: boolean }>;
+  freshStage?: () => Ctx;
+  // The files the stage pass reached (finish).
+  stageFiles?: Set<string>;
   hold?: string;
   noEnvIgnore?: boolean; // inside a wrapper other than env: a leading assignment is a command word, not the environment
   ignoreHooks?: boolean; // --ignore-scripts or npm_config_ignore_scripts: no pre/post script runs, and no lifecycle script of pack/version/it
@@ -10492,7 +10528,8 @@ function nodeFile(ctx: Ctx, base: string): string | undefined {
 function noteRootMain(ctx: Ctx): void {
   if (ctx.hold || !ctx.rootRuns) return;
   const manifest = ctx.logical.get("package.json");
-  const pj = manifest ? parseJson(ctx.bytes.get(manifest)) : undefined;
+  // Parsed once per scan: a hook of thousands of `node .` stages would parse a large manifest for each.
+  const pj = manifest ? (ctx.rootManifest ??= { json: parseJson(ctx.bytes.get(manifest)) }).json : undefined;
   let rel = "";
   if (pj && typeof pj.main === "string") {
     const m = normalize(pj.main);
@@ -10543,7 +10580,8 @@ function noteHookArg(ctx: Ctx, token: string, afterCd = false): void {
 // manifests, so every non-root package.json joins the surface on every widen (tests/ and docs/ included, and
 // the files under their folders). The root manifest is read on its own path.
 function movedInto(ctx: Ctx, logical: string): boolean {
-  for (const dir of ctx.movedDirs) if (logical.startsWith(`${dir}/`)) return true;
+  // Each folder of the path is looked up (a hook of thousands of stages names thousands of directories: a walk over them per widen is quadratic).
+  for (let k = logical.indexOf("/"); k >= 0; k = logical.indexOf("/", k + 1)) if (ctx.movedDirs.has(logical.slice(0, k))) return true;
   return false;
 }
 
@@ -10581,6 +10619,8 @@ function widenAll(ctx: Ctx): void {
 
 // A resolved file is the entry, and its own scan closes what it names.
 // No resolved file still widens to every non-inert file.
+const SHELL_KEYWORD = /^(?:if|then|else|elif|fi|do|done|while|until|for|in|case|esac|select|function|time)$/;
+const STAGE_FILTERS = /^(?:cat|tee|grep|egrep|fgrep|rg|sort|uniq|head|tail|wc|cut|tr|echo|printf|ls|true|false|jq|tar|curl|wget|sed|awk|xargs|less|more|column|paste|tac|nl|fold|rev|base64|md5sum|shasum|sha256sum|date|sleep|read|test|\[)$/;
 function closeUnknownRunner(ctx: Ctx, argv: string[], i: number): void {
   let resolved = false;
   const head = argv[i - 1] ?? "";
@@ -10597,7 +10637,21 @@ function closeUnknownRunner(ctx: Ctx, argv: string[], i: number): void {
     const key = findKey(ctx, logical);
     if (key && !isManifest(key)) resolved = true;
   }
-  if (!resolved) widenAll(ctx);
+  // A stage of an unsplit line that is some other tool (cat, tee, python3, grep: no named file of the package, no package runner) widens
+  // nothing: reading each as a bare unknown command would hold every pipeline. A package runner's stage keeps the bare widening.
+  // The plain filters of a pipe (cat, tee, grep, sort, jq...) and the plain commands (rm, mkdir, cp...) widen nothing when the stage is just
+  // that command. Every other stage keeps
+  // the bare reader's widening: an interpreter, a build tool, a wrapper around a runner or a script.
+  // A stage that is a shell keyword or `break`/`continue`/`shift` runs nothing (`fi`, `done`).
+  const debris = SHELL_KEYWORD.test(head) || /^(?:break|continue|shift)$/.test(head);
+  // A launcher word (`nice`, `env V=1`, `exec`, `nohup`) in front of a plain tool leaves the stage that tool: `env gulp` still widens.
+  let eff = head;
+  if (STAGE_PREFIX.test(head)) {
+    const k = argv.slice(i).findIndex((w) => !w.startsWith("-") && !/^[0-9]+$/.test(w) && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+    eff = k < 0 ? "" : argv[i + k]!;
+  }
+  const otherTool = ctx.stageRead === true && !head.includes("/") && (STAGE_FILTERS.test(runnerName(binName(eff))) || plainCommand(eff) || debris);
+  if (!resolved && !otherTool) widenAll(ctx);
 }
 
 function evalCode(ctx: Ctx, code: string): void {
@@ -10669,7 +10723,7 @@ function noteUnparsedMake(ctx: Ctx, text: string): void {
     }
     if (h < argv.length && (/^g?make$/.test(binName(argv[h]!)) || /^["']?\$\{?(?:MAKE|GMAKE)\b/.test(argv[h]!)) && ctx.depth < DEPTH) {
       ctx.depth++;
-      dispatch(ctx, argv.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      dispatch(ctx, argv.map((a) => reQuote(ctx, a)).join(" "));
       ctx.depth--;
     }
   }
@@ -10918,9 +10972,10 @@ function stageCommand(words: string[], assigns?: string[]): string[] {
 // it. The stages are cut apart by the shell reader (quotes, comments, heredoc bodies and redirect operands are not stages),
 // and a stage that starts with a script runner and holds no expansion the scan could not resolve is dispatched on its own:
 // `npm run evil | cat`, `(npm run evil)`, `f() { npm run evil; }; f`, `FOO=1 npm run evil | cat`, `sh -c 'npm run evil' | cat`.
-function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
+function dispatchScriptStages(ctx: Ctx, text: string, depth = 0, unsplit = false): void {
   if (ctx.hold || ctx.depth >= DEPTH || depth > 4) return;
-  const { stages } = shellStages(text);
+  // A line continuation (backslash, newline) joins the words around it, as the shell does: the stage reader would keep the newline in a word.
+  const { stages } = shellStages(unsplit ? text.replace(/\\\r?\n/g, "") : text);
   for (const stage of stages) {
     if (ctx.hold) return;
     if (stage.some((w) => w.sub || w.v)) continue;
@@ -10931,10 +10986,20 @@ function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
     if (!ws.length) continue;
     const ignoring = envIgnore(assigns);
     const bin = binName(ws[0]!);
+    // The stage as written (assignments and launchers kept): a bare command is read from its own words, which is what the plain read gets.
+    const asWritten = stage.map((w) => w.t);
+    // `eval 'node .'` runs its text as a line.
+    if (unsplit && bin === "eval") {
+      if (ws.length > 1) dispatchScriptStages(ctx, ws.slice(1).join(" "), depth + 1, unsplit);
+      // and keeps the widening the bare `eval` has
+      dispatchPlain(ctx, asWritten, ignoring);
+      continue;
+    }
     // A shell given a script text runs its commands like a line.
     if (SHELL_NAME.test(bin)) {
       const c = ws.findIndex((w) => /^-[A-Za-z]*c[A-Za-z]*$/.test(w));
-      if (c >= 0 && ws[c + 1] !== undefined) dispatchScriptStages(ctx, ws[c + 1]!, depth + 1);
+      if (c >= 0 && ws[c + 1] !== undefined) dispatchScriptStages(ctx, ws[c + 1]!, depth + 1, unsplit);
+      else if (unsplit) dispatchPlain(ctx, asWritten, ignoring);
       continue;
     }
     // `xargs npm run` runs the runner on what is piped in.
@@ -10949,6 +11014,7 @@ function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
           widenAll(ctx);
         } else dispatchRunner(ctx, inner, envIgnore([...assigns, ...innerAssigns]));
       }
+      if (unsplit) dispatchPlain(ctx, asWritten, ignoring);
       continue;
     }
     // `bunx run-s evil`, `npx --yes run-s evil`, `pnpm dlx run-s evil`: the scripts are followed, and the stage is still read
@@ -10956,20 +11022,58 @@ function dispatchScriptStages(ctx: Ctx, text: string, depth = 0): void {
     const runsAt = /^(?:npx|bunx|pnpx|yarn|yarnpkg|pnpm|bun)$/.test(runnerName(bin)) ? runsProgramAt(ws, 1, runnerName(bin), (n) => typeof ctx.raw[n] === "string") : -1;
     if (runsAt >= 0) dispatchRunner(ctx, ws.slice(runsAt), ignoring);
     // `npx run-s evil`, `npm exec -- run-s evil`
-    let run = ws;
+    let run: string[] | undefined = ws;
     if (bin === "npx" || (bin === "npm" && /^(?:exec|x)$/.test(ws[1] ?? ""))) {
       const k = ws.findIndex((w, j) => j > (bin === "npx" ? 0 : 1) && !w.startsWith("-"));
-      if (k < 0) continue;
-      run = ws.slice(k);
+      run = k < 0 ? undefined : ws.slice(k);
     }
-    if (!SCRIPT_RUNNERS.has(binName(run[0]!))) continue;
-    dispatchRunner(ctx, run, ignoring);
+    let readOnly = false;
+    if (run && SCRIPT_RUNNERS.has(binName(run[0]!))) readOnly = dispatchRunner(ctx, run, ignoring);
+    // A stage of a line that did not split is also read through the reader a bare command goes through (the whole stage, as written),
+    // so it reaches what the bare command reaches, by construction: a line with a pipe reads the same files as without.
+    if (unsplit && !readOnly) dispatchPlain(ctx, asWritten, ignoring);
   }
 }
 
-function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
+// A word handed back to dispatch() as text. On the stage pass a word with a single quote is double-quoted (`$`, backtick, `"` and backslash escaped
+// inside): the single-quote form `'a'\\''b'` holds a backslash that the backslash-taking reading takes as a word character and then misreads, so a
+// stage such as `FOO=1 node -e "require('./lib/ok.js')" | cat` widened the whole package. The reading of the parent keeps its form.
+function reQuote(ctx: Ctx, w: string): string {
+  if (ctx.stagePass && w.includes("'")) return '"' + w.replace(/[$`"\\]/g, "\\$&") + '"';
+  if (w.includes("'")) ctx.legacyQ = true;
+  return "'" + w.replace(/'/g, "'\\''") + "'";
+}
+function dispatchPlain(ctx: Ctx, ws: string[], envIg?: boolean): void {
+  if (ctx.hold) return;
+  // The same stage in the same place is read once: a line is read by readParts and again as part of its body, and a hook
+  // of thousands of `node . | cat` lines would read each stage every time.
+  const key = `${ctx.cwd}\0${(envIg ?? ctx.ignoreHooks) ? "i" : "n"}\0${ws.join("\0")}`;
+  const done = (ctx.stagesRead ??= new Set());
+  if (done.has(key)) return;
+  done.add(key);
+  // A word with a single quote is double-quoted, with `$`, backtick, `"` and backslash escaped: the single-quote form `'a'\\''b'` holds a backslash,
+  // which the backslash-taking reading takes as a word character and then misreads (a node -e body with a quote in it widened the whole package).
+  const quote = (w: string): string => {
+    if (!/[\s'"\\]/.test(w)) return w;
+    if (w.includes("'")) return '"' + w.replace(/[$`"\\]/g, "\\$&") + '"';
+    return "'" + w + "'";
+  };
+  const quoted = ws.map(quote);
+  if (envIg !== undefined) ctx.ignoreHooks = envIg;
+  const savedStage = ctx.stageRead;
+  ctx.stageRead = true;
+  ctx.depth++;
+  try {
+    dispatch(ctx, quoted.join(" "));
+  } finally {
+    ctx.depth--;
+    ctx.stageRead = savedStage;
+  }
+}
+
+/** true: the command runs nothing of the package by its subcommand (`npm ls`, `npm --version`): the caller reads it no further. */
+function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): boolean {
   const bin = binName(ws[0]!);
-  const quoted = ws.map((w) => (/[\s'"\\]/.test(w) ? "'" + w.replace(/'/g, "'\\''") + "'" : w));
   let npmSub: string | undefined;
   let npmRest: string[] = [];
   // Only npm has this flag; a flag beats the env, and the last of either wins.
@@ -11001,39 +11105,44 @@ function dispatchRunner(ctx: Ctx, ws: string[], envIg?: boolean): void {
       }
       npmSub = sub;
       npmRest = subAt >= 0 ? ws.slice(subAt + 1) : [];
-      if (version) return;
+      if (version) return true;
       if (sub !== undefined && NPM_READ_ONLY.has(sub)) {
         // An unknown flag may have taken the read-only word as its value: a script runner after it still runs.
         const k = args.indexOf(sub);
-        if (!(unsure && args.slice(k + 1, k + 2).some((w) => RUN_SUB.has(w) || STAGE_SCRIPT_WORDS.has(w)))) return;
+        if (!(unsure && args.slice(k + 1, k + 2).some((w) => RUN_SUB.has(w) || STAGE_SCRIPT_WORDS.has(w)))) return true;
       }
     }
     // Only a stage that names a script to run: `npm ls`, `yarn install` and the like run no script of this package.
     // Only the parsed subcommand names lifecycle scripts (`npm run build pack` runs build): and --ignore-scripts switches them off.
     const life = bin === "npm" && npmSub !== undefined ? NPM_LIFECYCLE[npmSub] : undefined;
     if (life) {
-      if (!npmLifecycleApplies(npmSub!, npmRest)) return;
+      if (!npmLifecycleApplies(npmSub!, npmRest)) return true;
       ctx.depth++;
       if (ignore) for (const name of NPM_RUNS_NAMED[npmSub!] ?? []) runNamed(ctx, name, true);
       else for (const name of life) runScript(ctx, name, true);
       ctx.depth--;
-      return;
+      return true;
     }
     const sub = args.find((w) => RUN_SUB.has(w) || STAGE_SCRIPT_WORDS.has(w) || (bin !== "npm" && typeof ctx.raw[w] === "string"));
-    if (sub === undefined) return;
+    if (sub === undefined) return false;
   }
   ctx.depth++;
   const savedIgnore = ctx.ignoreHooks;
   if (setIg !== undefined) ctx.ignoreHooks = setIg;
-  dispatch(ctx, quoted.join(" "));
+  // Quoted here, right before the dispatch that takes the legacy mark reQuote sets (an early return above would leave it dangling).
+  dispatch(ctx, ws.map((w) => (/[\s'"\\]/.test(w) ? reQuote(ctx, w) : w)).join(" "));
   ctx.ignoreHooks = savedIgnore;
   ctx.depth--;
+  return true;
 }
 
 // A body that does not read whole is read one logical line at a time, as the shell runs it: the commands of a line
 // that reads are scanned; a line that does not read is noted like an unreadable body, and the commands of it that
 // hold no expansion the scan cannot resolve are still scanned (`make -C sub && echo $(date)`).
-function noteUnreadable(ctx: Ctx, text: string): void {
+// `unsplit`: the text did not split into commands (a pipe, a redirect, a subshell). Its commands are read as on the parent (above), and each
+// stage is read as a bare command in a pass that only ADDS: queued here, run after the whole reading on a context of its own (runStageJobs).
+// A text that did split was read command by command already.
+function noteUnreadable(ctx: Ctx, text: string, unsplit = false): void {
   dispatchScriptStages(ctx, text);
   // The text was not split, so a `cd` or a workspace flag inside a redirect, pipe or subshell may be moving a
   // run to another package. A body that stays in place (`node safe.js > out`) is not widened.
@@ -11045,6 +11154,43 @@ function noteUnreadable(ctx: Ctx, text: string): void {
   }
   noteUnparsedCompile(ctx, text);
   noteUnparsedMake(ctx, text);
+  // The stage pass is queued, not run here: it runs after the whole reading, on a context of its own (runStageJobs).
+  // A text read out of a legacy-form re-quote is misread: the command that led to it is queued in its place.
+  // The replay keeps the context the command was read in, not the one of the nested reading that met the legacy form.
+  const job = ctx.legacyText ? ctx.legacyOrigin : { cmd: text, cwd: ctx.cwd, ignoreHooks: ctx.ignoreHooks, noEnvIgnore: ctx.noEnvIgnore };
+  // An origin replayed once is not keyed again for every nested line that meets it (the key holds the whole command).
+  const seenOrigin = ctx.legacyText && job !== undefined ? (ctx.originsQueued ??= new Set()) : undefined;
+  if (seenOrigin && job !== undefined && seenOrigin.has(job)) return;
+  if (unsplit && !ctx.hold && ctx.freshStage && job !== undefined) {
+    seenOrigin?.add(job);
+    const key = `${job.cwd}\0${job.ignoreHooks ? "i" : "n"}${job.noEnvIgnore ? "w" : "e"}\0${job.cmd}`;
+    const jobs = (ctx.stageJobs ??= new Map());
+    if (!jobs.has(key)) jobs.set(key, { text: job.cmd, cwd: job.cwd, ignoreHooks: job.ignoreHooks, noEnvIgnore: job.noEnvIgnore });
+  }
+}
+
+// The stage pass of the unsplit lines of a reading, run once the reading (its backslash re-read, its widenings, every record) is finished,
+// on a context built again from the package's inputs alone (its bytes, bins, scripts, config): its records, marks, widening and hold are its
+// own, so it cannot change what the reading read, marked or widened, and nothing the reading did can hide from it what a stage reaches.
+// It adds the files it reached (compared apart, as stageAll) and a hold it met.
+function runStageJobs(ctx: Ctx): void {
+  const jobs = ctx.stageJobs;
+  const make = ctx.freshStage;
+  ctx.stageJobs = undefined;
+  if (!jobs || !make || ctx.hold) return;
+  const sc = make();
+  sc.stagePass = true;
+  for (const job of jobs.values()) {
+    sc.cwd = job.cwd;
+    sc.ignoreHooks = job.ignoreHooks;
+    sc.noEnvIgnore = job.noEnvIgnore;
+    dispatchScriptStages(sc, job.text, 0, true);
+    if (sc.hold) {
+      ctx.hold = sc.hold;
+      return;
+    }
+  }
+  ctx.stageFiles = new Set([...sc.files, ...(sc.selfFiles ?? []), ...(sc.escFiles ?? [])]);
 }
 
 // The command word of a command (after variable assignments) holds an expansion that could not be resolved.
@@ -11991,7 +12137,7 @@ function readParts(ctx: Ctx, body: string, old = false): void {
       }
     } else if (loose !== null) unreadableUnresolved(ctx, loose, line, carry);
     if (ctx.hold) return;
-    if (lines.length > 1) noteUnreadable(ctx, line); // a body of one line is noted whole by the caller
+    if (lines.length > 1) noteUnreadable(ctx, line, !(cmds && ctx.depth < DEPTH)); // a body of one line is noted whole by the caller
   }
 }
 
@@ -12039,7 +12185,7 @@ function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
   const escaped = splitEscaped;
   if (!cmds) {
     readParts(ctx, body);
-    noteUnreadable(ctx, sub);
+    noteUnreadable(ctx, sub, true);
     return;
   }
   if (ctx.hold) return;
@@ -12050,7 +12196,7 @@ function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
   let cwd1 = cwd0;
   if (escaped) {
     readParts(ctx, body, true);
-    if (!ctx.hold) noteUnreadable(ctx, sub);
+    if (!ctx.hold) noteUnreadable(ctx, sub, true);
     if (ctx.hold) return;
     cwd1 = ctx.cwd;
     ctx.cwd = cwd0;
@@ -12085,7 +12231,23 @@ function distinctScripts(ctx: Ctx): number {
   return n;
 }
 
+// A script body is read from the manifest as written, whatever text led to it: the legacy-form mark of the text that named it does not reach its lines.
 function runScript(ctx: Ctx, name: string, optional: boolean): void {
+  const saved = ctx.legacyText;
+  const savedPlain = ctx.plainCmd;
+  const savedOrigin = ctx.legacyOrigin;
+  ctx.legacyText = 0;
+  ctx.plainCmd = undefined;
+  ctx.legacyOrigin = undefined;
+  try {
+    runScriptText(ctx, name, optional);
+  } finally {
+    ctx.legacyText = saved;
+    ctx.plainCmd = savedPlain;
+    ctx.legacyOrigin = savedOrigin;
+  }
+}
+function runScriptText(ctx: Ctx, name: string, optional: boolean): void {
   if (ctx.hold) return;
   if (ctx.seen.has(name) || (ctx.ignoreHooks && ctx.seenNoHooks.has(name))) return;
   const raw = ctx.raw[name];
@@ -12643,7 +12805,7 @@ function npmExec(ctx: Ctx, argv: string[], from: number, ex: number): void {
   }
   // The command word is a file the run executes, so it is read itself, inert path or not.
   if (k < argv.length && localEntry(argv[k]!)) closeUnknownRunner(ctx, argv, k);
-  const inner = argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
+  const inner = argv.slice(k).map((a) => reQuote(ctx, a)).join(" ");
   if (ctx.depth >= DEPTH) {
     ctx.widenInert = true;
     widenAll(ctx);
@@ -13966,7 +14128,27 @@ function runNamed(ctx: Ctx, name: string, ignoring: boolean): void {
   ctx.ignoreHooks = saved;
 }
 
+// A text re-built by the reading of the parent from words with a quote holds the legacy form `'a'\\''b'`, which a body read out of it misreads (an `env sh -c "node -e \"require('./x')\""`
+// body reaches the stage pass with a stray backslash). Such a text is read as before, but a line unsplit inside it does not queue its own stage job from the misread text: the
+// command that led to it (as the reading was given it, in the form it was written) is queued instead, and the stage pass reads that command's shell bodies as written.
 function dispatch(ctx: Ctx, cmd: string): void {
+  const legacy = ctx.legacyQ === true;
+  ctx.legacyQ = false;
+  const savedPlain = ctx.plainCmd;
+  const savedOrigin = ctx.legacyOrigin;
+  if (legacy) {
+    if (!ctx.legacyText) ctx.legacyOrigin = savedPlain;
+    ctx.legacyText = (ctx.legacyText ?? 0) + 1;
+  } else if (!ctx.legacyText) ctx.plainCmd = { cmd, cwd: ctx.cwd, ignoreHooks: ctx.ignoreHooks, noEnvIgnore: ctx.noEnvIgnore };
+  try {
+    dispatchText(ctx, cmd);
+  } finally {
+    if (legacy) ctx.legacyText = (ctx.legacyText ?? 1) - 1;
+    ctx.plainCmd = savedPlain;
+    ctx.legacyOrigin = savedOrigin;
+  }
+}
+function dispatchText(ctx: Ctx, cmd: string): void {
   if (ctx.hold) return;
   const argv = words(cmd);
   let i = 0;
@@ -13991,7 +14173,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     if (j < argv.length) {
       const savedIgnore = ctx.ignoreHooks;
       if (ignoring !== undefined && !ctx.noEnvIgnore && binName(argv[j]!) === "npm") ctx.ignoreHooks = ignoring;
-      dispatch(ctx, argv.slice(j).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      dispatch(ctx, argv.slice(j).map((a) => reQuote(ctx, a)).join(" "));
       ctx.ignoreHooks = savedIgnore;
     }
     if (!ctx.hold) fail(ctx, "unresolved: env");
@@ -14020,7 +14202,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
         // A function body runs when the function is called: a cd in it does not move the rest of the line.
         const cwd = ctx.cwd;
         ctx.depth++;
-        dispatch(ctx, rest.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+        dispatch(ctx, rest.map((a) => reQuote(ctx, a)).join(" "));
         ctx.depth--;
         ctx.cwd = cwd;
       }
@@ -14142,7 +14324,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
         if (wrapperLookup(cur, w)) look = true;
         else if (Object.hasOwn(WRAPPER_VALUE_OPTS, cur) && WRAPPER_VALUE_OPTS[cur]!.has(w)) o++;
       }
-      const run = () => dispatch(ctx, inner.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      const run = () => dispatch(ctx, inner.map((a) => reQuote(ctx, a)).join(" "));
       if (look) underLookup(ctx, run);
       else run();
       ctx.noEnvIgnore = savedNoEnv;
@@ -14156,7 +14338,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     const k = argv.findIndex((a, q) => q >= i && RUNNERS.has(runnerName(a.replace(/^\\+/, ""))));
     if (k >= 0) {
       ctx.depth++;
-      dispatch(ctx, argv.slice(k).map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      dispatch(ctx, argv.slice(k).map((a) => reQuote(ctx, a)).join(" "));
       ctx.depth--;
     }
   }
@@ -14247,7 +14429,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
       ctx.depth++;
       const savedIgnore = ctx.ignoreHooks;
       ctx.ignoreHooks = flagIgnore(argv.slice(i, end)) ?? savedIgnore; // the flag is dropped from the line, not its meaning
-      for (const rest of [keepNext, dropNext]) dispatch(ctx, ["npm", ...rest].map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+      for (const rest of [keepNext, dropNext]) dispatch(ctx, ["npm", ...rest].map((a) => reQuote(ctx, a)).join(" "));
       ctx.ignoreHooks = savedIgnore;
       ctx.depth--;
       return;
@@ -14323,7 +14505,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
         if (n > 0 && ctx.depth < DEPTH && argv.length <= 200) {
           const cwd = ctx.cwd;
           ctx.depth++;
-          dispatch(ctx, [...argv.slice(i - 1, j), ...argv.slice(j + n)].map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" "));
+          dispatch(ctx, [...argv.slice(i - 1, j), ...argv.slice(j + n)].map((a) => reQuote(ctx, a)).join(" "));
           ctx.depth--;
           ctx.cwd = cwd;
         }
@@ -14424,7 +14606,7 @@ function dispatch(ctx: Ctx, cmd: string): void {
     for (const sh of shells) {
       if (ctx.depth < DEPTH) {
         ctx.depth++;
-        dispatch(ctx, `'${sh.replace(/'/g, "'\\''")}'`);
+        dispatch(ctx, reQuote(ctx, sh));
         ctx.depth--;
       } else {
         ctx.widenInert = true;
@@ -14768,13 +14950,18 @@ function walkStrings(v: unknown, fn: (s: string) => void): void {
 }
 
 function finish(ctx: Ctx, manifest: string, gyp: string | undefined, hook: boolean, binStamp: string): InstallView {
+  runStageJobs(ctx);
+  const arFiles = new Set([...(ctx.arRec?.files ?? []), ...(ctx.stageFiles ?? [])]);
   return {
     hold: ctx.hold,
     manifest,
-    files: [...new Set([...ctx.files, ...(ctx.selfFiles ?? []), ...(ctx.escFiles ?? []), ...(ctx.arRec?.files ?? [])])].sort(),
+    files: [...new Set([...ctx.files, ...(ctx.selfFiles ?? []), ...(ctx.escFiles ?? []), ...arFiles])].sort(),
     selfOnly: [...(ctx.selfFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     escOnly: [...(ctx.escFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     arOnly: [...(ctx.arRec?.files ?? [])].filter((k) => !ctx.files.has(k)).sort(),
+    arAll: [...(ctx.arRec?.files ?? [])].sort(),
+    stageAll: [...(ctx.stageFiles ?? [])].sort(),
+    stageOnly: [...(ctx.stageFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     gypFiles: [...ctx.gypFiles].sort(),
     missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? []), ...(ctx.escMissing ?? []), ...(ctx.arRec?.missing ?? [])])].sort(),
     selfMissing: [...(ctx.selfMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
@@ -14888,7 +15075,7 @@ function readOwnBin(ctx: Ctx, target: string, selfRun = false): void {
         return;
       }
       // The shebang's own words run too: its assignments (NODE_OPTIONS=...) and the interpreter's options (--require x, -e code).
-      const q = (w: string) => `'${w.replace(/'/g, "'\\''")}'`;
+      const q = (w: string) => reQuote(ctx, w);
       const pre = words && at >= 0 ? [...words.slice(0, at), "node", ...words.slice(at + 1)] : ["node"];
       ctx.depth++;
       dispatch(ctx, [...pre, target].map(q).join(" "));
@@ -15242,11 +15429,13 @@ function installViewBackslash(files: FileMap): InstallView {
     const real = new Set([...a.filter((k) => !aOnly.has(k)), ...b.filter((k) => !bOnly.has(k))]);
     return (self: string[] | undefined, other: string[] | undefined) => merge(self ?? [], other ?? []).filter((k) => !real.has(k));
   };
-  const onlyFiles = only(v.files, v.selfOnly, v.escOnly, v.arOnly, w.files, w.selfOnly, w.escOnly, w.arOnly);
+  const onlyFiles = only(v.files, v.selfOnly, v.escOnly, [...(v.arOnly ?? []), ...(v.stageOnly ?? [])], w.files, w.selfOnly, w.escOnly, [...(w.arOnly ?? []), ...(w.stageOnly ?? [])]);
   const onlyMissing = only(v.missing, v.selfMissing, v.escMissing, v.arMissing, w.missing, w.selfMissing, w.escMissing, w.arMissing);
   return {
     ...v,
     hold: v.hold ?? w.hold,
+    // both readings' caps: the first alone would shadow the other's
+    holds: [...new Set([v.hold, w.hold].filter((h): h is string => !!h))],
     files: merge(v.files, w.files),
     selfOnly: onlyFiles(v.selfOnly, w.selfOnly),
     gypFiles: merge(v.gypFiles, w.gypFiles),
@@ -15255,6 +15444,9 @@ function installViewBackslash(files: FileMap): InstallView {
     escOnly: onlyFiles(v.escOnly, w.escOnly),
     escMissing: onlyMissing(v.escMissing, w.escMissing),
     arOnly: onlyFiles(v.arOnly, w.arOnly),
+    arAll: merge(v.arAll ?? [], w.arAll ?? []),
+    stageAll: merge(v.stageAll ?? [], w.stageAll ?? []),
+    stageOnly: onlyFiles(v.stageOnly, w.stageOnly),
     arMissing: onlyMissing(v.arMissing, w.arMissing),
     arScripts: Object.fromEntries(Object.entries({ ...w.arScripts, ...v.arScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
     escScripts: Object.fromEntries(Object.entries({ ...w.escScripts, ...v.escScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
@@ -15269,7 +15461,7 @@ function installViewCore(files: FileMap): InstallView {
   if (!indexed.manifest && !indexed.gyp && !indexed.foldClash) {
     return { manifest, files: [], gypFiles: [], missing: [], scripts: {}, hook: false, binStamp: "" };
   }
-  const ctx: Ctx = {
+  const makeCtx = (): Ctx => ({
     files: new Set(),
     gypFiles: new Set(),
     missing: new Set(),
@@ -15297,7 +15489,8 @@ function installViewCore(files: FileMap): InstallView {
     raw: {},
     config: {},
     bytes: files,
-  };
+  });
+  const ctx = makeCtx();
   const pj = indexed.manifest ? parseJson(files.get(indexed.manifest)) : {};
   if (indexed.manifest && !pj) {
     fail(ctx, "unresolved: manifest");
@@ -15315,6 +15508,14 @@ function installViewCore(files: FileMap): InstallView {
   ctx.raw = scripts && typeof scripts === "object" && !Array.isArray(scripts) ? (scripts as Record<string, unknown>) : {};
   const config = root.config;
   ctx.config = config && typeof config === "object" && !Array.isArray(config) ? (config as Record<string, unknown>) : {};
+  ctx.freshStage = () => {
+    const c = makeCtx();
+    c.bins = ctx.bins;
+    c.self = ctx.self;
+    c.raw = ctx.raw;
+    c.config = ctx.config;
+    return c;
+  };
   walkStrings(root.exports, (s) => {
     if (ctx.hold || !s.includes("*")) return;
     if (s.length > STAR_PATTERN_MAX) fail(ctx, "pattern length");
