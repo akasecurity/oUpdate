@@ -1,25 +1,30 @@
 // The release-check step of the host apply run (run.ts drives it): each unfinished check's owner restarts, its
 // pre-check gate and its verdict, and the owner jobs a check requires.
 
-import type { Exec } from "./exec.ts";
+import { groupAlive, type Exec } from "./exec.ts";
 import { basename, dirname, join } from "node:path";
 import { kegHolders, lsofMaps, type Holder, type KegEnv } from "./kegs.ts";
 import { matchOwner, ownerDir, ownerFiles, ownerOps, parsePrint, type OwnerWaiterEnv, type QueuedOwner } from "./owner-waiter.ts";
 import { asUser, brewView, resume, findCheck, holdFailed, pendingPath, readHold, runHook, savePending, type PendingCheck } from "./release-checks.ts";
 import { restartUpgraded } from "./restarts.ts";
-import { type RunCtx, last, named } from "./run-ctx.ts";
+import { type RunCtx, last, liveRestartPid, named, ownerArgvKey, ownerArgvs } from "./run-ctx.ts";
 
 /** How long a release check waits for the owner waiter's lock before its check waits for a later run. */
 const LOCK_WAIT_MS = 10 * 60_000;
 
 /** Runs a check waits for its owner (any reason) before it ends with no verdict, notified. */
 const UNRESOLVED_WAIT_RUNS = 3;
+/** Runs in which after may be withheld for a restart process still running as root, each by a fresh helper hanging (the pid is kept for one run only): at this count it runs anyway. */
+const AFTER_WITHHELD_RUNS = 3;
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export async function releaseChecksSection(rt: RunCtx) {
-  const { opts, dryRun, now, host, log, b, x, notify, step, rcEnv, rcPending, mergeOwners, rcStopOff, stoppingNow, afterOwed, expectedKeg, retiredFor, ownerLock, clock, restartOpts, cfg, fs, exec } = rt;
-  if (!rcPending.size) return;
+  const { opts, dryRun, now, host, log, b, x, notify, step, rcEnv, rcPending, mergeOwners, rcStopOff, stoppingNow, afterOwed, expectedKeg, retiredFor, ownerLock, clock, restartOpts, cfg, fs, exec, waiterEnv } = rt;
+  if (!rcPending.size) {
+    await startDeferredWaiter(rt);
+    return;
+  }
   log.push("", "--- release checks ---");
   try {
   for (const p of [...rcPending.values()]) {
@@ -38,6 +43,8 @@ export async function releaseChecksSection(rt: RunCtx) {
     }
     let keep = false;
     let locked = false;
+    /** The pid of a restart process still running as root: no `after`, no lock release, no waiter beside it. */
+    const helperHeld = () => liveRestartPid(restartOpts.helperRunning, p.formula, ownerArgvs(cfg.staleOwners, [...(findCheck(cfg.releaseChecks, f)?.owners ?? []), ...(p.owners ?? []).map((q) => q.label)]));
     const lockPath = ownerFiles(ownerDir(cfg.stateDir)).lock;
     try {
       if (p.ended) {
@@ -164,7 +171,7 @@ export async function releaseChecksSection(rt: RunCtx) {
         restartOwner: async (phase) => {
           const keg = join(p.rack, phase === "new" ? p.from : to);
           const into: string[] = [];
-          if (phase === "restored") await restartUpgraded({ exec: x, exists: fs.exists, spawnDetached: fs.spawnDetached, home: fs.home, uid: fs.uid }, [p.formula], { ...restartOpts, into });
+          if (phase === "restored") await restartUpgraded({ exec: x, restartExec: waiterEnv.exec, exists: fs.exists, spawnDetached: fs.spawnDetached, home: fs.home, uid: fs.uid }, [p.formula], { ...restartOpts, into });
           // The version the owners must run after the restart: every other keg of the formula is stale.
           const expect = join(p.rack, phase === "new" ? to : p.from);
           const jobs = await requiredJobs(rt, f, keg, expect);
@@ -174,7 +181,15 @@ export async function releaseChecksSection(rt: RunCtx) {
             p.owners = all;
             await savePending(rcEnv, p);
           }
-          const o = await ownerJobs(rt, jobs);
+          // The formula's helper (step 2's, or the restored phase's own) is still running as root: an owner restart now would race it.
+          const running = helperHeld();
+          const o = running !== undefined
+            ? { kind: "failed" as const, note: `owner restarts not made: a root restart process (pid ${running}) is still running` }
+            : await ownerJobs(rt, jobs);
+          if ("running" in o && o.running !== undefined && o.argv) {
+            // Kept for the run: no `after`, no other restart of the owners this argv covers, and no owner waiter beside it (the key is no package name).
+            restartOpts.helperRunning?.set(ownerArgvKey(o.argv), o.running);
+          }
           const kind = into.some((s) => s.includes("FAILED")) ? "failed" : o.kind;
           // Whether a process is left on a keg it must leave is the pre-check gate's to see.
           return { kind, note: [...into, o.note].filter(Boolean).join(", ") || "nothing to restart" };
@@ -199,7 +214,29 @@ export async function releaseChecksSection(rt: RunCtx) {
       // A stop under way: the stop task owns after; the record resumes from its last step.
       if (stoppingNow()) log.push(`  release check ${f}: oupdate is stopping — after is left to the stop path, the record to the next run`);
       else {
-        const owed = !!rc.after && afterOwed(p);
+        const wanted = !!rc.after && afterOwed(p);
+        // A restart process still running as root: after is not run now, and the record (with its owed after) stays for a later run,
+        // counted on the record; at AFTER_WITHHELD_RUNS it runs anyway.
+        const holdPid = wanted ? helperHeld() : undefined;
+        let withheld = false;
+        if (holdPid !== undefined) {
+          p.afterWithheld = (p.afterWithheld ?? 0) + 1;
+          const n = p.afterWithheld;
+          // On the record at once: a stop during the notice below must not lose this run's count.
+          await savePending(rcEnv, p);
+          if (n < AFTER_WITHHELD_RUNS) {
+            withheld = true;
+            log.push(`  release check ${f}: after not run — a restart process (pid ${holdPid}) is still running as root, after stays owed to a later run (${n}/${AFTER_WITHHELD_RUNS})`);
+            b.failed.push(`release-check-after:${f}`);
+            b.flagged = true;
+            await notify(`⚠️ <b>${host} release check ${f}: after withheld (${n}/${AFTER_WITHHELD_RUNS})</b>\nA restart process (pid ${holdPid}) is still running as root: the host stays out of rotation for this run only. The hold lasts one run: the pid is kept for this run, not saved, so the next run runs after unless a fresh helper hangs again. The count reaches ${AFTER_WITHHELD_RUNS} only if a fresh helper hangs ${AFTER_WITHHELD_RUNS} runs in a row, and after then runs anyway.\nLog: ${cfg.logFile ?? "-"}`);
+          } else {
+            log.push(`  release check ${f}: after run anyway — withheld ${n} runs while a restart process (pid ${holdPid}) is still running as root`);
+            b.flagged = true;
+            await notify(`⚠️ <b>${host} release check ${f}: after runs anyway after ${n} withheld runs</b>\nA restart process (pid ${holdPid}) is still running as root.\nLog: ${cfg.logFile ?? "-"}`);
+          }
+        }
+        const owed = wanted && !withheld;
         if (owed) {
           let ran = false;
           try {
@@ -222,7 +259,7 @@ export async function releaseChecksSection(rt: RunCtx) {
             p.beforeRan = false;
           }
           // The record goes only once the check is over and no after is owed.
-          if (p.ended && !(owed && !p.afterRan)) {
+          if (p.ended && !(owed && !p.afterRan) && !withheld) {
             await fs.remove(pendingPath(cfg.stateDir, f));
             rcPending.delete(f);
           } else await savePending(rcEnv, p);
@@ -243,25 +280,35 @@ export async function releaseChecksSection(rt: RunCtx) {
     }
   }
   } finally {
-    // Other owners queued while a release check was unfinished: their waiter starts now.
-    if (rt.st.waiterDeferred && !dryRun) {
-      const labels = rt.st.waiterDeferred;
-      rt.st.waiterDeferred = "";
-      if (!opts.ownerWaiterArgv?.length) log.push(`  owner restart waiter FAILED: no waiter command here, ${labels} queued but not started`);
-      else {
-        try {
-          const pid = await fs.spawnDetached(opts.ownerWaiterArgv, join(cfg.stateDir, "restart.log"));
-          log.push(`  owner restart waiter started (pid ${pid}) for ${labels}, after the release checks`);
-        } catch (e) {
-          log.push(`  owner restart waiter FAILED to start (${e instanceof Error ? e.message : String(e)}), ${labels} queued`);
-        }
+    await startDeferredWaiter(rt);
+  }
+}
+
+/**
+ * Other owners queued while a release check was unfinished, or while a restart helper still ran as root: their
+ * waiter starts now, unless a restart process is still running as root (they stay queued for a later run).
+ */
+async function startDeferredWaiter(rt: RunCtx) {
+  const { opts, dryRun, log, restartOpts, cfg, fs } = rt;
+  const heldPid = [...(restartOpts.helperRunning?.values() ?? [])].find((pid) => groupAlive(pid));
+  if (rt.st.waiterDeferred && !dryRun && heldPid !== undefined) log.push(`  owner restart waiter not started: a restart helper (pid ${heldPid}) is still running as root, ${rt.st.waiterDeferred} stay queued for a later run`);
+  else if (rt.st.waiterDeferred && !dryRun) {
+    const labels = rt.st.waiterDeferred;
+    rt.st.waiterDeferred = "";
+    if (!opts.ownerWaiterArgv?.length) log.push(`  owner restart waiter FAILED: no waiter command here, ${labels} queued but not started`);
+    else {
+      try {
+        const pid = await fs.spawnDetached(opts.ownerWaiterArgv, join(cfg.stateDir, "restart.log"));
+        log.push(`  owner restart waiter started (pid ${pid}) for ${labels}, after the release checks`);
+      } catch (e) {
+        log.push(`  owner restart waiter FAILED to start (${e instanceof Error ? e.message : String(e)}), ${labels} queued`);
       }
     }
   }
 }
 
 /** A release check's owner jobs, inline, as the waiter does them: failed, busy, or ok. */
-async function ownerJobs(rt: RunCtx, jobs: QueuedOwner[]): Promise<{ kind: "ok" | "busy" | "failed"; note: string }> {
+async function ownerJobs(rt: RunCtx, jobs: QueuedOwner[]): Promise<{ kind: "ok" | "busy" | "failed"; note: string; running?: number; argv?: string[] }> {
   const { now, r, log, clock, waiterEnv, cfg, fs, exec } = rt;
   if (!jobs.length) return { kind: "ok", note: "" };
   const env: OwnerWaiterEnv = {
@@ -272,6 +319,8 @@ async function ownerJobs(rt: RunCtx, jobs: QueuedOwner[]): Promise<{ kind: "ok" 
   };
   const ops = ownerOps(env, { dir: ownerDir(cfg.stateDir), lsof: cfg.lsof, staleOwners: cfg.staleOwners ?? [], keepUnmatched: true });
   let kind: "ok" | "busy" | "failed" = "ok";
+  let running: number | undefined;
+  let runningArgv: string[] | undefined;
   const lines: string[] = [];
   for (const q of jobs) {
     // Restarted even when an earlier run's restart of it failed: the check needs it restarted.
@@ -282,8 +331,19 @@ async function ownerJobs(rt: RunCtx, jobs: QueuedOwner[]): Promise<{ kind: "ok" 
     // An owner gone before its restart was never restarted: a failure, never ok.
     if (r.kind === "failed" || r.kind === "skipped" || r.kind === "not-running") kind = "failed";
     else if (r.kind === "busy" && kind === "ok") kind = "busy";
+    // A restart process still running as root: no other owner restarts beside it (a glob entry runs the same argv for each label).
+    if (r.running !== undefined) {
+      running = r.running;
+      runningArgv = r.argv;
+      const rest = jobs.slice(jobs.indexOf(q) + 1);
+      for (const n of rest) {
+        log.push(`  release check owner: not tried: ${n.label} (the restart process of ${q.label}, pid ${r.running}, is still running)`);
+        lines.push(`not tried: ${n.label}`);
+      }
+      break;
+    }
   }
-  return { kind, note: lines.join(", ") };
+  return { kind, note: lines.join(", "), ...(running !== undefined ? { running, ...(runningArgv ? { argv: runningArgv } : {}) } : {}) };
 }
 
 /**

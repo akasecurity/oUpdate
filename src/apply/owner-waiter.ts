@@ -31,7 +31,7 @@
 import { closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import { dlopen, FFIType } from "bun:ffi";
 import { dirname, join } from "node:path";
-import { LOG_ONLY, type Exec } from "./exec.ts";
+import { LOG_ONLY, stillRunningAfterTimeout, type Exec } from "./exec.ts";
 import { kegHolders } from "./holders.ts";
 
 export interface StaleOwner {
@@ -300,12 +300,17 @@ export async function runOwnerWaiter(env: OwnerWaiterEnv, o: OwnerWaiterOptions)
 }
 
 /** How one job ended: restarted, already on the new keg, not running, held busy, failed, or skipped (its label already failed). */
+const RUNNING = "restart process still running: ";
 export type OwnerJobKind = "restarted" | "already" | "not-running" | "busy" | "failed" | "skipped";
 
 export interface OwnerJobResult {
   kind: OwnerJobKind;
   /** The outcome line; none for a skipped job. */
   line?: string;
+  /** The restart process (a root helper under sudo) was still running after its bound: its pid. Nothing else restarts after it. */
+  running?: number;
+  /** With running: the argv of the restart process (the staleOwners entry's), for the run's hold on every check it covers. */
+  argv?: string[];
 }
 
 /**
@@ -397,7 +402,11 @@ export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
     // An argv restart runs as given (its own sudo, if any), in place of launchctl.
     if (Array.isArray(q.restart)) {
       const r = await env.exec(q.restart, { timeoutMs: q.restartTimeoutSec !== undefined ? q.restartTimeoutSec * 1000 : (o.restartTimeoutMs ?? 120_000), ...LOG_ONLY });
-      return r.timedOut ? "restart timed out" : r.rc !== 0 ? `restart rc ${r.rc}` : undefined;
+      if (r.timedOut || r.truncated) {
+        const alive = await stillRunningAfterTimeout(r, env.sleep);
+        return alive !== undefined ? `${RUNNING}${alive}` : "restart timed out";
+      }
+      return r.rc !== 0 ? `restart rc ${r.rc}` : undefined;
     }
     const sudo = q.target.startsWith("system/") ? ["sudo", "-n"] : [];
     if (typeof q.restart === "object") {
@@ -463,6 +472,11 @@ export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
     const why = (await restartJob(q)) ?? (await health(q, pid));
     if (why === undefined) return { kind: "restarted", line: `restarted ${shown(q.label)}` };
     await markFailed(q.label);
+    // A restart that outlived its bound (a root helper that ignored SIGTERM, which oupdate cannot signal) may still finish: held, not a plain failure.
+    if (why.startsWith(RUNNING)) {
+      const left = why.slice(RUNNING.length);
+      return { kind: "failed", running: Number(left), ...(Array.isArray(q.restart) ? { argv: q.restart } : {}), line: `held: ${shown(q.label)} restart still running after its time bound (pid ${left}) — oupdate cannot signal a root process, FAILED and not retried: once \`ps -g ${left}\` shows it gone, check the job: ${rollback(q, plist)}` };
+    }
     return { kind: "failed", line: `FAILED: ${shown(q.label)} not healthy after restart (${why}) — ${rollback(q, plist)}` };
   };
   return { job, markFailed, derive };

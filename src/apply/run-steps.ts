@@ -2,7 +2,7 @@
 // update, the post-upgrade checks and the closing summary and notice.
 
 import { basename, dirname, join } from "node:path";
-import { isStopping as execStopping, LOG_ONLY } from "./exec.ts";
+import { groupAlive, isStopping as execStopping, LOG_ONLY } from "./exec.ts";
 import { staleKegCheck } from "./kegs.ts";
 import { MAS_NOT_CHECKED } from "./summary-text.ts";
 import { npmSection, type NpmRun } from "./npm.ts";
@@ -13,7 +13,7 @@ import { assembleBrew } from "./run-brew.ts";
 import { PhaseTimeout, uniq, type ApplyResult, type RunCtx } from "./run-ctx.ts";
 
 export async function staleKegStep(rt: RunCtx): Promise<void> {
-  const { opts, dryRun, host, log, b, notify, cfg, fs, rcEnv, rcPending, rcJobs, mergeOwners, kegEnv, recoverTo, releaseRacks, ownerHanded, waiterEnv, track, st } = rt;
+  const { opts, dryRun, host, log, b, notify, cfg, fs, rcEnv, rcPending, rcJobs, mergeOwners, kegEnv, recoverTo, releaseRacks, ownerHanded, helperRunning, waiterEnv, track, st } = rt;
   if (b.noBrew) return;
   // This run's upgrades whose installed version was not read right after them.
   if (!dryRun) for (const p of rcPending.values()) await recoverTo(p, "the upgrade installed");
@@ -35,6 +35,7 @@ export async function staleKegStep(rt: RunCtx): Promise<void> {
     staleKegUnlisted: cfg.staleKegUnlisted,
     jobRunners: cfg.jobRunners ?? opts.jobRunners ?? [],
     ownerHanded,
+    helperRunning,
     detachedLog: join(cfg.stateDir, "restart.log"),
     staleOwners: cfg.staleOwners,
     ownerFailed: st.owners.failed,
@@ -56,11 +57,13 @@ export async function staleKegStep(rt: RunCtx): Promise<void> {
       const inline = new Set(mine.map((q) => q.target));
       const rest = items.filter((q) => !retired(q.keg) && !inline.has(q.target));
       // A waiter started now would hold its lock through the release checks' inline restarts.
-      const later = rest.length && [...rcPending.values()].some((p) => !p.ended);
+      // Nor beside a restart process still running as root (a helper past its bound): its start waits for the end of the release checks section, which checks again.
+      const rootRunning = [...(helperRunning?.values() ?? [])].some((pid) => groupAlive(pid));
+      const later = rest.length && ([...rcPending.values()].some((p) => !p.ended) || rootRunning);
       let n = await queueOwners(fs, ownerDir(cfg.stateDir), rest, later ? undefined : opts.ownerWaiterArgv, join(cfg.stateDir, "restart.log"));
       if (later && !n.includes("could not queue")) {
         st.waiterDeferred = rest.map((q) => q.label).join(" ");
-        n = `owner restart waiter starts after the release checks for ${st.waiterDeferred}`;
+        n = `owner restart waiter deferred to the end of the release checks for ${st.waiterDeferred} (started there unless a restart process is still running as root)`;
       }
       return [n, mine.length ? `owner restart for the release check: ${mine.map((q) => q.label).join(" ")}` : ""].filter(Boolean).join(", ");
     },

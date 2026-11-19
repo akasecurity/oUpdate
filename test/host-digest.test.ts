@@ -29,6 +29,15 @@ describe("renderDigest", () => {
     expect(alone).toContain("- example/tap/head-tool: held, the reviewer cannot read the formula");
   });
 
+  test("the deferred owner waiter note of a live run is a known fragment, never `unrecognized`", () => {
+    // Mutant caught: `waiter deferred` missing from the PARTS table (the fragment fell through to unrecognized under Waiting on you).
+    const note = "owner restart waiter deferred to the end of the release checks for org.example.serving (started there unless a restart process is still running as root)";
+    const log = `=== studio summary ===\n  brew: upgraded: good-a; STALE KEG: bun(waiting for idle restart 1) still running from a deleted keg; ${note}\n  npm:  nothing to update\n`;
+    const text = renderDigest({ host: "studio", date: "2026-11-03", log });
+    expect(text).not.toContain("unrecognized");
+    expect(text).toContain("owner restart waiter deferred to the end of the release checks for org.example.serving");
+  });
+
   test("a quiet run says nothing needs you", () => {
     const log = "=== studio summary ===\n  brew: nothing to update\n  npm:  nothing to update\n";
     const text = renderDigest({ host: "studio", date: "2026-11-03", log });

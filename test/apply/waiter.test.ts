@@ -313,6 +313,8 @@ describe("owner waiter", () => {
     /** An argv restart (its first word /usr/bin/sudo or /opt/restart.test/restart): rc, a timeout; it restarts restartTarget. */
     argvRc?: number;
     argvTimedOut?: boolean;
+    /** With argvTimedOut: the pid of the timed-out command's group, as realExec reports it. */
+    argvTimedOutPid?: number;
     /** The argv restart throws (the waiter killed mid-restart). */
     argvThrows?: boolean;
     /** Records the timeoutMs each hang call was given. */
@@ -374,7 +376,7 @@ describe("owner waiter", () => {
       if (line.includes("launchctl bootstrap")) return { rc: s.bootstrapRc ?? 0, out: "", err: "" };
       if (argv[0] === "/usr/bin/sudo" || argv[0] === "/opt/restart.test/restart") {
         if (s.argvThrows) throw new Error("waiter killed mid-restart");
-        if (s.argvTimedOut) return { rc: 143, out: "", err: "", timedOut: true };
+        if (s.argvTimedOut) return { rc: 143, out: "", err: "", timedOut: true, ...(s.argvTimedOutPid !== undefined ? { pid: s.argvTimedOutPid } : {}) };
         if ((s.argvRc ?? 0) === 0) kicked.add(s.restartTarget ?? "gui/501/org.example.svc");
         return { rc: s.argvRc ?? 0, out: "", err: "" };
       }
@@ -693,6 +695,31 @@ describe("owner waiter", () => {
     });
     test("a timeout: FAILED", async () => {
       const w = owEnv({ argvTimedOut: true, restartTarget: T });
+      w.queue(host());
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(w.outcome()[0]).toStartWith("FAILED: org.example.host not healthy after restart (restart timed out)");
+    });
+    test("a timeout whose process is still running (a root helper that ignored SIGTERM): a distinct held line naming the pid, still marked failed and the queue stopped", async () => {
+      // A real process in its own group stands for the root helper oupdate could not kill.
+      const child = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+      try {
+        const w = owEnv({ argvTimedOut: true, argvTimedOutPid: child.pid, restartTarget: T });
+        w.queue(host());
+        expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+        expect(w.outcome()[0]).toStartWith(`held: org.example.host restart still running after its time bound (pid ${child.pid})`);
+        expect(w.outcome()[0]).toContain("FAILED");
+        expect(w.outcome()[0]).toEndWith(`rollback: ${JSON.stringify(ARGV)}`);
+        expect(w.files.get(`${Q}/failed`)).toBe("org.example.host\n");
+      } finally {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+    });
+    test("a timeout whose process is gone by the grace: the plain restart timed out FAILED, as before", async () => {
+      const child = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+      child.kill("SIGKILL");
+      await child.exited;
+      const w = owEnv({ argvTimedOut: true, argvTimedOutPid: child.pid, restartTarget: T });
       w.queue(host());
       expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
       expect(w.outcome()[0]).toStartWith("FAILED: org.example.host not healthy after restart (restart timed out)");

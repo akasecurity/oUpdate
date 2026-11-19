@@ -14,7 +14,7 @@
 // is still stale. lsof failing is a reported failure, never "nothing stale".
 
 import { basename, dirname } from "node:path";
-import { isStopping, LSOF_STREAM_BYTES, type Exec } from "./exec.ts";
+import { groupAlive, helperTimeoutLine, isStopping, LOG_ONLY, LSOF_STREAM_BYTES, stillRunningAfterTimeout, type Exec } from "./exec.ts";
 import { kegHolders, type Holder } from "./holders.ts";
 import { matchOwner, parsePrint, type QueuedOwner, type StaleOwner } from "./owner-waiter.ts";
 
@@ -37,6 +37,13 @@ export interface KegEnv {
   selfPid?: number;
   /** Starts a command detached (the labelRestart owner commands); its stderr goes to the file. */
   spawnDetached?(argv: string[], stderrFile: string): Promise<number>;
+  /**
+   * Runs the restart helper: returns its timeout (timedOut) instead of stopping the phase, as the run's `exec` does. Defaults to `exec`.
+   * Without it the helper call would end the brew phase at its bound.
+   */
+  restartExec?: Exec;
+  /** Waits (the grace after a timed-out helper's kill); a real timer by default. */
+  sleep?(ms: number): Promise<void>;
 }
 
 /**
@@ -139,7 +146,7 @@ export interface KegOptions {
   /** Hands a deferred service's stale keg over; returns the note for the summary, if any. Called in a dry run too: it must honour dryRun itself. */
   handoff: (keg: string, service: string) => Promise<string | undefined>;
   /** A narrow root helper that restarts a daemon by package name, for the packages it allows. */
-  restartHelper?: { path: string; packages: string[] };
+  restartHelper?: { path: string; packages: string[]; timeoutSec?: number };
   /** Labels whose restart belongs to their owner, matched literally; checked before the helper and kickstart. */
   labelRestart?: LabelRestart;
   /** A label not in labelRestart: "kickstart" (absent too) restarts it, "report" only names it in the note. */
@@ -150,6 +157,8 @@ export interface KegOptions {
   detachedLog?: string;
   /** Labels the restart step already handed to their owner command this run (label → command name). */
   ownerHanded?: ReadonlyMap<string, string>;
+  /** Packages whose restart helper was still running (as root) after its bound earlier this run (package → pid): never restarted again here. */
+  helperRunning?: Map<string, number>;
   /** Counts the still-stale packages in the stale-keg lane; returns the stuck entries. */
   trackStuck: (still: string[]) => string[];
   /** The caller's log: lines land there as they are made, so a check stopped part-way keeps them. */
@@ -450,6 +459,14 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
   };
   /** Makes the restart; returns how a package on this target is accounted for. */
   const restartOnce = async (pkg: string, label: string, target: string, system: boolean, helper: boolean, pid: string, keg: string): Promise<Outcome> => {
+    // A helper from step 2 still running as root: no second helper, kickstart or owner restart races it.
+    const recorded = o.helperRunning?.get(pkg);
+    // Rechecked: a helper that has exited since step 2 no longer blocks the restart.
+    const running = recorded !== undefined && groupAlive(recorded) ? recorded : undefined;
+    if (running !== undefined) {
+      log.push(`    ${pkg}: its restart helper (pid ${running}) is still running from the restart step — ${target} is not restarted again; once \`ps -g ${running}\` shows it gone, check ${target}`);
+      return { said: "restart helper still running", record: (p) => add(unresolved, `${p}(restart helper pid ${running} still running)`) };
+    }
     // An owner restarted at an idle moment: queued for the waiter, before any other policy.
     const owned = await queueOwner(pkg, label, target, helper, pid, keg);
     if (owned) return owned;
@@ -492,24 +509,39 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
     }
     if (system) {
       let kicked = false;
+      let helperRunning = false;
+      let helperPid = 0;
       if (o.dryRun) {
         log.push(`    dry-run: would kickstart ${target}`);
         kicked = true;
       } else {
         if (helper && o.restartHelper?.packages.includes(pkg) && (await env.exists(o.restartHelper.path))) {
-          if ((await env.exec(["sudo", "-n", o.restartHelper.path, pkg])).rc === 0) {
+          const argv = ["sudo", "-n", o.restartHelper.path, pkg];
+          const hr = await (env.restartExec ?? env.exec)(argv, { ...(o.restartHelper.timeoutSec !== undefined ? { timeoutMs: o.restartHelper.timeoutSec * 1000 } : {}), ...LOG_ONLY });
+          if (hr.timedOut || hr.truncated) log.push(helperTimeoutLine(argv, o.restartHelper.timeoutSec));
+          if (hr.rc === 0 && !hr.timedOut && !hr.truncated) {
             log.push(`    restarted ${target} (via ${basename(o.restartHelper.path)})`);
             kicked = true;
+          } else {
+            // A helper under sudo runs as root: oupdate cannot kill it. While it runs, no second restart (kickstart) races it.
+            const alive = await stillRunningAfterTimeout(hr, env.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))));
+            if (alive !== undefined) {
+              helperRunning = true;
+              helperPid = alive;
+              // Recorded for the rest of the run: a release check and the owner waiter's start see it too.
+              o.helperRunning?.set(pkg, alive);
+              log.push(`    ${basename(o.restartHelper.path)} still running after its time bound (pid ${alive}) — oupdate cannot signal a root process, so ${target} is not restarted again; once \`ps -g ${alive}\` shows it gone, check ${target}`);
+            }
           }
         }
-        if (!kicked && (await env.exec(["sudo", "-n", "launchctl", "kickstart", "-k", target])).rc === 0) {
+        if (!kicked && !helperRunning && (await env.exec(["sudo", "-n", "launchctl", "kickstart", "-k", target])).rc === 0) {
           log.push(`    restarted ${target}`);
           kicked = true;
         }
       }
       if (kicked) return o.dryRun ? nothing("said it would kickstart") : restartedOutcome(target);
-      log.push(`    cannot restart unattended — run: sudo launchctl kickstart -k ${target}`);
-      return { said: "failed to restart", record: (p) => add(unresolved, `${p}(${target})`) };
+      if (!helperRunning) log.push(`    cannot restart unattended — run: sudo launchctl kickstart -k ${target}`);
+      return { said: "failed to restart", record: (p) => add(unresolved, helperRunning ? `${p}(restart helper pid ${helperPid} still running)` : `${p}(${target})`) };
     }
     if (o.dryRun) {
       log.push(`    dry-run: would kickstart ${target}`);

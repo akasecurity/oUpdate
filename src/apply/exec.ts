@@ -10,6 +10,8 @@ export interface ExecResult {
   timedOut?: boolean;
   /** A stream grew past its bound (and the command was not log-only): the command was stopped, out is empty and rc is OVER_BOUND_RC. Never a partial answer. */
   truncated?: true;
+  /** With timedOut or truncated: the pid (and process group) of the command that was signalled, for the caller to see whether it is gone. */
+  pid?: number;
 }
 
 /** The rc of a command stopped for output past its bound: nonzero, so every caller's rc check reads it as a failure. */
@@ -50,7 +52,23 @@ const pidAlive = (pid: number) => {
     return (e as NodeJS.ErrnoException).code === "EPERM";
   }
 };
-const groupAlive = (pid: number) => pidAlive(-pid);
+export const groupAlive = (pid: number) => pidAlive(-pid);
+
+/** The log line for a restart helper that passed its bound (the run's wrapper writes its own TIMEOUT line for the other commands). */
+export const helperTimeoutLine = (argv: string[], timeoutSec: number | undefined) =>
+  `  TIMEOUT after ${timeoutSec !== undefined ? `${timeoutSec * 1000} ms` : "the run's command limit"}: ${argv.join(" ")} — restart helper killed (a root process may not be signalled)`;
+
+/**
+ * After a timeout: the pid of the command's group when it is still running once the kill has had its grace, else
+ * undefined. A command under sudo runs as root, so oupdate's SIGTERM and SIGKILL to it fail (EPERM, counted as
+ * alive here) and a helper that ignores SIGTERM can finish after the timeout was reported.
+ */
+export async function stillRunningAfterTimeout(r: ExecResult, sleep: (ms: number) => Promise<void>): Promise<number | undefined> {
+  // A pid of 1 or less would probe every process (kill -1) or our own group (kill 0): never a command's group.
+  if (!(r.timedOut || r.truncated) || r.pid === undefined || r.pid <= 1) return undefined;
+  await sleep(KILL_GRACE_MS + 500);
+  return groupAlive(r.pid) ? r.pid : undefined;
+}
 
 /** One process: pid, parent, start time and full command line (ps -ww, so the command is never cut short). */
 interface PsRow {
@@ -318,8 +336,8 @@ export const realExec: Exec = async (argv, opts = {}) => {
       // Confirm the exit (bounded: 1 s): the group and each killed pid are gone, so the next brew does not meet their lock.
       for (let i = 0; i < 50 && (groupAlive(pid) || tree.some((t) => pidAlive(t.pid))); i++) await new Promise((r) => setTimeout(r, 20));
     }
-    if (why === "over") return { rc: OVER_BOUND_RC, out: "", err: `output over ${max} bytes: the command was stopped`, truncated: true };
-    return { rc: 124, out: text(out), err: text(err), timedOut: true };
+    if (why === "over") return { rc: OVER_BOUND_RC, out: "", err: `output over ${max} bytes: the command was stopped`, truncated: true, pid };
+    return { rc: 124, out: text(out), err: text(err), timedOut: true, pid };
   }
   live.delete(pid);
   return { rc: closeRc(p.exitCode, p.signalCode as NodeJS.Signals | null), out: text(out), err: text(err) };

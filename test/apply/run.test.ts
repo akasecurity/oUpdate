@@ -5,6 +5,7 @@
 // promise and the summary read back by the host shadow parser.
 import { describe, expect, test } from "bun:test";
 import type { AppNet } from "../../src/apply/appbundle.ts";
+import { KILL_GRACE_MS, realExec, type Exec } from "../../src/apply/exec.ts";
 import { applyHost, type GkOps } from "../../src/apply/run.ts";
 import { parsePrevSummary } from "../../src/host/prev-log.ts";
 import { fakeHost, fakeTypeB, testConfig, type HostScript } from "./host-fixture.ts";
@@ -802,6 +803,91 @@ describe("slice 7 re-review", () => {
     expect(r.brew).toMatch(/^ {2}brew: FAILED: timeout:launchctl-kickstart; upgraded: good-a good-b; restarted: good-a\(sys\)/);
   });
 
+  test("2: a restart helper that runs past its restartHelper.timeoutSec through the real wrapper and real exec is FAILED to restart, not a phase timeout; the run goes on", async () => {
+    // Mutant caught: the helper call sent through the phase-stopping wrapper (PhaseTimeout: "FAILED: timeout:helper.test", cleanup never reached).
+    const HELPER = "/usr/local/sbin/helper.test";
+    const h = fakeHost({
+      formulas: "good-a", verbose: "good-a (1.0) < 1.1", formulaTaps: { "good-a": "homebrew/core" },
+      files: { "/Library/LaunchDaemons/sh.brew.good-a.plist": "", [HELPER]: "" },
+    });
+    const exec: Exec = (argv, o) => (argv.join(" ") === `sudo -n ${HELPER} good-a` ? realExec(["/bin/sh", "-c", "sleep 30"], o) : h.exec(argv, o));
+    const res = await applyHost(testConfig({ restartHelper: { path: HELPER, packages: ["good-a"], timeoutSec: 1 } }), exec, h.fs, { dryRun: false, reviewer: scripted([], "APPROVE\nno attack indicators found").r, typeB: fakeTypeB(0).typeB, now: new Date(2026, 9, 22, 7, 0) });
+    const brew = brewLine(res.summary);
+    expect(brew).not.toContain("timeout:");
+    expect(brew).toContain("good-a(FAILED to restart)");
+    expect(h.calls).toContain("brew cleanup");
+    await new Promise((r) => setTimeout(r, KILL_GRACE_MS + 200));
+  }, 20_000);
+
+  test("the stale-keg step's helper call, past restartHelper.timeoutSec through the real wrapper and real exec, is named in the log, not a phase timeout; the run goes on", async () => {
+    // Mutant caught: restartExec dropped from the kegEnv in run.ts (the stale-keg helper call then ends the brew phase: "FAILED: timeout:helper.test").
+    const HELPER = "/usr/local/sbin/helper.test";
+    const lsof = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngood-a 77 u txt REG 1,4 1 2 /brew/Cellar/good-a/1.0/bin/good-a\n";
+    const h = fakeHost({
+      formulas: "good-a", verbose: "good-a (1.0) < 1.1", formulaTaps: { "good-a": "homebrew/core" }, dirs: ["/brew/Cellar"], lsof: [lsof], ps: { "77": { comm: "good-a", ppid: "1" } },
+      files: { "/Library/LaunchDaemons/sh.brew.good-a.plist": "", [HELPER]: "" },
+    });
+    const listDir = h.fs.listDir;
+    h.fs.listDir = async (d) => (d === "/Library/LaunchDaemons" ? ["sh.brew.good-a.plist"] : listDir(d));
+    // Step 2's helper call (the first) answers at once, so the call that runs past its bound is the stale-keg step's.
+    let helperCalls = 0;
+    const exec: Exec = async (argv, o) => {
+      const line = argv.join(" ");
+      if (line === "launchctl print system/sh.brew.good-a") return { rc: 0, out: "system/sh.brew.good-a = {\n\tstate = running\n\tpid = 77\n}\n", err: "" };
+      return line === `sudo -n ${HELPER} good-a` && ++helperCalls > 1 ? realExec(["/bin/sh", "-c", "sleep 30"], o) : h.exec(argv, o);
+    };
+    const res = await applyHost(testConfig({ npm: null, restartHelper: { path: HELPER, packages: ["good-a"], timeoutSec: 1 } }), exec, h.fs, { dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB(0).typeB, now: new Date(2026, 9, 22, 7, 0) });
+    expect(helperCalls).toBe(2);
+    expect(brewLine(res.summary)).not.toContain("timeout:");
+    expect(res.log).toContain(`  TIMEOUT after 1000 ms: sudo -n ${HELPER} good-a — restart helper killed (a root process may not be signalled)`);
+    expect(h.calls).toContain("brew cleanup");
+  }, 20_000);
+
+  describe("step 2's helper still running as root: the stale-keg step does not restart the same package again", () => {
+    const HELPER = "/usr/local/sbin/helper.test";
+    const lsof = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngood-a 77 u txt REG 1,4 1 2 /brew/Cellar/good-a/1.0/bin/good-a\n";
+    const probe = async (byLaunchdPid: boolean) => {
+      // A live process in its own group stands for the root helper that outlived its bound.
+      const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+      try {
+        const h = fakeHost({
+          formulas: "good-a", verbose: "good-a (1.0) < 1.1", formulaTaps: { "good-a": "homebrew/core" }, dirs: ["/brew/Cellar"], lsof: [lsof], ps: { "77": { comm: "good-a", ppid: "1" } },
+          files: { "/Library/LaunchDaemons/sh.brew.good-a.plist": "", [HELPER]: "" },
+        });
+        const listDir = h.fs.listDir;
+        h.fs.listDir = async (d) => (d === "/Library/LaunchDaemons" ? ["sh.brew.good-a.plist"] : listDir(d));
+        const exec: Exec = async (argv, o) => {
+          const line = argv.join(" ");
+          if (line === `sudo -n ${HELPER} good-a`) {
+            h.calls.push(line);
+            return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+          }
+          if (line === "launchctl print system/sh.brew.good-a" || (byLaunchdPid && line === "launchctl print system")) {
+            const out = line === "launchctl print system" ? "system = {\n\tservices = {\n\t\t      77      - \tsh.brew.good-a\n\t}\n}\n" : "system/sh.brew.good-a = {\n\tstate = running\n\tpid = 77\n}\n";
+            return { rc: 0, out, err: "" };
+          }
+          return h.exec(argv, o);
+        };
+        const res = await applyHost(testConfig({ npm: null, restartHelper: { path: HELPER, packages: ["good-a"] } }), exec, h.fs, { dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB(0).typeB, now: new Date(2026, 9, 22, 7, 0) });
+        return { res, calls: h.calls, pid: child.pid };
+      } finally {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+    };
+    test("the stale daemon found by its launchd pid: no kickstart while the helper runs", async () => {
+      // Mutant caught: helperRunning not carried from step 2 to the stale-keg step (it then ran `sudo -n launchctl kickstart -k system/sh.brew.good-a`).
+      const r = await probe(true);
+      expect(r.calls.filter((c) => c.includes("kickstart") || c.includes(HELPER))).toEqual([`sudo -n ${HELPER} good-a`]);
+      expect(r.res.log.some((l) => l.includes(`its restart helper (pid ${r.pid}) is still running from the restart step`))).toBe(true);
+    }, 20_000);
+    test("the stale daemon found by its plist name: no second helper alongside the first", async () => {
+      // Mutant caught: as above (it then ran the helper a second time).
+      const r = await probe(false);
+      expect(r.calls.filter((c) => c.includes("kickstart") || c.includes(HELPER))).toEqual([`sudo -n ${HELPER} good-a`]);
+    }, 20_000);
+  });
+
   test("2: a stale-keg re-scan timeout keeps the handoff note; a linkage timeout keeps the stale-keg note", async () => {
     // Mutant caught: the handoff note only in staleKegCheck's return value (lost when its re-scan timed out).
     const SVC = { name: "svc", waiter: "/conf.test/svc-waiter.sh", holdFile: "/state.test/svc-hold", quarantineFile: "/state.test/svc-q", outcomeFile: "/state.test/svc-out", restartLog: "/state.test/svc.log" };
@@ -1077,6 +1163,36 @@ describe("stale owners in the run", () => {
     expect(r.summary).toContain("STALE KEG: bun(waiting for idle restart 1) still running from a deleted keg");
     expect(r.summary).toContain("owner restart waiter started (pid 4242) for org.example.serving");
   });
+  for (const hung of [true, false]) {
+    test(`a stale job queued while a restart helper ${hung ? "still runs as root: its waiter is not started beside it" : "returned normally: its waiter is started as before"}`, async () => {
+      // Mutants caught: the waiter spawned straight from the stale-keg step beside a root helper (run-steps.ts); the deferred start run only when release checks are pending.
+      const HELPER = "/usr/local/sbin/helper.test";
+      const child = Bun.spawn(["/bin/sleep", "60"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+      try {
+        const h = fakeHost({
+          formulas: "good-a", verbose: "good-a (1.0) < 1.1", formulaTaps: { "good-a": "homebrew/core" }, dirs: ["/brew/Cellar"], lsof: [lsof], ps: { "77": { comm: "bun", command: "bun serve.ts", ppid: "1" } },
+          files: { "/Library/LaunchDaemons/sh.brew.good-a.plist": "", [HELPER]: "" },
+        });
+        const listDir = h.fs.listDir;
+        h.fs.listDir = async (d) => (d.startsWith(DIR) ? [...h.files.keys()].filter((k) => k.startsWith(`${d}/`)).map((k) => k.slice(d.length + 1)) : listDir(d));
+        const exec: typeof h.exec = async (argv, o) => {
+          const line = argv.join(" ");
+          if (line === "launchctl print gui/501") return { rc: 0, out: gui, err: "" };
+          if (line === `sudo -n ${HELPER} good-a` && hung) return { rc: 143, out: "", err: "", timedOut: true, pid: child.pid };
+          return h.exec(argv, o);
+        };
+        const res = await applyHost(testConfig({ npm: null, restartHelper: { path: HELPER, packages: ["good-a"] }, staleOwners: [{ match: "org.example.serv*", probe: ["/opt/svc.test/idle"] }] }), exec, h.fs, {
+          dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB, ownerWaiterArgv: WAITER,
+        });
+        expect(h.spawned).toEqual(hung ? [] : [WAITER]);
+        expect(h.files.has(`${DIR}/queue/gui%2F501%2Forg.example.serving.json`)).toBe(true);
+        if (hung) expect(res.log.some((l) => l.includes("owner restart waiter not started") && l.includes("still running as root"))).toBe(true);
+      } finally {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
+    }, 20_000);
+  }
   test("no waiter command (not started from the CLI): queued, and the summary says FAILED", async () => {
     const r = await ownerRun({}, { argv: null });
     expect(r.spawned).toEqual([]);

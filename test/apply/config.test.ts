@@ -78,6 +78,12 @@ describe("parseApplyConfig", () => {
     const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [{ match: "org.example.*" }, { match: "org.example.svc", probe: ["/opt/svc.test/idle", "--quiet"], health: "http://127.0.0.1:8080/health" }] }), "hosta");
     expect(c.staleOwners).toEqual([{ match: "org.example.*" }, { match: "org.example.svc", probe: ["/opt/svc.test/idle", "--quiet"], health: "http://127.0.0.1:8080/health" }]);
   });
+  test("restartHelper timeoutSec: a positive integer of at most 2147483, kept", () => {
+    const h = (t: unknown) => cfg({ stateDir: "/s", restartHelper: { path: "/usr/local/sbin/helper.test", packages: ["svc"], timeoutSec: t } });
+    expect(parseApplyConfig(h(30), "hosta").restartHelper?.timeoutSec).toBe(30);
+    expect(() => parseApplyConfig(h(0), "hosta")).toThrow(/restartHelper\.timeoutSec/);
+    expect(() => parseApplyConfig(h(2147484), "hosta")).toThrow(/at most 2147483/);
+  });
   test("staleOwners restartTimeoutSec: a positive integer, kept", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [{ match: "org.x", restartTimeoutSec: 600 }] }), "hosta").staleOwners).toEqual([{ match: "org.x", restartTimeoutSec: 600 }]);
     expect(() => parseApplyConfig(cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restartTimeoutSec: 0 }] }), "hosta")).toThrow(/restartTimeoutSec/);

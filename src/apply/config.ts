@@ -19,6 +19,8 @@ export interface RestartHelper {
   /** Of those, the ones restarted detached after a delay (a restart that would cut this run's own connection). */
   detached?: string[];
   delaySec?: number;
+  /** Bound on one `sudo -n <path> <package>` call (default: the run's command limit, `timeoutMs`; at most 2147483). */
+  timeoutSec?: number;
 }
 
 /** A gated formula: after its upgrade and owner restart, a quality check; a confirmed fail rolls it back and holds the release (release-checks.ts). */
@@ -320,10 +322,10 @@ export function parseApplyConfig(text: string, fallbackHost: string, env: Record
     const h = a.restartHelper;
     const hw = `${w}.restartHelper`;
     if (!isObj(h)) throw new Error(`${hw} must be an object`);
-    for (const k of Object.keys(h)) if (!["path", "packages", "detached", "delaySec"].includes(k)) throw new Error(`${hw}: unknown key ${k}`);
+    for (const k of Object.keys(h)) if (!["path", "packages", "detached", "delaySec", "timeoutSec"].includes(k)) throw new Error(`${hw}: unknown key ${k}`);
     const p = path(h, "path", hw);
     if (!p) throw new Error(`${hw}.path is required`);
-    restartHelper = { path: p, packages: list(h, "packages", hw) ?? [], detached: list(h, "detached", hw), delaySec: posInt(h, "delaySec", hw) };
+    restartHelper = { path: p, packages: list(h, "packages", hw) ?? [], detached: list(h, "detached", hw), delaySec: posInt(h, "delaySec", hw), timeoutSec: posInt(h, "timeoutSec", hw, 2147483) };
   }
   let labelRestart: LabelRestart | undefined;
   if (a.labelRestart !== undefined) {

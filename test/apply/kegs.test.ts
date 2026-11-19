@@ -1,7 +1,7 @@
 // Ported from the previous updater's stale-keg, linkage and relink cases. The label
 // resolution and restart paths had no source tests; the "restart" block below is new.
 import { describe, expect, test } from "bun:test";
-import { killLive, LSOF_STREAM_BYTES, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
+import { killLive, LOG_ONLY, LSOF_STREAM_BYTES, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
 import { trackStuck } from "../../src/apply/stuck.ts";
 import { caskRunning, kegHolders, linkageCheck, lsofMaps, relinkUpgraded, staleKegCheck, type KegEnv, type KegOptions } from "../../src/apply/kegs.ts";
 import type { QueuedOwner } from "../../src/apply/owner-waiter.ts";
@@ -22,6 +22,8 @@ interface Fake {
   rc?: Record<string, number>; // exit code for a command line (default 0)
   out?: Record<string, string>;
   timeout?: readonly string[]; // command lines that time out
+  /** With timeout: the pid of the timed-out command's group, as realExec reports it. */
+  timeoutPid?: number;
   selfPid?: number;
   /** The pid `launchctl print <domain>/<label>` shows for every plist in plists (default "20"); null: none. */
   plistPid?: string | null;
@@ -39,9 +41,13 @@ function fakeEnv(f: Fake) {
       if (pid !== null) runs.set(`launchctl print ${target}`, `${target} = {\n\tstate = running\n\tpid = ${pid}\n}\n`);
     }
   }
-  const exec: Exec = async (argv) => {
+  const timeouts: Record<string, number | undefined> = {};
+  const seen: Record<string, Parameters<Exec>[1]> = {};
+  const exec: Exec = async (argv, eo) => {
     const line = argv.join(" ");
     calls.push(line);
+    timeouts[line] = eo?.timeoutMs;
+    seen[line] = eo;
     if (argv[0]!.endsWith("lsof")) {
       const a = lsof.length > 1 ? lsof.shift()! : lsof[0];
       if (a === undefined) return { rc: 127, out: "", err: "" };
@@ -55,7 +61,7 @@ function fakeEnv(f: Fake) {
     }
     if (line === "brew --cellar") return { rc: 0, out: `${CELLAR}\n`, err: "" };
     if (line === "brew --prefix") return { rc: 0, out: "/brew\n", err: "" };
-    if (f.timeout?.includes(line)) return { rc: 124, out: "", err: "", timedOut: true };
+    if (f.timeout?.includes(line)) return { rc: 124, out: "", err: "", timedOut: true, ...(f.timeoutPid !== undefined ? { pid: f.timeoutPid } : {}) };
     return { rc: f.rc?.[line] ?? 0, out: f.out?.[line] ?? runs.get(line) ?? "", err: "" };
   };
   const dirs = new Set([CELLAR, ...(f.dirs ?? [])]);
@@ -74,8 +80,9 @@ function fakeEnv(f: Fake) {
     uid: 501,
     selfPid: f.selfPid ?? 999999,
     spawnDetached: async (argv, err) => (spawned.push(`${argv.join(" ")} 2>${err}`), 4242),
+    sleep: async () => {},
   };
-  return { env, calls, files, spawned };
+  return { env, calls, files, spawned, timeouts, seen };
 }
 
 function opts(over: Partial<KegOptions> = {}) {
@@ -232,6 +239,114 @@ describe("staleKegCheck: restart", () => {
     expect(calls).toContain("sudo -n /usr/local/sbin/restart-helper redis");
     expect(calls.some((c) => c.includes("launchctl kickstart"))).toBe(false);
     expect(v.log).toContain("    restarted system/sh.brew.redis (via restart-helper)");
+  });
+  test("the restart helper call is bounded by restartHelper.timeoutSec; unset, it carries no bound of its own (the run limit applies)", async () => {
+    const mk = () => fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
+    const a = mk();
+    await staleKegCheck(a.env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] } }).o);
+    expect(a.timeouts["sudo -n /usr/local/sbin/restart-helper redis"]).toBeUndefined();
+    const b = mk();
+    await staleKegCheck(b.env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"], timeoutSec: 30 } }).o);
+    expect(b.timeouts["sudo -n /usr/local/sbin/restart-helper redis"]).toBe(30_000);
+  });
+  test("a helper that timed out and is still running is not followed by a second restart; reported unresolved", async () => {
+    const child = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      // Not restarted, so the re-scan still finds it (the title's "unresolved" is asserted below).
+      const { env, calls } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }, { lsof: [stale("redis"), stale("redis")] }), files: ["/usr/local/sbin/restart-helper"], timeout: ["sudo -n /usr/local/sbin/restart-helper redis"], timeoutPid: child.pid });
+      const running = new Map<string, number>();
+      const { o, notices } = opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] }, helperRunning: running });
+      const v = await staleKegCheck(env, o);
+      // Mutant caught: the pid kept in a local flag only (a release check and the waiter gate never see this helper).
+      expect(running.get("redis")).toBe(child.pid);
+      expect(calls.some((c) => c.includes("launchctl kickstart"))).toBe(false);
+      expect(v.log.join("\n")).toContain(`restart-helper still running after its time bound (pid ${child.pid})`);
+      expect(v.unresolved.size).toBeGreaterThan(0);
+      expect(notices.join("\n")).toContain(`Needs an operator: redis(restart helper pid ${child.pid} still running)`);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  });
+  test("a helper with no timeoutSec that timed out names the run's command limit; one that returns rc 0 yet timed out is not a restart; a passing helper logs no TIMEOUT", async () => {
+    // Mutants caught: the "the run's command limit" text; `&& !hr.timedOut` removed; `if (hr.timedOut)` -> `if (true)`.
+    const HP = "sudo -n /usr/local/sbin/restart-helper redis";
+    const mk = () => fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
+    const h = { restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] } };
+    const timed = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"], timeout: [HP] });
+    const v1 = await staleKegCheck(timed.env, opts(h).o);
+    expect(v1.log).toContain(`  TIMEOUT after the run's command limit: ${HP} — restart helper killed (a root process may not be signalled)`);
+    const a = mk();
+    const real = a.env.exec;
+    const v2 = await staleKegCheck({ ...a.env, exec: async (argv, o) => (argv.join(" ") === HP ? { rc: 0, out: "", err: "", timedOut: true } : real(argv, o)) }, opts(h).o);
+    expect(v2.log.some((l) => l.includes("restarted system/sh.brew.redis (via restart-helper)"))).toBe(false);
+    const ok = mk();
+    const v3 = await staleKegCheck(ok.env, opts(h).o);
+    expect(v3.log.some((l) => l.includes("TIMEOUT after"))).toBe(false);
+  });
+  test("a helper that timed out and is gone by the grace: its timeout is named in the log, then the kickstart fallback as before", async () => {
+    const { env, calls } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"], timeout: ["sudo -n /usr/local/sbin/restart-helper redis"] });
+    const v = await staleKegCheck(env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"], timeoutSec: 30 } }).o);
+    expect(v.log).toContain("  TIMEOUT after 30000 ms: sudo -n /usr/local/sbin/restart-helper redis — restart helper killed (a root process may not be signalled)");
+    expect(calls).toContain("sudo -n launchctl kickstart -k system/sh.brew.redis");
+  });
+  test("the helper call is log-only (its output is never read): a bounded tail, never a failure for a chatty helper", async () => {
+    // Mutant caught: ...LOG_ONLY removed from the helper call.
+    const { env, seen } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
+    await staleKegCheck(env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] } }).o);
+    expect(seen["sudo -n /usr/local/sbin/restart-helper redis"]).toMatchObject(LOG_ONLY);
+  });
+  test("a helper still running (a real process): no operator line telling them to kickstart while it runs", async () => {
+    // Mutant caught: "cannot restart unattended — run: sudo launchctl kickstart" logged while the helper still runs.
+    const child = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      const { env } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"], timeout: ["sudo -n /usr/local/sbin/restart-helper redis"], timeoutPid: child.pid });
+      const v = await staleKegCheck(env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] } }).o);
+      expect(v.log.some((l) => l.includes("cannot restart unattended"))).toBe(false);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  });
+  test("a package whose step-2 helper is still running: no helper, no kickstart, no owner restart; named, unresolved, noticed", async () => {
+    // Mutants caught: helperRunning not read by the stale-keg step; its record `() => {}` (no unresolved mark, no notice).
+    const child = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    try {
+      // Not restarted, so the re-scan still finds it.
+      const { env, calls } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }, { lsof: [stale("redis"), stale("redis")] }), files: ["/usr/local/sbin/restart-helper"] });
+      const { o, notices } = opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] }, helperRunning: new Map([["redis", child.pid]]) });
+      const v = await staleKegCheck(env, o);
+      expect(calls.some((c) => c.includes("restart-helper") || c.includes("kickstart"))).toBe(false);
+      expect(v.log.some((l) => l.includes(`redis: its restart helper (pid ${child.pid}) is still running from the restart step`))).toBe(true);
+      expect(v.note).toContain("redis");
+      expect(notices.join("\n")).toContain(`Needs an operator: redis(restart helper pid ${child.pid} still running)`);
+      expect(v.unresolved.size).toBeGreaterThan(0);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  });
+  test("a step-2 helper that has exited since: not blocking, the stale-keg step restarts as usual and says nothing false", async () => {
+    // Mutant caught: the recorded pid not rechecked (a false "still running" and a restart missed until the next run).
+    const gone = Bun.spawn(["/bin/sleep", "30"], { detached: true, stdio: ["ignore", "ignore", "ignore"] });
+    gone.kill("SIGKILL");
+    await gone.exited;
+    const { env, calls } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
+    const v = await staleKegCheck(env, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] }, helperRunning: new Map([["redis", gone.pid]]) }).o);
+    expect(calls).toContain("sudo -n /usr/local/sbin/restart-helper redis");
+    expect(v.log.some((l) => l.includes("still running from the restart step"))).toBe(false);
+  });
+  test("the helper call goes through restartExec (which returns a timeout), never the phase-stopping exec", async () => {
+    const { env, calls } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
+    const via: string[] = [];
+    const plain = env.exec;
+    const stopping: Exec = async (argv, o) => {
+      if (argv.includes("/usr/local/sbin/restart-helper")) throw new Error("the helper went through the phase-stopping exec");
+      return plain(argv, o);
+    };
+    await staleKegCheck({ ...env, exec: stopping, restartExec: async (argv, o) => (via.push(argv.join(" ")), plain(argv, o)) }, opts({ restartHelper: { path: "/usr/local/sbin/restart-helper", packages: ["redis"] } }).o);
+    expect(via).toEqual(["sudo -n /usr/local/sbin/restart-helper redis"]);
+    expect(calls).toContain("sudo -n /usr/local/sbin/restart-helper redis");
   });
   test("the restart helper is never asked for a package it does not allow", async () => {
     const { env, calls } = fakeEnv({ ...base("redis", { "/Library/LaunchDaemons": ["sh.brew.redis.plist"] }), files: ["/usr/local/sbin/restart-helper"] });
