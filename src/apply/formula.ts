@@ -10,7 +10,7 @@
 import type { Reviewer } from "../review.ts";
 import { chunkedReview, type Caps } from "./chunked.ts";
 import { artifactKind, formulaDeps, formulaUrls, loadsOtherFiles, supportFilesChanged, urlOrigin } from "./formula-gates.ts";
-import { gatherSurface, type Surface } from "./surface.ts";
+import { gatherSurface, gitFailed, type Git, type Surface } from "./surface.ts";
 import { tapIn } from "./taps.ts";
 
 /** The parts of `brew info --json=v2` (formulae[0]) the review reads. */
@@ -33,7 +33,7 @@ export interface FormulaEnv {
   /** `brew --cellar <name>`, or "" when brew cannot say. */
   cellar(name: string): Promise<string>;
   readFile(path: string): Promise<string | undefined>;
-  git(dir: string, args: string[]): Promise<{ rc: number; out: string }>;
+  git: Git;
 }
 
 export interface TapPin {
@@ -170,33 +170,36 @@ export async function formulaReview(env: FormulaEnv, r: Reviewer, a: FormulaRevi
   let oldText = "";
   if (!oldRev) {
     wholeNote = `the install receipt for ${a.oldVer} records no tap revision`;
-  } else if ((await env.git(a.tapDir, ["cat-file", "-e", `${oldRev}^{commit}`])).rc !== 0) {
+  } else if (gitFailed(await env.git(a.tapDir, ["cat-file", "-e", `${oldRev}^{commit}`]))) {
     wholeNote = `the receipt's tap revision ${oldRev.slice(0, 12)} is not in the local tap clone`;
   } else {
-    fdiff = (await env.git(a.tapDir, ["diff", `${oldRev}..${a.head}`, "--", rbPath])).out;
+    const fd = await env.git(a.tapDir, ["diff", `${oldRev}..${a.head}`, "--", rbPath]);
+    if (gitFailed(fd)) return gate(`git could not read the formula diff (rc ${fd.rc}) — manual review`);
+    fdiff = fd.out;
     // The installed text at its revision. A file the tap moved since is read from where it was: the one file of the
     // same name where brew loaded formulas at that revision: Formula/ (any depth) if it existed, else
     // HomebrewFormula/ (any depth), else the tap root. A file anywhere else was never what brew read.
     let shown = await env.git(a.tapDir, ["show", `${oldRev}:${rbPath}`]);
-    if (shown.rc !== 0) {
+    if (gitFailed(shown)) {
       const base = rbPath.split("/").at(-1)!;
       const rev = oldRev.slice(0, 12);
       // NUL-separated (-z lists every path as it is, never quoted), so a path with non-ASCII characters is never dropped.
       const tree = await env.git(a.tapDir, ["ls-tree", "-r", "-z", "--name-only", oldRev]);
       // The revision is there but the installed text is not: never reviewed without it (its url and deps go unchecked).
       // An ordinary hold, counted toward stuck: no installed text was read (see unreadable), and it may persist.
-      if (tree.rc !== 0) return gate(`cannot list the tap at revision ${rev} — manual review`);
+      if (gitFailed(tree)) return gate(`cannot list the tap at revision ${rev} — manual review`);
       const files = tree.out.split("\0").filter(Boolean);
       const dir = ["Formula/", "HomebrewFormula/"].find((d) => files.some((f) => f.startsWith(d)));
       const was = files.filter((f) => (dir ? f.startsWith(dir) && f.endsWith(`/${base}`) : f === base));
       if (was.length !== 1) return gate(`cannot read the installed formula at its tap revision ${rev} (no single ${base} there) — manual review`);
       shown = await env.git(a.tapDir, ["show", `${oldRev}:${was[0]}`]);
-      if (shown.rc !== 0) return gate(`cannot read the installed formula at its tap revision ${rev} (git show of ${was[0]} failed) — manual review`);
+      if (gitFailed(shown)) return gate(`cannot read the installed formula at its tap revision ${rev} (git show of ${was[0]} failed) — manual review`);
     }
     oldText = shown.out;
     if (!fdiff) wholeNote = `the formula file shows no change between ${oldRev.slice(0, 12)} and the current tap checkout`;
     // Every path, a rename's source too (not left to rename detection or the user's diff.renames).
     const names = await env.git(a.tapDir, ["diff", "--no-renames", "--name-only", `${oldRev}..${a.head}`]);
+    if (gitFailed(names)) return gate(`git could not list the changed tap files (rc ${names.rc}) — manual review`);
     const changed = names.out.split("\n").filter(Boolean);
     if (a.upstream) {
       const g = await gatherSurface(env.git, a.tapDir, oldRev, a.head);

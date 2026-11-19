@@ -23,7 +23,7 @@ import { chunkedReview, type Caps } from "./chunked.ts";
 import type { Exec } from "./exec.ts";
 import { realGates } from "./gatekeeper.ts";
 import { VERDICT_CONTRACT } from "./formula.ts";
-import { gatherSurface, type Git } from "./surface.ts";
+import { gatherSurface, gitFailed, type Git, type GitResult } from "./surface.ts";
 
 export interface AppBundle {
   name: string;
@@ -186,11 +186,11 @@ export async function appBundleUpgrade(env: AppEnv, r: Reviewer, b: AppBundle, o
   const url = `https://github.com/${b.repo}.git`;
   const fetched = (await env.exists(gitDir))
     ? await env.git(gitDir, ["fetch", "--force", "origin", "+refs/tags/*:refs/tags/*"])
-    : await env.exec(["git", "clone", "--bare", "--filter=blob:none", url, gitDir]).then((c) => ({ rc: c.rc, out: c.out }));
-  if (fetched.rc !== 0) return failed("cannot fetch the project's source tags");
+    : await env.exec(["git", "clone", "--bare", "--filter=blob:none", url, gitDir]).then((c): GitResult => ({ rc: c.rc, out: c.out, ...(c.truncated ? { truncated: true as const } : {}) }));
+  if (gitFailed(fetched)) return failed("cannot fetch the project's source tags");
   const oldTag = `v${oldVer}`;
   for (const t of [oldTag, rel.tag_name]) {
-    if ((await env.git(gitDir, ["rev-parse", "--verify", "--quiet", `refs/tags/${t}^{commit}`])).rc !== 0) return held(`tag ${t} is not in the project's source`);
+    if (gitFailed(await env.git(gitDir, ["rev-parse", "--verify", "--quiet", `refs/tags/${t}^{commit}`]))) return held(`tag ${t} is not in the project's source`);
   }
   const g = await gatherSurface(env.git, gitDir, `refs/tags/${oldTag}`, `refs/tags/${rel.tag_name}`);
   if (!g.ok) return held(`the release diff cannot be established (${g.why})`);

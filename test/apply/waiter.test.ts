@@ -317,6 +317,8 @@ describe("owner waiter", () => {
     argvThrows?: boolean;
     /** Records the timeoutMs each hang call was given. */
     hangTimeouts?: (number | undefined)[];
+    /** Every call with the output bound it asked for. */
+    asked?: { line: string; maxBytes?: number; tail?: boolean }[];
     restartTarget?: string;
     http?: number;
     lockHeld?: boolean;
@@ -348,6 +350,7 @@ describe("owner waiter", () => {
     const exec: Exec = async (argv, eo) => {
       const line = argv.join(" ");
       calls.push(line);
+      s.asked?.push({ line, maxBytes: eo?.maxBytes, tail: eo?.tail });
       // A helper that never exits: it ends only by the caller's own timeout (as realExec kills on timeoutMs).
       if (argv[0] === "/opt/restart.test/hang") {
         s.hangTimeouts?.push(eo?.timeoutMs);
@@ -793,6 +796,14 @@ describe("owner waiter", () => {
       await runOwnerWaiter(w.env, { ...opts, idleMs: 0, staleOwners: [] });
       expect(w.outcome()).toEqual(["not tried: org.example.host\\n\\u001b[2Jx\\u003by (no longer in staleOwners)"]);
     });
+    test("the idle probe is log-only (only its exit code is read): the last 1 MiB, never stopped for size", async () => {
+      const asked: { line: string; maxBytes?: number; tail?: boolean }[] = [];
+      const w = owEnv({ probeRc: [1], asked });
+      w.queue(item({ label: "org.example.p", target: "gui/501/org.example.p", probe: ["/opt/svc.test/idle"] }));
+      await runOwnerWaiter(w.env, { ...opts, busyBoundMs: 30_000, idleMs: 10_000 });
+      const a = asked.find((x) => x.line === "/opt/svc.test/idle");
+      expect({ maxBytes: a?.maxBytes, tail: a?.tail }).toEqual({ maxBytes: 1024 * 1024, tail: true });
+    });
     test("a busy label with \";\" is escaped in its held line and read back raw by the report: it stays busy", async () => {
       const L = "org.example;x";
       const w = owEnv({ probeRc: [1] });
@@ -838,6 +849,14 @@ describe("owner waiter", () => {
       const next = owEnv({ files: Object.fromEntries(w.files) });
       expect(await runOwnerWaiter(next.env, { ...opts, idleMs: 0, staleOwners: so })).toBe(1);
       expect(next.outcome()).toEqual([`FAILED: org.example.host restart interrupted (the waiter stopped mid-restart) — rollback: ${JSON.stringify(ARGV)}`]);
+    });
+    test("the argv restart is log-only (its output is not read): the last 1 MiB, never stopped for size", async () => {
+      const asked: { line: string; maxBytes?: number; tail?: boolean }[] = [];
+      const w = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T, asked });
+      w.queue(host());
+      await runOwnerWaiter(w.env, { ...opts, idleMs: 0 });
+      const a = asked.find((x) => x.line === ARGV.join(" "));
+      expect({ maxBytes: a?.maxBytes, tail: a?.tail }).toEqual({ maxBytes: 1024 * 1024, tail: true });
     });
     test("restartTimeoutSec bounds the argv restart (in place of the 120 s default)", async () => {
       const seen: (number | undefined)[] = [];

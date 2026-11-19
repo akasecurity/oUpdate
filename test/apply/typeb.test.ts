@@ -195,6 +195,18 @@ describe("tapUnchangedSinceReview", () => {
   });
 });
 
+describe("tapUnchangedSinceReview with a cut git read", () => {
+  test("a status or HEAD read that comes back cut (rc 0, truncated) is never 'unchanged'", async () => {
+    const fx = fixture();
+    const { o } = opts();
+    const pin = { pkg: "tool", tapDir: fx.tap, head: fx.head, rbPath: "Formula/tool.rb" };
+    const cutOn = (arg: string, out: string): typeof fx.env => ({ ...fx.env, git: async (d, args) => (args[0] === arg ? { rc: 0, out, truncated: true as const } : fx.env.git(d, args)) });
+    expect(await tapUnchangedSinceReview(fx.env, "tool", pin, o, [])).toBe(true);
+    expect(await tapUnchangedSinceReview(cutOn("status", ""), "tool", pin, o, [])).toBe(false);
+    expect(await tapUnchangedSinceReview(cutOn("rev-parse", fx.head), "tool", pin, o, [])).toBe(false);
+  });
+});
+
 describe("awaitingTapApproval", () => {
   const VERBOSE = `${TAP}/tool (1.0) < 1.1\nexample/tf/tfapp (1.5) < 1.6\n`;
   for (const [label, answer, want] of [

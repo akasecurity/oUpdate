@@ -31,7 +31,7 @@ export interface HostScript {
   /** rc for a command line (exact). */
   rc?: Record<string, number>;
   /** The whole answer for a command line (exact): its rc and what it prints. */
-  answers?: Record<string, { rc: number; out: string }>;
+  answers?: Record<string, { rc: number; out: string; err?: string; truncated?: true }>;
   /** Successive lsof answers: stdout, or stdout with something on stderr (exit 0 either way). */
   lsof?: (string | { out: string; err: string })[];
   npmOutdated?: string;
@@ -51,16 +51,19 @@ const ok = (out = ""): ExecResult => ({ rc: 0, out, err: "" });
 
 export function fakeHost(s: HostScript = {}) {
   const calls: string[] = [];
+  /** The options each call carried, by command line, in call order (the fixture's answers do not depend on them). */
+  const callOpts: { line: string; opts: Parameters<Exec>[1] }[] = [];
   const upgraded = new Set<string>();
   const npmInstalled = new Map<string, string>();
   const lsof = [...(s.lsof ?? [])];
   const installedOf = (n: string) => s.installedVersion?.[n] ?? outdatedVersions(n, s.verbose ?? "").split("→")[1]!;
-  const exec: Exec = async (argv) => {
+  const exec: Exec = async (argv, opts) => {
     const line = argv.join(" ");
     calls.push(line);
+    callOpts.push({ line, opts });
     if ((s.timeout ?? []).some((t) => line.startsWith(t))) return { rc: 143, out: "", err: "", timedOut: true };
     if (s.rc?.[line] !== undefined) return { rc: s.rc[line]!, out: "", err: "" };
-    if (s.answers?.[line] !== undefined) return { ...s.answers[line]!, err: "" };
+    if (s.answers?.[line] !== undefined) return { err: "", ...s.answers[line]! };
     const [cmd, ...a] = argv;
     const rest = a.join(" ");
     if (cmd === "brew") {
@@ -156,7 +159,7 @@ export function fakeHost(s: HostScript = {}) {
     },
     pinFiles: () => s.pinFiles ?? [],
   };
-  return { exec, fs, calls, files, writes, spawned };
+  return { exec, fs, calls, callOpts, files, writes, spawned };
 }
 
 export function testConfig(over: Partial<ApplyConfig> = {}): ApplyConfig {

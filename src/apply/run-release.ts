@@ -1,6 +1,7 @@
 // The release-check step of the host apply run (run.ts drives it): each unfinished check's owner restarts, its
 // pre-check gate and its verdict, and the owner jobs a check requires.
 
+import type { Exec } from "./exec.ts";
 import { basename, dirname, join } from "node:path";
 import { kegHolders, lsofMaps, type Holder, type KegEnv } from "./kegs.ts";
 import { matchOwner, ownerDir, ownerFiles, ownerOps, parsePrint, type OwnerWaiterEnv, type QueuedOwner } from "./owner-waiter.ts";
@@ -374,8 +375,11 @@ async function ownersUnloadedProbe(rt: RunCtx, labels: readonly string[]): Promi
 }
 
 /** Straight to exec, not through the run's wrapper: a timeout reads as a failed command (a hold), never a phase stop or a time-box hit. */
-function rawExec(rt: RunCtx, argv: string[]) {
-  return rt.exec(argv, { timeoutMs: rt.cfg.timeoutMs, ...(argv[0] === rt.cfg.brew ? { env: { HOMEBREW_NO_AUTO_UPDATE: "1" } } : {}) });
+async function rawExec(rt: RunCtx, argv: string[], o: Parameters<Exec>[1] = {}) {
+  const res = await rt.exec(argv, { timeoutMs: rt.cfg.timeoutMs, ...(argv[0] === rt.cfg.brew ? { env: { HOMEBREW_NO_AUTO_UPDATE: "1" } } : {}), ...o });
+  // As the run's wrapper does: a command stopped for output over its bound fails with rc 125, and the log says why.
+  if (res.truncated) rt.log.push(`  ${argv.join(" ")}: ${res.err}`);
+  return res;
 }
 
 /**
@@ -389,7 +393,7 @@ function rawExec(rt: RunCtx, argv: string[]) {
  */
 export async function formulaPids(rt: RunCtx, f: string): Promise<{ pids: string[] } | { why: string }> {
   const { log, cfg } = rt;
-  const raw = (argv: string[]) => rawExec(rt, argv);
+  const raw: Exec = (argv, o) => rawExec(rt, argv, o);
   const unread = { why: "the processes running from it could not be read completely" };
   try {
     const cel = await raw([cfg.brew, "--cellar", f]);

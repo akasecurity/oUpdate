@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import type { ReleaseCheck } from "../../src/apply/config.ts";
 import type { Exec } from "../../src/apply/exec.ts";
 import type { ApplyFs } from "../../src/apply/fs.ts";
-import { isStopping, killLive, resetStopping, runStopTasks } from "../../src/apply/exec.ts";
+import { LSOF_STREAM_BYTES, isStopping, killLive, resetStopping, runStopTasks } from "../../src/apply/exec.ts";
 import { applyHost } from "../../src/apply/run.ts";
 import { fakeHost, fakeTypeB, testConfig, type HostScript } from "./host-fixture.ts";
 import { scripted } from "./helpers.ts";
@@ -27,7 +27,7 @@ interface Rc {
   files?: Record<string, string>;
   dryRun?: boolean;
   /** Extra answers, by exact command line. */
-  answer?: (line: string, argv: string[]) => { rc: number; out: string; err: string } | undefined;
+  answer?: (line: string, argv: string[]) => { rc: number; out: string; err: string; truncated?: true } | undefined;
   /** Keg-only: brew info says linked_keg null; the opt link is the version. */
   kegOnly?: boolean;
   /** The opt link cannot be read (and brew info names no linked keg). */
@@ -71,7 +71,7 @@ async function rcRun(o: Rc = {}) {
   const kegs = new Set([...(o.noPrevKeg ? [] : ["1.2.0"]), linked]);
   if (o.noPrevKeg) kegs.delete("1.2.0");
   const queue = Object.fromEntries(Object.entries(o.check ?? {}).map(([k, v]) => [k, [...v]]));
-  const envs: { line: string; env?: Record<string, string> }[] = [];
+  const envs: { line: string; env?: Record<string, string>; maxBytes?: number; tail?: boolean }[] = [];
   /** A kickstart -k ends the job's process (the pid its launchctl print last named) and its children: gone from the scripted lsof. */
   const jobPid = new Map<string, string>();
   const gone = new Set<string>();
@@ -90,7 +90,7 @@ async function rcRun(o: Rc = {}) {
   };
   const inner: Exec = async (argv, opt = {}) => {
     const line = argv.join(" ");
-    envs.push({ line, env: opt.env });
+    envs.push({ line, env: opt.env, maxBytes: opt.maxBytes, tail: opt.tail });
     if (isStopping() && !opt.force) {
       h.calls.push(`STOPPED ${line}`);
       return { rc: 143, out: "", err: "oupdate is stopping: not started" };
@@ -190,6 +190,13 @@ describe("release checks in the run", () => {
     expect(r.envs.find((e) => e.line === "brew upgrade example/tap/gadget")?.env).toMatchObject({ HOMEBREW_NO_INSTALL_CLEANUP: "1" });
     expect(r.calls).toContain("brew cleanup good-a");
     expect(r.calls).not.toContain("brew cleanup");
+    // The upgrade and the named cleanup only log: their last 1 MiB is kept, never a stop for size.
+    for (const line of ["brew upgrade example/tap/gadget", "brew cleanup good-a"]) {
+      const e = r.envs.find((x) => x.line === line);
+      expect({ line, maxBytes: e?.maxBytes, tail: e?.tail }).toEqual({ line, maxBytes: 1024 * 1024, tail: true });
+    }
+    // A release check's own reads keep the whole answer.
+    expect(r.envs.filter((x) => /^brew info --json=v2 /.test(x.line)).every((x) => x.maxBytes === undefined && x.tail === undefined)).toBe(true);
     expect(r.res.log).toContain("  gadget: release check pending — cleanup skips gadget (its previous keg is the rollback)");
     expect(r.brew).toContain("release check: gadget 1.3.0 PASS");
     expect(r.files.has(PENDING)).toBe(false);
@@ -1692,6 +1699,8 @@ describe("a check whose owner is left unloaded on purpose (ownerUnloaded: upgrad
     expect(r.res.log.some((l) => l.startsWith("--- Type A review"))).toBe(true);
     expect(r.flow).toEqual(["brew upgrade gadget"]);
     expect(r.brew).toContain("release check: gadget upgraded unchecked, owner not loaded");
+    const up = r.envs.find((x) => x.line === "brew upgrade gadget");
+    expect({ maxBytes: up?.maxBytes, tail: up?.tail }).toEqual({ maxBytes: 1024 * 1024, tail: true });
   });
   test("Type A: the owner loads before the recheck: held, not upgraded, not an upgrade failure", async () => {
     const r = await rcRun({ cfg: typeA([A]), ...owners({ [A]: { state: "unloaded", loadsAfter: 3 } }) });
@@ -1889,6 +1898,21 @@ describe("a check whose owner is left unloaded on purpose (ownerUnloaded: upgrad
     held(r);
     expect(r.res.log).toContain(`  holding gadget (release check: its owner ${A} is not loaded, but pid 66 runs from it — not upgraded, its keg is untouched)`);
     expect(r.calls).toContain("/usr/sbin/lsof -nP -w -d cwd,txt,mem");
+    // The holder scan goes straight to exec (rawExec): it asks for the lsof bound too, not the 32 MiB default.
+    expect(r.envs.find((e) => e.line === "/usr/sbin/lsof -nP -w -d cwd,txt,mem")?.maxBytes).toBe(LSOF_STREAM_BYTES);
+  });
+  test("the holder scan over its bound is no scan: held, and the log names the stopped command", async () => {
+    const LSOF = "/usr/sbin/lsof -nP -w -d cwd,txt,mem";
+    const ow = owners({ [A]: { state: "unloaded" } });
+    const cut = { rc: 125, out: "", err: "output over 134217728 bytes: the command was stopped", truncated: true as const };
+    const r = await rcRun({ cfg: cfgOf([A]), ...ow, answer: (l, a) => (l === LSOF ? cut : ow.answer(l, a)) });
+    held(r);
+    expect(r.res.log).toContain(`  ${LSOF}: ${cut.err}`);
+  });
+  test("a release check's own read that is stopped over its bound is named in the log (the release-check exec)", async () => {
+    const cut = { rc: 125, out: "", err: "output over 1000 bytes: the command was stopped", truncated: true as const };
+    const r = await rcRun({ answer: (l) => (l === "brew info --json=v2 gadget" || l === "brew info --json=v2 example/tap/gadget" ? cut : undefined) });
+    expect(r.res.log).toContain(`  brew info --json=v2 gadget: ${cut.err}`);
   });
   test("same user, working directory at a keg's root (no file under it): the lsof cwd row holds it", async () => {
     const cwd = `${CLEAN}python3 66 u cwd DIR 1,4 736 2 /brew/Cellar/gadget/1.2.0\n`;

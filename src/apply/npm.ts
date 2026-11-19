@@ -9,7 +9,7 @@
 // mention it; the stuck lane counts "<name>=<latest>" like the brew lane.
 
 import { untrusted, type Reviewer } from "../review.ts";
-import type { Exec } from "./exec.ts";
+import { LOG_ONLY, type Exec } from "./exec.ts";
 import { reviewChunk } from "./verdict.ts";
 import { VERDICT_CONTRACT } from "./formula.ts";
 import { dependencyDowngrades } from "../prepass.ts";
@@ -312,7 +312,7 @@ One-line reason if FLAG. 6 lines max.`;
   for (const [pkg, v] of outdated) {
     // Exactly the reviewed version: `npm update` would take whatever is newest by now.
     log.push(`  upgrading ${pkg} to ${v.next}...`);
-    const u = await exec([o.npm, "install", "-g", `${pkg}@${v.next}`]);
+    const u = await exec([o.npm, "install", "-g", `${pkg}@${v.next}`], { ...LOG_ONLY });
     if (u.rc !== 0) {
       status = `FAILED — ${pkg}`;
       log.push(`npm: upgrade failed for ${pkg} — continuing`);
