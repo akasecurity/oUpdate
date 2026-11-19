@@ -6259,13 +6259,14 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
   const text = codeOnly(source, [], true) ?? source;
   if (hasUnbounded(text, source)) tier.all = true;
+  const late = { all: false };
   cls = { text, raw: source, ...pathNames(text), bind: new Map(), memo: new Map(), visiting: new Set(), steps: 0, defSteps: 0, fold: new Map(), foldSteps: 0 };
   try {
     classifyLoads(tier, fromKey, text);
     // A command that runs a file named through a folded or decoded name can name any file, docs included.
     if (!tier.all && runnerFolds(text)) tier.all = true;
     // A load path or exec command with a part that is neither a literal nor a known runtime value can name any file.
-    if (!tier.all && constPartsWiden(text)) tier.all = true;
+    if (!tier.all && constPartsWiden(text, late)) tier.all = true;
   } finally {
     cls = undefined;
   }
@@ -6275,6 +6276,7 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
     tier.tests = true;
     tier.flows = true;
   }
+  if (late.all) tier.all = true;
   return tier;
 }
 // require without a call: not `require(`, `require.resolve(`, `typeof require`, `require.main/cache/extensions`, not a member name, not a parameter of the
@@ -6752,7 +6754,9 @@ function keepsOldStep(s: string, open: number, close: number): boolean {
   }
   return stack.length > 0;
 }
-function constPartsWiden(text: string): boolean {
+// `late.all` is set by a widening that main does not reach: the caller applies it once every later scan has run, so a scan that stops there (the
+// budget) stops as it does on main, and the file is held as a fault instead of released.
+function constPartsWiden(text: string, late: { all: boolean }): boolean {
   const c = cls!;
   const budget = 8 * text.length + 100000;
   let spent = 0;
@@ -6990,15 +6994,31 @@ function constPartsWiden(text: string): boolean {
   // A call read inside the arguments of a run call (main steps over them) reads names on a copy of `seen`: ok() caches a name by name alone, not by
   // depth, so a name first read here at one depth would answer a later read after the run call at a deeper depth, where main reads it first.
   const runOpen = new Set<number>();
+  // What is read inside the arguments of a run call is read only by this scan (main steps over it). Its work is counted apart (`xs`), never in
+  // `spent`: the budget stops of main stay where they were. What it finds, or the budget it passes, widens late (`widenNew`): an early return would
+  // skip the scans after it that main reaches, and a file those scans fault on would be released.
+  let widenNew = false;
+  let xs = 0;
   const visit = (segs: string[], dotted: boolean, paren: number): boolean => {
     if (!runOpen.size) return visitCore(segs, dotted, paren);
+    if (widenNew) return false;
+    if (spent + xs > budget) {
+      widenNew = true;
+      return false;
+    }
+    const s0 = spent;
     const saved = seen;
     seen = new Map(saved);
     try {
-      return visitCore(segs, dotted, paren);
+      if (visitCore(segs, dotted, paren)) widenNew = true;
     } finally {
       seen = saved;
+      xs += spent - s0;
+      spent = s0;
     }
+    // The work of main and the work inside the run calls together past the budget: the release before this one widened there.
+    if (spent + xs > budget) widenNew = true;
+    return false;
   };
   const TOK = /["'`{}()[\]/]|(?<![\w$])[A-Za-z_$][\w$]*/g;
   const stack: number[] = [];
@@ -7030,13 +7050,18 @@ function constPartsWiden(text: string): boolean {
     } else if (t === "(" || t === "[") opens.push(at);
     else if (t === "]" || t === ")") {
       const k = opens.pop() ?? -1;
-      runOpen.delete(k);
+      // A bracket read inside the arguments of a run call, or the one that closes it: main stepped over both.
+      const inRun = runOpen.delete(k) || runOpen.size > 0;
       CALL.lastIndex = pos;
       if (!cp || !CALL.test(text)) continue;
       const inner = text.slice(k + 1, Math.min(at, k + 201));
       const word = t === "]" ? /^\s*(['"`])([\w$]+)\1\s*$/.exec(inner) : null;
       // A computed member, a curried call or a parenthesized callee that is no function (`(a || run)(x)`): it cannot be resolved.
-      if (k < 0 || (t === "]" ? !word : !/^\s*(?:async\b|function\b|\([^)]*\)\s*=>|[\w$]+\s*=>)/.test(inner))) return true;
+      if (k < 0 || (t === "]" ? !word : !/^\s*(?:async\b|function\b|\([^)]*\)\s*=>|[\w$]+\s*=>)/.test(inner))) {
+        if (!inRun) return true;
+        widenNew = true;
+        continue;
+      }
       if (word && visit([word[2]!], true, CALL.lastIndex - 1)) return true;
     } else {
       const segs = [t];
@@ -7055,7 +7080,10 @@ function constPartsWiden(text: string): boolean {
       const paren = CALL.lastIndex - 1;
       // x.require( on a receiver rooted at the module or a holder of it (module.children[0].require(x)): a load like module.require.
       if (text[q] === "." && segs[segs.length - 1] === "require") {
+        // Inside the arguments of a run call this walk is work main does not do: it is counted in `xs`, not in `spent`.
+        const r0 = spent;
         const root = receiverRoot(text[q - 1] === "?" ? q - 1 : q);
+        if (runOpen.size) (xs += spent - r0), (spent = r0);
         if (root !== undefined && (root === "?" || memberLoad([root, ...segs]))) {
           if (visit(["module", "require"], false, paren)) return true;
           pos = paren + 1;
@@ -7070,11 +7098,15 @@ function constPartsWiden(text: string): boolean {
         // wrapped call). Where closeAt and this read can disagree about where the arguments end, the old step jumps over the whole list: a
         // template in them (closeAt ends a template at its next backtick), a slash outside a string, or brackets that are not typed-balanced (keepsOldStep).
         const close = closeAt(text, paren);
-        if (LOAD_CALLS.has(segs.join(".")) || keepsOldStep(text, paren, close)) pos = Math.max(pos, close + 1);
+        // Once the file widens late the arguments are stepped over, as before: no run call is walked again, so the walks stay bounded.
+        if (LOAD_CALLS.has(segs.join(".")) || widenNew || keepsOldStep(text, paren, close)) pos = Math.max(pos, close + 1);
         else (opens.push(paren), runOpen.add(paren));
       } else opens.push(paren);
     }
   }
+  // The work of main and the work inside run calls, taken together, past the budget: checked at the exit too, where either kind may have grown
+  // after the last read inside a run call.
+  late.all = widenNew || spent + xs > budget;
   return spent > budget;
 }
 
