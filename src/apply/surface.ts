@@ -73,10 +73,88 @@ export interface Surface {
 export type SurfaceResult = { ok: true; surface: Surface } | { ok: false; why: string };
 
 // git's text wrapper turns a PNG's 0x89 into a replacement character, so the magic bytes come from the blob.
-function blobBytes(dir: string, rev: string, path: string): Uint8Array | undefined {
-  const p = Bun.spawnSync(["git", "-C", dir, "cat-file", "blob", "--", `${rev}:${path}`], { stdout: "pipe", stderr: "pipe" });
-  if ((p.exitCode ?? 1) !== 0 || !p.stdout) return undefined;
-  return new Uint8Array(p.stdout);
+// Only the first bytes are read (the longest signature in BENIGN_BINARY ends at byte 36): a blob of any size costs a few bytes of memory,
+// git is stopped once they are in, and a read past the deadline gives up (it was spawnSync of the whole blob, with no bound and no timeout).
+// On a partial clone (--filter=blob:none, appBundleUpgrade's src.git) cat-file fetches a missing blob, as the whole-blob read did: that is
+// kept (a clean release whose binary numstat did not fetch must still pass). The fetch is bounded instead: git runs in its own process
+// group, killed as a whole when the read ends, and the read gives up at the deadline, so a stalled fetch (or a child that holds the pipe
+// past git's own death) costs the deadline and leaves no process.
+const BLOB_HEAD_BYTES = 64;
+export const BLOB_READ_MS = 30_000;
+type Kill = (pid: number, sig: NodeJS.Signals) => void;
+export async function blobBytes(dir: string, rev: string, path: string, o: { git?: string; ms?: number; kill?: Kill } = {}): Promise<Uint8Array | undefined> {
+  let p: Bun.Subprocess<"ignore", "pipe", "ignore">;
+  try {
+    p = Bun.spawn([o.git ?? "git", "-C", dir, "cat-file", "blob", "--", `${rev}:${path}`], {
+      stdin: "ignore", stdout: "pipe", stderr: "ignore", detached: true, env: { ...process.env },
+    } as never) as unknown as Bun.Subprocess<"ignore", "pipe", "ignore">;
+  } catch {
+    return undefined;
+  }
+  const head = new Uint8Array(BLOB_HEAD_BYTES);
+  let got = 0;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let out: Uint8Array | undefined;
+  try {
+    reader = p.stdout.getReader();
+    const late = new Promise<"late">((res) => {
+      timer = setTimeout(() => res("late"), o.ms ?? BLOB_READ_MS);
+    });
+    out = await (async () => {
+      while (got < BLOB_HEAD_BYTES) {
+        const r = await Promise.race([reader!.read(), late]);
+        if (r === "late") return undefined;
+        if (r.done) break;
+        const take = Math.min(r.value.length, BLOB_HEAD_BYTES - got);
+        head.set(r.value.subarray(0, take), got);
+        got += take;
+      }
+      // A blob shorter than the head ends by itself: only a clean exit counts. One cut at the head size is stopped below, on purpose: the exit
+      // status of a git we stop is not read (a git that prints 64 bytes and then fails passes once the magic is in; real git does that only
+      // on a corrupt local object).
+      if (got < BLOB_HEAD_BYTES) {
+        const code = await Promise.race([p.exited, late]);
+        if (code !== 0) return undefined;
+      }
+      return head.subarray(0, got);
+    })();
+  } catch {
+    out = undefined;
+  } finally {
+    clearTimeout(timer);
+    // However this ends (enough bytes, a deadline, an error): stop git and anything it started, even after git itself exited (a lazy
+    // fetch child outlives it). The group is git's own (detached), so this reaches nothing else. Only ESRCH (or EPERM once git has exited (waited for 250 ms)) means the group is gone; any other
+    // error leaves a child we could not stop: git itself is killed by pid, and the read is flagged (undefined).
+    const kill = o.kill ?? ((pid: number, sig: NodeJS.Signals) => void process.kill(pid, sig));
+    try {
+      kill(-p.pid, "SIGKILL");
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      // macOS answers EPERM, not ESRCH, for a group that is only zombies (git exited, not yet reaped by us): that is gone too, once git has exited (waited for 250 ms).
+      let gone = code === "ESRCH";
+      if (code === "EPERM") {
+        let t2: ReturnType<typeof setTimeout> | undefined;
+        gone = await Promise.race([p.exited.then(() => true), new Promise<boolean>((res) => (t2 = setTimeout(() => res(false), 250)))]);
+        clearTimeout(t2);
+      }
+      if (!gone) {
+        out = undefined;
+        try {
+          kill(p.pid, "SIGKILL");
+        } catch {
+          // the pid is gone too, or not ours to stop
+        }
+        try {
+          p.kill("SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    }
+    void reader?.cancel().catch(() => {});
+  }
+  return out;
 }
 
 /** The surface of the diff oldRev..head in the tap checkout. */
@@ -104,7 +182,7 @@ export async function gatherSurface(git: Git, dir: string, oldRev: string, head:
     const link = m.to === "120000" && m.from !== "120000";
     if (binary.has(path)) {
       const rev = m.status.startsWith("D") ? oldRev : head;
-      if (!benignBinary(path, blobBytes(dir, rev, path))) findings.push(`${path}: binary file added or changed`);
+      if (!benignBinary(path, await blobBytes(dir, rev, path))) findings.push(`${path}: binary file added or changed`);
     }
     if (isSurfaceFile(path) || execNew || link) read.push(path);
     else otherCount++;
