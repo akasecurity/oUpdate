@@ -1,7 +1,7 @@
 // Ported from the previous updater's stale-keg, linkage and relink cases. The label
 // resolution and restart paths had no source tests; the "restart" block below is new.
 import { describe, expect, test } from "bun:test";
-import { killLive, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
+import { killLive, LSOF_STREAM_BYTES, realExec, resetStopping, type Exec } from "../../src/apply/exec.ts";
 import { trackStuck } from "../../src/apply/stuck.ts";
 import { caskRunning, kegHolders, linkageCheck, lsofMaps, relinkUpgraded, staleKegCheck, type KegEnv, type KegOptions } from "../../src/apply/kegs.ts";
 import type { QueuedOwner } from "../../src/apply/owner-waiter.ts";
@@ -119,6 +119,18 @@ describe.if(process.platform === "darwin")("real lsof", () => {
     const env = { ...fakeEnv({}).env, exec: realExec };
     const out = await lsofMaps(env, "/usr/sbin/lsof", []);
     expect(out?.split("\n").length ?? 0).toBeGreaterThan(10);
+  });
+});
+
+describe("lsofMaps bound", () => {
+  test("the all-process lsof scan asks for the 128 MiB bound, not the default", async () => {
+    const seen: (number | undefined)[] = [];
+    const exec = (async (_argv: string[], o?: { maxBytes?: number }) => {
+      seen.push(o?.maxBytes);
+      return { rc: 0, out: `COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n${lsofLine("10", `${CELLAR}/p/1/bin/x`)}\n`, err: "" };
+    }) as never;
+    await lsofMaps({ ...fakeEnv({}).env, exec } as KegEnv, "/usr/sbin/lsof", []);
+    expect(seen).toEqual([LSOF_STREAM_BYTES]);
   });
 });
 

@@ -2,9 +2,9 @@
 // scripted exec. The run's wiring (before/after, the hold filter, cleanup, dry run) is in run.test.ts.
 import { describe, expect, test } from "bun:test";
 import type { ReleaseCheck } from "../../src/apply/config.ts";
-import type { Exec } from "../../src/apply/exec.ts";
+import { realExec, type Exec } from "../../src/apply/exec.ts";
 import { join } from "node:path";
-import { asUser, holdPath, resume, runCheck, type KegProcs, type PendingCheck, type ReleaseEnv } from "../../src/apply/release-checks.ts";
+import { asUser, holdPath, resume, runCheck, runHook, type KegProcs, type PendingCheck, type ReleaseEnv } from "../../src/apply/release-checks.ts";
 
 /** resume from an upgraded record whose owner was restarted, with every step saved in memory; `st.after` mirrors the record's. */
 async function decide(e: ReleaseEnv, rc: ReleaseCheck, p: PendingCheck & { to: string }, restart: (keg: string) => Promise<{ ok: boolean; note: string }>, st: { after?: "run" | "skip" }) {
@@ -98,6 +98,27 @@ function env(s: Script = {}) {
 const HOLD = holdPath("/state.test", "gadget");
 /** A gate that lets every attempt run. */
 const OPEN = async () => ({ kind: "ok" as const, note: "" });
+
+describe("runCheck with a check that prints past the output bound", () => {
+  const LOUD = (code: number) => ({ ...CHECK, retries: 0, command: [process.execPath, "-e", `const b=Buffer.alloc(1024*1024,"x");for(let i=0;i<33;i++)process.stdout.write(b);process.exitCode=${code}`] });
+  const real = { exec: realExec, log: [] as string[] } as unknown as ReleaseEnv;
+  test("exit 1 after 33 MiB is still a FAIL (the hold and rollback), never 'could not run (rc 125)'", async () => {
+    const v = await runCheck(real, LOUD(1), "1.3.0", OPEN);
+    expect(v).toMatchObject({ kind: "fail", attempts: 1 });
+  });
+  test("exit 0 after 33 MiB is still a PASS", async () => {
+    expect((await runCheck(real, LOUD(0), "1.3.0", OPEN)).kind).toBe("pass");
+  });
+});
+
+describe("runHook with a hook that prints past the output bound", () => {
+  test("exit 0 after 33 MiB is still ok (before and after)", async () => {
+    const loud = { ...CHECK, before: [process.execPath, "-e", `const b=Buffer.alloc(1024*1024,"x");for(let i=0;i<33;i++)process.stdout.write(b)`], after: [process.execPath, "-e", `const b=Buffer.alloc(1024*1024,"x");for(let i=0;i<33;i++)process.stderr.write(b)`] };
+    const env = { exec: realExec, log: [] as string[], notify: async () => {}, host: "h" } as unknown as ReleaseEnv;
+    expect(await runHook(env, loud, "before")).toBe(true);
+    expect(await runHook(env, loud, "after")).toBe(true);
+  });
+});
 
 describe("runCheck", () => {
   test("PASS at exit 0, with GATE_VERSION set to the version checked", async () => {

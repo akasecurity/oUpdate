@@ -36,7 +36,8 @@ import { isStopping as execStopping, onStop } from "./exec.ts";
 import type { Reviewer } from "../review.ts";
 import { makeReviewer } from "../adapters/reviewer/spec.ts";
 import type { ApplyConfig } from "./config.ts";
-import type { Exec } from "./exec.ts";
+import type { Exec, ExecResult } from "./exec.ts";
+import { gitVia } from "./surface.ts";
 import type { BrewFormulaInfo } from "./formula.ts";
 import type { ApplyFs } from "./fs.ts";
 import { gkCheck, gkRelease, gkRevert, realGates, type GkOptions } from "./gatekeeper.ts";
@@ -121,6 +122,11 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   // Streamed: every line reaches the sink as it is pushed, so a run that hangs or is killed still
   // leaves its log behind.
   const log: string[] = [];
+  // A command stopped for output over its bound (rc 125) fails like any other nonzero rc, and most callers print only the rc: this line says why.
+  const cutNote = (argv: string[], res: ExecResult) => {
+    if (res.truncated) log.push(`  ${argv.join(" ")}: ${res.err}`);
+    return res;
+  };
   const sink = opts.onLine;
   if (sink) {
     const push = log.push.bind(log);
@@ -150,7 +156,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   const x: Exec = async (argv, o = {}) => {
     const env = argv[0] === cfg.brew ? { HOMEBREW_NO_AUTO_UPDATE: "1", ...o.env } : o.env;
     const t0 = Date.now();
-    const res = await exec(argv, { ...o, ...(env ? { env } : {}), timeoutMs: o.timeoutMs ?? cfg.timeoutMs });
+    const res = cutNote(argv, await exec(argv, { ...o, ...(env ? { env } : {}), timeoutMs: o.timeoutMs ?? cfg.timeoutMs }));
     // How long each upgrade took, so the limit can be set from measured runs.
     if (argv[0] === cfg.brew && argv[1] === "upgrade" && !res.timedOut) {
       log.push(`  ${argv.slice(1).join(" ")}: ${Math.round((Date.now() - t0) / 1000)} s`);
@@ -210,7 +216,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   const waiterEnv: WaiterEnv = {
     // Not `x`: a timed-out --holder probe is an answer the handoff acts on (it hands off, as
     // the previous updater did), not a stop of the stale-keg step.
-    exec: (argv, o = {}) => exec(argv, { ...o, timeoutMs: o.timeoutMs ?? cfg.timeoutMs }),
+    exec: async (argv, o = {}) => cutNote(argv, await exec(argv, { ...o, timeoutMs: o.timeoutMs ?? cfg.timeoutMs })),
     exists: fs.exists,
     readFile: async (p) => {
       const t = await fs.readFile(p);
@@ -242,10 +248,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       return res.rc === 0 ? res.out.trim() : "";
     },
     readFile: fs.readFile,
-    git: async (dir, args) => {
-      const res = await x(["git", "-C", dir, ...args]);
-      return { rc: res.rc, out: res.out };
-    },
+    git: gitVia(x),
   };
   const tbOpts: TypeBOptions = { officialTaps: cfg.officialTaps, host, logFile: cfg.logFile, notify, caps: cfg.caps, upstreamTaps: cfg.upstreamTaps };
 
@@ -264,7 +267,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   // Release checks: the upgrades whose check has not decided (this run's and any a stopped run left),
   // and the staleOwners jobs of their previous kegs, restarted inline before the check.
   const rcEnv: ReleaseEnv = {
-    exec: (argv, o = {}) => exec(argv, { ...o, ...(argv[0] === cfg.brew ? { env: { HOMEBREW_NO_AUTO_UPDATE: "1", ...o.env } } : {}), timeoutMs: o.timeoutMs ?? cfg.timeoutMs }),
+    exec: async (argv, o = {}) => cutNote(argv, await exec(argv, { ...o, ...(argv[0] === cfg.brew ? { env: { HOMEBREW_NO_AUTO_UPDATE: "1", ...o.env } } : {}), timeoutMs: o.timeoutMs ?? cfg.timeoutMs })),
     brew: cfg.brew, stateDir: cfg.stateDir, host, logFile: cfg.logFile,
     // Missing is the only "none": a state file or directory that is there but unread throws.
     readFile: fs.readState ?? (async (p) => {

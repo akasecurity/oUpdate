@@ -67,6 +67,8 @@ interface World {
   existing?: string[];
   mvFail?: number;
   restart?: string[];
+  /** git calls (by argv) that come back cut: rc 0 with the truncated flag. */
+  gitCut?: (args: string[]) => boolean;
 }
 
 function rig(state: string, w: World = {}) {
@@ -97,6 +99,7 @@ function rig(state: string, w: World = {}) {
   const env: AppEnv = {
     exec,
     git: async (dir, args) => {
+      if (w.gitCut?.(args)) return { rc: 0, out: "", truncated: true };
       const r = Bun.spawnSync(["git", "-C", dir, ...args]);
       return { rc: r.exitCode ?? 1, out: r.stdout.toString() };
     },
@@ -148,6 +151,13 @@ describe("appBundleUpgrade", () => {
     expect(t.calls).toContainEqual(["/bin/mv", "/Applications/Example.app.new-oupdate", "/Applications/Example.app"]);
     expect(t.spawned).toEqual([["/bin/bash", "/w/exampleapp-restart.sh", "/Applications/Example.app.bak-oupdate-0.7.0"]]);
     expect(res.log.join("\n")).toContain("revert");
+  });
+  test("a tag fetch that comes back cut is a failed fetch, and a tag check that does is a held release (never read as present)", async () => {
+    const { state } = project();
+    const fetchCut = await rig(state, { gitCut: (a) => a[0] === "fetch" }).run();
+    expect(fetchCut.status).toBe("failed");
+    const tagCut = await rig(state, { gitCut: (a) => a[0] === "rev-parse" }).run();
+    expect(tagCut.status).toBe("held");
   });
   test("a dry run reviews and changes nothing", async () => {
     const { state } = project();

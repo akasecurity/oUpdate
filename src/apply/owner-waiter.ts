@@ -31,7 +31,7 @@
 import { closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import { dlopen, FFIType } from "bun:ffi";
 import { dirname, join } from "node:path";
-import type { Exec } from "./exec.ts";
+import { LOG_ONLY, type Exec } from "./exec.ts";
 import { kegHolders } from "./holders.ts";
 
 export interface StaleOwner {
@@ -376,7 +376,7 @@ export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
     let since: number | undefined;
     for (;;) {
       if (q.probe) {
-        const r = await env.exec(q.probe, { timeoutMs: o.probeTimeoutMs ?? 30_000 });
+        const r = await env.exec(q.probe, { timeoutMs: o.probeTimeoutMs ?? 30_000, ...LOG_ONLY });
         if (r.rc === 0 && !r.timedOut) return true;
       } else {
         const r = await env.exec([o.lsof, "-nP", "-w", "-a", "-p", pid, "-iTCP", "-sTCP:ESTABLISHED"]);
@@ -396,7 +396,7 @@ export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
   const restartJob = async (q: QueuedOwner): Promise<string | undefined> => {
     // An argv restart runs as given (its own sudo, if any), in place of launchctl.
     if (Array.isArray(q.restart)) {
-      const r = await env.exec(q.restart, { timeoutMs: q.restartTimeoutSec !== undefined ? q.restartTimeoutSec * 1000 : (o.restartTimeoutMs ?? 120_000) });
+      const r = await env.exec(q.restart, { timeoutMs: q.restartTimeoutSec !== undefined ? q.restartTimeoutSec * 1000 : (o.restartTimeoutMs ?? 120_000), ...LOG_ONLY });
       return r.timedOut ? "restart timed out" : r.rc !== 0 ? `restart rc ${r.rc}` : undefined;
     }
     const sudo = q.target.startsWith("system/") ? ["sudo", "-n"] : [];

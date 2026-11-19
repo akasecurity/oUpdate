@@ -4,7 +4,7 @@
 import { join } from "node:path";
 import { appBundleUpgrade, realAppNet } from "./appbundle.ts";
 import type { ApplyConfig, ReleaseCheck } from "./config.ts";
-import type { Exec } from "./exec.ts";
+import { LOG_ONLY, type Exec } from "./exec.ts";
 import { gkCheck, gkRelease, gkSnapshot, realGates, type GkEnv, type GkOptions } from "./gatekeeper.ts";
 import { caskRunning, lsofMaps, type KegEnv } from "./kegs.ts";
 import { asUser, brewView, findCheck, holdPath, holdState, pendingPath, runHook, savePending, trustState, type PendingCheck } from "./release-checks.ts";
@@ -110,11 +110,11 @@ export async function brewSection(rt: RunCtx) {
   // unreachable tap does not cost the host its official upgrades.
   if (dryRun) log.push("dry-run: brew update skipped — the outdated list is against the taps as they are");
   else {
-    const u = await x([cfg.brew, "update"]);
-    const out = `${u.out}${u.err}`;
+    const u = await x([cfg.brew, "update"], { ...LOG_ONLY });
+    const out = `${u.out}\n${u.err}`;
     if (u.rc !== 0) {
       log.push(`  WARNING: brew update exited ${u.rc} — a tap fetch likely failed, so the outdated list below may be computed against a STALE tap:`);
-      log.push(...out.split("\n").filter((l) => /error|fatal|failed/i.test(l)).slice(0, 5).map((l) => `    ${l}`));
+      log.push(...out.split("\n").filter((l) => /error|fatal|failed/i.test(l)).slice(-5).map((l) => `    ${l}`));
     }
     log.push(...out.trimEnd().split("\n").slice(-3));
   }
@@ -432,10 +432,10 @@ export async function cleanup(rt: RunCtx) {
     if (quarantined) log.push(`  ${quarantined.name} quarantined — cleanup skips ${quarantined.name}`);
     for (const f of rcPending.keys()) log.push(`  ${f}: release check pending — cleanup skips ${f} (its previous keg is the rollback)`);
     for (const f of rcBroken) log.push(`  ${f}: release check record unreadable — cleanup skips ${f}`);
-    if (keep.length) log.push(...(await x([cfg.brew, "cleanup", ...keep])).out.trimEnd().split("\n").slice(-5));
+    if (keep.length) log.push(...(await x([cfg.brew, "cleanup", ...keep], { ...LOG_ONLY })).out.trimEnd().split("\n").slice(-5));
     return;
   }
-  log.push(...(await x([cfg.brew, "cleanup"])).out.trimEnd().split("\n").slice(-5));
+  log.push(...(await x([cfg.brew, "cleanup"], { ...LOG_ONLY })).out.trimEnd().split("\n").slice(-5));
 }
 
 /**
@@ -532,7 +532,7 @@ async function upgradeFormula(rt: RunCtx, full: string): Promise<number | "held"
       await ownerHold(rt, unchecked.name, last(full), why ?? `its owner ${unchecked.owners.join(" ")} runs now, though it was not loaded when this run planned`);
       return "held";
     }
-    const code = (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true })).rc;
+    const code = (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true, ...LOG_ONLY })).rc;
     // The summary note is the restart step's, once the upgrade is counted (a Type A version mismatch is not); the
     // stale-keg step leaves it alone once brew ran it, whatever comes after.
     if (code === 0) unchecked.ran = true;
@@ -540,7 +540,7 @@ async function upgradeFormula(rt: RunCtx, full: string): Promise<number | "held"
     return code;
   }
   const rc = findCheck(cfg.releaseChecks, full);
-  if (!rc) return (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true })).rc;
+  if (!rc) return (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true, ...LOG_ONLY })).rc;
   const f = last(full);
   const view = await brewView(rcEnv.exec, cfg.brew, full);
   const cel = await x([cfg.brew, "--cellar", f]);
@@ -573,7 +573,7 @@ async function upgradeFormula(rt: RunCtx, full: string): Promise<number | "held"
   // Owed only once written: a write that fails stops the upgrade, and a run that upgraded nothing owes none.
   await savePending(rcEnv, { ...p, upgradeStarted: true });
   p.upgradeStarted = true;
-  const code = (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true })).rc;
+  const code = (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true, ...LOG_ONLY })).rc;
   if (code === 0) {
     const now = await brewView(rcEnv.exec, cfg.brew, full);
     if (now?.current && now.current === p.from) {
@@ -653,6 +653,8 @@ export async function casksSection(rt: RunCtx) {
       const rq = await x([cfg.brew, "--caskroom"]);
       const room = rq.rc === 0 ? rq.out.trim() : "";
       const lsofRead: { clean?: boolean; why?: string; dirty?: string } = {};
+      // One full scan per cask, fresh on purpose (an earlier cask's upgrade changes what runs); each holds up to ~3.6x its output (up to
+      // ~460 MiB at the 128 MiB bound) until it ends. Not hoisted: a per-run scan could miss a process started since.
       // Strict and complete: exit 0, nothing on stderr, the header, at least one process, every row whole, the last line
       // ended. Anything less is not a scan: a process missing from it would let its cask upgrade.
       const read = room.startsWith("/") ? await lsofMaps({ exec: x } as KegEnv, cfg.lsof, log, true, lsofRead) : undefined;
@@ -681,7 +683,7 @@ export async function casksSection(rt: RunCtx) {
       log.push(`  upgrading ${cask}...`);
       // The snapshot is taken before the upgrade replaces what it reads.
       const prior = await gk.snapshot(cask);
-      if ((await x([cfg.brew, "upgrade", "--cask", "--greedy", cask], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true })).rc === 0) {
+      if ((await x([cfg.brew, "upgrade", "--cask", "--greedy", cask], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true, ...LOG_ONLY })).rc === 0) {
         let got: unknown;
         try {
           got = (JSON.parse((await x([cfg.brew, "info", "--json=v2", "--cask", cask])).out) as { casks?: { installed?: unknown }[] }).casks?.[0]?.installed;

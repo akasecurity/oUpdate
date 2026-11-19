@@ -9,6 +9,7 @@ import { applyHost, type GkOps } from "../../src/apply/run.ts";
 import { parsePrevSummary } from "../../src/host/prev-log.ts";
 import { fakeHost, fakeTypeB, testConfig, type HostScript } from "./host-fixture.ts";
 import { scripted } from "./helpers.ts";
+import { LOG_STREAM_BYTES } from "../../src/apply/exec.ts";
 
 const T = "\t";
 // As the previous updater's brew mocks: a core formula, a third-party tap formula, a third-party tap cask.
@@ -44,6 +45,8 @@ describe("post-upgrade check (issue 2)", () => {
   test("an upgraded package with a passing check is logged ok; no failure", async () => {
     const r = await run(BREW, { cfg: { postUpgradeCheck: CHECK } });
     expect(r.calls).toContain("good-a --version");
+    // Only the exit code is read: log-only.
+    expect(r.callOpts.find((c) => c.line === "good-a --version")?.opts).toMatchObject({ maxBytes: LOG_STREAM_BYTES, tail: true });
     expect(r.log).toContain("post-upgrade check: good-a ok");
     expect(r.rc).toBe(0);
   });
@@ -924,6 +927,7 @@ describe("Claude Code native update in the npm phase (port 12c)", () => {
     // Mutants caught: the step not run (no update call), the version read before the update, the part dropped from the npm line.
     const r = await cc({ claudeUpdateOut: "Checking for updates\nSuccessfully updated from 1.0.0 to 2.0.0\n" });
     expect(ccCalls(r.calls)).toEqual([`${CC} update`, `${CC} --version`]);
+    expect(r.callOpts.find((c) => c.line === `${CC} update`)?.opts).toMatchObject({ maxBytes: LOG_STREAM_BYTES, tail: true });
     expect(r.npm).toBe("  npm:  nothing to update; claude-code: 2.0.0");
     const at = r.log.indexOf("--- claude code (native) ---");
     expect(at).toBeGreaterThan(r.log.findIndex((l) => l.startsWith("--- npm")));
@@ -1121,5 +1125,44 @@ describe("the bun this run executes", () => {
     );
     expect(r.calls).toContain("brew upgrade bun");
     expect(r.log.some((l) => l.includes("runs under it"))).toBe(false);
+  });
+});
+
+describe("brew update that fails", () => {
+  test("its failure lines are the LAST five error lines of its output, one per line", async () => {
+    const out = Array.from({ length: 8 }, (_, i) => `error: tap ${i} fetch failed`).join("\n");
+    const r = await run({ ...BREW, answers: { "brew update": { rc: 1, out } } });
+    const shown = r.log.filter((l) => /^    error: tap \d fetch failed$/.test(l));
+    expect(shown).toEqual([3, 4, 5, 6, 7].map((i) => `    error: tap ${i} fetch failed`));
+  });
+});
+
+describe("a command stopped for output over its bound", () => {
+  const cut = { rc: 125, out: "", err: "output over 1000 bytes: the command was stopped", truncated: true as const };
+  test("fails the outdated query, and the log says why, not only the rc (also on the plain-query fallback)", async () => {
+    const r = await run({ ...BREW, answers: { "brew outdated --fetch-HEAD --formula": cut, "brew outdated --formula": cut } });
+    expect(r.brew).toContain("FAILED: outdated-query");
+    expect(r.log.filter((l) => /^  brew outdated .*--formula: output over 1000 bytes: the command was stopped$/.test(l)).length).toBeGreaterThan(0);
+  });
+});
+
+describe("which commands keep only a tail of their output", () => {
+  test("brew update, upgrade and cleanup and npm install -g are log-only (the last 1 MiB, nothing parsed); every other brew and npm call keeps the whole answer", async () => {
+    const r = await run({ ...BREW, npmOutdated: JSON.stringify({ pkgx: { current: "1.0.0", wanted: "1.1.0", latest: "1.1.0" } }) });
+    const logOnly = (line: string) => /^brew (update|upgrade|cleanup)\b/.test(line) || /^npm install -g /.test(line);
+    const mine = r.callOpts.filter((c) => /^(\S*\/)?(brew|npm) /.test(c.line) || /^(brew|npm) /.test(c.line));
+    expect(mine.some((c) => /^brew upgrade /.test(c.line))).toBe(true);
+    expect(mine.some((c) => /^brew update$/.test(c.line))).toBe(true);
+    expect(mine.some((c) => /^npm install -g /.test(c.line))).toBe(true);
+    for (const c of mine) {
+      if (logOnly(c.line)) expect({ line: c.line, maxBytes: c.opts?.maxBytes, tail: c.opts?.tail }).toEqual({ line: c.line, maxBytes: LOG_STREAM_BYTES, tail: true });
+      else expect({ line: c.line, maxBytes: c.opts?.maxBytes, tail: c.opts?.tail }).toEqual({ line: c.line, maxBytes: undefined, tail: undefined });
+    }
+  });
+
+  test("a cask upgrade is log-only too", async () => {
+    const r = await run({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1" });
+    const c = r.callOpts.find((x) => x.line === "brew upgrade --cask --greedy app");
+    expect({ maxBytes: c?.opts?.maxBytes, tail: c?.opts?.tail }).toEqual({ maxBytes: LOG_STREAM_BYTES, tail: true });
   });
 });

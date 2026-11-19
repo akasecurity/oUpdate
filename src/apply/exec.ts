@@ -8,13 +8,22 @@ export interface ExecResult {
   err: string;
   /** The command ran past its timeoutMs and was killed: the caller marks its phase failed. */
   timedOut?: boolean;
+  /** A stream grew past its bound (and the command was not log-only): the command was stopped, out is empty and rc is OVER_BOUND_RC. Never a partial answer. */
+  truncated?: true;
 }
+
+/** The rc of a command stopped for output past its bound: nonzero, so every caller's rc check reads it as a failure. */
+export const OVER_BOUND_RC = 125;
 
 /**
  * force: starts even while oupdate is stopping (a release check's owed after, run from the stop tasks). soft: a timeout is
- * returned (timedOut) for the caller to record, not a stop of the phase.
+ * returned (timedOut) for the caller to record, not a stop of the phase. maxBytes: the most bytes of each of stdout and
+ * stderr (default MAX_STREAM_BYTES; anything but a number of 1 or more is the default, a fraction is rounded down). A
+ * command that prints more is stopped and fails (truncated, rc OVER_BOUND_RC, nothing of its output returned): no gate reads a
+ * partial answer. tail: a command whose output is only logged keeps the last maxBytes instead (a notice line says how many
+ * earlier bytes went), and is never stopped for it.
  */
-export type Exec = (argv: string[], opts?: { env?: Record<string, string>; timeoutMs?: number; cwd?: string; stdin?: string; force?: boolean; soft?: boolean }) => Promise<ExecResult>;
+export type Exec = (argv: string[], opts?: { env?: Record<string, string>; timeoutMs?: number; cwd?: string; stdin?: string; force?: boolean; soft?: boolean; maxBytes?: number; tail?: boolean }) => Promise<ExecResult>;
 
 /** After SIGTERM to a timed-out command's process group, SIGKILL follows this much later. */
 export const KILL_GRACE_MS = 2000;
@@ -153,20 +162,86 @@ export async function killLive(graceMs = 500): Promise<void> {
 /** The process groups killLive would stop now (for tests). */
 export const liveGroups = () => [...live];
 
-/** Reads a stream to its end into chunks; a cancelled or failed stream just ends. */
-async function drain(r: ReadableStreamDefaultReader<Uint8Array>, into: Uint8Array[]) {
+/**
+ * Default most bytes of each of a command's stdout and stderr. Callers parse captured text as JSON (brew info and outdated, npm ls,
+ * a broker client's reply, a reviewer command) or read it whole (git diff, lsof), so the default is far above any real answer
+ * (32 MiB) and only bounds memory against a runaway command, which is stopped and fails.
+ */
+export const MAX_STREAM_BYTES = 32 * 1024 * 1024;
+
+/** The bound for a command whose output is only logged (an upgrade, an install, a cleanup): pass it with tail: true. */
+export const LOG_STREAM_BYTES = 1024 * 1024;
+
+/**
+ * The bound for the all-process lsof scans (stale-keg and release-check holders). Run as root over every user on a busy host,
+ * lsof's answer can legitimately pass the default; a scan over even this fails (rc OVER_BOUND_RC), never reads as "nothing holds
+ * it". Memory: up to 128 MiB held per stream until lsof ends.
+ */
+export const LSOF_STREAM_BYTES = 128 * 1024 * 1024;
+
+/** The options of a log-only command: its last LOG_STREAM_BYTES are kept and nothing parses them. */
+export const LOG_ONLY = { maxBytes: LOG_STREAM_BYTES, tail: true } as const;
+
+/** maxBytes as used: a finite number of 1 or more, rounded down; anything else (0, Infinity) is the default. realExec rejects negative and NaN before this. */
+export const boundOf = (n: number | undefined): number => (typeof n === "number" && Number.isFinite(n) && n >= 1 ? Math.floor(n) : MAX_STREAM_BYTES);
+
+/** One stream's bytes: all of them up to `max`, or with `tail` the last `max` and how many earlier bytes were let go. */
+interface Capture {
+  max: number;
+  tail: boolean;
+  chunks: Uint8Array[];
+  bytes: number;
+  dropped: number;
+  /** Set (non-tail) when a chunk took the stream past max; nothing more is read. */
+  over: boolean;
+}
+
+function take(c: Capture, value: Uint8Array) {
+  if (!c.tail) {
+    if (c.bytes + value.length > c.max) {
+      c.over = true;
+      return;
+    }
+    c.chunks.push(value);
+    c.bytes += value.length;
+    return;
+  }
+  c.chunks.push(value);
+  c.bytes += value.length;
+  while (c.bytes > c.max) {
+    const over = c.bytes - c.max;
+    const first = c.chunks[0]!;
+    if (first.length <= over) {
+      c.chunks.shift();
+      c.bytes -= first.length;
+      c.dropped += first.length;
+    } else {
+      c.chunks[0] = first.subarray(over);
+      c.bytes -= over;
+      c.dropped += over;
+    }
+  }
+}
+
+/** Reads a stream to its end (or, past its bound, until onOver); a cancelled or failed stream just ends. */
+async function drain(r: ReadableStreamDefaultReader<Uint8Array>, into: Capture, onOver: () => void) {
   try {
     for (;;) {
       const { done, value } = await r.read();
       if (done) return;
-      into.push(value);
+      take(into, value);
+      if (into.over) {
+        onOver();
+        return;
+      }
     }
   } catch {
     // cancelled at a timeout
   }
 }
 
-const text = (chunks: Uint8Array[]) => Buffer.concat(chunks).toString();
+const newCapture = (max: number, tail: boolean): Capture => ({ max, tail, chunks: [], bytes: 0, dropped: 0, over: false });
+const text = (c: Capture) => (c.dropped ? `[... ${c.dropped} earlier bytes truncated ...]\n` : "") + Buffer.concat(c.chunks).toString();
 
 /**
  * Runs argv directly (never through a shell), in its own process group. A command that cannot
@@ -179,6 +254,8 @@ const text = (chunks: Uint8Array[]) => Buffer.concat(chunks).toString();
  * spawn in a process), so a finished command was waited on to its timeout.
  */
 export const realExec: Exec = async (argv, opts = {}) => {
+  // A caller bug, not a runtime condition: said at once, never quietly turned into some other bound.
+  if (typeof opts.maxBytes === "number" && (Number.isNaN(opts.maxBytes) || opts.maxBytes < 0)) throw new RangeError(`exec maxBytes must not be negative or NaN, got ${opts.maxBytes}`);
   if (stopping && !opts.force) return { rc: 143, out: "", err: "oupdate is stopping: not started" };
   let p: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
@@ -195,23 +272,30 @@ export const realExec: Exec = async (argv, opts = {}) => {
   }
   const pid = p.pid;
   live.add(pid);
-  const out: Uint8Array[] = [];
-  const err: Uint8Array[] = [];
+  const max = boundOf(opts.maxBytes);
+  const out = newCapture(max, opts.tail === true);
+  const err = newCapture(max, opts.tail === true);
+  let overRes: () => void = () => {};
+  const overflow = new Promise<"over">((res) => {
+    overRes = () => res("over");
+  });
   const outR = p.stdout.getReader();
   const errR = p.stderr.getReader();
-  const finished = Promise.all([p.exited, drain(outR, out), drain(errR, err)]).then(() => "done" as const);
+  const finished = Promise.all([p.exited, drain(outR, out, overRes), drain(errR, err, overRes)]).then(() => "done" as const);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<"timeout">((res) => {
     if (opts.timeoutMs !== undefined) timer = setTimeout(() => res("timeout"), opts.timeoutMs);
   });
-  const why = await Promise.race([finished, timeout]);
+  const why = await Promise.race([finished, timeout, overflow]);
   clearTimeout(timer);
-  if (why === "timeout") {
+  if (why !== "done") {
+    // An over-bound answer is never returned: let go of what was read at once, not after the kill wait (up to 2x max is held).
+    if (why === "over") out.chunks.length = err.chunks.length = 0;
     const tree = snapshotTree(pid);
     killGroup(pid, "SIGTERM");
     // Not unref'd: oupdate stays up for the grace so the SIGKILL is sent. The group stays listed
     // until then: a grandchild may still be running.
-    if (!opts.soft) {
+    if (!opts.soft && why === "timeout") {
       setTimeout(() => {
         killGroup(pid, "SIGKILL");
         killTree(tree);
@@ -220,15 +304,21 @@ export const realExec: Exec = async (argv, opts = {}) => {
     }
     void outR.cancel().catch(() => {});
     void errR.cancel().catch(() => {});
-    if (opts.soft) {
-      // The caller goes on to start another command: wait for the kill to finish first, so a killed brew no longer holds its lock.
-      await new Promise((r) => setTimeout(r, KILL_GRACE_MS));
+    if (opts.soft || why === "over") {
+      // The caller goes on to start another command (an over-bound read fails and the run continues, unlike a hard timeout, which
+      // aborts the phase): wait for the kill to finish first, so a killed brew no longer holds its lock and a reviewer's
+      // directory is not emptied under a child still writing. A child that exits at SIGTERM ends the wait at once.
+      // Bounded, not exact: this can run past the caller's timeoutMs (a SIGTERM-ignorer: the grace, then the 1 s exit poll; seen 2070 ms
+      // at timeoutMs 300), and a child stuck in uninterruptible sleep outlives the poll, so the group may still be alive on return.
+      if (why === "over") await Promise.race([p.exited, new Promise((r) => setTimeout(r, KILL_GRACE_MS))]);
+      else await new Promise((r) => setTimeout(r, KILL_GRACE_MS));
       killGroup(pid, "SIGKILL");
       killTree(tree);
       live.delete(pid);
       // Confirm the exit (bounded: 1 s): the group and each killed pid are gone, so the next brew does not meet their lock.
       for (let i = 0; i < 50 && (groupAlive(pid) || tree.some((t) => pidAlive(t.pid))); i++) await new Promise((r) => setTimeout(r, 20));
     }
+    if (why === "over") return { rc: OVER_BOUND_RC, out: "", err: `output over ${max} bytes: the command was stopped`, truncated: true };
     return { rc: 124, out: text(out), err: text(err), timedOut: true };
   }
   live.delete(pid);

@@ -5,8 +5,19 @@
 // not read. Deterministic findings on the surface FLAG before any reviewer call.
 
 import { benignBinary } from "../benign-binary.ts";
+import type { Exec } from "./exec.ts";
 
-export type Git = (dir: string, args: string[]) => Promise<{ rc: number; out: string }>;
+export type GitResult = { rc: number; out: string; truncated?: true };
+export type Git = (dir: string, args: string[]) => Promise<GitResult>;
+
+/** A git read that did not give its whole answer: it failed, or it was stopped over the output bound (rc 125, truncated). */
+export const gitFailed = (r: GitResult) => r.rc !== 0 || r.truncated === true;
+
+/** git -C dir <args> through an Exec, keeping what a gate needs to tell a whole answer from a cut one. */
+export const gitVia = (x: Exec): Git => async (dir, args) => {
+  const res = await x(["git", "-C", dir, ...args]);
+  return { rc: res.rc, out: res.out, ...(res.truncated ? { truncated: true as const } : {}) };
+};
 
 const MANIFEST = /^(setup\.py|setup\.cfg|pyproject\.toml|MANIFEST\.in|Pipfile(\.lock)?|requirements[^/]*\.txt|package(-lock)?\.json|bun\.lockb?|yarn\.lock|pnpm-lock\.yaml|uv\.lock|poetry\.lock|Cargo\.(toml|lock)|build\.rs|Package\.(swift|resolved)|Gemfile(\.lock)?|go\.(mod|sum)|CMakeLists\.txt|GNUmakefile|[Mm]akefile|Dockerfile[^/]*|install[^/]*)$/;
 const DIRS = /^(Formula|HomebrewFormula|Casks|\.github|\.circleci|packaging|scripts?|bin|ci)\//;
@@ -74,7 +85,7 @@ export async function gatherSurface(git: Git, dir: string, oldRev: string, head:
   const base = ["-c", "core.quotepath=false", "diff", "--no-renames"];
   const raw = await git(dir, [...base, "--raw", range]);
   const num = await git(dir, [...base, "--numstat", range]);
-  if (raw.rc !== 0 || num.rc !== 0) return { ok: false, why: "git could not list the release diff" };
+  if (gitFailed(raw) || gitFailed(num)) return { ok: false, why: "git could not list the release diff" };
   const modes = new Map<string, { from: string; to: string; status: string }>();
   for (const l of raw.out.split("\n")) {
     const m = l.match(/^:(\d+) (\d+) \S+ \S+ (\S+)\t(.+)$/);
@@ -101,7 +112,7 @@ export async function gatherSurface(git: Git, dir: string, oldRev: string, head:
   const files: { path: string; diff: string }[] = [];
   for (const path of read.sort()) {
     const d = await git(dir, [...base, "-U0", range, "--", path]);
-    if (d.rc !== 0) return { ok: false, why: `git could not read the diff of ${path}` };
+    if (gitFailed(d)) return { ok: false, why: `git could not read the diff of ${path}` };
     const body = d.out.slice(d.out.search(/^@@|^Binary files|^new file|^deleted file/m) >= 0 ? d.out.search(/^@@|^Binary files|^new file|^deleted file/m) : 0);
     files.push({ path, diff: body });
   }

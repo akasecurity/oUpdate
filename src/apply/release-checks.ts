@@ -37,7 +37,7 @@
 
 import { join } from "node:path";
 import type { ReleaseCheck } from "./config.ts";
-import type { Exec } from "./exec.ts";
+import { LOG_ONLY, type Exec } from "./exec.ts";
 import type { QueuedOwner } from "./owner-waiter.ts";
 
 export interface PendingCheck {
@@ -284,7 +284,8 @@ const tailOf = (out: string, n = 15) => out.split("\n").map((l) => l.trimEnd()).
 export async function runHook(env: ReleaseEnv, rc: ReleaseCheck, which: "before" | "after"): Promise<boolean> {
   const argv = asUser(rc, rc[which]!);
   const f = shortName(rc.formula);
-  const r = await env.exec(argv, { timeoutMs: rc.timeoutSec * 1000 });
+  // Log-only: the output feeds tailOf and nothing else, so a hook that prints past the bound and exits 0 still passes.
+  const r = await env.exec(argv, { timeoutMs: rc.timeoutSec * 1000, ...LOG_ONLY });
   const ok = r.rc === 0 && !r.timedOut;
   const why = r.timedOut ? "timeout" : `rc ${r.rc}`;
   env.log.push(`  release check ${f}: ${which} ${argv.join(" ")} — ${ok ? "ok" : `FAILED (${why})`}`);
@@ -329,7 +330,8 @@ export async function runCheck(env: ReleaseEnv, rc: ReleaseCheck, version: strin
       env.log.push(`  release check ${f} ${version}: attempt ${n}/${total} not run (gate ${g.kind}: ${g.note})${n > 1 ? ` — the ${n - 1} FAIL before it ${n > 2 ? "are" : "is"} no verdict` : ""}`);
       return { kind: "blocked", gate: g, attempts: n - 1 };
     }
-    const r = await env.exec(argv, { env: { GATE_VERSION: version }, timeoutMs: rc.timeoutSec * 1000 });
+    // Log-only: the output feeds tailOf and nothing else, so a check that prints past the bound keeps its real exit code (a FAIL still rolls back), never rc 125 ("could not run").
+    const r = await env.exec(argv, { env: { GATE_VERSION: version }, timeoutMs: rc.timeoutSec * 1000, ...LOG_ONLY });
     tail = tailOf(`${r.out}${r.err}`);
     const said = r.timedOut ? `timeout after ${rc.timeoutSec} s` : r.rc === 0 ? "PASS" : r.rc === 1 ? "FAIL" : `could not run (rc ${r.rc})`;
     env.log.push(`  release check ${f} ${version}: attempt ${n}/${total} ${said}`);

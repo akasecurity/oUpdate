@@ -10,6 +10,7 @@ import type { Reviewer } from "../review.ts";
 import type { Caps } from "./chunked.ts";
 import { artifactKind } from "./formula-gates.ts";
 import { formulaReview, type FormulaEnv, type TapPin } from "./formula.ts";
+import { gitFailed } from "./surface.ts";
 import { outdatedVersions, tapIn } from "./taps.ts";
 
 export interface TypeBEnv extends FormulaEnv {
@@ -48,7 +49,8 @@ export async function typeBReview(env: TypeBEnv, r: Reviewer, pkg: string, tap: 
   // this commit, and the install refuses to run if the tap is not still exactly here.
   const repo = await env.brew(["--repository", tap]);
   const tapDir = repo.rc === 0 ? repo.out.trim() : "";
-  const head = tapDir ? (await env.git(tapDir, ["rev-parse", "HEAD"])).out.trim() : "";
+  const headRead = tapDir ? await env.git(tapDir, ["rev-parse", "HEAD"]) : undefined;
+  const head = headRead && !gitFailed(headRead) ? headRead.out.trim() : "";
   const list = await env.brew(["list", "--versions", `${tap}/${pkg}`]);
   const oldVer = list.rc === 0 ? firstVersion(list.out) : "";
   const info = await env.brewInfo(`${tap}/${pkg}`);
@@ -95,10 +97,11 @@ export async function tapUnchangedSinceReview(env: TypeBEnv, pkg: string, pin: T
   if (!pin || pin.pkg !== pkg || !pin.tapDir || !pin.head || !pin.rbPath) {
     reason = `no reviewed tap state recorded for ${pkg}`;
   } else {
-    const now = (await env.git(pin.tapDir, ["rev-parse", "HEAD"])).out.trim();
+    const nowRead = await env.git(pin.tapDir, ["rev-parse", "HEAD"]);
+    const now = gitFailed(nowRead) ? "" : nowRead.out.trim();
     // The whole tap, untracked files included: an edit anywhere changes what brew would run.
     const st = await env.git(pin.tapDir, ["status", "--porcelain", "--untracked-files=all"]);
-    const dirty = st.rc !== 0 ? "git status failed" : st.out.trim();
+    const dirty = gitFailed(st) ? "git status failed" : st.out.trim();
     if (now !== pin.head) reason = `tap HEAD moved ${pin.head.slice(0, 12)} → ${now.slice(0, 12)}`;
     else if (dirty) reason = "uncommitted or untracked changes in the tap";
     else return true;

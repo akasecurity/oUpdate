@@ -14,7 +14,7 @@
 // is still stale. lsof failing is a reported failure, never "nothing stale".
 
 import { basename, dirname } from "node:path";
-import { isStopping, type Exec } from "./exec.ts";
+import { isStopping, LSOF_STREAM_BYTES, type Exec } from "./exec.ts";
 import { kegHolders, type Holder } from "./holders.ts";
 import { matchOwner, parsePrint, type QueuedOwner, type StaleOwner } from "./owner-waiter.ts";
 
@@ -75,7 +75,7 @@ export function caskRunning(lsofOut: string, caskroom: string, cask: string, app
  * process on the keg".
  */
 export async function lsofMaps(env: KegEnv, bin: string, log: string[], strict = false, scan?: { clean?: boolean; why?: string; dirty?: string }, fds = "txt,mem"): Promise<string | undefined> {
-  const r = await env.exec([bin, "-nP", "-w", "-d", fds]);
+  const r = await env.exec([bin, "-nP", "-w", "-d", fds], { maxBytes: LSOF_STREAM_BYTES });
   // A complete answer: exit 0, nothing on stderr, the COMMAND header, at least one row past it, every row with lsof's
   // nine fields and a numeric pid, and the last line ended (a cut-off answer is not a scan). dirty: what is not.
   if (scan) {

@@ -2,7 +2,7 @@
 // update, the post-upgrade checks and the closing summary and notice.
 
 import { basename, dirname, join } from "node:path";
-import { isStopping as execStopping } from "./exec.ts";
+import { isStopping as execStopping, LOG_ONLY } from "./exec.ts";
 import { staleKegCheck } from "./kegs.ts";
 import { MAS_NOT_CHECKED } from "./summary-text.ts";
 import { npmSection, type NpmRun } from "./npm.ts";
@@ -119,7 +119,7 @@ export async function claudeCodeStep(rt: RunCtx): Promise<string | undefined> {
         await step("npm", "claude code", async () => {
           let rc: number | "timeout";
           try {
-            const u = await x([ccBin, "update"]);
+            const u = await x([ccBin, "update"], { ...LOG_ONLY });
             rc = u.rc;
             for (const l of `${u.out}${u.err}`.split("\n")) if (l !== "") log.push(`  ${l}`);
           } catch (e) {
@@ -165,7 +165,7 @@ export async function postUpgradeChecks(rt: RunCtx, npmRun: NpmRun): Promise<voi
           }
           let why = "";
           try {
-            const c = await x(argv);
+            const c = await x(argv, { ...LOG_ONLY });
             if (c.rc !== 0) why = `rc=${c.rc}`;
           } catch (e) {
             if (!(e instanceof PhaseTimeout)) throw e;

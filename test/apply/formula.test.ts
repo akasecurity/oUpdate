@@ -278,6 +278,50 @@ describe("formulaReview", () => {
     expect(v).toMatchObject({ rc: 1, calls: 0 });
     expect(v.reason).toMatch(/^cannot list the tap at revision [0-9a-f]{12} — manual review$/);
   });
+  test.each([
+    ["the formula diff", (args: string[]) => args[0] === "diff" && args.includes("--"), /^git could not read the formula diff \(rc 128\) — manual review$/],
+    ["the changed-files list", (args: string[]) => args[0] === "diff" && args.includes("--name-only"), /^git could not list the changed tap files \(rc 128\) — manual review$/],
+  ] as const)("Me git cannot read %s (an answer cut at its bound has rc 125 or another failure): FLAG, never an empty list", async (_what, fails, why) => {
+    const fx = fixture({ after: moved, rbPath: "Formula/t/tool.rb" });
+    const { r } = scripted([], APPROVE);
+    const env: FormulaEnv = { ...fx.env, git: async (d, args) => (fails(args) ? { rc: 128, out: "" } : fx.env.git(d, args)) };
+    const v = await formulaReview(env, r, { pkg: "tool", tap: TAP, oldVer: "1.0", newVer: "1.1", artifact: "prebuilt", tapDir: fx.tap, head: fx.head, newUrl: PREBUILT("1.1"), officialTaps: OFFICIAL, host: "fixture", notify: () => {} });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toMatch(why);
+  });
+  test.each([
+    ["the formula diff", (args: string[]) => args[0] === "diff" && args.includes("--"), /^git could not read the formula diff/],
+    ["the changed-files list", (args: string[]) => args[0] === "diff" && args.includes("--name-only"), /^git could not list the changed tap files/],
+  ] as const)("Me a git read of %s that comes back cut (truncated, even with rc 0): FLAG, never a partial list", async (_what, cut, why) => {
+    const fx = fixture({ after: moved, rbPath: "Formula/t/tool.rb" });
+    const { r } = scripted([], APPROVE);
+    const env: FormulaEnv = { ...fx.env, git: async (d, args) => (cut(args) ? { rc: 0, out: "partial", truncated: true } : fx.env.git(d, args)) };
+    const v = await formulaReview(env, r, { pkg: "tool", tap: TAP, oldVer: "1.0", newVer: "1.1", artifact: "prebuilt", tapDir: fx.tap, head: fx.head, newUrl: PREBUILT("1.1"), officialTaps: OFFICIAL, host: "fixture", notify: () => {} });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toMatch(why);
+  });
+  test.each([
+    ["the first git show", (args: string[], oldRev: string) => args[0] === "show" && args[1] === `${oldRev}:Formula/t/tool.rb`, /^cannot list the tap at revision [0-9a-f]{12} — manual review$/, true],
+    ["the ls-tree listing", (args: string[]) => args.includes("ls-tree"), /^cannot list the tap at revision [0-9a-f]{12} — manual review$/, false],
+    ["the git show of the file found", (args: string[], oldRev: string) => args[0] === "show" && args[1] === `${oldRev}:Formula/tool.rb`, /\(git show of Formula\/tool\.rb failed\) — manual review$/, false],
+  ] as const)("Me %s comes back cut (truncated, rc 0): FLAG, never read as the installed text", async (_what, cut, why, listFails) => {
+    const fx = fixture({ after: moved, rbPath: "Formula/t/tool.rb" });
+    const { r } = scripted([], APPROVE);
+    const env: FormulaEnv = {
+      ...fx.env,
+      git: async (d, args) => (args.includes("ls-tree") && listFails ? { rc: 128, out: "" } : cut(args, fx.oldRev) ? { rc: 0, out: "partial", truncated: true } : fx.env.git(d, args)),
+    };
+    const v = await formulaReview(env, r, { pkg: "tool", tap: TAP, oldVer: "1.0", newVer: "1.1", artifact: "prebuilt", tapDir: fx.tap, head: fx.head, newUrl: PREBUILT("1.1"), officialTaps: OFFICIAL, host: "fixture", notify: () => {} });
+    expect(v).toMatchObject({ rc: 1, calls: 0 });
+    expect(v.reason).toMatch(why);
+  });
+  test("Me the receipt revision check that comes back cut (rc 0, truncated) is not 'present': noted as not in the clone, a whole-file review", async () => {
+    const fx = fixture({ after: moved, rbPath: "Formula/t/tool.rb" });
+    const { r } = scripted([], APPROVE);
+    const env: FormulaEnv = { ...fx.env, git: async (d, args) => (args[0] === "cat-file" ? { rc: 0, out: "", truncated: true } : fx.env.git(d, args)) };
+    const v = await formulaReview(env, r, { pkg: "tool", tap: TAP, oldVer: "1.0", newVer: "1.1", artifact: "prebuilt", tapDir: fx.tap, head: fx.head, newUrl: PREBUILT("1.1"), officialTaps: OFFICIAL, host: "fixture", notify: () => {} });
+    expect(JSON.stringify(v)).toContain("is not in the local tap clone");
+  });
   test("Me the receipt revision exists but holds no single file of that name (two, here) → FLAG, no reviewer call, counted toward stuck", async () => {
     // At the old revision Formula/tool.rb and Formula/a/tool.rb both exist; brew now reads Formula/t/tool.rb.
     const twin = (t: string) => {
