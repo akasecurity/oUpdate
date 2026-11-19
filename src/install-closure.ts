@@ -30,6 +30,10 @@ export interface InstallView {
   hook: boolean;
   // package.json `bin` and `directories.bin`, compared only while a hook exists.
   binStamp: string;
+  // Set only when a widening happened (every file, the whole package, a hook's reach, a same or named directory): the same view read
+  // with those widenings left out. What a manifest field (main, bin) or a runner reaches by name shows there, where the widening puts every file on
+  // both sides and a retarget between two unchanged files would not show in `files`.
+  narrow?: InstallView;
 }
 
 const LIFECYCLE = ["preinstall", "install", "postinstall"] as const;
@@ -200,6 +204,10 @@ function runnerName(token: string): string {
 // view that took such a word is also read the old way, so everything the old reading reached is still reached.
 let oldBackslash = false;
 let tookBackslash = false;
+// A widening of any kind (every file, the whole package, a shell hook's whole reach, a script's own directory or a named directory)
+// happened in this read (widened), and a read that leaves all of them out (noWiden).
+let widened = false;
+let noWiden = false;
 function words(cmd: string): string[] {
   // No quote, backslash or tilde: the words are the runs between blanks.
   if (!/['"\\~]/.test(cmd)) return cmd.split(/\s+/).filter((w) => w !== "");
@@ -4904,6 +4912,8 @@ function dynamicRequireDirs(code: string): string[] {
 }
 
 function addUnder(ctx: Ctx, dir: string): boolean {
+  widened = true;
+  if (noWiden) return false;
   let any = false;
   for (const logical of ctx.logical.keys()) {
     if (logical !== dir && !logical.startsWith(`${dir}/`)) continue;
@@ -5081,6 +5091,8 @@ function addStdlibShadow(ctx: Ctx, dir: string, name: string): void {
 
 // Recorded, not scanned, so a directory widen does not cascade or trip the depth cap.
 function addSameDir(ctx: Ctx, fromKey: string): void {
+  widened = true;
+  if (noWiden) return;
   const dir = parentDir(fromKey);
   for (const [logical, key] of ctx.logical) {
     if (parentDir(logical) !== dir) continue;
@@ -5277,6 +5289,8 @@ function addScannedLiterals(ctx: Ctx): void {
 
 function addPrefixDir(ctx: Ctx, dir: string): void {
   if (!dir || badPath(dir)) return;
+  widened = true;
+  if (noWiden) return;
   for (const [logical, key] of ctx.logical) {
     if (logical !== dir && !logical.startsWith(`${dir}/`)) continue;
     if (isManifest(logical)) continue;
@@ -5287,6 +5301,8 @@ function addPrefixDir(ctx: Ctx, dir: string): void {
 
 // Docs stay out. Tests and workflows stay out unless the computed tail could name them.
 function widenPackage(ctx: Ctx, reachTests: boolean, reachFlows: boolean): void {
+  widened = true;
+  if (noWiden) return;
   for (const [logical, key] of ctx.logical) {
     if (isManifest(logical) || isDocSurface(logical)) continue;
     if (!reachTests && isTestSurface(logical)) continue;
@@ -5297,6 +5313,8 @@ function widenPackage(ctx: Ctx, reachTests: boolean, reachFlows: boolean): void 
 }
 
 function widenEvery(ctx: Ctx): void {
+  widened = true;
+  if (noWiden) return;
   for (const [logical, key] of ctx.logical) {
     if (isManifest(logical)) continue;
     ctx.files.add(key);
@@ -10282,10 +10300,15 @@ function scanAdded(ctx: Ctx, key: string): void {
     return;
   }
   if (ctx.fromGyp) ctx.gypScanned.add(key);
-  if (capCount(ctx, "scanned") >= DEPTH && !(ctx.realSets ?? ctx).scanned.has(key) && !ctx.lookupSets?.scanned.has(key)) {
+  // A `.node` file is a binary nothing here reads. The wide read counts it against the scan cap as it always did (a name that reaches it, `require("./addon.node")`,
+  // stops the scan at the cap); the narrow read does not: settled() already skips it by stem in the wide read, so only the narrow read would stop on a
+  // file the wide read never took in, and hold a package whose version only moved.
+  const addon = /\.node$/i.test(base);
+  if (!(noWiden && addon) && capCount(ctx, "scanned") >= DEPTH && !(ctx.realSets ?? ctx).scanned.has(key) && !ctx.lookupSets?.scanned.has(key)) {
     fail(ctx, "unresolved: script depth");
     return;
   }
+  if (addon) return;
   const text = dec.decode(ctx.bytes.get(key));
   // A file that is not JavaScript is read under an allowance of its own: it is not charged to the JavaScript file whose scan reached it.
   budgeted(text.length, () => scanAddedOther(ctx, key, base, text), () => fail(ctx, "scanner fault"));
@@ -10439,6 +10462,8 @@ function movedInto(ctx: Ctx, logical: string): boolean {
 const PKG_DIRS = new WeakMap<object, string[]>();
 
 function widenAll(ctx: Ctx): void {
+  widened = true;
+  if (noWiden) return;
   // The backslash reading widens once for the same state: what a widen adds depends on widenInert, the gyp flag and the moved folders
   // (which only grow), and a widen it already did is kept in its own records.
   if (ctx.inEsc) {
@@ -15093,7 +15118,21 @@ function notePrebuild(ctx: Ctx, root: Record<string, unknown>): void {
   fail(ctx, "unresolved: prebuild");
 }
 
-export function installView(files: FileMap): InstallView {
+export function installView(files: FileMap, o: { narrow?: boolean } = {}): InstallView {
+  widened = false;
+  const full = installViewBackslash(files);
+  // `narrow: false`: a caller that reads only the wide files (the package review) skips the second read.
+  if (!widened || o.narrow === false) return full;
+  // A read without the every-file and whole-package widenings: its reached sets still name what main, bin and a runner reach.
+  noWiden = true;
+  try {
+    return { ...full, narrow: installViewBackslash(files) };
+  } finally {
+    noWiden = false;
+  }
+}
+
+function installViewBackslash(files: FileMap): InstallView {
   tookBackslash = false;
   const v = installViewCore(files);
   if (!tookBackslash) return v;

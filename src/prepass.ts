@@ -1027,18 +1027,25 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   // A retarget reaches a different key even when both files sit in both trees.
   const oldReached = reachedFiles(oldFiles, oldV);
   const newReached = reachedFiles(newFiles, newV);
-  for (const k of oldReached) if (!newReached.has(k)) push(`file ${k}`);
-  for (const k of newReached) if (!oldReached.has(k)) push(`file ${k}`);
-  // A file only a self-run read reached on one side but another read reaches on the other is a retarget (`npx . ; node .` with main moved).
-  const oldSelf = selfReached(oldFiles, oldV);
-  const newSelf = selfReached(newFiles, newV);
-  for (const k of oldReached) if (oldSelf.has(k) !== newSelf.has(k)) push(`file ${k}`);
-  const oldEsc = selfReached(oldFiles, oldV, "esc");
-  const newEsc = selfReached(newFiles, newV, "esc");
-  for (const k of oldReached) if (oldEsc.has(k) !== newEsc.has(k)) push(`file ${k}`);
-  const oldAr = selfReached(oldFiles, oldV, "ar");
-  const newAr = selfReached(newFiles, newV, "ar");
-  for (const k of oldReached) if (oldAr.has(k) !== newAr.has(k)) push(`file ${k}`);
+  const retargets = (oV: typeof oldV, nV: typeof newV, oR: Set<string>, nR: Set<string>) => {
+    for (const k of oR) if (!nR.has(k)) push(`file ${k}`);
+    for (const k of nR) if (!oR.has(k)) push(`file ${k}`);
+    // A file only a self-run read reached on one side but another read reaches on the other is a retarget (`npx . ; node .` with main moved).
+    for (const kind of ["self", "esc", "ar"] as const) {
+      const a = selfReached(oldFiles, oV, kind);
+      const b = selfReached(newFiles, nV, kind);
+      for (const k of oR) if (a.has(k) !== b.has(k)) push(`file ${k}`);
+    }
+  };
+  retargets(oldV, newV, oldReached, newReached);
+  // A widening that takes every file puts every file on both sides in the sets above, so a main or bin moved between two files
+  // both releases hold shows nowhere there. The same comparison on the reads without those widenings still shows it (a side that
+  // never widened is its own narrow read). Holding more is the only change: a difference found here is one more `file` signal.
+  if (oldV.narrow || newV.narrow) {
+    const oN = oldV.narrow ?? oldV;
+    const nN = newV.narrow ?? newV;
+    retargets(oN, nN, reachedFiles(oldFiles, oN), reachedFiles(newFiles, nN));
+  }
   // The same for a path that is missing: a self-run read alone reached it on one side only.
   const oldMissSelf = new Set(oldV.selfMissing ?? []);
   const newMissSelf = new Set(newV.selfMissing ?? []);
@@ -1074,6 +1081,10 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   if (out.length === 0) {
     const cap = newV.hold ?? oldV.hold;
     if (cap && surfaceCap(cap)) push(cap);
+    // A stop only the narrow read made (the wide read already holds the file the narrow one adds by name, so it never reaches that cap)
+    // aborts that read before it follows `node .`: its reached sets are incomplete. Holding is the only safe reading.
+    const narrowStop = newV.narrow?.hold ?? oldV.narrow?.hold;
+    if (!cap && narrowStop) push(`narrow read: ${narrowStop}`);
   }
   return out;
 }
