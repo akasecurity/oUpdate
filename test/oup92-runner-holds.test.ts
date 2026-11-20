@@ -569,7 +569,9 @@ describe("round 12: unresolvable cd targets, npm exec flags after the command, b
       expect(testHeld(hook), hook.slice(0, 12)).toBe(true);
       expect(Date.now() - t).toBeLessThan(30000);
     }
-  });
+    // bun's default test timeout is 5 s and these three reads take about 2.5 s on dev, 5.7 s on a CI runner: the test is given three times
+    // the per-hook bound above, so the bound (30 s each) is the line that fails on a blow-up and a slow runner does not trip the default.
+  }, 90_000);
 
   test("3b. a long wrapper chain is read without crashing", () => {
     const t = Date.now();
