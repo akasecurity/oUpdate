@@ -17,6 +17,19 @@ function details(hook: string): string[] {
 const reads = (hook: string): boolean => details(hook).includes("file sub/x.js") && details(hook.split("make -C sub").join("echo ok")).length === 0;
 // For bodies whose harmless twin holds on its own (an if block, a pipe into sh, thousands of lines).
 const has = (hook: string): boolean => details(hook).includes("file sub/x.js");
+// The median of 3 timings of `run(n)` and of `run(4 * n)`, in ms.
+const scaling = (n: number, run: (n: number) => void): [number, number] => {
+  const median = (size: number) => {
+    const t: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      run(size);
+      t.push(performance.now() - t0);
+    }
+    return t.sort((a, b) => a - b)[1]!;
+  };
+  return [median(n), median(4 * n)];
+};
 const quiet = (hook: string): boolean => details(hook).length === 0;
 const P = "make -C sub";
 const B = "echo a(b)";
@@ -117,13 +130,16 @@ describe("an install hook of several lines: every line the shell runs is read", 
     expect(details("echo " + "a#".repeat(3000) + "\n" + "echo ok")).toEqual([]);
   });
   test("a body of many # characters is read in linear time", () => {
-    const t = performance.now();
-    expect(details("a#".repeat(200000) + "\n" + P).includes("file sub/x.js")).toBe(true);
-    expect(details("a#".repeat(200000) + "; echo $(x)\n" + P).includes("file sub/x.js")).toBe(true); // an unresolved expansion: the line is read leniently
-    expect(details("a#".repeat(200000) + "\necho a(b)\n" + P).includes("file sub/x.js")).toBe(true);
-    expect(details("a#".repeat(200000) + "\nnode sub/x.js\necho a(b)")).toContain("file sub/x.js"); // a long line, the payload, then a line that does not parse
-    expect(performance.now() - t).toBeLessThan(3000);
-  });
+    // The ratio of 4n to n (see the many-parentheses test); the absolute cap is about 10x the build time at 200000.
+    const [small, big] = scaling(50000, (n) => {
+      expect(details("a#".repeat(n) + "\n" + P).includes("file sub/x.js")).toBe(true);
+      expect(details("a#".repeat(n) + "; echo $(x)\n" + P).includes("file sub/x.js")).toBe(true); // an unresolved expansion: the line is read leniently
+      expect(details("a#".repeat(n) + "\necho a(b)\n" + P).includes("file sub/x.js")).toBe(true);
+      expect(details("a#".repeat(n) + "\nnode sub/x.js\necho a(b)")).toContain("file sub/x.js"); // a long line, the payload, then a line that does not parse
+    });
+    expect(big / Math.max(small, 20), `${small.toFixed(0)} ms -> ${big.toFixed(0)} ms`).toBeLessThan(7);
+    expect(big, `${big.toFixed(0)} ms`).toBeLessThan(10_000);
+  }, 60_000);
   test("a shift in arithmetic is not a heredoc; a backslash in a double-quoted delimiter stays", () => {
     // the twins of the first three hold on their own (a line with << is read as a whole), so has()
     expect(has(`(( 1 << EOF )) && echo $(date)\n${P}\nEOF`)).toBe(true);
@@ -154,11 +170,17 @@ describe("an install hook of several lines: every line the shell runs is read", 
     }
   });
   test("many ( or (( stay linear and the payload is read", () => {
-    const t = performance.now();
-    expect(has(`x${"(".repeat(200000)}\n${P}\n${B}`)).toBe(true);
-    expect(has(`${"x; ((1)) ".repeat(12000)}\n${P}\n${B}`)).toBe(true);
-    expect(performance.now() - t).toBeLessThan(1200);
-  });
+    // Linear in the size: 4n costs about 4x n (a quadratic 16x). The bound is 7x. A wall-time bound near the cost does not hold: a hook with a
+    // widening line gets a second (narrow) read, 1.75x the single read on build, which tripped a 1200 ms bound on a slower CI shard.
+    for (const [what, make] of [
+      ["(", (n: number) => `x${"(".repeat(n)}\n${P}\n${B}`],
+      ["((1))", (n: number) => `${"x; ((1)) ".repeat(n)}\n${P}\n${B}`],
+    ] as const) {
+      const [small, big] = scaling(what === "(" ? 50000 : 3000, (n) => expect(has(make(n))).toBe(true));
+      expect(big / Math.max(small, 20), `${what}: ${small.toFixed(0)} ms -> ${big.toFixed(0)} ms`).toBeLessThan(7);
+      expect(big, `${what}: ${big.toFixed(0)} ms`).toBeLessThan(10_000);
+    }
+  }, 60_000);
   test("a here-string, # and quotes inside ${ } and $( ) in a substitution or a loose line", () => {
     expect(reads(`X=$(cat <<< hi)\n)\n${B2}\n${P}`)).toBe(true);
     expect(reads(`X=$(echo \${x:- #})\n${B2}\n${P}`)).toBe(true);
