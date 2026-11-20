@@ -198,6 +198,8 @@ export function fakeTypeB(rc: 0 | 1 | 2 = 0, kind = "formula-only, prebuilt", un
   const upgrades: typeof typeBUpgrades = async (_env, _r, pairs, o) => {
     const run: TypeBRun = o.into ?? { upgraded: [], upgradedFull: [], failed: [], flagged: false, log: [] };
     for (const { pkg, tap } of pairs) {
+      // As typeb.ts: the stop counter is read before anything else, the dry-run branch included.
+      if (o.skip?.(`${tap}/${pkg}`)) continue;
       seen.push(`TBREVIEW ${pkg} ${tap} suppress=0`);
       if (rc !== 0) {
         run.flagged = true;
@@ -209,7 +211,6 @@ export function fakeTypeB(rc: 0 | 1 | 2 = 0, kind = "formula-only, prebuilt", un
         run.log.push(`  dry-run: would upgrade ${pkg}`);
         continue;
       }
-      if (o.skip?.(`${tap}/${pkg}`)) continue;
       const code = await o.upgrade(`${tap}/${pkg}`);
       if (code === "held") continue;
       if (code === 0) {

@@ -91,6 +91,7 @@ export async function npmStep(rt: RunCtx, npmRun: NpmRun): Promise<string> {
         npm, host, registry: cfg.npmRegistry, dryRun, logFile: cfg.logFile, notify,
         trackStuck: (pending) => track("npm", pending),
         into: npmRun,
+        record: (e) => rt.record.add(e),
       });
       npmStatus = n.status;
     });

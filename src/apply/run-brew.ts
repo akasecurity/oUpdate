@@ -279,6 +279,14 @@ export async function brewSection(rt: RunCtx) {
   const verbose = `${vq.out}${vq.err}`.split("\n").filter((l) => !named(hide, l.trim().split(/\s+/)[0] ?? "")).join("\n");
   log.push(verbose.trimEnd(), "");
   b.verbose = verbose;
+  // The versions this run moves from, on disk before the first upgrade (run-record.ts).
+  await rt.record.add(
+    verbose.split("\n").map((l) => l.trim().split(/\s+/)[0] ?? "").filter(Boolean).flatMap((n) => {
+      const manager = formulas.some((f) => last(f) === last(n)) ? "brew-formula" : casks.some((k) => last(k) === last(n)) ? "brew-cask" : undefined;
+      const [from = "?", to = "?"] = outdatedVersions(last(n), verbose).split("→");
+      return manager ? [{ manager, name: last(n), from, to } as const] : [];
+    }),
+  );
 
   // 3. Tap tiers. Type B is the config's list plus this host's approved taps.
   let typeBTaps = cfg.typeBTaps;

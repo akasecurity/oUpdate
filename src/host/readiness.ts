@@ -135,7 +135,7 @@ export async function readiness(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, o: { 
   };
 
   // The dry run's own npm calls (outdated, view) get the same notifier-off environment as the reads above.
-  const dry = await applyHost({ ...cfg, appBundles: [] }, npmQuiet(cfg.npm, exec), fs, { dryRun: true, ...(o.now ? { now: o.now } : {}), ...(o.appNet ? { appNet: o.appNet } : {}) });
+  const dry = await applyHost({ ...cfg, appBundles: [] }, npmQuiet(cfg.npm, exec), fs, { dryRun: true, skipPreflight: true, ...(o.now ? { now: o.now } : {}), ...(o.appNet ? { appNet: o.appNet } : {}) });
   const dryLines = [...dry.log, ...dry.summary].flatMap((l) => l.split(/\r?\n/));
   if (dry.rc !== 0) trouble = true;
 
