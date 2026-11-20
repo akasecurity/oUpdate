@@ -485,3 +485,80 @@ for (const [label, hook, scripts] of invQuiet) {
     });
   }
 }
+
+// OUP-335: the stage pass widened to every file once per distinct unknown stage (S stages cost S times the file count: about 36 ms a stage at 4,000 files).
+// A widen already done on a file set in the same state adds nothing, so it is skipped.
+const widePkg = (v: string, hook: string, docs: number) => {
+  const o: Record<string, string> = { "package.json": JSON.stringify({ name: "p", version: "1.0." + v, scripts: { postinstall: hook } }) };
+  for (let i = 0; i < docs; i++) o[`docs/f${i}.md`] = "x";
+  for (let i = 0; i < docs / 8; i++) o[`pkgs/p${i}/package.json`] = `{"name":"p${i}"}`;
+  o["pkgs/p0/i.js"] = "v" + v;
+  o["lib/x.js"] = "v" + v;
+  return files(o);
+};
+const bestOf3 = (run: () => void): number => {
+  let best = Infinity;
+  for (let i = 0; i < 3; i++) {
+    const t = performance.now();
+    run();
+    best = Math.min(best, performance.now() - t);
+  }
+  return best;
+};
+// A stage that names a different word each (`c0 n0 | c1 n1`) grows the named files at every stage: that must not make every widen walk again.
+for (const [what, stage, join] of [
+  ["one unknown word a stage", (i: number) => `c${i}`, " | "],
+  ["an unknown word and a different named word a stage", (i: number) => `c${i} n${i}`, " | "],
+  ["the same joined with &&", (i: number) => `c${i} n${i}`, " && "],
+  ["the same joined with ;", (i: number) => `c${i} n${i}`, "; "],
+] as const) {
+  test(`a pipeline of many unknown stages costs the stage count once, not once per file: ${what} (OUP-335)`, () => {
+    const cost = (s: number) => {
+      const hook = Array.from({ length: s }, (_, i) => stage(i)).join(join);
+      return bestOf3(() => holds(widePkg("0", hook, 3000), widePkg("1", hook, 3000)));
+    };
+    const small = cost(200);
+    expect(small, `S=200: ${small.toFixed(0)} ms`).toBeLessThan(2000);
+    const big = cost(1600);
+    // linear: 8x the stages costs about 8x (a stage-by-file product 64x); the floor keeps a very fast small run from making the ratio noisy
+    expect(big / Math.max(small, 50), `S=200 ${small.toFixed(0)} ms -> S=1600 ${big.toFixed(0)} ms`).toBeLessThan(20);
+    expect(big, `S=1600: ${big.toFixed(0)} ms`).toBeLessThan(5000);
+  }, 60_000);
+}
+// What a widen adds is held to its state: the first stage widens without the inert files, a later one reads them all (widenInert).
+test("a widen in another state adds its own files, so none is skipped (OUP-335)", () => {
+  const rel = (hook: string, extra: Record<string, string>, v: string) => files({ "package.json": JSON.stringify({ name: "p", version: "1.0." + v, scripts: { postinstall: hook } }), "docs/a.md": v, "tests/t.js": v, ".github/workflows/ci.yml": v, "lib/ok.js": "1", ...extra });
+  const held = (hook: string, extra: Record<string, string> = {}) => holds(rel(hook, extra, "0"), rel(hook, extra, "1"));
+  // the first stage widens without the inert files, the second one (`../x.js`) reads them all
+  expect(held("tsc | node ../x.js")).toEqual(["file .github/workflows/ci.yml", "file docs/a.md", "file tests/t.js"]);
+  // a moved folder: after `cd docs` its files are not inert
+  expect(held("tsc | cd docs && c1 | c2")).toContain("file docs/a.md");
+  // a named inert file stops being omitted for the widens after it
+  expect(held("tsc | cat docs/a.md | c3")).toContain("file docs/a.md");
+});
+test("a pipeline of unknown stages holds the same files as before the widen was kept (OUP-335)", () => {
+  // the nested package's file and lib/x.js change; docs and tests stay inert
+  const detail = (hook: string) => {
+    const mk = (v: string) => files({ "package.json": JSON.stringify({ name: "p", version: "1.0." + v, scripts: { postinstall: hook } }), "docs/a.md": v, "tests/t.js": v, "pkgs/p/package.json": '{"name":"p"}', "pkgs/p/i.js": v, "lib/x.js": v });
+    return holds(mk("0"), mk("1"));
+  };
+  for (const hook of ["c0 | c1 | c2 | c3", "cat a | c1 | node -e 1 | c3", "c0 | c1 > o", "(c0 | c1)"]) expect(detail(hook), hook).toEqual(["file lib/x.js", "file pkgs/p/i.js"]);
+});
+test("stages that each name several different words stay linear in the stage count (OUP-335)", () => {
+  const cost = (s: number) => {
+    const hook = Array.from({ length: s }, (_, i) => `c${i} ` + [0, 1, 2, 3, 4].map((k) => `n${i}_${k}`).join(" ")).join(" | ");
+    const mk = (v: string) => files({ "package.json": JSON.stringify({ name: "p", version: "1.0." + v, scripts: { postinstall: hook } }), ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`docs/f${i}.md`, "x" + v])) });
+    return bestOf3(() => holds(mk("0"), mk("1")));
+  };
+  const small = cost(1000);
+  const big = cost(8000);
+  // linear: 8x the stages costs about 8x (a walk over the names at every widen 64x)
+  expect(big / Math.max(small, 50), `S=1000 ${small.toFixed(0)} ms -> S=8000 ${big.toFixed(0)} ms`).toBeLessThan(14);
+}, 60_000);
+// A `cd` moves the run: the files of the folder it moves to are not inert, and a widen after it must add them.
+test("a widen after a cd adds the inert files of the folder it moved to (OUP-335)", () => {
+  const rel = (hook: string, v: string) => files({ "package.json": JSON.stringify({ name: "p", version: "1.0." + v, scripts: { postinstall: hook } }), "docs/a.md": "a", "docs/b.md": "b", "tests/t.js": v, ".github/workflows/ci.yml": v, "lib/ok.js": "1" });
+  const held = (hook: string) => holds(rel(hook, "0"), rel(hook, "1"));
+  expect(held("c1 > o; c2 docs/a.md | c3; cd tests && c4 | c5")).toContain("file tests/t.js");
+  expect(held("c1 | c2 docs/a.md docs/b.md | c3 | cd .github && c4 | c5")).toContain("file .github/workflows/ci.yml");
+});
