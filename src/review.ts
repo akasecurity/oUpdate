@@ -228,7 +228,7 @@ function fileDiff(path: string, before: Uint8Array | undefined, after: Uint8Arra
       : undefined;
   const out = [head, renderLineDiff(bt, at, getOps)];
   // A line whose lexical context changed is added after the diff as its own removed/added pair; the diff itself is as it always was.
-  const mode = lexMode(path);
+  const mode = lexMode(path, at);
   if (getOps && mode && bt !== undefined && at !== undefined) {
     const [x, y] = [bt.split("\n"), at.split("\n")];
     out.push(renderShifted(x, y, getOps(x, y), mode));
