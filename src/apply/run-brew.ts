@@ -14,7 +14,7 @@ import { reviewedVersion, typeAReview, versionMismatch } from "./typea.ts";
 import type { TypeBRun } from "./typeb.ts";
 import { handoff } from "./waiter.ts";
 import { formulaPids, ownersNotRunning } from "./run-release.ts";
-import { type GkOps, type RunCtx, words, uniq, last, named, holdRunningBun, PKG_NAME, DECLARED_DEPS } from "./run-ctx.ts";
+import { planKey, type BrewState, type GkOps, type RunCtx, words, uniq, last, named, holdRunningBun, PKG_NAME, DECLARED_DEPS } from "./run-ctx.ts";
 
 /** The real Gatekeeper env, or undefined when brew cannot say where the Caskroom and prefix are. */
 export async function gkEnv(cfg: ApplyConfig, exec: Exec): Promise<GkEnv | undefined> {
@@ -162,7 +162,10 @@ export async function brewSection(rt: RunCtx) {
   // The bun this run is executing. Upgrading Homebrew's bun replaces that binary mid-run
   // (brew cleanup then deletes the keg). It is held; a deliberate step updates it later.
   const self = holdRunningBun(formulas, opts.bunExec ?? process.execPath);
-  for (const n of self.held) log.push(`  holding ${n} (runs under it)`);
+  for (const n of self.held) {
+    log.push(`  holding ${n} (runs under it)`);
+    holdOf(b, "formula", n, "runs under it");
+  }
   b.selfBun.push(...self.held);
   formulas = self.kept;
 
@@ -176,7 +179,10 @@ export async function brewSection(rt: RunCtx) {
   for (const [kind, names] of [["brew", formulas], ["cask", casks]] as const) {
     const p = pinFilter(kind, names, { brewPinned: pinnedQ.rc === 0 ? words(pinnedQ.out) : [], files });
     if (kind === "brew") log.push(...p.warnings.map((w) => `  ${w}`));
-    for (const n of p.pinned) log.push(`  holding ${n.replace(/\(.*$/, "")} (pinned: ${n.replace(/^[^(]*\(|\)$/g, "")})`);
+    for (const n of p.pinned) {
+      log.push(`  holding ${n.replace(/\(.*$/, "")} (pinned: ${n.replace(/^[^(]*\(|\)$/g, "")})`);
+      holdOf(b, kind === "brew" ? "formula" : "cask", n.replace(/\(.*$/, ""), `pinned: ${n.replace(/^[^(]*\(|\)$/g, "")}`);
+    }
     b.pinned.push(...p.pinned);
     if (kind === "brew") formulas = p.kept;
     else casks = p.kept;
@@ -196,11 +202,13 @@ export async function brewSection(rt: RunCtx) {
       if (open) {
         // Never a second upgrade over an unfinished one: its from stays the rollback baseline.
         log.push(`  holding ${f} (its release check of ${open.from || "?"} → ${open.to ?? "?"} is not finished — finished first)`);
+        holdOf(b, "formula", n, "its release check is not finished");
         b.rcHeldNames.push(n);
         continue;
       }
       if (rcBroken.includes(f)) {
         log.push(`  holding ${f} (its release check record ${pendingPath(cfg.stateDir, f)} is unreadable — fix or remove it)`);
+        holdOf(b, "formula", n, "its release check record is unreadable");
         b.rcHeld.push(`${f} (record unreadable)`);
         b.rcHeldNames.push(n);
         continue;
@@ -209,6 +217,7 @@ export async function brewSection(rt: RunCtx) {
       const hs = await holdState(rcEnv, f);
       if (hs.unreadable) {
         log.push(`  holding ${f} (its release check hold ${holdPath(cfg.stateDir, f)} is unreadable — fix or remove it)`);
+        holdOf(b, "formula", n, "its release check hold is unreadable");
         b.rcHeld.push(`${f} (hold unreadable)`);
         b.rcHeldNames.push(n);
         continue;
@@ -216,6 +225,7 @@ export async function brewSection(rt: RunCtx) {
       // A hold is only ever compared with a version read: no candidate, no upgrade this run.
       if (!view?.candidate) {
         log.push(`  holding ${f} (release check: its candidate version could not be read — not upgraded this run)`);
+        holdOf(b, "formula", n, "release check: its candidate version could not be read");
         b.rcNotes.push(`${f} not upgraded, candidate unreadable`);
         b.rcHeldNames.push(n);
         continue;
@@ -223,6 +233,7 @@ export async function brewSection(rt: RunCtx) {
       const hold = hs.hold;
       if (hold && view.candidate === hold.version) {
         log.push(`  holding ${f} ${hold.version} (HELD by release check — failed ${hold.at}, rolled back to ${hold.from}; a newer release is tried)`);
+        holdOf(b, "formula", n, `held by release check: ${hold.version}`);
         b.rcHeld.push(`${f} ${hold.version}`);
         b.rcHeldNames.push(n);
         continue;
@@ -366,15 +377,25 @@ export async function brewSection(rt: RunCtx) {
     if (a.held.length) {
       b.flagged = true;
       const held = new Set(a.held);
+      const wasFormula = new Set(typeA);
+      const wasCask = new Set(keptCasks);
       typeA = typeA.filter((p) => !held.has(p));
       keptCasks = keptCasks.filter((p) => !held.has(p));
       await notify(`⚠️ <b>${host} Type A — holding ${a.held.length} pkg(s), upgrading rest</b>\nheld: ${a.held.join(" ")}\nSensitive major increase or unverifiable version baseline.\nLog: ${cfg.logFile ?? "-"}`);
       log.push(`Type A: holding [${a.held.join(" ")}] — upgrading [${[...typeA, ...keptCasks].join(" ")}]`);
+      for (const n of a.held) {
+        if (wasFormula.has(n)) b.plan.typeAHeld.add(planKey("formula", n));
+        if (wasCask.has(n)) b.plan.typeAHeld.add(planKey("cask", n));
+      }
     }
     typeA = await notWaiting(rt, typeA);
     keptCasks = await notWaiting(rt, keptCasks, true);
     if (!typeA.length && !keptCasks.length) log.push("Type A: nothing left to upgrade after holds");
-    else if (dryRun) log.push(`dry-run: would upgrade Type A formulas=[${typeA.join(" ")}] casks=[${keptCasks.join(" ")}]`);
+    else if (dryRun) {
+      log.push(`dry-run: would upgrade Type A formulas=[${typeA.join(" ")}] casks=[${keptCasks.join(" ")}]`);
+      for (const n of typeA) b.plan.typeAUp.add(planKey("formula", n));
+      for (const n of keptCasks) b.plan.typeAUp.add(planKey("cask", n));
+    }
     else {
       // Recorded before the formula upgrades, so a stop part-way still leaves the casks to their phase.
       if (keptCasks.length) {
@@ -512,6 +533,7 @@ async function uncheckedBlock(rt: RunCtx, f: string, rc: ReleaseCheck): Promise<
 async function ownerHold(rt: RunCtx, n: string, f: string, why: string): Promise<void> {
   const { log, b, notify, host, cfg } = rt;
   log.push(`  holding ${f} (release check: ${why} — not upgraded, its keg is untouched)`);
+  holdOf(b, "formula", n, `release check: ${why}`);
   const said = why.replace(/^its /, "");
   b.rcNotes.push(`${f} not upgraded, ${said.replace(/ is not running$/, " not running")}`);
   b.failed.push(`release-check:${f}`);
@@ -591,6 +613,12 @@ async function upgradeFormula(rt: RunCtx, full: string): Promise<number | "held"
     }
   }
   return code;
+}
+
+/** Records why a name is held, as data, under its kind and full name; the first hold of that stays. */
+function holdOf(b: BrewState, kind: "formula" | "cask", name: string, why: string) {
+  const k = planKey(kind, name);
+  if (!b.plan.holds.has(k)) b.plan.holds.set(k, why);
 }
 
 export async function appBundlesSection(rt: RunCtx) {

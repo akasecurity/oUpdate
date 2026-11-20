@@ -316,6 +316,7 @@ describe("release checks in the run", () => {
     expect(r.flow).toEqual([]);
     expect(r.res.log.some((l) => l.includes("holding gadget 1.3.0 (HELD by release check"))).toBe(true);
     expect(r.brew).toContain("HELD by release check: gadget 1.3.0");
+    expect(r.res.plan.holds).toEqual({ "formula:gadget": "held by release check: 1.3.0" });
   });
   test("a newer version than the held one is tried normally", async () => {
     const r = await rcRun({ candidate: "1.4.0", files: { [HOLD]: JSON.stringify({ formula: "gadget", version: "1.3.0", from: "1.2.0", at: "2026-10-25 04:00" }) } });
@@ -677,6 +678,7 @@ describe("release checks: review round 2 (b8c02f7)", () => {
     expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
     expect(r.flow).toEqual(["/opt/gate.test/check GATE_VERSION=1.3.0"]);
     expect(r.res.log).toContain("  holding gadget (its release check of 1.2.0 → 1.3.0 is not finished — finished first)");
+    expect(r.res.plan.holds).toEqual({ "formula:gadget": "its release check is not finished" });
   });
 
   test("5: the inline restart, check and re-check hold the waiter's lock (waited for, bounded); the label's queued waiter job is removed", async () => {
@@ -1140,6 +1142,16 @@ describe("release checks: review round 4 (85dd0da)", () => {
     expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
   });
 
+  test("plan record: an unreadable release check record holds the formula and says why", async () => {
+    const r = await rcRun({ files: { [PENDING]: "{not json" } });
+    expect(r.res.log.some((l) => l.startsWith("  holding gadget (its release check record "))).toBe(true);
+    expect(r.res.plan.holds).toEqual({ "formula:gadget": "its release check record is unreadable" });
+  });
+  test("plan record: an unreadable release check hold holds the formula and says why", async () => {
+    const r = await rcRun({ files: { [HOLD]: "{not json" } });
+    expect(r.res.log.some((l) => l.startsWith("  holding gadget (its release check hold "))).toBe(true);
+    expect(r.res.plan.holds).toEqual({ "formula:gadget": "its release check hold is unreadable" });
+  });
   test("4: a held formula whose candidate cannot be read is not upgraded this run", async () => {
     let infos = 0;
     const r = await rcRun({
@@ -1148,6 +1160,7 @@ describe("release checks: review round 4 (85dd0da)", () => {
     });
     expect(r.flow).toEqual([]);
     expect(r.res.log).toContain("  holding gadget (release check: its candidate version could not be read — not upgraded this run)");
+    expect(r.res.plan.holds).toEqual({ "formula:gadget": "release check: its candidate version could not be read" });
   });
   test("4: any gated formula whose candidate cannot be read is not upgraded this run", async () => {
     let infos = 0;
@@ -2169,6 +2182,7 @@ describe("OUP-78: a formula whose check owner is not running is held, and an unf
     expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
     expect(r.flow).toEqual([]);
     expect(r.res.log).toContain(`  holding gadget (release check: its owner ${LABEL} is not running — not upgraded, its keg is untouched)`);
+    expect(r.res.plan.holds).toEqual({ "formula:gadget": `release check: its owner ${LABEL} is not running` });
     expect(r.brew).toContain(`gadget not upgraded, owner ${LABEL} not running`);
     expect(r.brew).toContain("FAILED: release-check:gadget");
     expect(r.files.has(PENDING)).toBe(false);

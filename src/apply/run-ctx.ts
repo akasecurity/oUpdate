@@ -56,6 +56,18 @@ export interface ApplyResult {
   /** The summary block. */
   summary: string[];
   rc: 0 | 1;
+  /** What the brew phase decided per name, as data (readiness.ts reads it; never parsed back out of the log text). */
+  plan: ApplyPlan;
+}
+
+/** The key of a name in an ApplyPlan: its kind and the name as brew prints it (the core and cask prefixes dropped). */
+export const planKey = (kind: "formula" | "cask", name: string) => `${kind}:${name.replace(/^homebrew\/(?:core|cask)\//, "")}`;
+
+/** The brew phase's decisions by planKey (kind + full name): why a name is held, what the Type A policy held, what a dry run would upgrade. */
+export interface ApplyPlan {
+  holds: Record<string, string>;
+  typeAHeld: string[];
+  typeAUp: string[];
 }
 
 export class PhaseTimeout extends Error {}
@@ -189,6 +201,8 @@ export function newBrewState(dryRun: boolean) {
     rcHeldNames: [] as string[],
     /** Formulae named bun held because this process is that Homebrew binary. */
     selfBun: [] as string[],
+    /** The decisions as data (ApplyPlan); the first hold of a name stays. */
+    plan: { holds: new Map<string, string>(), typeAHeld: new Set<string>(), typeAUp: new Set<string>() },
   };
 }
 

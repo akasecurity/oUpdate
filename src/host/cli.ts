@@ -20,6 +20,7 @@ import { parseApplyConfig, type ApplyConfig } from "../apply/config.ts";
 import { killLive, runStopTasks, type Exec } from "../apply/exec.ts";
 import type { ApplyFs } from "../apply/fs.ts";
 import { applyHost, gatekeeperAction } from "../apply/run.ts";
+import { readiness } from "./readiness.ts";
 import { ownerDir, realHttpStatus, realReleaseLock, realTakeLock, runOwnerWaiter } from "../apply/owner-waiter.ts";
 import { realFs } from "../apply/fs.ts";
 import { parseLaunchdArgs, type LaunchdArgs } from "./launchd.ts";
@@ -92,17 +93,18 @@ export type HostCommand =
   | { mode: "apply"; config: string; dryRun: boolean; host?: string }
   | { mode: "gatekeeper"; action: "approve" | "revert"; cask: string; config: string; host?: string }
   | { mode: "owner-waiter"; config: string; host?: string }
+  | { mode: "readiness"; config: string; host?: string }
   | { mode: "launchd"; args: LaunchdArgs };
 
 export const defaultConfigPath = () => join(homedir(), ".config", "oupdate", "config.json");
 
 /**
  * `oupdate host` arguments: --report-only (the shadow), --apply [--dry-run], a Gatekeeper one-off,
- * or --launchd-plist (prints the LaunchDaemon that schedules --apply).
+ * --readiness (the read-only latest-readiness report), or --launchd-plist (prints the LaunchDaemon that schedules --apply).
  */
 export function parseHostCommand(argv: string[]): HostCommand {
   const has = (f: string) => argv.includes(f);
-  const modes = ["--report-only", "--apply", "--gatekeeper-approve", "--gatekeeper-revert", "--launchd-plist", "--stale-owners-waiter"].filter(has);
+  const modes = ["--report-only", "--apply", "--gatekeeper-approve", "--gatekeeper-revert", "--launchd-plist", "--stale-owners-waiter", "--readiness"].filter(has);
   if (modes.length > 1) throw new Error(`host takes one of ${modes.join(", ")}`);
   if (modes[0] === "--launchd-plist") return { mode: "launchd", args: parseLaunchdArgs(argv) };
   if (!modes.length || modes[0] === "--report-only") {
@@ -120,7 +122,7 @@ export function parseHostCommand(argv: string[]): HostCommand {
       if (v === undefined || v.startsWith("--")) throw new Error(`${a} needs a value`);
       return v;
     };
-    if (a === "--apply" || a === "--stale-owners-waiter") continue;
+    if (a === "--apply" || a === "--stale-owners-waiter" || a === "--readiness") continue;
     else if (a === "--dry-run") dryRun = true;
     else if (a === "--config") config = value();
     else if (a === "--host") host = value();
@@ -130,8 +132,16 @@ export function parseHostCommand(argv: string[]): HostCommand {
   config ??= defaultConfigPath();
   if (modes[0] === "--apply") return { mode: "apply", config, dryRun, ...(host ? { host } : {}) };
   if (dryRun) throw new Error("--dry-run goes with --apply");
+  if (modes[0] === "--readiness") return { mode: "readiness", config, ...(host ? { host } : {}) };
   if (modes[0] === "--stale-owners-waiter") return { mode: "owner-waiter", config, ...(host ? { host } : {}) };
   return { mode: "gatekeeper", action: modes[0] === "--gatekeeper-approve" ? "approve" : "revert", cask: cask!, config, ...(host ? { host } : {}) };
+}
+
+/** `host --readiness`: the read-only latest-readiness report (readiness.ts). Prints it; writes nothing. */
+export async function readinessMain(c: Extract<HostCommand, { mode: "readiness" }>, deps: { exec: Exec; fs: ApplyFs; now?: Date; out?: (line: string) => void }): Promise<number> {
+  const r = await readiness(loadConfig(c), deps.exec, deps.fs, { ...(deps.now ? { now: deps.now } : {}) });
+  for (const l of r.lines) (deps.out ?? ((x: string) => console.log(x)))(l);
+  return r.rc;
 }
 
 function loadConfig(c: { config: string; host?: string }): ApplyConfig {
