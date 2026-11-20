@@ -36,6 +36,8 @@ export interface NpmOptions {
   /** Counts what is still outdated after the run (npm lane); returns the stuck entries, or undefined when the state is unusable. */
   trackStuck: (pending: string[]) => string[] | undefined;
   into?: NpmRun;
+  /** Gets the from/to versions of what is outdated, before any review or upgrade (the per-run record). */
+  record?: (entries: { manager: "npm"; name: string; from: string; to: string }[]) => Promise<void>;
 }
 
 interface Outdated {
@@ -199,6 +201,7 @@ export async function npmSection(exec: Exec, r: Reviewer, o: NpmOptions): Promis
     log.push("npm: nothing to update");
     return { status: "nothing to update", log };
   }
+  await o.record?.([...outdated].map(([name, v]) => ({ manager: "npm" as const, name, from: v.current, to: v.next })));
 
   const names = [...outdated.keys()];
   run.pending.push(...names);

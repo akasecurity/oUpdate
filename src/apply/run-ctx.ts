@@ -1,6 +1,7 @@
 // What the host apply run's steps share (run.ts drives them; run-brew.ts and run-release.ts hold the steps): the
 // option and result types, the run's context and brew bookkeeping, and the small name helpers.
 
+import type { RunRecord } from "./run-record.ts";
 import { realpathSync } from "node:fs";
 import type { AppNet } from "./appbundle.ts";
 import type { Reviewer } from "../review.ts";
@@ -24,6 +25,8 @@ export interface GkOps {
 
 export interface ApplyOptions {
   dryRun: boolean;
+  /** True: a dry run leaves out the report-only pre-flight (host --readiness makes the same df and curl reads itself). */
+  skipPreflight?: boolean;
   /** Default: the config's reviewer; none configured is an unavailable reviewer (everything it would judge is held). */
   reviewer?: Reviewer;
   now?: Date;
@@ -237,6 +240,8 @@ export interface RunCtx {
   stamp: string;
   b: BrewState;
   brewHeld: () => string[];
+  /** The per-run from-version record (run-record.ts); a dry run writes nothing. */
+  record: RunRecord;
   x: Exec;
   notify: (text: string) => Promise<void>;
   step: (name: "brew" | "npm", label: string, f: () => Promise<void>) => Promise<void>;

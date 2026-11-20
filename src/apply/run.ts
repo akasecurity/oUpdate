@@ -46,6 +46,8 @@ import { type NpmRun } from "./npm.ts";
 import { ownerDir, ownerWaiterReport, realHttpStatus, realReleaseLock, realTakeLock, type QueuedOwner } from "./owner-waiter.ts";
 import { brewView, findCheck, shortName, loadPending, runHook, savePending, type PendingCheck, type ReleaseEnv } from "./release-checks.ts";
 import { heldFromPinned } from "./pins.ts";
+import { preflight } from "./preflight.ts";
+import { makeRunRecord } from "./run-record.ts";
 import { restartUpgraded } from "./restarts.ts";
 import { pendingFromOutdated, trackStuck } from "./stuck.ts";
 import { awaitingTapApproval, typeBUpgrades, type TypeBEnv, type TypeBOptions } from "./typeb.ts";
@@ -373,11 +375,19 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     staleOwners: cfg.staleOwners, log,
   };
 
+  const record = makeRunRecord({ fs, stateDir: cfg.stateDir, host, now, stamp, dryRun, log });
   const rt: RunCtx = {
-    opts, cfg, fs, exec, dryRun, now, host, r, tb, log, stamp, b, brewHeld, x, notify, step, tbEnv, tbOpts, brewFailed, quarantined, installEnv,
+    opts, cfg, fs, exec, dryRun, now, host, r, tb, log, stamp, b, brewHeld, record, x, notify, step, tbEnv, tbOpts, brewFailed, quarantined, installEnv,
     rcEnv, rcPending, rcBroken, rcThisRun, rcUnchecked, rcJobs, mergeOwners, rcStopOff, stoppingNow, afterOwed, oweAfter, expectedKeg, retiredFor, gatedOutdated,
     ownerLock, clock, restartOpts, waiterEnv, kegEnv, ownerHanded, helperRunning, track, recoverTo, releaseRacks, npmFailed, st,
   };
+
+  // ── pre-flight, report only and only in a dry run (preflight.ts): a real run never probes or refuses ──
+  if (dryRun && !opts.skipPreflight) {
+    const pf = await preflight(cfg, exec);
+    log.push(...pf.lines.map((l) => `dry-run: ${l}`));
+    log.push(`dry-run: preflight (report only, nothing is refused): ${pf.wouldRefuse.length ? `would refuse — ${pf.wouldRefuse.join("; ")}` : "would not refuse"}`);
+  }
 
   // ── waiter report: a drain a dead waiter left behind is recovered before any long brew build ──
   await step("brew", "waiter report", async () => {
