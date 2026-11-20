@@ -10488,7 +10488,16 @@ function markHookFile(ctx: Ctx, token: string): void {
   if (!token || token.startsWith("-")) return;
   const logical = normalize(token);
   if (!logical || badPath(logical) || /[*?[]/.test(logical)) return;
-  ctx.hookNamed.add(logical);
+  const named = ctx.hookNamed;
+  const rec = NAMED_INERT.get(named);
+  const before = named.size;
+  named.add(logical);
+  // The running count of inertNamedCount follows an add made outside the backslash reading (the adds of that one are taken back, and a size
+  // that does not match the record counts the set again).
+  if (rec && !ctx.inEsc && rec.size === before && named.size === before + 1) {
+    rec.size++;
+    if (ctx.logical.has(logical) && isInertSurface(logical)) rec.count++;
+  }
 }
 
 // A file named by a command, resolved from the directory an earlier cd moved to as well as from the package root.
@@ -10587,6 +10596,23 @@ function movedInto(ctx: Ctx, logical: string): boolean {
 
 // The directories that hold a nested manifest, per file map (the map does not change during a scan).
 const PKG_DIRS = new WeakMap<object, string[]>();
+// The states a file set was widened in, per file set (widenAll, outside the backslash reading).
+const WIDENED = new WeakMap<object, Set<string>>();
+// How many files named by a command are inert files of the package: the only part of hookNamed that omitInert reads for a widen (a command
+// that names a word per stage grows hookNamed at every stage, and must not change the key). markHookFile keeps the count as names are added;
+// a record whose size is not the set's size (a copy, an add of the backslash reading that was taken back, a first call) is counted again.
+const NAMED_INERT = new WeakMap<Set<string>, { size: number; count: number }>();
+function inertNamedCount(ctx: Ctx): number {
+  const named = ctx.hookNamed;
+  let rec = NAMED_INERT.get(named);
+  if (!rec || rec.size !== named.size) {
+    let count = 0;
+    for (const n of named) if (ctx.logical.has(n) && isInertSurface(n)) count++;
+    rec = { size: named.size, count };
+    NAMED_INERT.set(named, rec);
+  }
+  return rec.count;
+}
 
 function widenAll(ctx: Ctx): void {
   widened = true;
@@ -10598,6 +10624,16 @@ function widenAll(ctx: Ctx): void {
     const done = (ctx.widenDone ??= new Set());
     if (done.has(key)) return;
     done.add(key);
+  } else {
+    // The main reading widens once for the same state too (OUP-335): the stage pass met every distinct unknown stage with a full walk over the
+    // files (a piped postinstall of S stages cost S times the file count). What a widen adds depends on the file set it adds to (a self-run
+    // reads on a copy), widenInert, the gyp flag, the moved folders and the inert files of the package a command names (which only grow), and a
+    // widen already done there has added all of it.
+    let seen = WIDENED.get(ctx.files);
+    if (!seen) WIDENED.set(ctx.files, (seen = new Set()));
+    const key = `${ctx.widenInert ? 1 : 0}${ctx.fromGyp ? 1 : 0}${ctx.movedDirs.size}:${inertNamedCount(ctx)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
   }
   // A directory that holds a nested manifest is another package: a run can land there, so its files are not
   // inert whatever folder name they sit under (tests/pkg, docs/pkg).
