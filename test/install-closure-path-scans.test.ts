@@ -58,3 +58,28 @@ for (const [name, hook] of joins) {
     expect(held(hook)).toEqual(BOTH);
   });
 }
+
+// The per-name resume: a match of a name is skipped only when it starts inside text an earlier match of that same name read, and a skipped
+// match does not move the resume point. Each row binds a join through a pattern read out of an inert string, so a join that was wrongly skipped
+// turns the literal require below into a widened one (all: true) instead of lits ["lib/a.js"].
+const chains: [string, string][] = [
+  [
+    "a chain of three patterns on one name that ends in a keyword",
+    'const p$var = require("path"); const s = "const {a} = p$var{b} = p$var{join} = p$var"; require(join(__dirname, "a.js"));\n',
+  ],
+  [
+    "two names interleaved: the pattern is out of the name another pattern did not read",
+    'const q$var = require("path"); const p = require("path"); const s = "const {a} = q$var{join} = p"; require(join(__dirname, "a.js"));\n',
+  ],
+  [
+    "a name that is not bound before a bound one",
+    'const p = require("path"); const s = "const {a} = other$var{join} = p"; require(join(__dirname, "a.js"));\n',
+  ],
+];
+for (const [name, src] of chains) {
+  test(`${name} binds the join`, () => {
+    const tier = classifyJs("lib/x.js", src);
+    expect(tier.lits).toEqual(["lib/a.js"]);
+    expect(tier.all).toBe(false);
+  });
+}
