@@ -88,8 +88,9 @@ const time = (src: string, run: (s: string) => unknown): number => {
 // call on five of the six shapes (the long parameter list has one bracket pair) and 100 ms at 128 KiB. A slower-growing one is not caught on a
 // dev machine: a walk back at every 1024th call in thisOrArgumentsLeaks took 10 to 13 s there (it is caught on a runner about 2.6x slower).
 // Each timed read is of its own text: the two reads of a call take the text with `pad` and `pad + 1` spaces at the end (the shape does not change),
-// and the two calls take different pads. The scan keeps caches keyed by the text (the bracket index, the pair tables and the memo maps keyed by
-// them), so a text read twice would be found warm and a slowdown in building them would not show.
+// and the two calls take different pads. Only bracketCache (the last four texts' bracket indexes) and the memo inside each
+// index survive a call; the pair tables and the paren indexes are dropped when a file's scan ends. So a text read twice would be found warm in
+// bracketCache and a slowdown in building the index would not show.
 const fastest = (src: string, run: (s: string) => unknown, pad: number): number =>
   Math.min(time(src + " ".repeat(pad), run), time(src + " ".repeat(pad + 1), run));
 for (const [name, make] of SHAPES) {
