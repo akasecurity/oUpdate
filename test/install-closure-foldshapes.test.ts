@@ -384,7 +384,13 @@ for (const [label, make] of a1) {
 // plain statements, plus a floor that grows with the size, and must grow no faster than the size from one size to the next. A scan that
 // reads back over the text it has kept at every backtick takes seconds at 0.25 MB and minutes at 1 MB.
 test("repeated quotes, node: prefixes and backticks grow with the file from 0.125 to 8 MB", () => {
-  const body = (mb: number) => rep(mb, "\"node:'node:`node:", "", "\nexports.main = () => 1;");
+  // The repeat count is cut down to a multiple of 4: at 1 MB the plain count (55,555) ends inside an unclosed template literal, and that text takes the
+  // short path (codeOnly gives up, the file widens) instead of the scan this row times. A multiple of 4 closes it at 0.125, 1 and 8 MB.
+  const body = (mb: number) => {
+    const unit = "\"node:'node:`node:";
+    const n = Math.floor((mb * 1_000_000) / unit.length);
+    return unit.repeat(n - (n % 4)) + "\nexports.main = () => 1;";
+  };
   const plain = (mb: number) => rep(mb, "const c = 1;\n", "", "\nexports.main = () => 1;");
   let prev = 0;
   let prevMb = 0;
@@ -395,7 +401,15 @@ test("repeated quotes, node: prefixes and backticks grow with the file from 0.12
     // scan keeps by text (the bracket index and what hangs off it), so a second read would not time that work.
     const texts = [src, src + " ", src + "  "];
     let next = 0;
-    const ms = median(() => all(texts[next++]!).ms);
+    let widened = false;
+    const ms = median(() => {
+      const r = all(texts[next++]!);
+      widened ||= r.all;
+      return r.ms;
+    });
+    // A text that ends inside an unclosed template literal is not read by the full scan: it takes the short path and widens (all = true), which
+    // is cheap and times nothing. Each size must close its literals and so take the full path.
+    expect(widened).toBe(false);
     const control = all(plain(mb)).ms;
     expect(ms).toBeLessThan(3 * control + 50 * mb);
     if (prev > 0) expect(grows(prev, ms, mb / prevMb)).toBe(true);
