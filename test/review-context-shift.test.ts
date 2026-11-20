@@ -219,11 +219,13 @@ describe("the last lexer round", () => {
     expect(out).toContain("\\u2028");
     expect(out.includes(" ")).toBe(false);
   });
-  test("JSX and TSX files keep the plain diff", () => {
+  test("JSX and TSX files are lexed like .js: node loads an unknown extension as .js (OUP-281)", () => {
     for (const f of ["a.jsx", "a.tsx"]) {
       const b = `/*\n${P}\n*/\n`;
       const a = `\n${P}\n\n`;
-      expect(view(f, b, a)).toBe(plainView(f, b, a));
+      const out = view(f, b, a);
+      expect(out.startsWith(plainView(f, b, a))).toBe(true);
+      expect(out).toContain(`@@ -2 +2 @@ [context changed: comment->code]\n-${P}\n+${P}\n`);
     }
   });
   test("one 1 MB line of nested template holes stays fast", () => {

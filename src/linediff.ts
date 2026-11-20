@@ -176,11 +176,21 @@ const oddBackslashes = (l: string) => { let n = 0; for (let k = l.length - 1; k 
 
 export type LexMode = "js" | "py";
 
-/** The lexer a path gets: .js .mjs .cjs .ts .mts .cts and .py. Any other file (JSX and TSX included: no text state for them) keeps the plain diff. */
-export function lexMode(path: string): LexMode | undefined {
-  if (/\.(?:[cm]?[jt]s)$/i.test(path)) return "js";
-  if (/\.py$/i.test(path)) return "py";
+/** The runtime a `#!` first line names: every word is read (its basename, with an optional version suffix), so `env` options and their arguments, `-S`, and wrappers (npx, bunx, uv run) cannot hide it. A false hit only adds noise; a miss hides a shift. */
+function shebangMode(text: string): LexMode | undefined {
+  const first = text.replace(/^\uFEFF/, "").split(/[\r\n\u2028\u2029]/, 1)[0]!;
+  if (!first.startsWith("#!")) return undefined;
+  const names = first.slice(2).trim().split(/\s+/).map((w) => w.slice(w.lastIndexOf("/") + 1));
+  if (names.some((w) => /^(?:node(?:js)?|bun|deno|tsx|ts-node(?:-esm)?|zx|vite-node|esno)[\d.]*$/i.test(w))) return "js";
+  if (names.some((w) => /^(?:python|pypy|uv|pipx)[\d.]*$/i.test(w))) return "py";
   return undefined;
+}
+
+/** The lexer a file gets: .js .mjs .cjs .jsx .ts .mts .cts .tsx (node loads any unknown extension as .js, so a JSX or TSX file is read as code too), .py and .pyw, and any other file whose first line is a node-like or python `#!` line (pass the text for that). Anything else keeps the plain diff. */
+export function lexMode(path: string, text?: string): LexMode | undefined {
+  if (/\.(?:[cm]?[jt]sx?)$/i.test(path)) return "js";
+  if (/\.pyw?$/i.test(path)) return "py";
+  return text === undefined ? undefined : shebangMode(text);
 }
 
 /** What a stack top means to a reader: a template hole and a brace in one are code. */
@@ -227,20 +237,35 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): { sta
   let cmt: [string, string, string, boolean, boolean] | undefined; // the token state a block comment was opened in
   const reset = () => { prev2 = prev; prev = ")"; word = ""; wordDot = false; parenRegex = false; gap = false; };
   let last = "";
+  // A construct whose reading depends on the runtime (an HTML-style comment in a script, a Python 3.12 f-string hole that holds the
+  // string's own quote) is lexed one way and taints every later line: a line after it never has the same state as in a text without it.
+  let tainted = false;
+  let fStr = false; // the Python string open now has an f prefix
+  let fDepth = 0; // its braces so far: `{` +1, `}` -1, every one counted
+  const fOpen = (l: string, at: number) => {
+    let j = at;
+    while (j > 0 && j > at - 2 && /[A-Za-z]/.test(l[j - 1]!)) j--;
+    fStr = /f/i.test(l.slice(j, at)) && (j === 0 || !isId(l[j - 1]!));
+    fDepth = 0;
+  };
+  const fClose = () => { if (fStr && fDepth !== 0) tainted = true; fStr = false; };
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li]!.endsWith("\r") ? lines[li]!.slice(0, -1) : lines[li]!;
-    const now = stk.length === 0 ? "" : `${stk.length}:${h1[h1.length - 1]}:${h2[h2.length - 1]}`;
+    const now = stk.length === 0 && !tainted ? "" : `${stk.length}:${h1[h1.length - 1]}:${h2[h2.length - 1]}${tainted ? ":x" : ""}`;
     out.push(now === last ? last : (last = now));
     kindsOut.push(contextLabel(top()));
     let ran = false; // some part of this line runs as code in this version
     gap = true;
     let i = 0;
-    if (li === 0 && !py && line.startsWith("#!")) {
-      // a hashbang line is a comment, to any line terminator
-      const m = TERMINATOR.exec(line);
-      if (!m) continue;
-      i = m.index + 1;
-      gap = true;
+    if (li === 0 && !py) {
+      const bom = line.startsWith("\uFEFF") ? 1 : 0; // a byte order mark before the hashbang is dropped, as the runtime does
+      if (line.startsWith("#!", bom)) {
+        // a hashbang line is a comment, to any line terminator
+        const m = TERMINATOR.exec(line);
+        if (!m) continue;
+        i = m.index + 1;
+        gap = true;
+      }
     }
     while (i < line.length) {
       const t = top();
@@ -259,31 +284,33 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): { sta
         else if (c === "$" && line[i + 1] === "{") { ran = true; push("${"); i += 2; prev2 = prev; prev = "{"; word = ""; wordDot = false; parenRegex = false; }
         else i++;
       } else if (t === '"""' || t === "'''") {
-        if (c === "\\") i += 2;
-        else if (line.startsWith(t, i)) { pop(); i += 3; reset(); }
-        else i++;
+        if (c === "\\") i += fStr && (line[i + 1] === "{" || line[i + 1] === "}") ? 1 : 2;
+        else if (line.startsWith(t, i)) { pop(); fClose(); i += 3; reset(); }
+        else { if (fStr) fDepth += c === "{" ? 1 : c === "}" ? -1 : 0; i++; }
       } else if (t === '"' || t === "'") {
-        if (c === "\\") i += 2;
-        else if (c === t) { pop(); i++; reset(); }
-        else i++;
+        if (c === "\\") i += fStr && (line[i + 1] === "{" || line[i + 1] === "}") ? 1 : 2;
+        else if (c === t) { pop(); fClose(); i++; reset(); }
+        else { if (fStr) fDepth += c === "{" ? 1 : c === "}" ? -1 : 0; i++; }
       } else {
         // code: the top is empty, a hole or a brace inside one
         const inHole = t === "${" || t === "{";
+        const fresh = !ran; // no code before this character on the line
         if (!ran && !/\s/.test(c) && !(c === "/" && (line[i + 1] === "*" || (line[i + 1] === "/" && !py))) && !(c === "#" && py)) ran = true;
         if (c === "/" && line[i + 1] === "*") { cmt = [prev, prev2, word, wordDot, parenRegex]; push("/*"); i += 2; }
-        else if ((c === "/" && line[i + 1] === "/" && !py) || (c === "#" && py)) {
-          // a line comment ends at a line terminator: LF, CR, U+2028, U+2029
+        else if ((c === "/" && line[i + 1] === "/" && !py) || (c === "#" && py) || (!py && (line.startsWith("<!--", i) || (fresh && line.startsWith("-->", i))))) {
+          // a line comment ends at a line terminator: LF, CR, U+2028, U+2029. `<!--` and a `-->` that starts a line are comments in a script (CommonJS) and operators in a module: read as a comment, and taint
+          if (c === "<" || c === "-") tainted = true;
           const m = TERMINATOR.exec(line.slice(i));
           if (!m) break;
           i += m.index + 1;
           gap = true;
         } else if (TERMINATOR.test(c)) { i++; gap = true; }
         else if (c === "`") { push("`"); i++; }
-        else if (py && (line.startsWith('"""', i) || line.startsWith("'''", i))) { push(line.slice(i, i + 3)); i += 3; }
-        else if (c === '"' || c === "'") { push(c); i++; }
+        else if (py && (line.startsWith('"""', i) || line.startsWith("'''", i))) { fOpen(line, i); push(line.slice(i, i + 3)); i += 3; }
+        else if (c === '"' || c === "'") { if (py) fOpen(line, i); push(c); i++; }
         else if (inHole && c === "{") { push("{"); i++; prev2 = prev; prev = "{"; word = ""; wordDot = false; parenRegex = false; }
         else if (inHole && c === "}") { pop(); i++; prev2 = prev; prev = "}"; word = ""; wordDot = false; parenRegex = false; }
-        else if (c === "/" && !py && (prev === "" || (REGEX_AFTER.test(prev) && !((prev === "+" || prev === "-") && prev2 === prev)) || (prev === ")" && parenRegex) || (isId(prev) && !wordDot && REGEX_WORDS.has(word)))) {
+        else if (c === "/" && !py && (prev === "" || (REGEX_AFTER.test(prev) && !((prev === "+" || prev === "-") && prev2 === prev)) || (prev === "." && prev2 === ".") || (prev === ")" && parenRegex) || (isId(prev) && !wordDot && (REGEX_WORDS.has(word))))) {
           // a regex literal: to the closing slash on this line, a class kept whole
           let j = i + 1;
           let cls = false;
@@ -302,7 +329,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): { sta
           else {
             if (isId(c)) {
               if (!gap && isId(prev) && word) word += c;
-              else { prevWord = gap && isId(prev) ? word : ""; prevWordDot = wordDot; word = c; wordDot = prev === "."; }
+              else { prevWord = gap && isId(prev) ? word : ""; prevWordDot = wordDot; word = c; wordDot = prev === "." || prev === "#"; }
             } else { word = ""; wordDot = false; }
             gap = false;
             prev2 = prev;
@@ -316,7 +343,7 @@ export function lineStates(lines: string[], mode: LexMode, seed: LexSeed): { sta
     // a line that starts in a comment or a string and still runs code after a closing delimiter or in a hole is code
     if (ran) kindsOut[li] = "code";
     // a single-quoted string ends at the line end unless a backslash continues it
-    while ((top() === '"' || top() === "'") && !oddBackslashes(line)) pop();
+    while ((top() === '"' || top() === "'") && !oddBackslashes(line)) { pop(); fClose(); }
   }
   return { states: out, kinds: kindsOut };
 }
