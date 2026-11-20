@@ -118,7 +118,7 @@ test("the quiet lines do not run the changed file under bash, sh and dash", () =
 });
 
 // Time. A long run of backslashes and many words with backslashes: 0.125, 1 and 8 MB (the words from 0.0625 to 1 MB). Each size must
-// stay within a small multiple of the same size of plain lines, plus a floor that grows with the size, and must grow no faster than the
+// stay within a small multiple (12: a hook with a widening line gets a second, narrow, read, so it costs about twice what the plain control does; grows() below is the linearity guard) of the same size of plain lines, plus a floor that grows with the size, and must grow no faster than the
 // size from one size to the next (a quadratic scan takes seconds at 0.125 MB and minutes at 1 MB).
 const grows = (small: number, large: number, factor: number, floor = 2): boolean => large < 3 * factor * Math.max(small, floor);
 const rep = (mb: number, unit: string) => unit.repeat(Math.max(1, Math.floor((mb * 1_000_000) / unit.length)));
@@ -144,7 +144,7 @@ for (const [label, sizes, make, plain] of shapes) {
       const r = timed(make(mb));
       const control = timed(plain(mb)).ms;
       expect(r.held).toBe(true);
-      expect(r.ms).toBeLessThan(6 * control + 100 * mb + 100);
+      expect(r.ms).toBeLessThan(12 * control + 100 * mb + 100);
       if (prev > 0) expect(grows(prev, r.ms, mb / prevMb)).toBe(true);
       prev = r.ms;
       prevMb = mb;
