@@ -240,7 +240,8 @@ test("30000 distinct named functions in a file of about 1 MB are read in bounded
   holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"));
   // 15 s: a hook with a widening line gets a second (narrow) read, so this takes about twice what it did (2 s on build); a quadratic scan takes minutes.
   expect(performance.now() - t0).toBeLessThan(15_000);
-});
+  // bun's default test timeout is 5 s; this read took 5.2 s on a CI runner. The test gets twice the bound above, so the bound is what fails.
+}, 30_000);
 
 // Fifth review batch.
 const CR = `const { createRequire } = require("module"); `;
