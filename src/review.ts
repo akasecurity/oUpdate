@@ -684,7 +684,7 @@ export function entryPaths(files: FileMap, placed: FileMap = files, scope: { scr
   // The closed install view names files the script walker does not: node --run,
   // npm t, a pre/post script, a config path, and a binding.gyp npm would see.
   // Old roots keep scripts off, so a hook file stays on the new side only.
-  const inst = installView(files);
+  const inst = installView(files, { narrow: false });
   for (const f of scriptsOn ? inst.files : inst.gypFiles) out.add(f);
   return out;
 }
@@ -2711,7 +2711,7 @@ export const SCOPE_NOTE: Record<Scope, string> = {
 const PREPARE_NOTE = `\nThe prepare script differs between these releases. A change to the prepare script alone is not a reason to FLAG; judge the rest of the diff as usual.`;
 
 function manifestScripts(files: FileMap): { manifest: string; scripts: Record<string, unknown> } | undefined {
-  const manifest = installView(files).manifest;
+  const manifest = installView(files, { narrow: false }).manifest;
   const bytes = files.get(manifest);
   if (!bytes) return undefined;
   try {

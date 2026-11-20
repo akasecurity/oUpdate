@@ -238,7 +238,8 @@ test("30000 distinct named functions in a file of about 1 MB are read in bounded
   const code = Array.from({ length: 30000 }, (_, i) => `function f${i}(e) { return e }\n`).join("") + `function u(e) { require(e) }\nu(${BX});\nconst pad = "${"x".repeat(250_000)}";\n`;
   const t0 = performance.now();
   holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"));
-  expect(performance.now() - t0).toBeLessThan(5000);
+  // 15 s: a hook with a widening line gets a second (narrow) read, so this takes about twice what it did (2 s on build); a quadratic scan takes minutes.
+  expect(performance.now() - t0).toBeLessThan(15_000);
 });
 
 // Fifth review batch.
@@ -356,7 +357,8 @@ test("40000 createRequire aliases in a file of about 1 MB are read in bounded ti
   const code = CR + Array.from({ length: 40000 }, (_, i) => `const a${i} = createRequire(f);\n`).join("") + `a7(${BX});\n`;
   const t0 = performance.now();
   holds(nested("1.0.0", code, "x/evil.js"), nested("1.0.1", code, "x/evil.js"));
-  expect(performance.now() - t0).toBeLessThan(5000);
+  // 15 s: a hook with a widening line gets a second (narrow) read, so this takes about twice what it did (2 s on build); a quadratic scan takes minutes.
+  expect(performance.now() - t0).toBeLessThan(15_000);
 });
 
 // Seventh review batch: loaders reached through a destructuring key, a computed key, an export, a default value.

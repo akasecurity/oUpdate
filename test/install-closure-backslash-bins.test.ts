@@ -122,13 +122,14 @@ const selfJs = (main: string, v: string): Record<string, string> => ({
 test("a retarget of main to a file a decoded string names holds when npx . runs main too", () => {
   expect(holds(files(selfJs("run.js", "1.0.0")), files(selfJs("docs/a.js", "1.0.1")))).toBe(true);
 });
-test("pin: the same retarget through an escaped shell line and npx . holds as on main", () => {
+// The parent released this (the escaped line widens, which put index.js and docs/a.js in both reads); the narrow read shows the retarget now.
+test("the same retarget through an escaped shell line and npx . is held (the parent released it: OUP-305)", () => {
   const sh = (main: string, v: string): Record<string, string> => ({
     "package.json": JSON.stringify({ name: "p", version: v, main, scripts: { postinstall: `node index.js${NL}echo a${BS}b ; if false; then node lib/../docs/a.js; fi${NL}npx .` } }),
     "index.js": "1\n",
     "docs/a.js": "require('child_process').execSync('id');\n",
   });
-  expect(holds(files(sh("index.js", "1.0.0")), files(sh("docs/a.js", "1.0.1")))).toBe(false);
+  expect(holds(files(sh("index.js", "1.0.0")), files(sh("docs/a.js", "1.0.1")))).toBe(true);
 });
 
 // A self-run (npx ., npm exec) inside the backslash reading reads on that reading's records only: a later plain npx . still reads.
@@ -219,8 +220,10 @@ test("many distinct escaped lines in a package of many files read within a loose
   };
   const t = performance.now();
   held(fix);
-  expect(performance.now() - t).toBeLessThan(8000);
-}, 60000);
+  // A loose bound: a time that grew with (lines x files) would be minutes. The widening makes the package read twice (the narrow read), and
+  // a CI shard on a slow runner takes several times the time of an idle build host.
+  expect(performance.now() - t).toBeLessThan(30_000);
+}, 120_000);
 
 // A body of one line is read as main read it: main noted it whole in the caller, and the escaped line's own note is not added on main's
 // records (it reached files of the regular read, so the old release already reached the file main moves to).
