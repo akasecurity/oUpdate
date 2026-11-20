@@ -644,8 +644,8 @@ function reachedFiles(files: FileMap, view: ReturnType<typeof installView>): Set
 
 // What only a self-run reached (kind "self"), or only the backslash reading reached (kind "esc"): its files, and what only the
 // scripts it alone followed mention. Each kind is compared on its own, so one cannot hide a retarget the other shows.
-function selfReached(files: FileMap, view: ReturnType<typeof installView>, kind: "self" | "esc" | "ar" = "self"): Set<string> {
-  const sets = { self: view.selfOnly ?? [], esc: view.escOnly ?? [], ar: view.arOnly ?? [] };
+function selfReached(files: FileMap, view: ReturnType<typeof installView>, kind: "self" | "esc" | "ar" | "st" = "self"): Set<string> {
+  const sets = { self: view.selfOnly ?? [], esc: view.escOnly ?? [], ar: view.arOnly ?? [], st: view.stageOnly ?? [] };
   const other = new Set(Object.entries(sets).flatMap(([k, v]) => (k === kind ? [] : v)));
   const self = new Set(sets[kind]);
   const regular = new Set<string>(view.files.filter((k) => !self.has(k) && !other.has(k)));
@@ -658,7 +658,7 @@ function selfReached(files: FileMap, view: ReturnType<typeof installView>, kind:
     regular.add(k);
     self.delete(k);
   }
-  for (const k of mentionFiles(files, (kind === "self" ? view.selfScripts : kind === "esc" ? view.escScripts : view.arScripts) ?? {})) if (!regular.has(k)) self.add(k);
+  for (const k of mentionFiles(files, (kind === "self" ? view.selfScripts : kind === "esc" ? view.escScripts : kind === "ar" ? view.arScripts : undefined) ?? {})) if (!regular.has(k)) self.add(k);
   return self;
 }
 
@@ -1027,6 +1027,13 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   // A retarget reaches a different key even when both files sit in both trees.
   const oldReached = reachedFiles(oldFiles, oldV);
   const newReached = reachedFiles(newFiles, newV);
+  let stageNamed = false;
+  // a stage channel contributed on either side (a file reached by the stage pass alone, equal or not)
+  let stageUsed = false;
+  const pushStage = (k: string) => {
+    stageNamed = true;
+    push(`file ${k}`);
+  };
   const retargets = (oV: typeof oldV, nV: typeof newV, oR: Set<string>, nR: Set<string>) => {
     for (const k of oR) if (!nR.has(k)) push(`file ${k}`);
     for (const k of nR) if (!oR.has(k)) push(`file ${k}`);
@@ -1036,8 +1043,24 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
       const b = selfReached(newFiles, nV, kind);
       for (const k of oR) if (a.has(k) !== b.has(k)) push(`file ${k}`);
     }
+    // The stage pass's own channel, named as a stage file (the cap is named with it).
+    const oSt = selfReached(oldFiles, oV, "st");
+    const nSt = selfReached(newFiles, nV, "st");
+    if (oSt.size > 0 || nSt.size > 0) stageUsed = true;
+    for (const k of oR) if (oSt.has(k) !== nSt.has(k)) pushStage(k);
   };
   retargets(oldV, newV, oldReached, newReached);
+  // What the bare-line read and the stage pass reached is compared as it is: the main read's widening may hold every file on both sides.
+  {
+    const oA = new Set(oldV.arAll ?? []);
+    const nA = new Set(newV.arAll ?? []);
+    for (const k of oA) if (!nA.has(k)) push(`file ${k}`);
+    for (const k of nA) if (!oA.has(k)) push(`file ${k}`);
+    const oS = new Set(oldV.stageAll ?? []);
+    const nS = new Set(newV.stageAll ?? []);
+    for (const k of oS) if (!nS.has(k)) pushStage(k);
+    for (const k of nS) if (!oS.has(k)) pushStage(k);
+  }
   // A widening that takes every file puts every file on both sides in the sets above, so a main or bin moved between two files
   // both releases hold shows nowhere there. The same comparison on the reads without those widenings still shows it (a side that
   // never widened is its own narrow read). Holding more is the only change: a difference found here is one more `file` signal.
@@ -1078,13 +1101,19 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
   if (shrinkwrapChanged(oldFiles, newFiles)) push("shrinkwrap");
   // The surface matched. A cap still holds, because the closure above is incomplete.
   // A download, an eval, or an unresolved runner does not.
-  if (out.length === 0) {
-    const cap = newV.hold ?? oldV.hold;
-    if (cap && surfaceCap(cap)) push(cap);
-    // A stop only the narrow read made (the wide read already holds the file the narrow one adds by name, so it never reaches that cap)
-    // aborts that read before it follows `node .`: its reached sets are incomplete. Holding is the only safe reading.
-    const narrowStop = newV.narrow?.hold ?? oldV.narrow?.hold;
-    if (!cap && narrowStop) push(`narrow read: ${narrowStop}`);
+  // A side that stopped does not run all of its reads, so the stage files the other side reached are not all a difference: the cap is named too.
+  {
+    const surfaceMatched = out.length === 0;
+    // Both sides' caps are named: a stage pass can stop a side on a cap of its own that shadows the cap the side's main reading stopped on.
+    const caps = new Set([...(newV.holds ?? [newV.hold]), ...(oldV.holds ?? [oldV.hold])]);
+    if (surfaceMatched || stageNamed || stageUsed) for (const cap of caps) if (cap && surfaceCap(cap)) push(cap);
+    if (surfaceMatched) {
+      const cap = newV.hold ?? oldV.hold;
+      // A stop only the narrow read made (the wide read already holds the file the narrow one adds by name, so it never reaches that cap)
+      // aborts that read before it follows `node .`: its reached sets are incomplete. Holding is the only safe reading.
+      const narrowStop = newV.narrow?.hold ?? oldV.narrow?.hold;
+      if (!cap && narrowStop) push(`narrow read: ${narrowStop}`);
+    }
   }
   return out;
 }

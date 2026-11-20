@@ -796,8 +796,9 @@ describe("round 17: unknown flags keep dispatching, += assignments, directory al
     for (const cmd of ["cat x | python3", "cat x | python -", "python3 < x.py", "cat x | python3 -W ignore", "cat x | perl", "perl < x.pl", "cat x | ruby", "cat x | deno run -", "cat x | bun run -", "cat x | env python3", "cat x | sudo perl"]) {
       expect(fed(cmd), cmd).toBe(true);
     }
+    // These interpreters with inline code can import a file of the package, so their stage reads like the bare command (which widens): held.
     for (const cmd of ["echo hi | python3 -c 'print(1)'", "echo hi | perl -e 'print 1'", "echo hi | ruby -e 'p 1'"]) {
-      expect(fed(cmd), cmd).toBe(false);
+      expect(fed(cmd), cmd).toBe(true);
     }
   });
 });
@@ -818,7 +819,9 @@ describe("round 18: general wrappers, valued interpreter flags, IFS", () => {
   });
 
   test("3. a program flag is not a stdin sink", () => {
-    for (const cmd of ["node -e 1 < /dev/null", "node -p 1 < /dev/null", "node --eval 1 < /dev/null", "python3 -c 1 < /dev/null", "grep sh x.sh | sort"]) {
+    // (`python3 -c 1` can import a file of the package: its stage reads like the bare command, which widens.)
+    expect(fed("python3 -c 1 < /dev/null")).toBe(true);
+    for (const cmd of ["node -e 1 < /dev/null", "node -p 1 < /dev/null", "node --eval 1 < /dev/null", "grep sh x.sh | sort"]) {
       expect(fed(cmd), cmd).toBe(false);
     }
   });
@@ -887,7 +890,8 @@ describe("round 20: no-space redirects, class sinks, scan budget, dir-flag abbre
   test("5. many valued long flags do not blow up the interpreter scan", () => {
     const flags = Array.from({ length: 40 }, (_, i) => `--f${i} 1`).join(" ");
     const t = Date.now();
-    expect(fed(`cat x | node ${flags} -e 1`)).toBe(false);
+    // The node stage is read like the bare command (valued flags it does not know widen it): a hold, as the bare command's.
+    expect(fed(`cat x | node ${flags} -e 1`)).toBe(true);
     expect(fed(`cat x | node ${flags}`)).toBe(true);
     expect(Date.now() - t).toBeLessThan(10000);
   });
@@ -1047,7 +1051,8 @@ describe("round 25: stages with redirects, written files run by path, fed files'
     for (const cmd of ["cat test/x.js | node -e \"eval(require('fs').readFileSync(0,'utf8'))\"", "cat test/x.sh | bash -c '. /dev/stdin'", "cat test/x.py | python3 -c 'import sys; exec(sys.stdin.read())'"]) {
       expect(inert(cmd, cmd.includes(".py") ? "test/x.py" : cmd.includes("x.js") ? "test/x.js" : "test/x.sh"), cmd).toBe(true);
     }
-    expect(inert("cat test/x.sh | node -e 'console.log(1)'")).toBe(false);
+    // The stage `cat test/x.sh` is read like the bare command, which names the file: its changes are held (the node stage reads no stdin).
+    expect(inert("cat test/x.sh | node -e 'console.log(1)'")).toBe(true);
   });
 
   test("6. flags of plain commands that run a program", () => {

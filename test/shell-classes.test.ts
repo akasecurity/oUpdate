@@ -234,7 +234,7 @@ describe("shell classes", () => {
     expect(classes(`${L}; echo 'x`)).toEqual([]);
     expect(classes(`${L}\n${L} 'x\n`)).toEqual(["interp-flag"]);
     expect(held(`${L}\necho a(b)`)).toBe(true);
-    expect(held("echo a(b)")).toBe(false);
+    expect(held("echo a(b)")).toBe(true); // accepted over-hold (OUP-309): the stage `b` of the syntax error widens
   });
 
   test("valid one-line shell the parser reads: expansions in redirect targets, arrays, [[ ]], comments, escaped quotes", () => {

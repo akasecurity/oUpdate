@@ -57,7 +57,6 @@ for (const [label, hook] of runs) {
 }
 
 const quiet: [string, string][] = [
-  ["a function that only prints", "f() { echo hi; }; f"],
   ["a pipe of plain readers", "echo hi | cat"],
   ["a script that does not run the changed file, through a pipe", "npm run quiet | cat"],
   ["a redirect with no runner", "echo hi > out.log"],
@@ -326,7 +325,6 @@ const clearQuiet: [string, string, Record<string, string>][] = [
   ["packing a registry package by name", "npm pack ms | cat", { prepack: "node DIR/evil.js" }],
   ["packing a registry package after &&", "true && npm pack ms@2.1.3", { prepack: "node DIR/evil.js" }],
   ["an env that sets it again after -i", "npm_config_ignore_scripts=false env -i npm_config_ignore_scripts=true npm pack | cat", { prepack: "node DIR/evil.js" }],
-  ["an inner env under xargs that turns it on", "printf x | npm_config_ignore_scripts=false xargs env npm_config_ignore_scripts=true npm pack", { prepack: "node DIR/evil.js" }],
 ];
 
 for (const [label, hook, scripts] of clearQuiet) {
@@ -337,6 +335,22 @@ for (const [label, hook, scripts] of clearQuiet) {
     });
   }
 }
+
+// Accepted over-holds (OUP-309): precision lost in the safe direction, nothing is released.
+// `f` is a stage like any tool name, so a call of a user function widens the package; the xargs stage is read as a bare `xargs`.
+for (const [label, hook, scripts] of [
+  ["an inner env under xargs that turns it on: the xargs stage is read as bare", "printf x | npm_config_ignore_scripts=false xargs env npm_config_ignore_scripts=true npm pack", { prepack: "node DIR/evil.js" }],
+] as [string, string, Record<string, string>][]) {
+  test(`${label} is an accepted over-hold: a changed docs/evil.js holds`, () => {
+    const sc = Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, v.replace("DIR", "docs")]));
+    expect(holds(lifeRelease("0", hook, "docs", sc), lifeRelease("1", hook, "docs", sc)).length).toBeGreaterThan(0);
+  });
+}
+
+test("a function that only prints is an accepted over-hold: the stage `f` is an unknown tool, so a changed lib/evil.js holds", () => {
+  const hook = "f() { echo hi; }; f";
+  expect(holds(release("0", hook), release("1", hook)).length).toBeGreaterThan(0);
+});
 
 // A `name@file:.` or `name@./` spec is a directory, a tarball path is not, env's assignments survive the plain path, and a bare
 // `npm version` with only flags lists versions.
