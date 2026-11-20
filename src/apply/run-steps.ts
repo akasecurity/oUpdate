@@ -223,5 +223,5 @@ export async function finishRun(rt: RunCtx, a: { npmRun: NpmRun; npmStatus: stri
   for (const l of summary) sink?.(l);
   // A run being stopped by a signal sends no done notice: its ABORTED line is the last word.
   if (!dryRun && !opts.isStopping?.()) await notify(`📋 <b>${host} ${prevName} done (oupdate)</b>\nbrew: ${brewStatus}\nnpm:  ${npmLine}\nmas:  ${mas}`);
-  return { log, summary, rc };
+  return { log, summary, rc, plan: { holds: Object.fromEntries(rt.b.plan.holds), typeAHeld: [...rt.b.plan.typeAHeld], typeAUp: [...rt.b.plan.typeAUp] } };
 }

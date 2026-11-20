@@ -135,6 +135,7 @@ describe("tap approval in the brew phase (port 03)", () => {
     expect(r.calls.filter((c) => /^brew (update|upgrade|cleanup|link|unlink)\b|--fetch-HEAD|launchctl|^sudo|^npm (update|install)|^spawn/.test(c))).toEqual([]);
     expect(r.writes).toEqual([]);
     expect(r.log).toContain("dry-run: would upgrade Type A formulas=[good-a] casks=[]");
+    expect(r.plan.typeAUp).toEqual(["formula:good-a"]);
     expect(r.brew).toMatch(/^ {2}brew: FLAGGED — awaiting tap approval: example\/tf/);
   });
 });
@@ -222,6 +223,23 @@ describe("stuck tracking in the run (port 04)", () => {
     expect(res.rc).toBe(1);
   });
 
+  test("plan record: a Type A cask is recorded as would-upgrade, and a sensitive major cask as held, under the cask kind", async () => {
+    const r = await run(
+      { casks: "good-c git", verbose: "good-c (1.0) != 1.1\ngit (1.0) != 3.0", caskTaps: { "good-c": "homebrew/cask", git: "homebrew/cask" } },
+      { dryRun: true },
+    );
+    expect(r.plan.typeAUp).toEqual(["cask:good-c"]);
+    expect(r.plan.typeAHeld).toEqual(["cask:git"]);
+  });
+  test("plan record: a cask pinned in pins.json is held under its own kind, beside a formula of the same name that upgrades", async () => {
+    const r = await run({
+      formulas: "twin", casks: "twin", verbose: "twin (1.0) < 1.1",
+      formulaTaps: { twin: "homebrew/core" }, caskTaps: { twin: "homebrew/cask" },
+      pinFiles: [{ repo: "example-repo", path: "/repos.test/example-repo/pins.json", text: '{"cask":{"twin":"1.0"}}' }],
+    });
+    expect(r.log).toContain("  holding twin (pinned: example-repo)");
+    expect(r.plan.holds).toEqual({ "cask:twin": "pinned: example-repo" });
+  });
   test("pinned and excluded packages are held, reported, and never count as stuck", async () => {
     const r = await run({
       formulas: "duckdb good-a", casks: "big", verbose: "duckdb (1.5.5) < 2.0.0\ngood-a (1.0) < 1.1\nbig (1) < 2",
@@ -230,6 +248,7 @@ describe("stuck tracking in the run (port 04)", () => {
     }, { cfg: { caskExclude: ["big"] } });
     expect(r.calls).not.toContain("brew upgrade duckdb");
     expect(r.log).toContain("  holding duckdb (pinned: example-repo)");
+    expect(r.plan.holds).toEqual({ "formula:duckdb": "pinned: example-repo" });
     expect(r.log.some((l) => l.startsWith("  excluding big (CASK_EXCLUDE"))).toBe(true);
     expect(r.brew).toContain("PINNED: duckdb(example-repo)");
     expect(r.brew).not.toContain("STUCK");
@@ -598,6 +617,7 @@ describe("the run: failures, timeouts and the summary", () => {
     expect(r.calls).not.toContain("brew upgrade openssl@3");
     expect(r.calls).toContain("brew upgrade good-a");
     expect(r.log).toContain("Type A: holding [openssl@3] — upgrading [good-a]");
+    expect(r.plan.typeAHeld).toEqual(["formula:openssl@3"]);
     expect(r.log.some((l) => l.startsWith("[notify] ⚠️ hosta Type A — holding 1 pkg(s)"))).toBe(true);
   });
 
@@ -1227,6 +1247,7 @@ describe("the bun this run executes", () => {
       { bunExec: "/brew/Cellar/bun/1.0/bin/bun" },
     );
     expect(r.log).toContain("  holding bun (runs under it)");
+    expect(r.plan.holds).toEqual({ "formula:bun": "runs under it" });
     expect(r.calls).not.toContain("brew upgrade bun");
     expect(r.calls).toContain("brew upgrade good-a");
     expect(r.brew).toContain("HELD: bun (runs under it)");
