@@ -29,6 +29,8 @@ export interface InstallView {
   arMissing?: string[];
   // The files an npm-run-all --npm-path value names: a changed one holds, and they are in no reach comparison.
   npmFiles?: string[];
+  // The files a file that writes a loader surface and starts a process puts in play: a changed one holds, and they are in no reach comparison.
+  wsFiles?: string[];
   gypFiles: string[];
   missing: string[];
   scripts: Record<string, string>;
@@ -189,6 +191,9 @@ interface Ctx {
   // The files a --npm-path value names (a record of its own), and whether one widened to every file.
   npmFiles?: Set<string>;
   npmWidened?: boolean;
+  // The files a write-and-spawn file puts in play (a record of its own) and whether they were added.
+  wsFiles?: Set<string>;
+  wsDone?: boolean;
   filesLog?: Set<string>;
   escMarks?: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> };
   selfFiles?: Set<string>;
@@ -1267,6 +1272,98 @@ function stripLiteralLoad(raw: string): boolean {
   // A node: name that is not on the allowlist is a builtin too, including one this list does not know yet.
   if (spec.startsWith("node:")) return false;
   return !NODE_BUILTINS.has(root);
+}
+
+// OUP-334: a file that both writes to a loader surface and starts a process or loads code is held structurally, whatever the spelling (OUP-331 held the same writes one spelling at a
+// time). The write side is narrow and an allowlist: a file-system binding used through any member outside the read-only list (renamed, computed, called or handed on all count)
+// beside a loader-surface name (.bin, a start file, sitecustomize, NODE_OPTIONS, BASH_ENV); a PATH write (an env option counts only with PATH inside it); a prototype or
+// __proto__ write in a file that reaches a module root's constructor or the module builtin. The start side is any child-process, vm, loader or non-literal module load.
+// Only adds holds: it is read beside loadsFileByBuiltin and never replaces it. Not closed: a write in one file with the start in another, and a write made by the started
+// child itself (`sh -c 'echo > node_modules/.bin/x'`).
+const FS_MODULE = String.raw`(?:node:)?(?:fs(?:\/promises)?|graceful-fs|fs-extra)`;
+const FS_READ_ONLY = new Set(["readFile", "readFileSync", "readdir", "readdirSync", "read", "Stats", "globSync", "readlink", "readlinkSync", "realpath", "realpathSync", "stat", "statSync", "lstat", "lstatSync", "fstat", "fstatSync", "exists", "existsSync", "access", "accessSync", "constants", "createReadStream", "readSync", "promises", "F_OK", "R_OK", "W_OK", "X_OK", "statfs", "statfsSync", "opendir", "opendirSync", "watch", "watchFile", "unwatchFile"]);
+// The write side and the start side of OUP-334 as one test of a file's text. It reads text only and sets no tier flag (see widenJsScan: the files it names go to
+// a record of their own, so every reach and every detail the other rules compute stays as it was).
+// A prototype or __proto__ read through a name bound to the module builtin (`const M = require("module"); M.prototype._load = ...`): the module builtin
+// imported for createRequire or builtinModules is no write receiver.
+function moduleReceiver(text: string): boolean {
+  const names = new Set<string>();
+  for (const m of text.matchAll(/(?<![\w$])([\w$]+)\s*=(?!=)\s*(?:await\s+)?(?:module\s*\.\s*)?(?:require\s*\(\s*|import\s*\(\s*|process\s*\.\s*getBuiltinModule\s*\(\s*)["'`](?:node:)?module["'`]\s*\)|\bimport(?![\w$])\s*(?:([\w$]+)\s*(?:,\s*)?)?(?:\*\s*as\s+([\w$]+)\s*)?from\s*["'`](?:node:)?module["'`]/g)) for (const g of [m[1], m[2], m[3]]) if (g) names.add(g);
+  names.delete("");
+  if (names.size === 0) return false;
+  for (const m of text.matchAll(/(?<![\w$.])([\w$]+)\s*(?:\?\.|\.)\s*(?:prototype|__proto__)(?![\w$])/g)) {
+    if (!names.has(m[1]!)) continue;
+    // A write on that receiver: an assignment to it or a member of it, or it as the target of a defineProperty-like call. A read beside a start is no write.
+    const at = m.index ?? 0;
+    if (/^(?:\s*(?:\?\.|\.)\s*[\w$]+|\s*\[[^\]]{0,40}\])*\s*(?:\?\?|\|\||&&|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?!=)/.test(text.slice(at + m[0].length, at + m[0].length + 80))) return true;
+    if (/(?:defineProperty|defineProperties|setPrototypeOf|Reflect\s*\.\s*set|Object\s*\.\s*assign)\s*\(\s*$/.test(text.slice(Math.max(0, at - 60), at))) return true;
+  }
+  return false;
+}
+function writesLoaderSurfaceAndStarts(text: string, blank: string): boolean {
+  const nonLiteralLoad = /\b(?:require|import)\s*\(\s*[^"'`\s)]|\bgetBuiltinModule\s*\(/.test(blank);
+  // The names bound to a file-system module (a name, a namespace import, an inline load, `promises` taken from it) and the members taken from it by destructuring.
+  const fsNames = new Set<string>();
+  const taken = new Set<string>();
+  // A load of the module: require("fs"), module.require("fs"), process.getBuiltinModule("fs"), import("fs"), each optionally awaited. Any `name =` before it binds
+  // the name (a declaration, a comma declarator, an assignment).
+  const LOAD = String.raw`(?:\(\s*)?(?:await\s+)?(?:module\s*\.\s*)?(?:require\s*\(\s*|process\s*\.\s*getBuiltinModule\s*\(\s*|import\s*\(\s*)["'\x60]${FS_MODULE}["'\x60]\s*\)`;
+  for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$])([\w$]+)\s*=(?!=)\s*${LOAD}|\bimport(?![\w$])\s*(?:([\w$]+)\s*(?:,\s*)?)?(?:\*\s*as\s+([\w$]+)\s*)?from\s*["'\x60]${FS_MODULE}["'\x60]|\bimport(?![\w$])\s*([\w$]+)\s*,\s*\{[^{}]*\}\s*from\s*["'\x60]${FS_MODULE}["'\x60]`, "g"))) for (const g of [m[1], m[2], m[3], m[4]]) if (g) fsNames.add(g);
+  // The members of a destructuring pattern (one level of nesting: `{ promises: { writeFile } }`): `a`, `a: b`, `a as b`, `...a`. The token split is linear in a run of spaces
+  // (a split on `\s+as\s+` is not).
+  const takeParts = (pattern: string): void => {
+    for (const part of pattern.split(/[,{}]/)) {
+      const tok = part.trim().replace(/^\.\.\./, "").split(/[:\s]+/);
+      const name = tok[0] ?? "";
+      const alias = (tok[1] === "as" ? tok[2] : tok[1]) ?? "";
+      if (name === "promises") fsNames.add(alias || "promises");
+      else if (name) taken.add(name);
+    }
+  };
+  for (const m of text.matchAll(new RegExp(String.raw`\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}\s*=(?!=)\s*${LOAD}|\bimport(?![\w$])\s*(?:[\w$]+\s*,\s*)?\{([^{}]*)\}\s*from\s*["'\x60]${FS_MODULE}["'\x60]`, "g"))) takeParts(m[1] ?? m[2] ?? "");
+  // A name bound to a member read of a binding (`const p = fs.promises`) or to the binding itself (`const f = fs`) is the same module (twice: a chain of two); a
+  // pattern taken from a binding (`const { writeFileSync: w } = fs`, `= fs.promises`) takes its members.
+  for (let pass = 0; pass < 2 && fsNames.size; pass++) {
+    for (const m of blank.matchAll(/(?<![\w$])([\w$]+)\s*=(?!=)\s*(?:await\s+)?([\w$]+)(?:\s*(?:\?\.|\.)\s*promises)?(?![\w$])(?!\s*[.(\[])/g)) if (fsNames.has(m[2]!)) fsNames.add(m[1]!);
+  }
+  if (fsNames.size) for (const m of blank.matchAll(/\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}\s*=(?!=)\s*(?:await\s+)?([\w$]+)(?:\s*(?:\?\.|\.)\s*promises)?(?![\w$])(?!\s*[.(\[])/g)) if (fsNames.has(m[2]!)) takeParts(m[1]!);
+  const fsLoaded = fsNames.size > 0 || taken.size > 0 || new RegExp(String.raw`["'\x60]${FS_MODULE}["'\x60]`).test(text);
+  const fsWrites = new Set<string>();
+  for (const name of taken) if (!FS_READ_ONLY.has(name)) fsWrites.add(name);
+  // A member of an inline load: require("fs").writeFileSync(...).
+  for (const m of text.matchAll(new RegExp(String.raw`\b(?:require|import)\s*\(\s*["'\x60]${FS_MODULE}["'\x60]\s*\)(?:\s*\))?\s*(?:\?\.|\.)\s*(?:promises\s*(?:\?\.|\.)\s*)?([\w$]+)`, "g"))) if (!FS_READ_ONLY.has(m[1]!)) fsWrites.add(m[1]!);
+  if (fsNames.size) {
+    // One pass over the members taken from any of the names, and one each for a computed key or a call, and a hand-off: a set lookup per match.
+    for (const m of blank.matchAll(/(?<![\w$.])([\w$]+)\s*(?:\?\.|\.)\s*(?:promises\s*(?:\?\.|\.)\s*)?([\w$]+)/g)) if (fsNames.has(m[1]!) && !FS_READ_ONLY.has(m[2]!)) fsWrites.add(m[2]!);
+    // The binding indexed by a computed key, called, or handed on as a value can reach any member.
+    for (const m of blank.matchAll(/(?<![\w$.])([\w$]+)\s*(?:\[|\()/g)) if (fsNames.has(m[1]!)) { fsWrites.add("*"); break; }
+    // A call argument, an array or object element or a keyed value (`f(fs)`, `[fs]`, `{ a: fs }`, `f(fs.promises)`); the parenthesis of `if (fs)`, `while (fs)` is not a call.
+    for (const m of blank.matchAll(/[(,{\[:]\s*([\w$]+)(?:\s*(?:\?\.|\.)\s*promises)?\s*(?=[,)}\]])/g)) {
+      if (!fsNames.has(m[1]!)) continue;
+      if (m[0].startsWith("(") && /(?:^|[^\w$.])(?:if|while|switch|for|with|catch|return|typeof)\s*$/.test(blank.slice(Math.max(0, (m.index ?? 0) - 12), m.index ?? 0))) continue;
+      fsWrites.add("*");
+      break;
+    }
+  }
+  if (fsLoaded && fsNames.size === 0 && taken.size === 0 && nonLiteralLoad) fsWrites.add("*");
+  // The write side, narrow: a prototype write counts only in a file that reaches a module root's constructor or loads the module builtin; only a PATH write counts of
+  // the environment (an env option needs a PATH token inside it); an fs write counts only beside a loader-surface name (.bin, a start file; a dot name has no
+  // identifier character before its dot, so `opts.profile` is not `.profile`).
+  const protoWrite = /(?:\.|\])\s*prototype\s*(?:\]\s*)?(?:\?\?|\|\||&&|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?!=)|\[\s*["'`]prototype["'`]\s*\]\s*=(?!=)|__proto__\s*=(?!=)|\bsetPrototypeOf\s*\(|\b(?:defineProperty|defineProperties|Reflect\s*\.\s*set|Object\s*\.\s*assign)\b[^;]{0,200}?\b(?:prototype|__proto__)\b/.test(text);
+  const writes =
+    (protoWrite && /(?:module|require\s*\.\s*main|process\s*\.\s*mainModule)\s*(?:\?\.|\.)\s*constructor|\[\s*["'`]constructor["'`]\s*\]|\bmainModule\b/.test(text) || moduleReceiver(text)) ||
+    /(?:\.\s*PATH|\[\s*["'`]PATH["'`]\s*\])\s*(?:\)\s*)?(?:\?\?|\|\||&&|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?!=)|\bObject\s*\.\s*assign\s*\(\s*process\s*\.\s*env\b[^;]{0,200}\bPATH\b|(?<![\w$])PATH=|[{,]\s*env\s*:\s*\{[^{}]{0,200}\bPATH\b/.test(text) ||
+    (fsWrites.size > 0 && /\.bin(?:[\/\\]|["'`])|(?<![\w$)\]])\.(?:bashrc|bash_profile|bash_login|bash_logout|zshrc|zshenv|zprofile|profile|npmrc|yarnrc)\b|\.pth\b|sitecustomize|usercustomize|NODE_OPTIONS|BASH_ENV/.test(text));
+  if (!writes) return false;
+  // Starts: a process (a child_process word, or a bare spawn-family call: a member call such as re.exec( is not one), a string run as code, a loader, a module named
+  // at run time, a module root's _load.
+  return (
+    /child_process|\bprocess\s*\.\s*(?:binding|dlopen|execve)\b/.test(text) ||
+    /(?<![\w$.])(?:spawn|spawnSync|execFile|execFileSync|exec|execSync|fork)\s*\(/.test(blank) ||
+    nonLiteralLoad ||
+    /\b(?:eval|Function|runInNewContext|runInThisContext|runInContext|compileFunction)\s*\(|\bnew\s+(?:vm\s*\.\s*)?Script\s*\(|(?:\.|\])\s*constructor\s*\(|(?<![\w$])_load\s*(?:\(|\?\.\s*\(|(?:\?\.|\.)\s*(?:call|apply|bind)\s*\()/.test(blank) ||
+    /(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s*)["'`](?:node:)?(?:vm|module|cluster|worker_threads)["'`]/.test(text)
+  );
 }
 
 // A builtin that runs another file by name: cluster (setupPrimary, settings.exec), module (register, _load), node:test (run).
@@ -5412,8 +5509,16 @@ function widenJs(ctx: Ctx, key: string, text: string): void {
 function addSameDirIf(ctx: Ctx, key: string, tier: JsTier): void {
   if (tier.pkg || tier.dirs.length === 0 || tier.same) addSameDir(ctx, key);
 }
+/** Whether a file adds its own hold (a write to a loader surface and a start) beyond what its tier already reaches: for a price run and the rows. */
+export function holdsWriteSpawn(fromKey: string, source: string): boolean {
+  writeSpawn = false;
+  const tier = classifyJs(fromKey, source);
+  return writeSpawn && !tier.all;
+}
 function widenJsScan(ctx: Ctx, key: string, text: string): void {
+  writeSpawn = false;
   const tier = classifyJs(key, text);
+  const ws = writeSpawn && !tier.all;
   if (tier.all) widenEvery(ctx);
   else {
     if (tier.pkg) widenPackage(ctx, tier.tests, tier.flows);
@@ -5424,6 +5529,17 @@ function widenJsScan(ctx: Ctx, key: string, text: string): void {
   for (const path of tier.lits) addLogical(ctx, path);
   addNative(ctx);
   addScannedLiterals(ctx);
+  if (ws) noteWriteSpawn(ctx);
+}
+
+// A file that writes a loader surface and starts a process or loads code can change what any later file does, so every file of the package but the manifests and
+// the docs is a file the release shows when its bytes change. They go to a record of their own (ctx.wsFiles, carried as `wsFiles`, read after every reach
+// comparison like npmFiles): the reach, the tier flags and the details the other rules compute are exactly what they were. Once per context.
+function noteWriteSpawn(ctx: Ctx): void {
+  if (noWiden || ctx.wsDone) return;
+  ctx.wsDone = true;
+  const rec = (ctx.wsFiles ??= new Set<string>());
+  for (const [logical, key] of ctx.logical) if (!isManifest(logical) && !isDocSurface(logical)) rec.add(key);
 }
 
 type JsEffect =
@@ -6349,7 +6465,10 @@ function budgeted<T>(len: number, run: () => T, closed: () => T): T {
 export function classifyJs(fromKey: string, source: string): JsTier {
   return budgeted(source.length, () => classifyJsScan(fromKey, source), () => ({ all: true, pkg: true, tests: true, flows: true, same: false, dirs: [], lits: [] }));
 }
+// The answer of the write-and-spawn test for the file classifyJs read last (it is read right after the call, in widenJsScan).
+let writeSpawn = false;
 function classifyJsScan(fromKey: string, source: string): JsTier {
+  writeSpawn = false;
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
   const text = codeOnly(source, [], true) ?? source;
   if (hasUnbounded(text, source)) tier.all = true;
@@ -6628,6 +6747,9 @@ function classifyLoads(tier: JsTier, fromKey: string, text: string): void {
   const loadsByName = loadsFileByBuiltin(text, blank);
   // Never narrower than the rules this one replaced: a literal cluster or module load with a loader verb anywhere, and a module or constructor _load chain anywhere, in the text with its strings kept.
   const sameAsBefore = (/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)["'`](?:node:)?(?:cluster|module)["'`]/.test(text) && /\b(?:setupPrimary|setupMaster)\s*\(|\bsettings\s*\.\s*exec\b|\bregister\s*\(|\b_load\s*\(/.test(text)) || /\b(?:module|constructor)\s*\.\s*(?:constructor\s*\.\s*)?_load\b/.test(text);
+  // OUP-334: the write-and-spawn test reads the same text but sets no tier flag; widenJsScan reads the answer (a flag on the tier would change the reach of every
+  // other rule: addSameDirIf, the glob and gyp details).
+  writeSpawn = writesLoaderSurfaceAndStarts(text, blank);
   if (loadsByName || sameAsBefore) {
     tier.pkg = true;
     tier.tests = true;
@@ -11228,10 +11350,19 @@ function runStageJobs(ctx: Ctx): void {
     dispatchScriptStages(sc, job.text, 0, true);
     if (sc.hold) {
       ctx.hold = sc.hold;
+      carryWriteSpawn(ctx, sc);
       return;
     }
   }
+  carryWriteSpawn(ctx, sc);
   ctx.stageFiles = new Set([...sc.files, ...(sc.selfFiles ?? []), ...(sc.escFiles ?? [])]);
+}
+
+// The files a write-and-spawn file of the stage pass put in play go to the parent's record (the stage context is dropped).
+function carryWriteSpawn(ctx: Ctx, sc: Ctx): void {
+  if (!sc.wsFiles?.size) return;
+  const rec = (ctx.wsFiles ??= new Set<string>());
+  for (const k of sc.wsFiles) rec.add(k);
 }
 
 // The command word of a command (after variable assignments) holds an expansion that could not be resolved.
@@ -15048,6 +15179,7 @@ function finish(ctx: Ctx, manifest: string, gyp: string | undefined, hook: boole
     stageAll: [...(ctx.stageFiles ?? [])].sort(),
     stageOnly: [...(ctx.stageFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     npmFiles: [...(ctx.npmFiles ?? [])].sort(),
+    wsFiles: [...(ctx.wsFiles ?? [])].sort(),
     gypFiles: [...ctx.gypFiles].sort(),
     missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? []), ...(ctx.escMissing ?? []), ...(ctx.arRec?.missing ?? [])])].sort(),
     selfMissing: [...(ctx.selfMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
@@ -15534,6 +15666,7 @@ function installViewBackslash(files: FileMap): InstallView {
     stageAll: merge(v.stageAll ?? [], w.stageAll ?? []),
     stageOnly: onlyFiles(v.stageOnly, w.stageOnly),
     npmFiles: merge(v.npmFiles ?? [], w.npmFiles ?? []),
+    wsFiles: merge(v.wsFiles ?? [], w.wsFiles ?? []),
     arMissing: onlyMissing(v.arMissing, w.arMissing),
     arScripts: Object.fromEntries(Object.entries({ ...w.arScripts, ...v.arScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
     escScripts: Object.fromEntries(Object.entries({ ...w.escScripts, ...v.escScripts }).filter(([k]) => !Object.hasOwn(v.scripts, k))),
