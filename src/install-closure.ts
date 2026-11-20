@@ -1321,6 +1321,41 @@ function loadsFileByBuiltin(text: string, blank: string): boolean {
   // A name bound to module, module.constructor, require.main or process.mainModule (const M = module.constructor): its register and _load are the loader.
   const selfNames = new Set<string>();
   for (const m of code.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:\(\s*0\s*,\s*)?(?:module|require\s*\.\s*main|process\s*\.\s*mainModule)(?=\s*(?:[;,)\n]|$|\.\s*constructor\b(?!\s*\.)))/g)) selfNames.add(m[1] ?? "");
+  // Module.prototype is a writable property of a plain function: a file that assigns or defines a `prototype` key on a module root's constructor (or on a name bound to it)
+  // can make it the loader itself, so a name bound to that prototype is the loader too (OUP-331). Structural: the key may be spelled with a dot, a bracket string, an
+  // optional chain, a parenthesis, a destructured key or an Object.assign / defineProperty / setPrototypeOf / Reflect.set argument; the text is read with its strings kept.
+  const ROOT = String.raw`(?:module|require\s*\.\s*main|process\s*\.\s*mainModule)`;
+  const PKEY = String.raw`\s*(?:\)\s*)?(?:(?:\?\.|\.)\s*prototype(?![\w$])|(?:\?\.\s*)?\[\s*["'\x60]prototype["'\x60]\s*\])`;
+  const ASSIGN = String.raw`\s*(?:\?\?|\|\||&&|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?!=)`;
+  const CTOR = String.raw`(?:\(\s*0\s*,\s*)?(?:\(\s*)?${ROOT}\s*(?:\)\s*)?(?:\?\.|\.)\s*constructor`;
+  const protoWritten = new RegExp(String.raw`${CTOR}${PKEY}${ASSIGN}|\b(?:defineProperty|defineProperties|setPrototypeOf|Reflect\s*\.\s*set|Object\s*\.\s*assign)\b[^;]{0,200}?\bprototype\b`).test(text);
+  // One pass over the text for every name that takes a prototype from `src`; `from` says which sources count (a root's constructor, or a name in the set it was snapshotted into).
+  const bindFrom = (src: string, from: (n: string) => boolean): void => {
+    for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])(?:(?:const|let|var)\s+)?([\w$]+)\s*=(?!=)\s*(?:\(\s*)?(${src})${PKEY}`, "g"))) if (from(m[2] ?? "")) selfNames.add(m[1] ?? "");
+    for (const m of text.matchAll(new RegExp(String.raw`(?:const|let|var)\s*\{([^{}]{0,200})\}\s*=\s*(?:\(\s*)?(${src})(?![\w$])`, "g"))) {
+      if (!from(m[2] ?? "")) continue;
+      const pk = /(?<![\w$])prototype\s*(?::\s*([\w$]+))?\s*(?:[,}=]|$)/.exec(m[1] ?? "");
+      if (pk) selfNames.add(pk[1] ?? "prototype");
+    }
+  };
+  if (protoWritten) bindFrom(CTOR, () => true);
+  // The same through a name already bound to a module root's constructor (const M = module.constructor; M.prototype = M; const P = M.prototype): P is the loader.
+  if (selfNames.size) {
+    const known = new Set(selfNames);
+    const writtenNames = new Set<string>();
+    for (const m of text.matchAll(new RegExp(String.raw`(?<![\w$.])([\w$]+)${PKEY}${ASSIGN}`, "g"))) writtenNames.add(m[1] ?? "");
+    bindFrom(String.raw`(?<![\w$.])[\w$]+`, (n) => known.has(n) && (protoWritten || writtenNames.has(n)));
+  }
+  // npm puts node_modules/.bin first on PATH for every hook, so a tool name in a spawn is not the system tool when the file can place its own. Held (OUP-331):
+  // hole 1: a file write call whose argument holds a string ending a path in .bin, or any write-capable fs call or spawned cp/mv/ln/install beside a child-process call whose command is not an
+  //   absolute literal (the path need not be a literal in the call);
+  // hole 2: a PATH assignment in any target spelling, an env option key of a child-process call, or PATH= in a command string, beside a child-process word.
+  // A write to any other path alone, a read of PATH or .bin, and a spawn alone are not held.
+  const childWord = /\b(?:spawn|spawnSync|execFile|execFileSync|exec|execSync|fork)\b/.test(blank);
+  if (/\b(?:writeFileSync|appendFileSync|copyFileSync|renameSync|symlinkSync|linkSync|createWriteStream|writeFile|appendFile|copyFile|rename|symlink|link)\s*\([^;]{0,200}?["'`][^"'`\n]{0,200}\.bin(?:[\/\\]|["'`])/.test(text)) return true;
+  if (childWord && /(?:\.\s*PATH|\[\s*["'`]PATH["'`]\s*\])\s*(?:\)\s*)?(?:\?\?|\|\||&&|\*\*|>>>|<<|>>|[-+*\/%&|^])?=(?!=)|\bObject\s*\.\s*assign\s*\(\s*process\s*\.\s*env\b|\bprocess\s*\.\s*env\s*=(?!=)|[{,]\s*env\s*(?::|[,}])|(?<![\w$])PATH=/.test(text)) return true;
+  if (childWord && /child_process/.test(text) && /\b(?:spawn|spawnSync|execFile|execFileSync|exec|execSync)\s*\(\s*(?!["'`]\/)/.test(text)
+    && /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|cp|cpSync|copyFile|copyFileSync|rename|renameSync|link|linkSync|symlink|symlinkSync|createWriteStream)\s*\(|\bopenSync\s*\([^)]{0,200}?["'`](?:[wa]x?|r\+)["'`]|\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*["'`](?:cp|mv|ln|install)["'`]/.test(text)) return true;
   if (selfNames.size && (viaReceiver(selfNames, String.raw`(?:register|_load)\b`, CALL) || handedOff(selfNames, String.raw`(?:register|_load)`))) return true;
   if (named("cluster")) {
     const r = receivers("cluster");
