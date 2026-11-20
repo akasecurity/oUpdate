@@ -1115,6 +1115,12 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
       if (!cap && narrowStop) push(`narrow read: ${narrowStop}`);
     }
   }
+  // A file an npm-run-all --npm-path names holds when its bytes change (or it is added or removed); it is in no reach comparison. It comes after the cap block, so it adds its detail to the base's and never turns the surface unmatched first.
+  for (const k of new Set([...(oldV.npmFiles ?? []), ...(newV.npmFiles ?? [])])) {
+    const a = oldFiles.get(k);
+    const b = newFiles.get(k);
+    if (!a || !b || !bytesEqual(a, b)) push(`file ${k}`);
+  }
   return out;
 }
 
