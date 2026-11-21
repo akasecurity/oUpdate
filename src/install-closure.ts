@@ -1252,7 +1252,7 @@ const LITERAL_KEY_SCANS = [
 // so every cost, early out and fault of the scan is the one it had without it (a scan limit gives the same details at every limit).
 type Open = { kind: "call" | "ctl" | "group" | "index" | "array" | "brace"; at: number; hits: number };
 const CONTROL_HEADS = new Set(["if", "while", "for", "switch", "with"]);
-function indexKeyUse(source: string): boolean {
+export function indexKeyUse(source: string): boolean {
   const outerSteps = jsSteps;
   const outerLimit = jsLimit;
   jsLimit = Infinity;
