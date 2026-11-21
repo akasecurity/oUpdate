@@ -208,13 +208,15 @@ describe("the rule is linear in the size of the file", () => {
     ["spaces in a prototype bracket", (n: number) => `x.prototype${" ".repeat(n)}]${" ".repeat(n)}`],
     ["spaces in a destructured fs import", (n: number) => `const {${" ".repeat(n)}a${" ".repeat(n)}} = require("fs");\n`],
     ["spaces after .PATH", (n: number) => `${FS}${CP}process.env.PATH${" ".repeat(n)}+ "x";\n`],
-    ["many file-system bindings", (n: number) => Array.from({ length: n / 8 }, (_, i) => `const f${i} = require("fs"); f${i}.readFileSync(1);`).join("\n")],
+    // 3000 ms for this row: the key read added to classifyJs (OUP-282) makes it about 1.3 times main's time (dev arm64 at 256,000: main 544 ms,
+    // here 715 ms), and the x64 CI runner read 1,542 ms against the 1,500 below; a quadratic pattern still takes tens of seconds.
+    ["many file-system bindings", (n: number) => Array.from({ length: n / 8 }, (_, i) => `const f${i} = require("fs"); f${i}.readFileSync(1);`).join("\n"), 3000],
     ["many calls of the binding, the matching one last", (n: number) => `${FS}${"g(x, 1);\n".repeat(n / 4)}g(fs, 1);\n`],
-  ])("%s", (_n, make) => {
+  ] as [string, (n: number) => string, number?][])("%s", (_n, make, bound = 1500) => {
     // Absolute bounds, no floor: a pattern that is quadratic in the run takes seconds at these sizes.
     for (const n of [64000, 256000]) {
       const big = fastest(() => classifyJs("lib/x.js", make(n)));
-      expect(big, `${n} chars: ${big.toFixed(0)} ms`).toBeLessThan(1500);
+      expect(big, `${n} chars: ${big.toFixed(0)} ms`).toBeLessThan(bound);
     }
   }, 30_000);
 });
