@@ -425,13 +425,31 @@ const SHAPES: [string, (n: number) => string][] = [
   ["60,000 sibling closes with calls", () => 'a[f("x")]'.repeat(60_000)],
   ["an opener run", (n) => "x[" + '"['.repeat(n / 2)],
 ];
-for (const [name, build] of SHAPES) {
-  for (const n of [65_536, 262_144]) {
-    test(`${name} at ${n} stays fast`, () => {
-      const src = build(n);
-      // measured at most 40 ms (dangerousStringUse) and 150 ms (provablyStatic) at 262,144 on this host
-      expect(fastest(() => key(src))).toBeLessThan(400);
-      expect(fastest(() => stat(src))).toBeLessThan(1000);
-    });
-  }
+// No bound here is a number of milliseconds a runner must meet: a sized shape is timed at two sizes in the same process and the larger may
+// take at most 6 times the smaller (a linear read gives about 4; a quadratic one gives 16) with a floor of 60 ms for the smaller, and a fixed
+// 60,000-bracket shape may take at most 8 times a plain text of the same length ('a[0];' repeated) timed in the same process (measured at
+// most 1.4). The 10 s ceiling is only a sanity cap.
+const CEILING = 10_000;
+const SIZED = SHAPES.filter(([name]) => !name.startsWith("60,000"));
+for (const [name, build] of SIZED) {
+  test(`${name} at 262,144 takes at most 6 times 65,536`, () => {
+    const small = build(65_536);
+    const large = build(262_144);
+    for (const [what, f] of [["key", key], ["stat", stat]] as const) {
+      const t1 = fastest(() => f(small));
+      const t2 = fastest(() => f(large));
+      expect(`${what} ${t2 <= Math.max(6 * t1, 60) && t2 < CEILING}`).toBe(`${what} true`);
+    }
+  });
+}
+for (const [name, build] of SHAPES.filter(([n]) => n.startsWith("60,000"))) {
+  test(`${name} takes at most 8 times a plain text of the same length`, () => {
+    const src = build(0);
+    const plain = "a[0];".repeat(Math.ceil(src.length / 5));
+    for (const [what, f] of [["key", key], ["stat", stat]] as const) {
+      const t1 = fastest(() => f(plain));
+      const t2 = fastest(() => f(src));
+      expect(`${what} ${t2 <= Math.max(8 * t1, 60) && t2 < CEILING}`).toBe(`${what} true`);
+    }
+  });
 }
