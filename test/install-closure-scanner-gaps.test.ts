@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import * as IC from "../src/install-closure.ts";
 import { prepass, type FileMap } from "../src/prepass.ts";
 import { allowFaults } from "./fault-guard.ts";
+import { SHAPES } from "./index-read-timing-probe.ts";
 
 // OUP-282: the key scans of the loader check. dangerousStringUse reads a source and says whether a string in it (or a bracket that
 // spells one) names a property that reaches Function or a loader; provablyStatic is the file-level answer.
@@ -401,55 +402,39 @@ test("random text of brackets, quotes and escapes never throws", () => {
     expect(() => IC.classifyJs("h.js", s)).not.toThrow();
   }
 });
-const fastest = (f: () => unknown) => {
-  let best = Infinity;
-  for (let i = 0; i < 3; i++) {
-    const t = performance.now();
-    f();
-    best = Math.min(best, performance.now() - t);
-  }
-  return best;
-};
-const SHAPES: [string, (n: number) => string][] = [
-  ["a run of $word", (n) => "x[`" + "$a".repeat(n / 2) + "`]"],
-  ["a run of $ in a piece", (n) => "x[`" + "$".repeat(n) + "`]"],
-  ["a run of ${word} holes", (n) => "x[`" + '${"a"}'.repeat(n / 6) + "`]"],
-  ["a run of escaped holes", (n) => "x[`" + '${"\\\\"}'.repeat(n / 7) + "`]"],
-  ["nested index brackets", (n) => "a[".repeat(n / 2) + "]".repeat(n / 2)],
-  ["nested brackets that start with a string", (n) => 'a["x"+'.repeat(n / 6) + "b" + "]".repeat(n / 6)],
-  ["many short indexes", (n) => 'a["b"+c];'.repeat(n / 9)],
-  ["60,000 short indexes", () => 'a["b"+c];'.repeat(60_000)],
-  ["60,000 nested closes", () => "a[".repeat(60_000) + "]".repeat(60_000)],
-  ["60,000 nested closes with a piece in each", () => 'a["constr"+'.repeat(60_000) + "b" + "]".repeat(60_000)],
-  ["60,000 sibling closes", () => "a[0]".repeat(60_000)],
-  ["60,000 sibling closes with calls", () => 'a[f("x")]'.repeat(60_000)],
-  ["an opener run", (n) => "x[" + '"['.repeat(n / 2)],
-];
-// No bound here is a number of milliseconds a runner must meet: a sized shape is timed at two sizes in the same process and the larger may
-// take at most 6 times the smaller (a linear read gives about 4; a quadratic one gives 16) with a floor of 60 ms for the smaller, and a fixed
-// 60,000-bracket shape may take at most 8 times a plain text of the same length ('a[0];' repeated) timed in the same process (measured at
-// most 1.4). The 10 s ceiling is only a sanity cap.
+// No bound here is a number of milliseconds a runner must meet, and the timing is taken in a fresh bun process (one per shape,
+// test/index-read-timing-probe.ts), not in the process of the whole run, whose heap and collections the timing would otherwise include. A sized
+// shape is timed at two sizes in the one process and the larger may take at most 6 times the smaller (a linear read gives about 4; a quadratic
+// one gives 16) with a floor of 60 ms for the smaller, and a fixed 60,000-bracket shape may take at most 8 times a plain text of the same length
+// ('a[0];' repeated) timed in the same process (measured at most 1.4). The 10 s ceiling is only a sanity cap.
 const CEILING = 10_000;
-const SIZED = SHAPES.filter(([name]) => !name.startsWith("60,000"));
-for (const [name, build] of SIZED) {
-  test(`${name} at 262,144 takes at most 6 times 65,536`, () => {
-    const small = build(65_536);
-    const large = build(262_144);
-    for (const [what, f] of [["key", key], ["stat", stat]] as const) {
-      const t1 = fastest(() => f(small));
-      const t2 = fastest(() => f(large));
-      expect(`${what} ${t2 <= Math.max(6 * t1, 60) && t2 < CEILING}`).toBe(`${what} true`);
-    }
-  });
-}
-for (const [name, build] of SHAPES.filter(([n]) => n.startsWith("60,000"))) {
-  test(`${name} takes at most 8 times a plain text of the same length`, () => {
-    const src = build(0);
-    const plain = "a[0];".repeat(Math.ceil(src.length / 5));
-    for (const [what, f] of [["key", key], ["stat", stat]] as const) {
-      const t1 = fastest(() => f(plain));
-      const t2 = fastest(() => f(src));
-      expect(`${what} ${t2 <= Math.max(8 * t1, 60) && t2 < CEILING}`).toBe(`${what} true`);
-    }
-  });
+type Pair = { key: number; stat: number };
+const probe = (name: string): Record<string, Pair> => {
+  const r = Bun.spawnSync([process.execPath, "test/index-read-timing-probe.ts", name], { cwd: new URL("..", import.meta.url).pathname });
+  if (r.exitCode !== 0) throw new Error(`probe ${name}: ${r.stderr.toString()}`);
+  return JSON.parse(r.stdout.toString());
+};
+for (const [name] of SHAPES) {
+  if (name.startsWith("60,000")) {
+    test(`${name} takes at most 8 times a plain text of the same length`, () => {
+      const { src, plain } = probe(name);
+      for (const what of ["key", "stat"] as const) {
+        expect(`${what} ${src![what] <= Math.max(8 * plain![what], 60) && src![what] < CEILING}`).toBe(`${what} true`);
+      }
+    });
+  } else {
+    test(`${name} at 262,144 takes at most 6 times 65,536`, () => {
+      const { small, large, half, mb5 } = probe(name);
+      for (const what of ["key", "stat"] as const) {
+        expect(`${what} ${large![what] <= Math.max(6 * small![what], 60) && large![what] < CEILING}`).toBe(`${what} true`);
+      }
+      // 5 MB (one run) takes at most 14 times 524,288 (linear is about 10), under the cap
+      if (mb5) {
+        console.log(`timing 5 MB ${name} key=${mb5.key.toFixed(0)} stat=${mb5.stat.toFixed(0)} at 524,288 key=${half!.key.toFixed(0)} stat=${half!.stat.toFixed(0)}`);
+        for (const what of ["key", "stat"] as const) {
+          expect(`${what} ${mb5[what] <= 14 * half![what] && mb5[what] < CEILING}`).toBe(`${what} true`);
+        }
+      }
+    });
+  }
 }
