@@ -7068,8 +7068,8 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
       if (spent > budget) return true;
       // An opener found earlier once the strings are stepped over binds its names too, in `otherNew`: the scan below reads every call once as main
       // does (with `other`) and, when `otherNew` holds a name, once more with it. A widening that only the second read gives is kept to the end, so
-      // the stops main reaches later in the scan (its budget) are still reached. Only the opener above adds parameters: `params` lets a load of one
-      // bare name through, and it has no scope.
+      // the stops main reaches later in the scan (its budget) are still reached. Only the opener above adds parameters: `params` only feeds `notFn`
+      // (a call of a parameter is an unresolved callee); it no longer lets a load of a bare name through, and it has no scope.
       const ks = k >= 0 && /["']/.test(text.slice(k, close)) ? backStr(close, 2000) : -1;
       for (const kk of ks >= 0 && ks < k ? [k, ks] : [k]) {
         if (kk < 0) poison = true;
@@ -7229,8 +7229,10 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
     const args = text.slice(paren + 1, close);
     spent += args.length + 1;
     let a = list(args);
-    // A load of one bare name that is a parameter or has no value here (require(x)) is left to the existing handling.
-    if (load) return !(/^[A-Za-z_$][\w$]*$/.test(a[0] ?? "") && (params.has(a[0]!) || !inits.has(a[0]!))) && !ok(a[0] ?? "", 0);
+    // A load of one bare name that has no value here (require(x)) is left to the existing handling. A name some parameter list binds is not: `params` has
+    // no scope, so `var n = <dynamic>; function g(n, q = 1) {} require(n)` read the load outside g as g's parameter and released it. A name with a
+    // value here is read as a value (a parameter of the same name is also in `other`, so ok() does not take it as a constant).
+    if (load) return !(/^[A-Za-z_$][\w$]*$/.test(a[0] ?? "") && !inits.has(a[0]!)) && !ok(a[0] ?? "", 0);
     let fn = name;
     if (reflect) {
       fn = /([\w$]+)["'`\]\s]*$/.exec((a[0] ?? "").slice(-80))?.[1] ?? "";
