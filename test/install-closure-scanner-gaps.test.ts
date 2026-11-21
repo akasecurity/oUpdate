@@ -404,8 +404,11 @@ test("random text of brackets, quotes and escapes never throws", () => {
 });
 // No bound here is a number of milliseconds a runner must meet, and the timing is taken in a fresh bun process (one per shape,
 // test/index-read-timing-probe.ts), not in the process of the whole run, whose heap and collections the timing would otherwise include. A sized
-// shape is timed at two sizes in the one process and the larger may take at most 6 times the smaller (a linear read gives about 4; a quadratic
-// one gives 16) with a floor of 60 ms for the smaller, and a fixed 60,000-bracket shape may take at most 8 times a plain text of the same length
+// shape is timed at 262,144 and 524,288 characters in the one process and the larger may take at most 3 times the smaller (a linear read gives
+// about 2; a quadratic one gives 4) with a floor of 60 ms for the smaller. Both sizes are past a step: a shape such as a run of ${word} holes takes
+// 3.8, 7.2, 178.9 and 358 ms at 65,536, 131,072, 262,144 and 524,288 characters on the CI runner (main's own function: 2.7, 4.4, 130.6, 260.0),
+// then exactly 2 times per doubling, so a ratio from 65,536 could not be a bound for it; past the step the read is linear. The 65,536 point is
+// not timed. A fixed 60,000-bracket shape may take at most 8 times a plain text of the same length and a fixed 60,000-bracket shape may take at most 8 times a plain text of the same length
 // ('a[0];' repeated) timed in the same process (measured at most 1.4). The 10 s ceiling is only a sanity cap.
 const CEILING = 10_000;
 // CI runs bun test with its default 5 s per-test timeout, and a probe runs 3 timings of key and stat at four sizes. On the CI runner (x64, about
@@ -430,16 +433,16 @@ for (const [name] of SHAPES) {
       }
     }, PROBE_TIMEOUT);
   } else {
-    test(`${name} at 262,144 takes at most 6 times 65,536`, () => {
-      const { small, large, half, mb5 } = probe(name);
+    test(`${name} at 524,288 takes at most 3 times 262,144`, () => {
+      const { small, large, mb5 } = probe(name);
       for (const what of ["key", "stat"] as const) {
-        expect(`${what} ${large![what] <= Math.max(6 * small![what], 60) && large![what] < CEILING}`).toBe(`${what} true`);
+        expect(`${what} ${large![what] <= Math.max(3 * small![what], 60) && large![what] < CEILING}`).toBe(`${what} true`);
       }
-      // 5 MB (one run) takes at most 14 times 524,288 (linear is about 10), under the cap
+      // 5 MB (one run) takes at most 14 times 524,288 (linear is about 10), under its own ceiling
       if (mb5) {
-        console.log(`timing 5 MB ${name} key=${mb5.key.toFixed(0)} stat=${mb5.stat.toFixed(0)} at 524,288 key=${half!.key.toFixed(0)} stat=${half!.stat.toFixed(0)}`);
+        console.log(`timing 5 MB ${name} key=${mb5.key.toFixed(0)} stat=${mb5.stat.toFixed(0)} at 524,288 key=${large.key.toFixed(0)} stat=${large.stat.toFixed(0)}`);
         for (const what of ["key", "stat"] as const) {
-          expect(`${what} ${mb5[what] <= 14 * half![what] && mb5[what] < MB5_CEILING}`).toBe(`${what} true`);
+          expect(`${what} ${mb5[what] <= 14 * large![what] && mb5[what] < MB5_CEILING}`).toBe(`${what} true`);
         }
       }
     }, name.startsWith("a run of $") && !name.includes("holes") ? BIG_TIMEOUT : PROBE_TIMEOUT);

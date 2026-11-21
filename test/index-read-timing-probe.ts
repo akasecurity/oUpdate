@@ -45,8 +45,10 @@ if (import.meta.main) {
     const src = build(0);
     console.log(JSON.stringify({ src: both(src), plain: both("a[0];".repeat(Math.ceil(src.length / 5))) }));
   } else {
-    // The two template runs that are the slowest shapes also get 524,288 (best of 3) and 5 MB (one run each).
+    // Two sizes, both past the step that some shapes have between 131,072 and 262,144 characters; the two template runs that are the slowest
+    // shapes also get 5 MB (one run each).
     const big = process.argv[2]!.startsWith("a run of $") && !process.argv[2]!.includes("holes");
-    console.log(JSON.stringify({ small: both(build(65_536)), large: both(build(262_144)), ...(big ? { half: both(build(524_288)), mb5: once(build(5_242_880)) } : {}) }));
+    const large = build(524_288);
+    console.log(JSON.stringify({ small: both(build(262_144)), large: both(large), ...(big ? { mb5: once(build(5_242_880)) } : {}) }));
   }
 }
