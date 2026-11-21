@@ -2,7 +2,7 @@
 // supply-chain surface of the release diff, not every source file. A suspicious change in that
 // surface still FLAGs; the existing gates (formula, origin, dependencies) stay in force.
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { formulaReview } from "../../src/apply/formula.ts";
 import { isSurfaceFile, scanSurface } from "../../src/apply/surface.ts";
@@ -103,6 +103,25 @@ describe("upstream formulaReview", () => {
     const fake = await review({ after: release((t) => writeFileSync(join(t, "logo.png"), Buffer.from([0, 1, 2, 0, 255]))) });
     expect(fake).toMatchObject({ rc: 1, calls: 0 });
     expect(fake.reason).toContain("logo.png: binary file added or changed");
+  });
+  test("a deleted real image is judged by the OLD blob: not flagged (a read of the new revision would find nothing)", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const v = await review({ before: (t) => writeFileSync(join(t, "logo.png"), png), after: release((t) => rmSync(join(t, "logo.png"))) });
+    expect(v.rc).toBe(0);
+    const fake = await review({ before: (t) => writeFileSync(join(t, "logo.png"), Buffer.from([0, 1, 2, 0, 255])), after: release((t) => rmSync(join(t, "logo.png"))) });
+    expect(fake.reason).toContain("logo.png: binary file added or changed");
+  });
+  test("a large blob is judged by its first bytes only: a real 6 MB PNG is not flagged, a 6 MB blob that only is named .png is, a font's signature at byte 34 (eot) is read", async () => {
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(6 * 1024 * 1024, 7)]);
+    const img = await review({ after: release((t) => writeFileSync(join(t, "big.png"), png)) });
+    expect(img.rc).toBe(0);
+    const fake = await review({ after: release((t) => writeFileSync(join(t, "big.png"), Buffer.concat([Buffer.from([0, 1, 2]), Buffer.alloc(6 * 1024 * 1024, 7)]))) });
+    expect(fake).toMatchObject({ rc: 1, calls: 0 });
+    expect(fake.reason).toContain("big.png: binary file added or changed");
+    const eot = Buffer.concat([Buffer.alloc(34, 0), Buffer.from("LP"), Buffer.alloc(1000, 0)]);
+    expect((await review({ after: release((t) => writeFileSync(join(t, "f.eot"), eot)) })).rc).toBe(0);
+    const notEot = Buffer.concat([Buffer.alloc(34, 0), Buffer.from("XX"), Buffer.alloc(1000, 0)]);
+    expect((await review({ after: release((t) => writeFileSync(join(t, "f.eot"), notEot)) })).rc).toBe(1);
   });
   test("a new executable script is read as surface wherever it is", async () => {
     const v = await review({ after: release((t) => { put(t, "tools/run", "#!/bin/sh\necho hi\n"); chmodSync(join(t, "tools/run"), 0o755); }) });
