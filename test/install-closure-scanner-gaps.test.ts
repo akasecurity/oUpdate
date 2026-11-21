@@ -408,6 +408,13 @@ test("random text of brackets, quotes and escapes never throws", () => {
 // one gives 16) with a floor of 60 ms for the smaller, and a fixed 60,000-bracket shape may take at most 8 times a plain text of the same length
 // ('a[0];' repeated) timed in the same process (measured at most 1.4). The 10 s ceiling is only a sanity cap.
 const CEILING = 10_000;
+// CI runs bun test with its default 5 s per-test timeout, and a probe runs 3 timings of key and stat at four sizes. On the CI runner (x64, about
+// 3.5 times the time of a dev arm64 machine: processHazard of 524,288 characters of $word takes 1,958 ms there against about 470) one shape
+// takes about 12 s and the two template runs, with the 5 MB point (one run, linear: about 10 times 524,288, so about 40 s), about 60 s. So every
+// probe test has an explicit timeout above that, and the 5 MB point has a ceiling of its own.
+const PROBE_TIMEOUT = 120_000;
+const BIG_TIMEOUT = 300_000;
+const MB5_CEILING = 90_000;
 type Pair = { key: number; stat: number };
 const probe = (name: string): Record<string, Pair> => {
   const r = Bun.spawnSync([process.execPath, "test/index-read-timing-probe.ts", name], { cwd: new URL("..", import.meta.url).pathname });
@@ -421,7 +428,7 @@ for (const [name] of SHAPES) {
       for (const what of ["key", "stat"] as const) {
         expect(`${what} ${src![what] <= Math.max(8 * plain![what], 60) && src![what] < CEILING}`).toBe(`${what} true`);
       }
-    });
+    }, PROBE_TIMEOUT);
   } else {
     test(`${name} at 262,144 takes at most 6 times 65,536`, () => {
       const { small, large, half, mb5 } = probe(name);
@@ -432,9 +439,9 @@ for (const [name] of SHAPES) {
       if (mb5) {
         console.log(`timing 5 MB ${name} key=${mb5.key.toFixed(0)} stat=${mb5.stat.toFixed(0)} at 524,288 key=${half!.key.toFixed(0)} stat=${half!.stat.toFixed(0)}`);
         for (const what of ["key", "stat"] as const) {
-          expect(`${what} ${mb5[what] <= 14 * half![what] && mb5[what] < CEILING}`).toBe(`${what} true`);
+          expect(`${what} ${mb5[what] <= 14 * half![what] && mb5[what] < MB5_CEILING}`).toBe(`${what} true`);
         }
       }
-    });
+    }, name.startsWith("a run of $") && !name.includes("holes") ? BIG_TIMEOUT : PROBE_TIMEOUT);
   }
 }
