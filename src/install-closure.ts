@@ -940,6 +940,7 @@ function followLoads(ctx: Ctx, key: string, text: string): void {
   budgeted(text.length, () => followLoadsScan(ctx, key, text), () => fail(ctx, "scanner fault"));
 }
 function followLoadsScan(ctx: Ctx, key: string, text: string): void {
+  const nul = new Set<string>(); // each name once: the pass adds at most one lookup per distinct name, never one per load
   for (const m of (codeOnly(text, [], true) ?? text).matchAll(new RegExp(LITERAL_LOAD.source, "g"))) {
     if (ctx.hold) return;
     let spec = m[2] || m[4] || m[6] || "";
@@ -951,14 +952,21 @@ function followLoadsScan(ctx: Ctx, key: string, text: string): void {
       }
       spec = decoded;
     }
-    if (spec.startsWith(".")) {
-      const logical = relFrom(key, spec);
-      if (logical) addLogical(ctx, logical);
-      continue;
-    }
-    const root = resolveBundledRoot(ctx, key, spec);
-    if (root) addBundled(ctx, root);
+    // A NUL ends the name for anything that reads it as a C string: the part before it is followed once the loop is done (a post-step,
+    // so the loop's own cost and details are as they were; the whole name is still followed as it was).
+    if (spec.includes("\0") && spec.indexOf("\0") > 0) nul.add(spec.slice(0, spec.indexOf("\0")));
+    followOne(ctx, key, spec);
   }
+  for (const spec of nul) if (!ctx.hold) followOne(ctx, key, spec);
+}
+function followOne(ctx: Ctx, key: string, spec: string): void {
+  if (spec.startsWith(".")) {
+    const logical = relFrom(key, spec);
+    if (logical) addLogical(ctx, logical);
+    return;
+  }
+  const root = resolveBundledRoot(ctx, key, spec);
+  if (root) addBundled(ctx, root);
 }
 
 // `helper` and `@scope/pkg` and their subpaths. Relative and node: specs are not bundled.
@@ -1019,38 +1027,61 @@ const UNSAFE_JS = /\brequire\b|import\s*\(|\bmodule\b|\bFunction\b|\beval\b|\bWo
 // child_process only counts as the name of a module being loaded; the word inside a message does not.
 // A load of the process module by name, in any shape.
 const LOADS_PROCESS = /(?:\brequire\s*\(|\brequire\s*\.\s*resolve\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*(['"`])(?:node:)?process\1/;
+const DANGEROUS_WORDS = ["constructor", "__proto__", "prototype", "getBuiltinModule", "mainModule", "linkedBinding", "_linkedBinding", "createRequire", "prepareStackTrace", "getThis", "getFunction"];
+// The names a string reaches in any value position, and (with __proto__ and prototype, which are ordinary strings elsewhere) as the
+// key of an index.
 const DANGEROUS_KEY = /^(?:constructor|getBuiltinModule|mainModule|_?linkedBinding|createRequire|prepareStackTrace|getThis|getFunction)$/;
+const DANGEROUS_INDEX_KEY = new RegExp(`^(?:${DANGEROUS_WORDS.join("|")})$`);
+// The words the names are made of: a piece that is only one of them ("main", "create", "Module") is an ordinary word.
+const NAME_SEGMENTS = new Set(["constructor", "proto", "prototype", "get", "builtin", "module", "main", "linked", "binding", "create", "require", "prepare", "stack", "trace", "this", "function"]);
+// A piece of a key that points at a dangerous name: the whole name, or 5 or more characters of it that are not one of its words.
+function namePiece(v: string): boolean {
+  if (DANGEROUS_INDEX_KEY.test(v)) return true;
+  return v.length >= 5 && DANGEROUS_WORDS.some((w) => w.includes(v)) && !NAME_SEGMENTS.has(v.toLowerCase());
+}
 // The value of a key made only of string literals, template literals of literals, + and parentheses; undefined for anything else.
 // Escapes and line continuations are read as in a name; a piece that does not decode makes the key undefined. A piece with no
 // backslash reads as it always did; in a piece with one, only an unescaped ${"..."} of a template is a substitution.
 const LITERAL_HOLE = /\$\{\s*(?:"([^"]*)"|'([^']*)')\s*\}/g;
-function templateText(piece: string): string | undefined {
+// The hole as the index read takes it: the text of a hole is a string literal too, so an escape or a continuation in it is read the
+// same way. The scans that were main's keep the narrow form above (the first scan limit they pass under is main's).
+const LITERAL_HOLE_WIDE = /\$\{\s*(?:"((?:[^"\\\n]|\\[\s\S])*)"|'((?:[^'\\\n]|\\[\s\S])*)')\s*\}/g;
+function templateText(piece: string, wide: boolean): string | undefined {
   let out = "";
   let from = 0;
-  for (const h of piece.matchAll(LITERAL_HOLE)) {
+  for (const h of piece.matchAll(wide ? LITERAL_HOLE_WIDE : LITERAL_HOLE)) {
     let b = 0;
     for (let k = h.index - 1; k >= 0 && piece[k] === "\\"; k--) b++;
     if (b % 2 === 1) continue; // \${ is text
     const text = decodeJsString(piece.slice(from, h.index), true);
     if (text === undefined) return undefined;
-    out += text + (h[1] ?? h[2] ?? "");
+    let hole = h[1] ?? h[2] ?? "";
+    if (wide) {
+      const d = decodeJsString(hole, true);
+      if (d === undefined) return undefined;
+      hole = d;
+    }
+    out += text + hole;
     from = h.index + h[0].length;
   }
   const rest = decodeJsString(piece.slice(from), true);
   return rest === undefined ? undefined : out + rest;
 }
-function pureLiteralKey(key: string): string | undefined {
+const NARROW_PIECE = /^(?:"((?:[^"\\\n]|\\[\s\S])*)"|'((?:[^'\\\n]|\\[\s\S])*)'|`((?:[^`\\$]|\\[\s\S]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*)`)/;
+const WIDE_PIECE = /^(?:"((?:[^"\\\n]|\\[\s\S])*)"|'((?:[^'\\\n]|\\[\s\S])*)'|`((?:[^`\\$]|\\[\s\S]|\$(?!\{)|\$\{\s*(?:"(?:[^"\\\n]|\\[\s\S])*"|'(?:[^'\\\n]|\\[\s\S])*')\s*\})*)`)/;
+export function pureLiteralKey(key: string, wide = false): string | undefined {
   let i = 0;
   let out = "";
   const ws = () => { while (i < key.length && /[\s()]/.test(key[i]!)) i++; };
   for (;;) {
     ws();
-    const m = /^(?:"((?:[^"\\\n]|\\[\s\S])*)"|'((?:[^'\\\n]|\\[\s\S])*)'|`((?:[^`\\$]|\\[\s\S]|\$(?!\{)|\$\{\s*(?:"[^"\\\n]*"|'[^'\\\n]*')\s*\})*)`)/.exec(key.slice(i));
+    const m = (wide ? WIDE_PIECE : NARROW_PIECE).exec(key.slice(i));
     if (!m) return undefined;
     const piece = m[1] ?? m[2] ?? m[3] ?? "";
     let text: string | undefined;
-    if (!piece.includes("\\")) text = piece.replace(LITERAL_HOLE, (_x, a: string | undefined, b: string | undefined) => a ?? b ?? "");
-    else text = m[3] === undefined ? decodeJsString(piece, true) : templateText(piece);
+    if (wide && m[3] === undefined && !piece.includes("\\")) text = piece; // a ${...} is text in a quoted string, a substitution only in a template
+    else if (!piece.includes("\\")) text = piece.replace(wide ? LITERAL_HOLE_WIDE : LITERAL_HOLE, (_x, a: string | undefined, b: string | undefined) => a ?? b ?? "");
+    else text = m[3] === undefined ? decodeJsString(piece, true) : templateText(piece, wide);
     if (text === undefined) return undefined;
     out += text;
     i += m[0].length;
@@ -1162,7 +1193,7 @@ function inPattern(code: string, at: number, idx = bracketIndex(code)): boolean 
 // A comparison (key === "constructor"), a case label, the left side of in and a key of an object literal are guards or names,
 // not uses; the key of a destructuring pattern binds the property and is one. A string that names a variable that steers the
 // next process (NODE_OPTIONS, PATH, ...) as a key of an object is a use too.
-function dangerousStringUse(source: string): boolean {
+export function dangerousStringUse(source: string): boolean {
   const spans: SpanNote[] = [];
   const out = codeOnly(source, [], true, spans);
   if (out === undefined) return false;
@@ -1211,6 +1242,99 @@ const LITERAL_KEY_SCANS = [
   /\[((?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`|[^\]\["'`])*)\]/g,
   /\[((?:"(?:[^"\\\n]|\\[\s\S])*"|'(?:[^'\\\n]|\\[\s\S])*'|`[^`]*`|[^\]\["'`])*)\]/g,
 ];
+// A third read that does not depend on where a quote opens: the brackets of the code itself (strings blanked), so a string that only
+// holds a bracket and a quote ('["' ... '"]') cannot shift the two scans above out of step. In an index (a bracket after a name that
+// is not a keyword, a ) that does not close the head of if/while/for/switch/with, a ], ?. or a string) it holds a pure literal key
+// that is a dangerous name (with __proto__ and prototype), or any key made of pieces where a piece is a dangerous name or 5 or more
+// characters of one that are not one of its words ("constr" + x, ["constr", "uctor"].join("")). A string inside the arguments of a
+// call in the index supplies no piece. One forward walk with a stack of the open brackets: linear.
+// It is record-only: it runs after the scan it adds to has finished, as one more answer to OR in, and its own steps are not charged,
+// so every cost, early out and fault of the scan is the one it had without it (a scan limit gives the same details at every limit).
+type Open = { kind: "call" | "ctl" | "group" | "index" | "array" | "brace"; at: number; hits: number };
+const CONTROL_HEADS = new Set(["if", "while", "for", "switch", "with"]);
+function indexKeyUse(source: string): boolean {
+  const outerSteps = jsSteps;
+  const outerLimit = jsLimit;
+  jsLimit = Infinity;
+  try {
+    const spans: SpanNote[] = [];
+    const out = codeOnly(source, [], true, spans);
+    return out !== undefined && indexKeyWalk(out, maskSpans(out, spans), spans);
+  } catch {
+    return false;
+  } finally {
+    jsSteps = outerSteps;
+    jsLimit = outerLimit;
+  }
+}
+function indexKeyWalk(out: string, masked: string, spans: SpanNote[]): boolean {
+  let strs = spans;
+  for (let k = 1; k < strs.length; k++) {
+    if (strs[k]!.at < strs[k - 1]!.at) {
+      strs = [...spans].sort((a, b) => a.at - b.at);
+      break;
+    }
+  }
+  const stringEnds = new Set<number>();
+  for (const s of spans) stringEnds.add(s.at + s.len);
+  const stack: Open[] = [];
+  let sp = 0;
+  let last = "";
+  let before = "";
+  let wordAt = 0;
+  let wordEnd = 0;
+  let lastAt = -1;
+  let afterString = false;
+  let lastCtl = false; // the last ) closed the head of a control statement
+  for (let i = 0; i < masked.length; i++) {
+    // A string or template piece that starts here belongs to the innermost open bracket, unless that is the argument list of a call.
+    for (; sp < strs.length && strs[sp]!.at <= i; sp++) {
+      const top = stack[stack.length - 1];
+      if (top === undefined || top.kind === "call" || top.kind === "ctl") continue;
+      const s = strs[sp]!;
+      // A mask holds no text of its own: the piece of a template with a substitution is read from the kept text, between its ends.
+      const raw = s.mask ? out.slice(s.at, s.at + s.len).replace(/^[`}]|(?:\$\{|`)$/g, "") : s.raw;
+      const v = raw.includes("\\") ? decodeJsString(raw, true) : raw;
+      if (v !== undefined && namePiece(v)) top.hits++;
+    }
+    if (stringEnds.has(i)) afterString = true;
+    const c = masked[i]!;
+    const word = (c === "(" || c === "[") && /[\w$]/.test(last) ? masked.slice(wordAt, wordEnd) : "";
+    if (c === "(") {
+      const call = afterString || /[)\]]/.test(last) || (/[\w$]/.test(last) && !STATEMENT_KEYWORDS.has(word) && !CONTROL_HEADS.has(word));
+      stack.push({ kind: CONTROL_HEADS.has(word) ? "ctl" : call ? "call" : "group", at: i, hits: 0 });
+    } else if (c === ")") {
+      const o = stack.pop();
+      lastCtl = o?.kind === "ctl";
+      if (o && o.kind !== "call" && o.kind !== "ctl" && stack.length > 0) stack[stack.length - 1]!.hits += o.hits;
+    } else if (c === "[") {
+      const index = afterString || (/[)\]]/.test(last) && !(last === ")" && lastCtl)) || (last === "." && before === "?") || (/[\w$]/.test(last) && !STATEMENT_KEYWORDS.has(word));
+      stack.push({ kind: index ? "index" : "array", at: i, hits: 0 });
+    } else if (c === "{") stack.push({ kind: "brace", at: i, hits: 0 });
+    else if (c === "]" || c === "}") {
+      const o = stack.pop();
+      if (o?.kind === "index" && c === "]") {
+        const content = out.slice(o.at + 1, i);
+        const v = /^[\s(]*['"`]/.test(content) ? pureLiteralKey(content, true) : undefined;
+        if (v !== undefined) {
+          if (DANGEROUS_INDEX_KEY.test(v)) return true;
+        } else if (o.hits > 0) return true;
+      }
+      if (o && o.kind !== "call" && o.kind !== "ctl" && stack.length > 0) stack[stack.length - 1]!.hits += o.hits;
+    }
+    if (!/\s/.test(c)) {
+      if (/[\w$]/.test(c)) {
+        if (!/[\w$]/.test(last) || lastAt !== i - 1 || afterString) wordAt = i;
+        wordEnd = i + 1;
+      }
+      before = last;
+      last = c;
+      lastAt = i;
+      afterString = false;
+    }
+  }
+  return false;
+}
 function dangerousLiteralKey(keep: string): boolean {
   for (const scan of LITERAL_KEY_SCANS) {
     for (const m of keep.matchAll(scan)) {
@@ -1265,6 +1389,12 @@ function stripLiteralLoad(raw: string): boolean {
     if (decoded === undefined) return false;
     spec = decoded;
   }
+  const r = stripSpec(spec);
+  // A NUL ends the name for a C string: a name that is a builtin up to it stays in the text (only ever true to false: an added hold).
+  const nul = spec.indexOf("\0");
+  return r && (nul <= 0 || stripSpec(spec.slice(0, nul)));
+}
+function stripSpec(spec: string): boolean {
   if (spec.startsWith(".") || spec.startsWith("/")) return true;
   const root = builtinRoot(spec);
   if (!root) return true;
@@ -4904,7 +5034,8 @@ export function scannerFaultCount(): number {
   return scannerFaults;
 }
 export function provablyStatic(source: string): boolean {
-  return budgeted(source.length, () => provablyStaticScan(source), () => false);
+  const r = budgeted(source.length, () => provablyStaticScan(source), () => false);
+  return r && !indexKeyUse(source);
 }
 function provablyStaticScan(source: string): boolean {
   if (source.includes(REMOVED)) return false;
@@ -5518,7 +5649,8 @@ export function holdsWriteSpawn(fromKey: string, source: string): boolean {
 function widenJsScan(ctx: Ctx, key: string, text: string): void {
   writeSpawn = false;
   const tier = classifyJs(key, text);
-  const ws = writeSpawn && !tier.all;
+  // A whole-package tier that only the index read added leaves the write-and-spawn record as it was: main's files still come out.
+  const ws = writeSpawn && (!tier.all || indexOnlyAll);
   if (tier.all) widenEvery(ctx);
   else {
     if (tier.pkg) widenPackage(ctx, tier.tests, tier.flows);
@@ -5607,6 +5739,10 @@ function endsInPathCall(before: string, names: { mods: Set<string>; fns: Set<str
   return m[2] !== undefined ? names.mods.has(m[1]!) : names.fns.has(m[1]!);
 }
 export function processHazard(source: string): boolean {
+  return processHazardMain(source) || indexKeyUse(source);
+}
+// The answer without the index read: hasUnbounded and classifyJs add that read at the end of their own scan.
+function processHazardMain(source: string): boolean {
   return budgeted(source.length, () => processHazardScan(source), () => true);
 }
 function processHazardScan(source: string): boolean {
@@ -6308,7 +6444,7 @@ function loaderReach(code: string, text: string): boolean {
 }
 
 function hasUnboundedScan(text: string, source: string): boolean {
-  if (processHazard(source)) return true;
+  if (processHazardMain(source)) return true;
   // Indirect and optional eval, new Function, the global object's eval, a computed member of a global, and a timer given code.
   const plain = codeOnly(text) ?? text;
   if (/(?<![\w$.])(?<!instanceof\s+)(?:eval|Function)\b(?!\s*\()/.test(plain)) return true;
@@ -6463,10 +6599,13 @@ function budgeted<T>(len: number, run: () => T, closed: () => T): T {
   }
 }
 export function classifyJs(fromKey: string, source: string): JsTier {
+  indexOnlyAll = false;
   return budgeted(source.length, () => classifyJsScan(fromKey, source), () => ({ all: true, pkg: true, tests: true, flows: true, same: false, dirs: [], lits: [] }));
 }
 // The answer of the write-and-spawn test for the file classifyJs read last (it is read right after the call, in widenJsScan).
 let writeSpawn = false;
+// The last classifyJs held the whole package only because of the index read.
+let indexOnlyAll = false;
 function classifyJsScan(fromKey: string, source: string): JsTier {
   writeSpawn = false;
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
@@ -6490,6 +6629,10 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
     tier.flows = true;
   }
   if (late.all) tier.all = true;
+  if (!tier.all && indexKeyUse(source)) {
+    tier.all = true;
+    indexOnlyAll = true;
+  }
   return tier;
 }
 // require without a call: not `require(`, `require.resolve(`, `typeof require`, `require.main/cache/extensions`, not a member name, not a parameter of the
