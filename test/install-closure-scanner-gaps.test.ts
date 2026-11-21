@@ -203,11 +203,13 @@ for (const [name, src, st, hz, cl] of CUTS) {
     expect(firstCleanLimit((s) => IC.classifyJs("lib/x.js", s), src)).toBe(cl);
   });
 }
-test("a builtin with a NUL stays as main reads it, and a changed file it hides is still held", () => {
+test("a builtin with a NUL is not static, and a changed file it hides is still held", () => {
   allowFaults();
   const hookOf = (l: string) => `${l};\nrequire("./deep/other.js");`;
   for (const l of ['require("node:fs\\x00")', 'require("node:fs\\u0000")', 'require("node:path\\x00x")', 'require("child_process\\x00")']) {
-    expect(stat(l)).toBe(false); // as main (the NUL name is not an allowlisted builtin)
+    // Not static, for node:fs and node:path as on main (the NUL name is not an allowlisted builtin); main reads child_process with a NUL as static
+    // (it releases it), here it is held (the NUL strip keeps the name in the text).
+    expect(stat(l)).toBe(false);
     expect(hard(hookOf(l), (v) => ({ "deep/other.js": `//${v}`, "lib/y.js": `//${v}` }))).toContain("install-script:file deep/other.js");
   }
 });
@@ -283,6 +285,18 @@ test('import "child_process\\x00" reads a limit lower than main (provablyStatic 
   expect(firstCleanLimit(IC.provablyStatic, 'import "child_process\\x00"')).toBe(64);
   expect(firstCleanLimit(IC.processHazard, 'import "child_process\\x00"')).toBe(96);
   expect(pkgHard("node h.js | cat", "h.js", { "h.js": 'import "child_process\\x00";\nrequire("./deep/other.js");', "deep/other.js": "" }, ["deep/other.js"])).toContain("install-script:file deep/other.js");
+});
+// At every limit below the one main reads it static at (120) the import is not static: a fault up to 63, a clean read that holds from 64.
+test('import "child_process\\x00" is never static at a limit under 120', () => {
+  allowFaults();
+  for (let limit = 1; limit < 120; limit++) {
+    IC.setJsScanSteps(limit);
+    try {
+      expect(`${limit} ${IC.provablyStatic('import "child_process\\x00"')}`).toBe(`${limit} false`);
+    } finally {
+      IC.setJsScanSteps(undefined);
+    }
+  }
 });
 // A NUL name queued once per distinct name: N loads of one name add one lookup, not N (head 1.05x the same loads without the NUL, 1.8x with
 // the queue kept per load).
@@ -408,7 +422,7 @@ test("random text of brackets, quotes and escapes never throws", () => {
 // about 2; a quadratic one gives 4) with a floor of 60 ms for the smaller. Both sizes are past a step: a shape such as a run of ${word} holes takes
 // 3.8, 7.2, 178.9 and 358 ms at 65,536, 131,072, 262,144 and 524,288 characters on the CI runner (main's own function: 2.7, 4.4, 130.6, 260.0),
 // then exactly 2 times per doubling, so a ratio from 65,536 could not be a bound for it; past the step the read is linear. The 65,536 point is
-// not timed. A fixed 60,000-bracket shape may take at most 8 times a plain text of the same length and a fixed 60,000-bracket shape may take at most 8 times a plain text of the same length
+// not timed. A fixed 60,000-bracket shape may take at most 8 times a plain text of the same length
 // ('a[0];' repeated) timed in the same process (measured at most 1.4). The 10 s ceiling is only a sanity cap.
 const CEILING = 10_000;
 // CI runs bun test with its default 5 s per-test timeout, and a probe runs 3 timings of key and stat at four sizes. On the CI runner (x64, about
