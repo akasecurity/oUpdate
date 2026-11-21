@@ -56,6 +56,9 @@ export interface StaleOwner {
 
 export type OwnerRestart = "kickstart" | { bootstrap: string } | string[];
 
+/** The most entries a restart argv in the config may hold (a helper command line; refused at load). A queue file's recorded argv is not capped: the job runs the config's argv, never the recorded one. */
+export const RESTART_ARGV_MAX = 64;
+
 /** A restart argv: non-empty, every entry a string, the first an absolute path. */
 export const isRestartArgv = (r: unknown): r is string[] =>
   Array.isArray(r) && r.length > 0 && r.every((a) => typeof a === "string" && a !== "") && (r[0] as string).startsWith("/");
@@ -107,8 +110,34 @@ export const ownerFiles = (dir: string) => ({
 });
 const queueName = (target: string) => `${encodeURIComponent(target)}.json`;
 
-/** The labels in the failed file. */
-const failedLabels = (text: string | undefined) => new Set((text ?? "").split("\n").map((l) => l.trim()).filter(Boolean));
+/**
+ * The labels in the failed file, one per line. A plain label is the line; a label a line cannot hold as it is (a control character or a newline in it,
+ * an edge space the reader trims, a leading quote) is written as a JSON string (see failedLine). A line is the label as written, as in older files, and
+ * a line that is a JSON string is also the label it quotes: never fewer labels than before. The cost is the one extra label of a quoted line (a raw
+ * `"org.x"` also fails `org.x`: a restart skipped, never one more run).
+ */
+const failedLabels = (text: string | undefined) => {
+  const out = new Set<string>();
+  for (const l of (text ?? "").split("\n").map((x) => x.trim()).filter(Boolean)) {
+    out.add(l);
+    try {
+      const v: unknown = JSON.parse(l);
+      if (typeof v === "string") out.add(v);
+    } catch {
+      // not a quoted label: the line only
+    }
+  }
+  return out;
+};
+/** JSON text with the characters JSON.stringify leaves raw escaped too: C1 controls (OSC, CSI reach a terminal) and U+2028/9 (a line break to a reader). */
+const escapeRaw = (t: string) => t.replace(/[\u0080-\u009f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+/**
+ * A label as one line of the failed file: as it is, unless a line would not read back to it (empty, a control character, DEL, C1, U+2028/9, a lone
+ * surrogate that UTF-8 would turn into U+FFFD, an edge space the reader trims, a leading quote): then a JSON string.
+ */
+const failedLine = (t: string) => {
+  return t === "" || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Surrogate}/u.test(t) || t !== t.trim() || t.startsWith('"') ? escapeRaw(JSON.stringify(t)) : t;
+};
 
 export interface OwnerQueueEnv {
   readFile(path: string): Promise<string | undefined>;
@@ -173,9 +202,14 @@ export async function ownerWaiterReport(
       }
     }
   }
+  // A busy label as the line shows it: whole (it may hold a space), and its first word as before; each as written and as shown (older lines were raw).
   for (const l of lines) {
-    const m = l.match(/^held: busy (\S+)/);
-    if (m) busy.add(unshown(m[1]!));
+    for (const m of [l.match(/^held: busy (.+) \(busy past \d+ min\)$/), l.match(/^held: busy (\S+)/)]) {
+      if (m) {
+        busy.add(m[1]!);
+        busy.add(unshown(m[1]!));
+      }
+    }
   }
   // Joined with commas: a part of the brew line starting "FAILED:" would read as failed packages.
   if (lines.length) notes.push(`owner restart waiter: ${lines.join(", ")}`);
@@ -244,7 +278,7 @@ export function parsePrint(out: string): { pid?: string; state?: string; path?: 
 }
 
 /** A label as an outcome line shows it: control characters (newline, ESC) JSON-escaped, a ";" too (the summary parser splits there). */
-const shown = (label: string) => JSON.stringify(label).slice(1, -1).replace(/;/g, "\\u003b");
+const shown = (label: string) => escapeRaw(JSON.stringify(String(label)).slice(1, -1)).replace(/;/g, "\\u003b");
 /** The label a shown one was made from (the report compares raw labels); text that is not a shown label is kept as it is. */
 const unshown = (text: string): string => {
   try {
@@ -336,7 +370,7 @@ export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
     if (!owner) {
       if (q.named) return base;
       if (!o.keepUnmatched) return undefined;
-      const { restartTimeoutSec: _rt, restart, ...kept } = q;
+      const { restartTimeoutSec: _rt, probe: _pr, restart, ...kept } = q;
       return Array.isArray(restart) || restart === undefined ? kept : { ...kept, restart };
     }
     return {
@@ -350,11 +384,12 @@ export function ownerOps(env: OwnerWaiterEnv, o: OwnerWaiterOptions) {
   const bound = o.busyBoundMs ?? BUSY_BOUND_MS;
   const healthMs = o.healthMs ?? 60_000;
   const pollMs = o.healthPollMs ?? 2_000;
-  const markFailed = async (label: string) => {
+  const markFailed = async (name: string) => {
+    const label = String(name); // a damaged record may hold any JSON value
     const had = (await env.readFile(f.failed)) ?? "";
     if (failedLabels(had).has(label)) return;
-    if (env.appendFile) await env.appendFile(f.failed, `${label}\n`);
-    else await env.writeFile(f.failed, `${had}${label}\n`);
+    if (env.appendFile) await env.appendFile(f.failed, `${failedLine(label)}\n`);
+    else await env.writeFile(f.failed, `${had}${failedLine(label)}\n`);
   };
   const print = async (target: string) => {
     const r = await env.exec(["launchctl", "print", target]);

@@ -8,7 +8,7 @@ import type { Caps } from "./chunked.ts";
 import type { DeferredService } from "./waiter.ts";
 import type { LabelRestart } from "./kegs.ts";
 import type { AppBundle } from "./appbundle.ts";
-import type { StaleOwner } from "./owner-waiter.ts";
+import { RESTART_ARGV_MAX, type StaleOwner } from "./owner-waiter.ts";
 import { validateReviewerSpec, type ReviewerSpec } from "../adapters/reviewer/spec.ts";
 
 export interface RestartHelper {
@@ -258,8 +258,8 @@ function staleOwner(v: unknown, i: number): StaleOwner {
   const r = v.restart;
   if (r === "kickstart") restart = r;
   else if (isObj(r) && Object.keys(r).length === 1 && typeof r.bootstrap === "string" && isAbsolute(r.bootstrap)) restart = { bootstrap: r.bootstrap };
-  else if (Array.isArray(r) && r.length > 0 && r.every(argWord) && isAbsolute(r[0] as string)) restart = [...(r as string[])];
-  else if (r !== undefined) throw new Error(`${where}.restart must be "kickstart", {"bootstrap": "<absolute plist path>"} or an argv of non-empty strings (no NUL, at most ${ARG_MAX} characters each) whose first entry is an absolute path`);
+  else if (Array.isArray(r) && r.length > 0 && r.length <= RESTART_ARGV_MAX && r.every(argWord) && isAbsolute(r[0] as string)) restart = [...(r as string[])];
+  else if (r !== undefined) throw new Error(`${where}.restart must be "kickstart", {"bootstrap": "<absolute plist path>"} or an argv of at most ${RESTART_ARGV_MAX} entries, non-empty strings (no NUL, at most ${ARG_MAX} characters each) whose first entry is an absolute path`);
   const healthWithinSec = posInt(v, "healthWithinSec", where);
   // A timer takes at most 2^31-1 ms: a longer bound would fire at once.
   const restartTimeoutSec = posInt(v, "restartTimeoutSec", where, 2147483);

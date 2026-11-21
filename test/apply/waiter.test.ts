@@ -817,6 +817,114 @@ describe("owner waiter", () => {
       expect(w.outcome()).toEqual(["already on the new keg: org.example.host"]);
       expect(w.calls.some((c) => c.startsWith("/usr/bin/sudo"))).toBe(false);
     });
+    test("a failed label with a newline and edge spaces reads back as that label and is not retried (OUP-288 1)", async () => {
+      const label = "org.example.a\n b ";
+      const TT = `gui/501/${label}`;
+      const w = owEnv({ pids: { [TT]: ["20", "20"] } });
+      w.queue(item({ label, target: TT }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect([...(await ownerWaiterReport(reportEnv(w.files), Q, true)).failed]).toContain(label);
+      const again = await ownerOps(w.env, { ...opts, idleMs: 0, staleOwners: [] }).job(item({ label, target: TT }));
+      expect(again.kind).toBe("skipped");
+    });
+    // A line is the label as written (as main read it), and a line that is a JSON string is also the label it quotes. So a raw legacy `"org.victim"`
+    // is the label `"org.victim"` (as on main) and also fails `org.victim`: that restart is skipped, never one more retried.
+    for (const raw of ['"abc"', '""', '"org.victim"']) {
+      test(`a legacy raw failed line ${raw} still fails the label as written, and also the label it quotes (OUP-288 review)`, async () => {
+        const failed = (await ownerWaiterReport(reportEnv(new Map([[`${Q}/failed`, `${raw}\n`]])), Q, true)).failed;
+        expect(failed.has(raw)).toBe(true);
+        expect(failed.has(JSON.parse(raw) as string)).toBe(true);
+      });
+    }
+    // The file holds one line per label: a plain label as it is, any label a line would not read back to as a JSON string with C1 controls and U+2028/9
+    // written as escapes (JSON.stringify keeps them raw). A flipped test in failedLine (empty, a control character, DEL, C1, U+2028/9, a lone surrogate,
+    // an edge space or tab, a leading quote) writes the raw text and reads back wrong or not at all.
+    const lines: [string, string][] = [
+      ["org.example.plain", "org.example.plain"], ['"quoted', '"\\"quoted"'], ["org.\u001b[2Jx", '"org.\\u001b[2Jx"'], ["org.\u0000x", '"org.\\u0000x"'], ["org.\u007fx", '"org.\u007fx"'],
+      ["org.\u2028x", '"org.\\u2028x"'], ["org.\u2029x", '"org.\\u2029x"'], ["org.\u009dx", '"org.\\u009dx"'], ["org.\u0080x", '"org.\\u0080x"'], ["org.\ud800x", '"org.\\ud800x"'],
+      ["org.\u{1F600}x", "org.\u{1F600}x"], [" lead", '" lead"'], ["trail ", '"trail "'], ["\ttab", '"\\ttab"'], ["org.a\r", '"org.a\\r"'],
+    ];
+    for (const [label, line] of lines) {
+      test(`a failed label ${JSON.stringify(label)} is written as ${JSON.stringify(line)} and read back (OUP-288 review)`, async () => {
+        // The target is not made from the label: a queue file name is encodeURIComponent(target), which throws on a lone surrogate (as on main).
+        const TT = "gui/501/org.example.svc";
+        const w = owEnv({ pids: { [TT]: ["20", "20"] } });
+        w.queue(item({ label, target: TT }));
+        expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+        const file = w.files.get(`${Q}/failed`)!;
+        expect(file).toBe(`${line}\n`);
+        expect(file).not.toMatch(/[\u0080-\u009f\u2028\u2029]/);
+        expect((await ownerWaiterReport(reportEnv(w.files), Q, true)).failed.has(label)).toBe(true);
+        // read again by a second job: not retried (the label is found, whatever bytes the file went through)
+        const again = await ownerOps(w.env, { ...opts, idleMs: 0, staleOwners: [] }).job(item({ label, target: TT }));
+        expect(again.kind).toBe("skipped");
+      });
+    }
+    test("an empty label is written as \"\" once, and read back (the empty line was dropped and appended every run) (OUP-288 review)", async () => {
+      const w = owEnv();
+      const ops = ownerOps(w.env, { ...opts, staleOwners: [] });
+      await ops.markFailed("");
+      await ops.markFailed("");
+      expect(w.files.get(`${Q}/failed`)).toBe('""\n');
+      expect((await ownerWaiterReport(reportEnv(w.files), Q, true)).failed.has("")).toBe(true);
+    });
+    // The held-busy outcome line: the label shown with the same escapes, and read back whole by the report.
+    for (const label of ["org.\u2028x", "org.\u2029x", "org.\ud800x", "org.\u009dx"]) {
+      test(`a busy label ${JSON.stringify(label)} is escaped in its outcome line and read back whole (OUP-288 review)`, async () => {
+        const w = owEnv({ probeRc: [1] });
+        w.queue(item({ label, target: "gui/501/org.example.svc", probe: ["/opt/svc.test/idle"] }));
+        expect(await runOwnerWaiter(w.env, { ...opts, busyBoundMs: 30_000, idleMs: 10_000 })).toBe(0);
+        const [line] = w.outcome();
+        expect(line).not.toMatch(/[\u0080-\u009f\u2028\u2029]/);
+        expect(line).toStartWith("held: busy org.");
+        expect((await ownerWaiterReport(w.env, Q, true)).busy.has(label)).toBe(true);
+      });
+    }
+    test("a damaged in-progress record whose label is not a string is reported and removed, never crashing the waiter (OUP-288 review)", async () => {
+      const w = owEnv({ files: { [`${Q}/inprogress.json`]: JSON.stringify({ phase: "restarting", item: { label: 1, target: "system/x" } }) } });
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(w.files.has(`${Q}/inprogress.json`)).toBe(false);
+      expect(w.outcome()[0]).toStartWith("FAILED: 1 restart interrupted");
+      expect(w.files.get(`${Q}/failed`)).toBe("1\n");
+    });
+    test("with appendFile: a label a line cannot hold is appended as its JSON string (OUP-288 review)", async () => {
+      const label = "org.example.a\n b ";
+      const TT = `gui/501/${label}`;
+      const w = owEnv({ pids: { [TT]: ["20", "20"] } });
+      const appended: string[] = [];
+      w.env.appendFile = async (p, text) => void appended.push(`${p}:${text}`);
+      w.queue(item({ label, target: TT }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0 })).toBe(1);
+      expect(appended).toEqual([`${Q}/failed:${JSON.stringify(label)}\n`]);
+    });
+    test("a queue entry whose recorded restart argv holds more than 64 entries is still read: the job runs the config's argv (OUP-288 review)", async () => {
+      const w = owEnv({ pids: { [T]: ["31", "31"] }, restartTarget: T });
+      w.queue(host({ restart: ["/usr/local/sbin/x", ...Array.from({ length: 64 }, (_, i) => `a${i}`)] }));
+      expect(await runOwnerWaiter(w.env, { ...opts, idleMs: 0, staleOwners: [{ match: "org.example.host", restart: [...ARGV] }] })).toBe(0);
+      expect(w.outcome()).toEqual(["already on the new keg: org.example.host"]);
+    });
+    test("a failed file written before labels were escaped is read line by line as written, a backslash included (OUP-288 4)", async () => {
+      const files = new Map([[`${Q}/failed`, "org.example.old\\nname\n  org.example.sp  \n"]]);
+      expect([...(await ownerWaiterReport(reportEnv(files), Q, true)).failed]).toEqual(["org.example.old\\nname", "org.example.sp"]);
+    });
+    test("a busy line of an older waiter with a literal backslash is read both as written and as shown (OUP-288 4)", async () => {
+      const files = new Map([outcomeFile(1, "held: busy org.example.old\\nname (busy past 1 min)")]);
+      const busy = [...(await ownerWaiterReport(reportEnv(files), Q, true)).busy];
+      expect(busy).toContain("org.example.old\\nname");
+      expect(busy).toContain("org.example.old\nname");
+    });
+    test("a busy label with a space is read whole, and its first word is still counted as on main (OUP-288 5)", async () => {
+      const files = new Map([outcomeFile(1, "held: busy org.example.my svc (busy past 120 min)")]);
+      const busy = [...(await ownerWaiterReport(reportEnv(files), Q, true)).busy];
+      expect(busy).toContain("org.example.my svc");
+      expect(busy).toContain("org.example.my");
+    });
+    test("a release check's other owner no entry matches: a recorded probe argv is dropped, as on main (OUP-288 3)", () => {
+      const ops = ownerOps(owEnv().env, { ...opts, staleOwners: [], keepUnmatched: true });
+      const d = ops.derive(host({ required: true, probe: ["/opt/probe.test/idle", "--x"], restart: { bootstrap: "/Library/LaunchDaemons/org.example.host.plist" } }));
+      expect(d?.probe).toBeUndefined();
+      expect(d?.restart).toEqual({ bootstrap: "/Library/LaunchDaemons/org.example.host.plist" });
+    });
     test("a label with a newline, ESC or \";\" is escaped in its outcome line", async () => {
       const w = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T });
       w.queue(host({ label: "org.example.host\n\u001b[2Jx;y" }));
@@ -837,7 +945,8 @@ describe("owner waiter", () => {
       w.queue(item({ label: L, target: `gui/501/${L}`, probe: ["/opt/svc.test/idle"] }));
       expect(await runOwnerWaiter(w.env, { ...opts, busyBoundMs: 30_000, idleMs: 10_000 })).toBe(0);
       expect(w.outcome()).toEqual(["held: busy org.example\\u003bx (busy past 1 min)"]);
-      expect([...(await ownerWaiterReport(w.env, Q, true)).busy]).toEqual([L]);
+      // The label as shown is also kept: a line an older waiter wrote raw reads either way (a superset of what main read).
+      expect([...(await ownerWaiterReport(w.env, Q, true)).busy].sort()).toEqual([L, "org.example\\u003bx"].sort());
     });
     test("a FAILED line escapes the label and the launchctl rollback's target; the failed note escapes it too", async () => {
       const L = "org.example.h;x\n";
@@ -850,7 +959,7 @@ describe("owner waiter", () => {
       expect(line).toContain("launchctl bootout gui/501/org.example.h\\u003bx\\n");
       expect(line).not.toContain(";");
       expect(line).not.toContain("\n");
-      expect((await ownerWaiterReport(w.env, Q, true)).note).toContain("owner restart FAILED earlier for org.example.h\\u003bx — ");
+      expect((await ownerWaiterReport(w.env, Q, true)).note).toContain(" org.example.h\\u003bx\\n — not retried");
     });
     test("a queue entry's forged named:true is never taken: an unmatched queued label is not tried, never kickstarted", async () => {
       const w = owEnv({ pids: { [T]: ["20", "31"] }, restartTarget: T });

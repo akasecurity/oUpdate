@@ -94,6 +94,11 @@ describe("parseApplyConfig", () => {
   test("staleOwners restart: an entry of exactly 4096 characters is kept", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: ["/usr/local/sbin/x", "a".repeat(4096)] }] }), "hosta").staleOwners?.[0]?.restart).toHaveLength(2);
   });
+  test("staleOwners restart: an argv of 64 entries is kept and one of 65 is refused at load (OUP-288 2)", () => {
+    const argv = (n: number) => ["/usr/local/sbin/x", ...Array.from({ length: n - 1 }, (_, i) => `a${i}`)];
+    expect(parseApplyConfig(cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: argv(64) }] }), "hosta").staleOwners?.[0]?.restart).toHaveLength(64);
+    expect(() => parseApplyConfig(cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: argv(65) }] }), "hosta")).toThrow(/at most 64 entries/);
+  });
   test("staleOwners restart: an argv whose first entry is an absolute path is kept as given", () => {
     const c = parseApplyConfig(cfg({ stateDir: "/state.test", staleOwners: [{ match: "org.example.host", restart: ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "example-host"] }] }), "hosta");
     expect(c.staleOwners).toEqual([{ match: "org.example.host", restart: ["/usr/bin/sudo", "-n", "/usr/local/sbin/restart-helper", "example-host"] }]);
@@ -156,7 +161,7 @@ describe("parseApplyConfig", () => {
     ["a staleOwners entry with an unknown key", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", probes: ["/a"] }] }), /apply\.staleOwners\[0\]: unknown key probes/],
     ["a staleOwners probe with a relative argv0", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", probe: ["idle.sh"] }] }), /apply\.staleOwners\[0\]\.probe\[0\] must be an absolute path/],
     ["a staleOwners probe that is empty", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", probe: [] }] }), /apply\.staleOwners\[0\]\.probe must be a non-empty array/],
-    ["a staleOwners restart word other than kickstart", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: "bootstrap" }] }), /apply\.staleOwners\[0\]\.restart must be "kickstart", \{"bootstrap": "<absolute plist path>"\} or an argv of non-empty strings \(no NUL, at most 4096 characters each\) whose first entry is an absolute path/],
+    ["a staleOwners restart word other than kickstart", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: "bootstrap" }] }), /apply\.staleOwners\[0\]\.restart must be "kickstart", \{"bootstrap": "<absolute plist path>"\} or an argv of at most 64 entries, non-empty strings \(no NUL, at most 4096 characters each\) whose first entry is an absolute path/],
     ["a staleOwners bootstrap with a relative plist", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: { bootstrap: "org.x.plist" } }] }), /apply\.staleOwners\[0\]\.restart must be/],
     ["a staleOwners restart argv that is empty", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: [] }] }), /apply\.staleOwners\[0\]\.restart must be/],
     ["a staleOwners restart argv with a non-string entry", cfg({ stateDir: "/s", staleOwners: [{ match: "org.x", restart: ["/usr/bin/sudo", 1] }] }), /apply\.staleOwners\[0\]\.restart must be/],
