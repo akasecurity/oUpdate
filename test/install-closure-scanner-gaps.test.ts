@@ -440,7 +440,7 @@ for (const [name] of SHAPES) {
       }
       // 5 MB (one run) takes at most 14 times 524,288 (linear is about 10), under its own ceiling
       if (mb5) {
-        console.log(`timing 5 MB ${name} key=${mb5.key.toFixed(0)} stat=${mb5.stat.toFixed(0)} at 524,288 key=${large.key.toFixed(0)} stat=${large.stat.toFixed(0)}`);
+        console.log(`timing 5 MB ${name} key=${mb5.key.toFixed(0)} stat=${mb5.stat.toFixed(0)} at 524,288 key=${large!.key.toFixed(0)} stat=${large!.stat.toFixed(0)}`);
         for (const what of ["key", "stat"] as const) {
           expect(`${what} ${mb5[what] <= 14 * large![what] && mb5[what] < MB5_CEILING}`).toBe(`${what} true`);
         }
