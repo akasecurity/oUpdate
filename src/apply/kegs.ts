@@ -785,25 +785,8 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
   return { note, log, unresolved: unresolvedKegs };
 }
 
-/** `brew linkage --test` over every installed formula: a dependent left linking a removed dylib is named and alerted. */
-export async function linkageCheck(env: KegEnv, o: Pick<KegOptions, "brew" | "host" | "logFile" | "notify" | "log">): Promise<{ note: string; log: string[] }> {
-  const log: string[] = o.log ?? [];
-  const list = await env.exec([o.brew, "list", "--formula"]);
-  if (list.rc === 127) return { note: "", log }; // no brew on this host: nothing to check
-  if (list.rc !== 0) {
-    const note = "LINKAGE CHECK FAILED: brew list --formula failed, linkage not checked";
-    log.push(`  ${note}`);
-    return { note, log };
-  }
-  const formulae = words(list.out);
-  if (!formulae.length) return { note: "", log };
-  // `linkage` is a Homebrew developer command: run as is, brew turns its developer mode on for good (homebrew.devcmdrun
-  // in its git config) and `brew update` then follows its main branch, not stable releases. HOMEBREW_DEV_CMD_RUN for this
-  // call only is the flag brew itself sets once that mode is on: brew writes nothing, and none of HOMEBREW_DEVELOPER's
-  // stricter behavior (a Mach-O it cannot parse, a deprecation, raising instead of warning) applies.
-  const r = await env.exec([o.brew, "linkage", "--test", ...formulae], { env: { HOMEBREW_DEV_CMD_RUN: "1" } });
-  if (r.rc === 0) return { note: "", log };
-  const out = `${r.out}${r.err}`;
+/** The formulae a `brew linkage --test` output names as having missing libraries or broken dependencies. */
+export function linkageBroken(out: string): string[] {
   const bad = new Set<string>();
   let f = "";
   for (const line of out.split("\n")) {
@@ -814,6 +797,29 @@ export async function linkageCheck(env: KegEnv, o: Pick<KegOptions, "brew" | "ho
     }
     if (/^(Missing libraries|Broken dependencies):/.test(line) && f) bad.add(f);
   }
+  return [...bad].sort();
+}
+
+/** `brew linkage --test` over every installed formula: a dependent left linking a removed dylib is named and alerted. */
+export async function linkageCheck(env: KegEnv, o: Pick<KegOptions, "brew" | "host" | "logFile" | "notify" | "log">): Promise<{ note: string; log: string[]; bad: string[] }> {
+  const log: string[] = o.log ?? [];
+  const list = await env.exec([o.brew, "list", "--formula"]);
+  if (list.rc === 127) return { note: "", log, bad: [] }; // no brew on this host: nothing to check
+  if (list.rc !== 0) {
+    const note = "LINKAGE CHECK FAILED: brew list --formula failed, linkage not checked";
+    log.push(`  ${note}`);
+    return { note, log, bad: [] };
+  }
+  const formulae = words(list.out);
+  if (!formulae.length) return { note: "", log, bad: [] };
+  // `linkage` is a Homebrew developer command: run as is, brew turns its developer mode on for good (homebrew.devcmdrun
+  // in its git config) and `brew update` then follows its main branch, not stable releases. HOMEBREW_DEV_CMD_RUN for this
+  // call only is the flag brew itself sets once that mode is on: brew writes nothing, and none of HOMEBREW_DEVELOPER's
+  // stricter behavior (a Mach-O it cannot parse, a deprecation, raising instead of warning) applies.
+  const r = await env.exec([o.brew, "linkage", "--test", ...formulae], { env: { HOMEBREW_DEV_CMD_RUN: "1" } });
+  if (r.rc === 0) return { note: "", log, bad: [] };
+  const out = `${r.out}${r.err}`;
+  const bad = new Set(linkageBroken(out));
   const names = [...bad].sort().join(" ");
   const note = `LINKAGE FAILED: ${names || "brew linkage --test (unparsed, see log)"}; fix: brew reinstall --build-from-source <formula>`;
   log.push(`  ${note}`);
@@ -828,7 +834,7 @@ export async function linkageCheck(env: KegEnv, o: Pick<KegOptions, "brew" | "ho
   } catch {
     log.push("  the notice could not be sent");
   }
-  return { note, log };
+  return { note, log, bad: [...bad].sort() };
 }
 
 /**

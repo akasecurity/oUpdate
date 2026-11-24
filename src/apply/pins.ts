@@ -27,16 +27,25 @@ export function readPinFiles(roots: string[]): PinFile[] {
     let names: string[];
     try {
       names = readdirSync(root).sort();
-    } catch {
+    } catch (e) {
+      // A root that does not exist holds no pins; one that cannot be read (permissions, a protected folder) is a warning.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") out.push({ repo: root, path: root, text: undefined });
       continue;
     }
     for (const repo of names) {
       if (repo.startsWith(".")) continue;
       const p = join(root, repo, "pins.json");
       try {
-        if (!statSync(p).isFile()) continue;
-      } catch {
-        continue; // no pins.json in this repo
+        if (!statSync(p).isFile()) {
+          // Something named pins.json that is not a file (a directory): the repo meant to pin and the pins cannot be read.
+          out.push({ repo, path: p, text: undefined });
+          continue;
+        }
+      } catch (e) {
+        // No pins.json in this repo is silent; one that cannot be looked at (permissions) is a warning.
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") out.push({ repo, path: p, text: undefined });
+        continue;
       }
       let text: string | undefined;
       try {
@@ -57,10 +66,13 @@ export interface PinResult {
   warnings: string[];
 }
 
+/** The pin key of a name: its last path segment, lower case (acme/tools/Foo@2 pins foo@2). */
+export const key = (n: string) => n.split("/").at(-1)!.toLowerCase();
+
 export function pinFilter(kind: "brew" | "cask", names: string[], o: { brewPinned?: string[]; files: PinFile[] }): PinResult {
   const held = new Map<string, string>();
   const warnings: string[] = [];
-  if (kind === "brew") for (const n of o.brewPinned ?? []) if (!held.has(n)) held.set(n, "brew pin");
+  if (kind === "brew") for (const n of o.brewPinned ?? []) if (!held.has(key(n))) held.set(key(n), "brew pin");
   for (const f of o.files) {
     let j: unknown;
     try {
@@ -73,14 +85,15 @@ export function pinFilter(kind: "brew" | "cask", names: string[], o: { brewPinne
       continue;
     }
     const section = (j as Record<string, unknown>)[kind];
+    if (section === undefined) continue;
     if (section && typeof section === "object" && !Array.isArray(section)) {
-      for (const n of Object.keys(section)) if (!held.has(n)) held.set(n, f.repo);
-    }
+      for (const n of Object.keys(section)) if (!held.has(key(n))) held.set(key(n), f.repo);
+    } else warnings.push(`WARNING: ${f.path}: "${kind}" is not an object, holds nothing`);
   }
   const kept: string[] = [];
   const pinned: string[] = [];
   for (const n of names) {
-    const why = held.get(n.split("/").at(-1)!);
+    const why = held.get(key(n));
     if (why) pinned.push(`${n}(${why})`);
     else kept.push(n);
   }

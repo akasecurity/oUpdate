@@ -42,6 +42,7 @@ import type { BrewFormulaInfo } from "./formula.ts";
 import type { ApplyFs } from "./fs.ts";
 import { gkCheck, gkRelease, gkRevert, realGates, type GkOptions } from "./gatekeeper.ts";
 import { linkageCheck, relinkUpgraded, type KegEnv } from "./kegs.ts";
+import { linkageRepair } from "./reinstall.ts";
 import { type NpmRun } from "./npm.ts";
 import { ownerDir, ownerWaiterReport, realHttpStatus, realReleaseLock, realTakeLock, type QueuedOwner } from "./owner-waiter.ts";
 import { brewView, findCheck, shortName, loadPending, runHook, savePending, type PendingCheck, type ReleaseEnv } from "./release-checks.ts";
@@ -446,7 +447,8 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   await step("brew", "linkage check", async () => {
     if (b.noBrew) return;
     const l = await linkageCheck(kegEnv, { brew: cfg.brew, host, logFile: cfg.logFile, notify, log });
-    b.linkageNote = l.note;
+    // Reinstall what the check names (never a pinned or held formula), then test those names again; the note says what is left.
+    b.linkageNote = await linkageRepair(rt, l.bad, l.note);
   });
   await step("brew", "stuck tracking", async () => {
     if (dryRun || b.noBrew) return;
