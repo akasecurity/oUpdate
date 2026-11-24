@@ -442,6 +442,12 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   });
   await step("brew", "stuck tracking", async () => {
     if (dryRun || b.noBrew) return;
+    // A failed brew update (a non-zero exit or a timeout) ended the brew phase before the holds were read (pins, self-bun, release
+    // checks, running casks): the brew lane's stuck tracking is skipped, so this run counts toward no streak. Other lanes keep their own rows.
+    if (b.updateFailed) {
+      log.push("stuck tracking skipped: brew update failed, nothing was checked this run");
+      return;
+    }
     const q = await x([cfg.brew, "outdated", "--json=v2", "--greedy-auto-updates", ...(b.fetchHead ? ["--fetch-HEAD"] : [])]);
     const formulae = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld(), "formulae") : undefined;
     const casks = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld(), "casks") : undefined;
