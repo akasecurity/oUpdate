@@ -107,7 +107,7 @@ describe("npmSection", () => {
   });
   test("an installed version other than the reviewed one is FLAGGED and noticed, not counted upgraded", async () => {
     const h = host({ installs: { tool: "1.2.0" } });
-    const run = { log: [] as string[], pending: [] as string[], upgraded: [] as string[] };
+    const run = { log: [] as string[], pending: [] as string[], upgraded: [] as string[], failed: [] as string[], held: [] as string[], errored: false };
     const { o, notices } = opts({ into: run });
     const s = await npmSection(h.exec, scripted([APPROVE]).r, o);
     expect(s.status).toBe("FLAGGED — tool installed 1.2.0, reviewed 1.1.0");

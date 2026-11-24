@@ -24,6 +24,12 @@ export interface NpmRun {
   pending: string[];
   /** Updated so far. */
   upgraded: string[];
+  /** Packages whose install failed this run, every one (the status text names only the last). */
+  failed: string[];
+  /** The batch a review flagged or could not read: held, none of it upgraded. */
+  held: string[];
+  /** An ERROR status (the query, the binary or the stuck state failed). */
+  errored: boolean;
 }
 
 export interface NpmOptions {
@@ -175,7 +181,7 @@ export async function npmInstalled(exec: Exec, npm: string, pkg: string): Promis
 }
 
 export async function npmSection(exec: Exec, r: Reviewer, o: NpmOptions): Promise<{ status: string; log: string[] }> {
-  const run: NpmRun = o.into ?? { log: [], pending: [], upgraded: [] };
+  const run: NpmRun = o.into ?? { log: [], pending: [], upgraded: [], failed: [], held: [], errored: false };
   const log = run.log;
   log.push("", "--- npm globals ---");
   const send = async (text: string) => {
@@ -190,11 +196,13 @@ export async function npmSection(exec: Exec, r: Reviewer, o: NpmOptions): Promis
   if (q.rc === 127) {
     // An ERROR, so the run exits non-zero and a status reader sees it: npm globals went unchecked.
     log.push(`npm: ${o.npm} not found — not checked`);
+    run.errored = true;
     return { status: `ERROR — ${o.npm} not found, npm globals not checked`, log };
   }
   const outdated = q.rc === 0 || q.rc === 1 ? parseNpmOutdated(q.out) : undefined;
   if (!outdated) {
     log.push(`npm: outdated query failed (rc ${q.rc}) — nothing upgraded`);
+    run.errored = true;
     return { status: `ERROR — npm outdated query failed (rc ${q.rc})`, log };
   }
   if (!outdated.size) {
@@ -287,6 +295,7 @@ One-line reason if FLAG. 6 lines max.`;
   if (unread.length) {
     const reason = `could not read ${unread.join(", ")} — not reviewed`;
     log.push(`npm: ${reason}; skipping upgrade`);
+    run.held.push(...names);
     await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${esc(reason)}\nPackages: ${esc(names.join(" "))}\nLog: ${o.logFile ?? "-"}`);
     return { status: `FLAGGED — ${reason}`, log };
   }
@@ -303,6 +312,7 @@ One-line reason if FLAG. 6 lines max.`;
   if (reason) {
     await send(`⚠️ <b>${o.host} npm FLAGGED</b>\n${esc(reason)}\nPackages: ${esc(names.join(" "))}\nLog: ${o.logFile ?? "-"}`);
     log.push("npm: flagged — skipping upgrade");
+    run.held.push(...names);
     return { status: `FLAGGED — ${reason}`, log };
   }
   if (o.dryRun) {
@@ -318,6 +328,7 @@ One-line reason if FLAG. 6 lines max.`;
     const u = await exec([o.npm, "install", "-g", `${pkg}@${v.next}`], { ...LOG_ONLY });
     if (u.rc !== 0) {
       status = `FAILED — ${pkg}`;
+      run.failed.push(pkg);
       log.push(`npm: upgrade failed for ${pkg} — continuing`);
       await send(`⚠️ <b>${o.host} npm FAILED — ${esc(pkg)}</b>\nLog: ${o.logFile ?? "-"}`);
       continue;
@@ -339,10 +350,14 @@ One-line reason if FLAG. 6 lines max.`;
   const leftMap = left.rc === 0 || left.rc === 1 ? parseNpmOutdated(left.out) : undefined;
   if (!leftMap) {
     log.push("npm: the pending query failed — stuck state kept");
+    run.errored = true;
     return { status: `${status}; ERROR — pending query failed`, log };
   }
   const stuck = o.trackStuck([...leftMap].map(([n, x]) => `${n}=${x.next}`));
-  if (stuck === undefined) status += "; ERROR — stuck state unusable";
+  if (stuck === undefined) {
+    status += "; ERROR — stuck state unusable";
+    run.errored = true;
+  }
   else if (stuck.length) status += `; STUCK: ${stuck.join(" ")}`;
   return { status, log };
 }

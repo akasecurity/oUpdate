@@ -5,12 +5,13 @@ import { basename, dirname, join } from "node:path";
 import { groupAlive, isStopping as execStopping, LOG_ONLY } from "./exec.ts";
 import { staleKegCheck } from "./kegs.ts";
 import { MAS_NOT_CHECKED } from "./summary-text.ts";
+import { isoZone, writeLastRun } from "./last-run.ts";
 import { npmSection, type NpmRun } from "./npm.ts";
 import { ownerDir, queueOwners } from "./owner-waiter.ts";
 import { savePending } from "./release-checks.ts";
 import { handoff } from "./waiter.ts";
 import { assembleBrew } from "./run-brew.ts";
-import { PhaseTimeout, uniq, type ApplyResult, type RunCtx } from "./run-ctx.ts";
+import { PhaseTimeout, last, uniq, type ApplyResult, type RunCtx } from "./run-ctx.ts";
 
 export async function staleKegStep(rt: RunCtx): Promise<void> {
   const { opts, dryRun, host, log, b, notify, cfg, fs, rcEnv, rcPending, rcJobs, mergeOwners, kegEnv, recoverTo, releaseRacks, ownerHanded, helperRunning, waiterEnv, track, st } = rt;
@@ -223,6 +224,31 @@ export async function finishRun(rt: RunCtx, a: { npmRun: NpmRun; npmStatus: stri
   const summary = summaryLines(host, dryRun, brewStatus, npmLine, mas);
   for (const l of summary) sink?.(l);
   // A run being stopped by a signal sends no done notice: its ABORTED line is the last word.
-  if (!dryRun && !opts.isStopping?.()) await notify(`📋 <b>${host} ${prevName} done (oupdate)</b>\nbrew: ${brewStatus}\nnpm:  ${npmLine}\nmas:  ${mas}`);
+  // A notice that cannot be sent never ends the run: a warning, and the result file is still written.
+  if (!dryRun && !opts.isStopping?.()) {
+    try {
+      await notify(`📋 <b>${host} ${prevName} done (oupdate)</b>\nbrew: ${brewStatus}\nnpm:  ${npmLine}\nmas:  ${mas}`);
+    } catch (e) {
+      log.push(`  WARNING: the done notice failed (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+  // The result file, after the notice so it carries what the CLI will exit with: a broken log is exit 1, a stop by a signal is not ok.
+  // A warning about the file goes to the log, never to the summary or the rc.
+  const stoppedRun = !!opts.isStopping?.();
+  // failed[]: the brew tokens, one "npm:<package>" per package whose install failed, the npm lane's own timeout or step tokens
+  // (every timeout token as the program only: a configured argument is never written), "npm" when the npm lane errored, and claude-code.
+  const npmTokens = [...npmFailed.map((t, i) => b.timeoutAt.npm.get(i) ?? `npm:${t}`), ...npmRun.failed.map((n) => `npm:${n}`), ...(npmRun.errored ? ["npm"] : [])];
+  // Brew names are bare (a tap prefix stripped); an npm name stays whole (@a/tool and @b/tool are two packages).
+  const heldNames = [...[...b.pinned.map((p) => p.replace(/\([\s\S]*$/, "")), ...[...b.plan.typeAHeld].map((k) => k.slice(k.indexOf(":") + 1)), ...b.selfBun, ...b.rcHeldNames, ...b.casksRunning, ...b.unreadable].map(last), ...b.appHeld, ...npmRun.held];
+  await writeLastRun({
+    fs: rt.fs, stateDir: rt.cfg.stateDir, dryRun, log,
+    run: {
+      host, pid: process.pid, started: isoZone(rt.now), ended: isoZone(new Date()), rc: opts.cliRc?.() ?? rc, stopped: stoppedRun,
+      failed: uniq([...b.failed.map((t, i) => b.timeoutAt.brew.get(i) ?? t), ...npmTokens, ...(ccPart?.includes("FAILED") ? ["claude-code"] : [])]),
+      upgraded: [...b.upgraded, ...b.casksUp, ...b.appUpgraded, ...npmRun.upgraded],
+      held: uniq(heldNames),
+      linkage: b.linkageNote, log: rt.cfg.logFile ?? "",
+    },
+  });
   return { log, summary, rc, plan: { holds: Object.fromEntries(rt.b.plan.holds), typeAHeld: [...rt.b.plan.typeAHeld], typeAUp: [...rt.b.plan.typeAUp] } };
 }

@@ -337,7 +337,7 @@ export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatek
       return { text: lines.join("\n"), rc: await settle(g.rc) };
     }
     if (!c.dryRun) mkdirSync(cfg.stateDir, { recursive: true });
-    const r = await applyHost(cfg, deps.exec, deps.fs, { dryRun: c.dryRun, now, onLine: (l) => emit(l), isStopping: () => stopCode !== undefined, ownerWaiterArgv: deps.ownerWaiterArgv ?? ownerWaiterArgv(c.config), ...(deps.previousUpdater ? { previousUpdater: deps.previousUpdater } : {}), ...(deps.jobRunners ? { jobRunners: deps.jobRunners } : {}) });
+    const r = await applyHost(cfg, deps.exec, deps.fs, { dryRun: c.dryRun, now, onLine: (l) => emit(l), isStopping: () => stopCode !== undefined, cliRc: () => stopCode ?? (logBroken ? 1 : undefined), ownerWaiterArgv: deps.ownerWaiterArgv ?? ownerWaiterArgv(c.config), ...(deps.previousUpdater ? { previousUpdater: deps.previousUpdater } : {}), ...(deps.jobRunners ? { jobRunners: deps.jobRunners } : {}) });
     // The end-of-run notice is logged after the summary block: emitted by applyHost already.
     // After a clean run: oUpdate's own old config backups go (a dry run only lists them). Never fails the run.
     // Not after a stop (a signal ends the log) or with a broken log (a deletion nobody can read back).

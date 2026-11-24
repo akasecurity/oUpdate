@@ -30,6 +30,8 @@ export interface HostScript {
   timeout?: string[];
   /** rc for a command line (exact). */
   rc?: Record<string, number>;
+  /** Paths whose writeFile throws (a full or read-only disk). */
+  failWrite?: string[];
   /** The whole answer for a command line (exact): its rc and what it prints. */
   answers?: Record<string, { rc: number; out: string; err?: string; truncated?: true }>;
   /** Successive lsof answers: stdout, or stdout with something on stderr (exit 0 either way). */
@@ -144,6 +146,7 @@ export function fakeHost(s: HostScript = {}) {
     listDir: async () => [],
     readFile: async (p) => files.get(p),
     writeFile: async (p, t) => {
+      if ((s.failWrite ?? []).includes(p)) throw new Error("ENOSPC: no space left on device");
       writes.push(p);
       files.set(p, t);
     },
