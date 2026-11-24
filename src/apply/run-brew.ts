@@ -148,7 +148,8 @@ export async function brewSection(rt: RunCtx) {
   // Casks never auto-managed here.
   casks = casks.filter((k) => {
     if (!named(cfg.caskExclude, k)) return true;
-    log.push(`  excluding ${k} (CASK_EXCLUDE — self-updates / too heavy to reinstall)`);
+    const own = cfg.policyEntries?.caskExclude.find((e) => named([e.value], k));
+    log.push(`  excluding ${k} (CASK_EXCLUDE — self-updates / too heavy to reinstall${own ? `; policy owner ${JSON.stringify(own.owner)}, reason ${JSON.stringify(own.reason)}` : ""})`);
     return false;
   });
 
@@ -183,6 +184,7 @@ export async function brewSection(rt: RunCtx) {
     b.pinWarn = `WARNING: brew list --pinned failed (rc ${pinnedQ.rc}) — brew pins not read, repo pins still held`;
     log.push(`  ${b.pinWarn}`);
   }
+  for (const e of cfg.policyEntries?.pinRoots ?? []) log.push(`  pin root ${JSON.stringify(e.value)} from the policy: owner ${JSON.stringify(e.owner)}, reason ${JSON.stringify(e.reason)}`);
   const files = fs.pinFiles(cfg.pinRoots);
   for (const [kind, names] of [["brew", formulas], ["cask", casks]] as const) {
     const p = pinFilter(kind, names, { brewPinned: pinnedQ.rc === 0 ? words(pinnedQ.out) : [], files });

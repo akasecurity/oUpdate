@@ -5,6 +5,7 @@
 
 import { MAS_NOT_CHECKED } from "../apply/summary-text.ts";
 import { DEFAULT_COMPAT } from "../targets/compat.ts";
+import { POLICY_NOTE_PREFIX } from "../apply/policy.ts";
 
 export interface PrevSummary {
   date?: string;
@@ -83,7 +84,7 @@ export interface RunBlock {
 const MAS_TEXT = new RegExp(`^\\s+mas:\\s+${MAS_NOT_CHECKED.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 const NOTICE = /^\[(?:notify|dry-run — not notified)\] /;
 const runOwnLine = (l: string, prev: string | undefined) =>
-  MAS_TEXT.test(l) || NOTICE.test(l) || (/^\s+the notice could not be sent$/.test(l) && prev !== undefined && /^\[notify\] /.test(prev));
+  MAS_TEXT.test(l) || l.startsWith(POLICY_NOTE_PREFIX) || NOTICE.test(l) || (/^\s+the notice could not be sent$/.test(l) && prev !== undefined && /^\[notify\] /.test(prev));
 
 /**
  * Reads the run log around the summary line at `at`: the body before it, back to the host's own
