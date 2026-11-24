@@ -30,6 +30,20 @@ export interface HostScript {
   timeout?: string[];
   /** rc for a command line (exact). */
   rc?: Record<string, number>;
+  /** `brew deps --include-build ... <name>`: the output by name (default: none). */
+  deps?: Record<string, string>;
+  /** `brew info --json=v2 --formula <name>`: its build_dependencies (default: none). */
+  buildDeps?: Record<string, string[]>;
+  /** Only when `--include-implicit` is in the argv / only when `--include-optional` is: the extra `brew deps` output by name. */
+  implicitDeps?: Record<string, string>;
+  optionalDeps?: Record<string, string>;
+  /** brew info --json=v2 --formula: alias -> canonical name; the installed keg's used_options by name. */
+  aliases?: Record<string, string>;
+  usedOptions?: Record<string, string[]>;
+  /** The whole `installed` array of the info answer by name (several kegs, or malformed entries). */
+  installedKegs?: Record<string, unknown[]>;
+  /** full_name of the info answer by name (tap-qualified). */
+  fullNames?: Record<string, string>;
   /** Paths whose writeFile throws (a full or read-only disk). */
   failWrite?: string[];
   /** The whole answer for a command line (exact): its rc and what it prints. */
@@ -74,9 +88,15 @@ export function fakeHost(s: HostScript = {}) {
       if (rest === "--cellar") return ok("/brew/Cellar\n");
       if (rest === "--prefix") return ok("/brew\n");
       if (rest === "--caskroom") return ok("/brew/Caskroom\n");
-      if (rest === "list --pinned") return ok(s.pinned ?? "");
+      if (rest === "list --pinned" || rest === "list --pinned --formula") return ok(s.pinned ?? "");
       if (rest === "list --formula") return ok("good-a\n");
       if (rest.startsWith("linkage")) return ok();
+      if (rest.startsWith("reinstall ")) return ok();
+      if (rest.startsWith("deps ")) {
+        // The plain answer always; the implicit and optional ones only when the argv asks (so a missing flag is a red row).
+        const nm = a.at(-1)!;
+        return ok([s.deps?.[nm], a.includes("--include-implicit") ? s.implicitDeps?.[nm] : undefined, a.includes("--include-optional") ? s.optionalDeps?.[nm] : undefined].filter(Boolean).join(""));
+      }
       if (rest === "cleanup" || rest.startsWith("cleanup ")) return ok("CLEANUP\n");
       if (rest.startsWith("outdated --json=v2")) {
         const names = (x?: string) => (x ?? "").split(/\s+/).filter(Boolean);
@@ -91,6 +111,10 @@ export function fakeHost(s: HostScript = {}) {
         const ks = a.slice(3);
         if (ks.length === 1 && (s.sudoCasks ?? []).includes(ks[0]!)) return ok(JSON.stringify({ casks: [{ token: ks[0], artifacts: [{ pkg: ["x.pkg"] }] }] }));
         return ok(JSON.stringify({ casks: ks.filter((k) => s.caskTaps?.[k]).map((k) => ({ token: k, tap: s.caskTaps![k], artifacts: [{ app: s.caskApps?.[k] ?? ["X.app"] }], ...(upgraded.has(k) ? { installed: installedOf(k) } : {}) })) }));
+      }
+      if (rest.startsWith("info --json=v2 --formula ")) {
+        const nm = a.at(-1)!;
+        return ok(JSON.stringify({ formulae: [{ name: (s.aliases?.[nm] ?? nm).split("/").at(-1), full_name: s.fullNames?.[nm] ?? s.aliases?.[nm] ?? nm, dependencies: [], build_dependencies: s.buildDeps?.[nm] ?? [], installed: s.installedKegs?.[nm] ?? [{ used_options: s.usedOptions?.[nm] ?? [] }] }] }));
       }
       if (rest.startsWith("info --json=v2 ")) {
         const fs = a.slice(2);
