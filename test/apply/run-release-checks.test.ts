@@ -318,6 +318,10 @@ describe("release checks in the run", () => {
     expect(r.brew).toContain("HELD by release check: gadget 1.3.0");
     expect(r.res.plan.holds).toEqual({ "formula:gadget": "held by release check: 1.3.0" });
   });
+  test("the held release is in the result file's held list once, as a bare name", async () => {
+    const r = await rcRun({ files: { [HOLD]: JSON.stringify({ formula: "gadget", version: "1.3.0", from: "1.2.0", at: "2026-10-25 04:00" }) } });
+    expect(JSON.parse(r.files.get("/state.test/last-run.json")!).held).toEqual(["gadget"]);
+  });
   test("a newer version than the held one is tried normally", async () => {
     const r = await rcRun({ candidate: "1.4.0", files: { [HOLD]: JSON.stringify({ formula: "gadget", version: "1.3.0", from: "1.2.0", at: "2026-10-25 04:00" }) } });
     expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", "/opt/gate.test/check GATE_VERSION=1.4.0", "svcctl on"]);

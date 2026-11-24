@@ -32,6 +32,8 @@ export interface ApplyOptions {
   now?: Date;
   /** True once a signal is stopping oupdate: the done notice is not sent. */
   isStopping?: () => boolean;
+  /** What the CLI will exit with when it is not the apply result: the signal's code after a stop, 1 once the log file could not be written. */
+  cliRc?: () => number | undefined;
   /** Every line of the run, the summary block included, as it is produced. */
   onLine?: (line: string) => void;
   /** Test seams, as the previous updater's tests mocked these functions. */
@@ -170,6 +172,11 @@ export function newBrewState(dryRun: boolean) {
     flaggedAtSection: false,
     flagged: false,
     upgraded: [] as string[],
+    /** App bundles upgraded and held this run, by name. */
+    appUpgraded: [] as string[],
+    appHeld: [] as string[],
+    /** By position in the lane's failed list (b.failed, or the npm lane's): what the result file writes for an entry a timeout made, the program only, never an argument. */
+    timeoutAt: { brew: new Map<number, string>(), npm: new Map<number, string>() },
     failed: [] as string[],
     pinned: [] as string[],
     pinWarn: "",

@@ -645,7 +645,11 @@ export async function appBundlesSection(rt: RunCtx) {
       dryRun, host, logFile: cfg.logFile, stateDir: cfg.stateDir, notify, caps: cfg.caps, detachedLog: join(cfg.stateDir, "restart.log"),
     });
     log.push(...res.log);
-    if (res.status === "held") b.flagged = true;
+    if (res.status === "upgraded") b.appUpgraded.push(app.name);
+    if (res.status === "held") {
+      b.flagged = true;
+      b.appHeld.push(app.name);
+    }
     else if (res.status === "failed") {
       b.flagged = true;
       b.failed.push(`app:${app.name}`);

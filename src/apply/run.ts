@@ -67,12 +67,18 @@ const day = (d: Date) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getD
  * last segment, an npm name whole), else "timeout:<program>[-<subcommand>]", looking through
  * `sudo -n` and `git -C <dir>`.
  */
-export function timeoutToken(argv: string[]): string {
+/** The argv with a leading `sudo -n` removed: the command whose program a timeout names. */
+function timeoutArgv(argv: string[]): string[] {
   let a = [...argv];
   if (basename(a[0] ?? "") === "sudo") {
     a = a.slice(1);
     while (a[0]?.startsWith("-")) a = a.slice(1);
   }
+  return a;
+}
+
+export function timeoutToken(argv: string[]): string {
+  const a = timeoutArgv(argv);
   const prog = basename(a[0] ?? "?");
   let rest = a.slice(1);
   if (prog === "git" && rest[0] === "-C") rest = rest.slice(2);
@@ -174,7 +180,9 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     }
     if (res.timedOut) {
       const token = timeoutToken(argv[0] === cfg.brew ? ["brew", ...argv.slice(1)] : argv[0] === cfg.npm ? ["npm", ...argv.slice(1)] : argv);
-      (phase === "brew" ? b.failed : npmFailed).push(token);
+      const lane = phase === "brew" ? b.failed : npmFailed;
+      b.timeoutAt[phase].set(lane.length, `timeout:${basename(argv[0] ?? "?")}`);
+      lane.push(token);
       log.push(`  TIMEOUT after ${o.timeoutMs ?? cfg.timeoutMs} ms: ${argv.join(" ")} — killed; ${phase} phase FAILED (${token})`);
       throw new PhaseTimeout();
     }
@@ -474,7 +482,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
 
   // ── npm ──
   // The phase's record is ours and its lines are the run's: a stop part-way keeps both.
-  const npmRun: NpmRun = { log, pending: [], upgraded: [] };
+  const npmRun: NpmRun = { log, pending: [], upgraded: [], failed: [], held: [], errored: false };
   const npmStatus = await npmStep(rt, npmRun);
   const ccPart = await claudeCodeStep(rt);
   await postUpgradeChecks(rt, npmRun);

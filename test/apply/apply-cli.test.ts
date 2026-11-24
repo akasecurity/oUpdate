@@ -332,6 +332,30 @@ describe("the log file (slice 7 review)", () => {
     expect(existsSync(join(dir, "20261022.log"))).toBe(false);
   });
 
+  test("the result file carries the CLI's exit code: a signal stop is 143 and stopped, a broken log is 1 and not ok (OUP-326)", async () => {
+    const h = fakeHost();
+    const c = config({ logFile: join(root, "stop-{date}.log") });
+    const file = join(c.dir, "state", "last-run.json");
+    const handlers = new Map<string, () => void>();
+    const signals = { on: (sg: string, f: () => void) => handlers.set(sg, f), off: (sg: string) => handlers.delete(sg) };
+    const exec: Exec = async (argv, o) => {
+      if (argv.join(" ") === "brew --version") handlers.get("SIGTERM")!();
+      return h.exec(argv, o);
+    };
+    const exits: number[] = [];
+    await applyMain({ mode: "apply", config: c.path, dryRun: false, host: "hosta" }, { exec, fs: h.fs, out: () => {}, signals, exit: (code) => void exits.push(code), stopLive: () => {}, now: new Date(2026, 9, 22, 7, 0) });
+    expect(exits).toEqual([143]);
+    expect(JSON.parse(h.files.get(file)!)).toMatchObject({ ok: false, rc: 143, stopped: true });
+
+    const blocker = join(root, "blocker-lr");
+    writeFileSync(blocker, "");
+    const b = fakeHost();
+    const c2 = config({ logFile: join(blocker, "sub", "{date}.log") });
+    const r = await applyMain({ mode: "apply", config: c2.path, dryRun: false, host: "hosta" }, { exec: b.exec, fs: b.fs, out: () => {}, now: new Date(2026, 9, 22, 7, 0) });
+    expect(r.rc).toBe(1);
+    expect(JSON.parse(b.files.get(join(c2.dir, "state", "last-run.json"))!)).toMatchObject({ ok: false, rc: 1 });
+  });
+
   test("5: a log directory that cannot be made says why; a throwing stdout still leaves the line in the file", async () => {
     // Mutants caught: a silent logBroken, and stdout written before the file (a throwing stdout lost the line).
     const blocker = join(root, "blocker");
