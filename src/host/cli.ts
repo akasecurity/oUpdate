@@ -20,6 +20,7 @@ import { parseApplyConfig, type ApplyConfig } from "../apply/config.ts";
 import { killLive, runStopTasks, type Exec } from "../apply/exec.ts";
 import type { ApplyFs } from "../apply/fs.ts";
 import { applyHost, gatekeeperAction } from "../apply/run.ts";
+import { cleanOldBackups } from "./backups.ts";
 import { readiness } from "./readiness.ts";
 import { ownerDir, realHttpStatus, realReleaseLock, realTakeLock, runOwnerWaiter } from "../apply/owner-waiter.ts";
 import { realFs } from "../apply/fs.ts";
@@ -338,6 +339,17 @@ export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatek
     if (!c.dryRun) mkdirSync(cfg.stateDir, { recursive: true });
     const r = await applyHost(cfg, deps.exec, deps.fs, { dryRun: c.dryRun, now, onLine: (l) => emit(l), isStopping: () => stopCode !== undefined, ownerWaiterArgv: deps.ownerWaiterArgv ?? ownerWaiterArgv(c.config), ...(deps.previousUpdater ? { previousUpdater: deps.previousUpdater } : {}), ...(deps.jobRunners ? { jobRunners: deps.jobRunners } : {}) });
     // The end-of-run notice is logged after the summary block: emitted by applyHost already.
+    // After a clean run: oUpdate's own old config backups go (a dry run only lists them). Never fails the run.
+    // Not after a stop (a signal ends the log) or with a broken log (a deletion nobody can read back).
+    if (r.rc === 0 && stopCode === undefined && !logBroken) {
+      try {
+        // The age reference is <dir>/config.json: only a run read from a file of that name cleans (a --config named like a backup never does).
+        if (basename(c.config) !== "config.json") emit(`config backup: cleanup skipped — --config is ${basename(c.config)}, not config.json`);
+        else for (const l of await cleanOldBackups(dirname(c.config), deps.fs, c.dryRun)) emit(l);
+      } catch (e) {
+        emit(`WARNING: config backup: cleanup skipped (${e instanceof Error ? e.message : String(e)})`);
+      }
+    }
     // The digest is for a person: printed and written beside the log, never added to the log a reader parses.
     // Building, printing or writing it never aborts a finished run: a failure is a warning, the rc stands.
     try {
