@@ -1,6 +1,6 @@
 // The small file-system surface of the host apply, so a run can be scripted in tests.
 
-import { accessSync, appendFileSync, constants, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, constants, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
 import { readPinFiles, type PinFile } from "./pins.ts";
@@ -28,6 +28,8 @@ export interface ApplyFs {
   appendFile?(path: string, text: string): Promise<void>;
   /** Modification date, YYYY-MM-DD local. */
   mtimeDay(path: string): Promise<string>;
+  /** Modification time in ms of a regular file (a link or directory is not one); undefined when missing or not a regular file. */
+  mtimeMs?(path: string): Promise<number | undefined>;
   /** Starts argv in its own process group, stderr appended to a file; returns the pid. */
   spawnDetached(argv: string[], stderrFile: string): Promise<number>;
   pinFiles(roots: string[]): PinFile[];
@@ -101,6 +103,14 @@ export const realFs: ApplyFs = {
     appendFileSync(p, text);
   },
   mtimeDay: mtimeDayOf,
+  mtimeMs: async (p) => {
+    try {
+      const s = lstatSync(p);
+      return s.isFile() ? s.mtimeMs : undefined;
+    } catch {
+      return undefined;
+    }
+  },
   spawnDetached: realSpawnDetached,
   pinFiles: readPinFiles,
 };
