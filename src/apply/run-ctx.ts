@@ -164,6 +164,8 @@ export function newBrewState(dryRun: boolean) {
     nothing: false,
     noBrew: false,
     started: false,
+    /** `brew update` failed (a non-zero exit or a timeout): the holds were never read, so the brew lane's stuck tracking is skipped. */
+    updateFailed: false,
     sectionDone: false,
     flaggedAtSection: false,
     flagged: false,

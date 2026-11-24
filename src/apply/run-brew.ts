@@ -106,16 +106,21 @@ export async function brewSection(rt: RunCtx) {
   }
   b.started = true;
 
-  // 1. Sync the formula repo only. A failed tap fetch is surfaced and the run goes on, so one
-  // unreachable tap does not cost the host its official upgrades.
+  // 1. Sync the formula repo. A failed update ends the brew phase: the outdated list and any upgrade
+  // would run against a stale tap.
   if (dryRun) log.push("dry-run: brew update skipped — the outdated list is against the taps as they are");
   else {
+    // Set before the call, so a timeout (which throws) leaves it set; cleared when the update succeeds.
+    b.updateFailed = true;
     const u = await x([cfg.brew, "update"], { ...LOG_ONLY });
     const out = `${u.out}\n${u.err}`;
     if (u.rc !== 0) {
-      log.push(`  WARNING: brew update exited ${u.rc} — a tap fetch likely failed, so the outdated list below may be computed against a STALE tap:`);
+      log.push(`  brew update exited ${u.rc} — a tap fetch likely failed; no formula or cask is upgraded against a stale tap:`);
       log.push(...out.split("\n").filter((l) => /error|fatal|failed/i.test(l)).slice(-5).map((l) => `    ${l}`));
+      await brewFailed("update");
+      return;
     }
+    b.updateFailed = false;
     log.push(...out.trimEnd().split("\n").slice(-3));
   }
 

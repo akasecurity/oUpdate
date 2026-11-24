@@ -1303,3 +1303,53 @@ describe("which commands keep only a tail of their output", () => {
     expect({ maxBytes: c?.opts?.maxBytes, tail: c?.opts?.tail }).toEqual({ maxBytes: LOG_STREAM_BYTES, tail: true });
   });
 });
+
+describe("a failed brew update ends the brew phase (OUP-326)", () => {
+  const STATE_FILE = "/state.test/pending-state.tsv";
+  test("rc 1 from brew update: FAILED update, no outdated --formula or --cask query and no upgrade", async () => {
+    const r = await run({ ...BREW, rc: { "brew update": 1 } });
+    expect(r.calls.filter((c) => /^brew (upgrade\b|outdated .*--(formula|cask))/.test(c))).toEqual([]);
+    expect(parsePrevSummary(r.text, "hosta")!.brew.failed).toEqual(["update"]);
+  });
+  test("rc 0 from brew update still upgrades", async () => {
+    const r = await run(BREW);
+    expect(r.calls).toContain("brew upgrade good-a");
+  });
+  test("a pinned formula is not counted stuck after a failed update: no STUCK line, the state file as it was", async () => {
+    const seed = `brew${T}other=1${T}5${T}2026-10-01\n`;
+    const S: HostScript = {
+      formulas: "duckdb good-a", verbose: "duckdb (1.5.5) < 2.0.0\ngood-a (1.0) < 1.1", formulaTaps: { duckdb: "homebrew/core", "good-a": "homebrew/core" },
+      pinFiles: [{ repo: "example-repo", path: "/repos.test/example-repo/pins.json", text: '{"brew":{"duckdb":"1.5.5"}}' }],
+      files: { [STATE_FILE]: seed },
+    };
+    const ok = await run({ ...S, rc: { "brew update": 0 } }, { cfg: { stuckAfter: 1 } });
+    expect(ok.brew).toContain("PINNED");
+    const r = await run({ ...S, rc: { "brew update": 1 } }, { cfg: { stuckAfter: 1 } });
+    expect(r.brew).not.toContain("STUCK");
+    expect(r.files.get(STATE_FILE)).toBe(seed);
+  });
+  test("a cask with a running process is not counted stuck after a failed update: no STUCK line, the state file as it was", async () => {
+    const RUNNING = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngcloud 55 u txt REG 1,4 1 2 /brew/Caskroom/app/1.0/bin/gcloud\n";
+    const seed = `brew${T}other=1${T}5${T}2026-10-01\n`;
+    const S: HostScript = { casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", lsof: [RUNNING, LSOF_NONE], files: { [STATE_FILE]: seed } };
+    const r = await run({ ...S, rc: { "brew update": 1 } }, { cfg: { stuckAfter: 1 } });
+    expect(r.brew).not.toContain("STUCK");
+    expect(r.files.get(STATE_FILE)).toBe(seed);
+  });
+  test("a timed-out brew update is not counted stuck either: no STUCK line, the state file as it was", async () => {
+    const seed = `brew${T}other=1${T}5${T}2026-10-01\n`;
+    const r = await run({
+      formulas: "duckdb good-a", verbose: "duckdb (1.5.5) < 2.0.0\ngood-a (1.0) < 1.1", formulaTaps: { duckdb: "homebrew/core", "good-a": "homebrew/core" },
+      pinFiles: [{ repo: "example-repo", path: "/repos.test/example-repo/pins.json", text: '{"brew":{"duckdb":"1.5.5"}}' }],
+      files: { [STATE_FILE]: seed }, timeout: ["brew update"],
+    }, { cfg: { stuckAfter: 1 } });
+    expect(parsePrevSummary(r.text, "hosta")!.brew.failed).toEqual(["timeout:brew-update"]);
+    expect(r.brew).not.toContain("STUCK");
+    expect(r.files.get(STATE_FILE)).toBe(seed);
+  });
+  test("a failed upgrade of a package named update, after a successful brew update, still advances the streak", async () => {
+    const r = await run({ formulas: "update", verbose: "update (1.0) < 1.1", formulaTaps: { update: "homebrew/core" }, upgradeRc: { update: 1 } }, { cfg: { stuckAfter: 1 } });
+    expect(r.calls).toContain("brew upgrade update");
+    expect(r.brew).toContain("STUCK: update=");
+  });
+});
