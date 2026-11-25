@@ -9,6 +9,7 @@
 
 import { STUCK_SINCE } from "../apply/stuck.ts";
 import { stripTerminal } from "../review.ts";
+import { npmParts, OFF_VERSION } from "./npm-line.ts";
 import { readRunBlock } from "./prev-log.ts";
 
 export interface DigestInput {
@@ -70,8 +71,6 @@ interface Part {
   re: RegExp;
   /** The part can carry "; ": a following fragment that starts no part (and matches this, when given) is joined back. */
   open?: true | RegExp;
-  /** A hold reason: every following fragment matching this is part of the reason, even one that reads like another part ("ERROR — x"). */
-  swallow?: RegExp;
   lane?: "brew" | "npm";
   on: (m: RegExpMatchArray, o: Out, lane: string) => void;
 }
@@ -121,6 +120,7 @@ const PARTS: Part[] = [
   { re: /^FAILED — (\S+)$/, on: (m, o, lane) => void o.waiting.push(`${one(m[1]!)}: the ${lane} step failed; read the run log`) },
   {
     re: /^FLAGGED — awaiting tap approval: (.*)$/s,
+    lane: "brew",
     open: TAP_ITEM,
     on: (m, o) => {
       o.flagExplained = true;
@@ -148,6 +148,7 @@ const PARTS: Part[] = [
   },
   {
     re: /^(?:FLAGGED — )?trusted-tap cask\(s\) skipped \(no cask review path\):(.*)$/,
+    lane: "brew",
     on: (m, o) => {
       o.flagExplained = true;
       for (const s of words(m[1]!)) {
@@ -222,7 +223,7 @@ const PARTS: Part[] = [
   { re: /^(\S+) \S+ → (\S+) \(.*\)$/, lane: "brew", on: (m, o) => void o.updated.push(`${one(m[1]!)} ${one(m[2]!)}`) },
   {
     // Installed, then found off the reviewed version: the install already happened.
-    re: /^FLAGGED — ([^\s,]+ installed [^\s,]+, reviewed [^\s,]+(?:, [^\s,]+ installed [^\s,]+, reviewed [^\s,]+)*)$/,
+    re: OFF_VERSION,
     lane: "npm",
     on: (m, o) => { for (const s of m[1]!.matchAll(/([^\s,]+) installed ([^\s,]+), reviewed ([^\s,]+)/g)) o.waiting.push(`${one(s[1]!)}: installed at ${one(s[2]!)}, but the review covered ${one(s[3]!)}; read the run log`); },
   },
@@ -230,8 +231,6 @@ const PARTS: Part[] = [
     re: /^(?:FLAGGED|STRUCTURAL FLAG)(?: — )?(.*)$/s,
     lane: "npm",
     open: true,
-    // The batch hold is the status itself: only the claude-code part follows it, so what else follows is the reviewer's reason.
-    swallow: /^(?!claude-code: )/,
     on: (m, o) => {
       const why = one(m[1]!.replace(/^FLAG:\s*/, "")) || "the review held it (see the run log)";
       o.held.push(`npm (whole batch): ${why}`);
@@ -276,7 +275,8 @@ const STUCK_TAIL = new RegExp(`^(?:(.*?) )?\\[((?:[^\\s(\\]]+${STUCK_SINCE} )+)\
 /** One summary line's parts: split on the writers' "; ", joined back where a part carries "; " itself. */
 function readLine(text: string, lane: string, o: Out) {
   const groups: { part: Part; text: string }[] = [];
-  for (const raw of text.split("; ")) {
+  // The npm lane's parts come from the one reader the shadow report uses too (a hold's reason stays whole).
+  for (const raw of lane === "npm" ? npmParts(text) : text.split("; ")) {
     let frag = raw.trim();
     // kegs.ts ends its note with " [<pkg>(N runs, since D) ... ]": the packages stale run after run.
     const st = frag.match(STUCK_TAIL);
@@ -287,7 +287,7 @@ function readLine(text: string, lane: string, o: Out) {
     if (!frag) continue;
     const part = partFor(frag, lane);
     const prev = groups.at(-1);
-    if (prev?.part.swallow?.test(frag) || (!part && prev?.part.open && (prev.part.open === true || prev.part.open.test(frag)))) prev.text += `; ${frag}`;
+    if (!part && prev?.part.open && (prev.part.open === true || prev.part.open.test(frag))) prev.text += `; ${frag}`;
     else groups.push({ part: part ?? UNRECOGNIZED, text: frag });
   }
   for (const g of groups) g.part.on(g.text.match(g.part.re)!, o, lane);

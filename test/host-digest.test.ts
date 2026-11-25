@@ -164,6 +164,24 @@ describe("renderDigest: summary parts", () => {
     expect(s.npm.claudeCode).toBe("2.4.0");
   });
 
+  test("the digest and the shadow report read the same npm parts: no failure in a hold that starts like the off-version form", () => {
+    const log = "=== studio summary ===\n  brew: nothing to update\n  npm:  FLAGGED — a installed 1, reviewed 2 and more; FAILED — z; claude-code: 2.4.0\n";
+    expect(section(digest(log), "Waiting on you")).not.toContain("z: the npm step failed");
+    expect(parsePrevSummary(log, "studio", "shadow")!.npm.failed).toEqual([]);
+  });
+
+  test("an npm hold reason that starts like a brew tap-approval part is still one npm hold", () => {
+    const text = digest("=== studio summary ===\n  brew: nothing to update\n  npm:  FLAGGED — awaiting tap approval: x; FAILED — z; claude-code: 2.4.0\n");
+    expect(section(text, "Held")).toBe("- npm (whole batch): awaiting tap approval: x; FAILED — z");
+    expect(section(text, "Waiting on you")).toBe("- npm: read the reason, then update the globals yourself or wait for a newer release");
+  });
+
+  test("an npm hold reason that starts like a brew skipped-cask part is still one npm hold", () => {
+    const text = digest("=== studio summary ===\n  brew: nothing to update\n  npm:  FLAGGED — trusted-tap cask(s) skipped (no cask review path): x; FAILED — z; claude-code: 2.4.0\n");
+    expect(section(text, "Held")).toBe("- npm (whole batch): trusted-tap cask(s) skipped (no cask review path): x; FAILED — z");
+    expect(section(text, "Waiting on you")).toBe("- npm: read the reason, then update the globals yourself or wait for a newer release");
+  });
+
   test("a held reason that contains a semicolon is kept whole", () => {
     const text = digest("=== studio summary ===\n  brew: nothing to update\n  npm:  FLAGGED — FLAG: new or changed install script: a; install script runs unreviewed package files: b (structural pre-gate); claude-code: 2.4.0\n");
     expect(text).toContain("- npm (whole batch): new or changed install script: a; install script runs unreviewed package files: b (structural pre-gate)");
