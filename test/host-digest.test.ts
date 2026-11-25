@@ -182,6 +182,20 @@ describe("renderDigest: summary parts", () => {
     expect(section(text, "Waiting on you")).toBe("- npm: read the reason, then update the globals yourself or wait for a newer release");
   });
 
+  test("an npm part that only starts with the letters FLAGGED is no hold", () => {
+    const text = digest("=== studio summary ===\n  brew: nothing to update\n  npm:  FLAGGEDness; FAILED — z; claude-code: 2.4.0\n");
+    expect(text).not.toContain("npm (whole batch)");
+    expect(section(text, "Waiting on you")).toContain("z: the npm step failed");
+  });
+
+  test("a skipped trusted-tap cask on a brew line is held per cask, plain and flagged", () => {
+    for (const part of ["trusted-tap cask(s) skipped (no cask review path): x/y", "FLAGGED — trusted-tap cask(s) skipped (no cask review path): x/y"]) {
+      const text = digest(`=== studio summary ===\n  brew: ${part}\n  npm:  nothing to update\n`);
+      expect(section(text, "Held")).toBe("- x/y: its tap is trusted but has no cask review path, so it was skipped");
+      expect(section(text, "Waiting on you")).toBe("- x/y: check it and upgrade it by hand");
+    }
+  });
+
   test("a held reason that contains a semicolon is kept whole", () => {
     const text = digest("=== studio summary ===\n  brew: nothing to update\n  npm:  FLAGGED — FLAG: new or changed install script: a; install script runs unreviewed package files: b (structural pre-gate); claude-code: 2.4.0\n");
     expect(text).toContain("- npm (whole batch): new or changed install script: a; install script runs unreviewed package files: b (structural pre-gate)");
