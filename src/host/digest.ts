@@ -228,7 +228,7 @@ const PARTS: Part[] = [
     on: (m, o) => { for (const s of m[1]!.matchAll(/([^\s,]+) installed ([^\s,]+), reviewed ([^\s,]+)/g)) o.waiting.push(`${one(s[1]!)}: installed at ${one(s[2]!)}, but the review covered ${one(s[3]!)}; read the run log`); },
   },
   {
-    re: /^(?:FLAGGED|STRUCTURAL FLAG)(?: — )?(.*)$/s,
+    re: /^(?:FLAGGED|STRUCTURAL FLAG)\b(?: — )?(.*)$/s,
     lane: "npm",
     open: true,
     on: (m, o) => {
