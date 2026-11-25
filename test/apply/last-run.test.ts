@@ -10,14 +10,14 @@ const FILE = "/state.test/last-run.json";
 const BREW: HostScript = { formulas: "good-a", verbose: "good-a (1.0) < 1.1", formulaTaps: { "good-a": "homebrew/core" } };
 const NOW = new Date(2026, 9, 22, 7, 0, 0);
 
-async function run(script: HostScript, o: { dryRun?: boolean; cfg?: Parameters<typeof testConfig>[0]; now?: Date; appNet?: AppNet; apply?: { isStopping?: () => boolean; cliRc?: () => number | undefined }; throwOn?: string; onCall?: (line: string, n: number) => { rc: number; out: string; err: string } | undefined } = {}) {
+async function run(script: HostScript, o: { reply?: string; dryRun?: boolean; cfg?: Parameters<typeof testConfig>[0]; now?: Date; appNet?: AppNet; apply?: { isStopping?: () => boolean; cliRc?: () => number | undefined }; throwOn?: string; onCall?: (line: string, n: number) => { rc: number; out: string; err: string } | undefined } = {}) {
   const h = fakeHost(script);
   const inner = h.exec;
   const seen = new Map<string, number>();
   if (o.onCall) h.exec = async (argv, opts) => { const line = argv.join(" "); const n = (seen.get(line) ?? 0) + 1; seen.set(line, n); return o.onCall!(line, n) ?? inner(argv, opts); };
   const inner2 = h.exec;
   if (o.throwOn) h.exec = async (argv, opts) => { if (argv[0] === o.throwOn) throw new Error("spawn failed"); return inner2(argv, opts); };
-  const res = await applyHost(testConfig({ logFile: "/log.test/host-update.log", ...o.cfg }), h.exec, h.fs, { dryRun: o.dryRun ?? false, reviewer: scripted([], "APPROVE\nno attack indicators found").r, typeB: fakeTypeB(0).typeB, now: o.now ?? NOW, ...(o.appNet ? { appNet: o.appNet } : {}), ...o.apply });
+  const res = await applyHost(testConfig({ logFile: "/log.test/host-update.log", ...o.cfg }), h.exec, h.fs, { dryRun: o.dryRun ?? false, reviewer: scripted([], o.reply ?? "APPROVE\nno attack indicators found").r, typeB: fakeTypeB(0).typeB, now: o.now ?? NOW, ...(o.appNet ? { appNet: o.appNet } : {}), ...o.apply });
   const text = h.files.get(FILE);
   return { ...res, ...h, doc: text === undefined ? undefined : JSON.parse(text), text };
 }
@@ -171,6 +171,12 @@ describe("last-run.json (OUP-326)", () => {
     const r = await run({ rc: { "npm outdated -g --json": 5 } });
     expect(r.rc).toBe(1);
     expect(r.doc).toMatchObject({ ok: false, rc: 1, failed: ["npm"] });
+  });
+  test("an npm hold reason that quotes FAILED or ERROR is a hold, not a failure: rc 0, failed []", async () => {
+    const r = await run({ npmOutdated: JSON.stringify({ tool: { current: "1.0.0", wanted: "1.1.0", latest: "1.1.0" } }) }, { reply: "FLAG: postinstall prints FAILED and ERROR then runs curl" });
+    expect(r.summary.join("\n")).toContain("FLAGGED — FLAG: postinstall prints FAILED and ERROR");
+    expect(r.rc).toBe(0);
+    expect(r.doc).toMatchObject({ ok: true, rc: 0, failed: [], held: ["tool"] });
   });
   test("npm and cask upgrades are in upgraded", async () => {
     const r = await run({ casks: "tfapp", caskTaps: { tfapp: "homebrew/cask" }, verbose: "tfapp (1) < 2", npmOutdated: JSON.stringify({ tool: { current: "1.0.0", wanted: "1.1.0", latest: "1.1.0" } }), lsof: ["COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nlaunchd 1 root txt REG 1,4 1 2 /sbin/launchd\n"] });
