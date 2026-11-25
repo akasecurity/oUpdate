@@ -80,6 +80,12 @@ export interface ApplyConfig {
   upstreamTaps: string[];
   /** Per-host tap approvals, "<tap>\t<host or *>\t<date>\t<note>" rows; adds to typeBTaps. */
   approvedTapsFile?: string;
+  /** The policy file naming an owner and reason per pin entry (policy.ts); default: oupdate-policy.json beside the config file. */
+  policyFile?: string;
+  /** Set when the config is loaded from a file: the policy's ownerless warnings, logged after the run. */
+  policyNotes?: string[];
+  /** The policy's own pinRoots and caskExclude entries (policy.ts), so a run logs the owner and reason of an exclusion it came from. */
+  policyEntries?: { pinRoots: { value: string; owner: string; reason: string }[]; caskExclude: { value: string; owner: string; reason: string }[] };
   hostPrefixes: string[];
   /** Repos one level under these may hold a pins.json. */
   pinRoots: string[];
@@ -165,7 +171,7 @@ export const DEFAULTS = {
 };
 
 const KEYS = new Set([
-  "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "hostPrefixes", "pinRoots",
+  "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "policyFile", "hostPrefixes", "pinRoots",
   "caskExclude", "inPlaceCasks", "heldByDesign", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "jobRunners", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "upgradeTimeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
@@ -379,6 +385,7 @@ export function parseApplyConfig(text: string, fallbackHost: string, env: Record
     typeBTaps: (list(a, "typeBTaps", w) ?? []).map((t) => t.toLowerCase()),
     upstreamTaps: (list(a, "upstreamTaps", w) ?? []).map((t) => t.toLowerCase()),
     approvedTapsFile: path(a, "approvedTapsFile", w),
+    policyFile: path(a, "policyFile", w),
     hostPrefixes: list(a, "hostPrefixes", w) ?? [],
     pinRoots: (list(a, "pinRoots", w) ?? []).map((p, i) => {
       if (!isAbsolute(p)) throw new Error(`${w}.pinRoots[${i}] must be an absolute path`);

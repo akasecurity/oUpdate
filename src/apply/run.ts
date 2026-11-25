@@ -153,7 +153,8 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
 
   // The brew phase's bookkeeping, kept outside each step so a step that stops part-way still reports.
   const b = newBrewState(dryRun);
-  const brewHeld = () => [...cfg.caskExclude, ...heldFromPinned(b.pinned), ...b.selfBun.flatMap((n) => [n, last(n)]), ...b.rcHeldNames];
+  const brewHeldBase = () => [...heldFromPinned(b.pinned), ...b.selfBun.flatMap((n) => [n, last(n)]), ...b.rcHeldNames];
+  const brewHeld = () => [...cfg.caskExclude, ...brewHeldBase()];
   const npmFailed: string[] = [];
 
   // Every command goes through here: brew never auto-updates, and a timeout is a FAILED entry of
@@ -459,7 +460,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       return;
     }
     const q = await x([cfg.brew, "outdated", "--json=v2", "--greedy-auto-updates", ...(b.fetchHead ? ["--fetch-HEAD"] : [])]);
-    const formulae = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld(), "formulae") : undefined;
+    const formulae = q.rc === 0 ? pendingFromOutdated(q.out, brewHeldBase(), "formulae") : undefined;
     const casks = q.rc === 0 ? pendingFromOutdated(q.out, brewHeld(), "casks") : undefined;
     if (formulae === undefined || casks === undefined) {
       await brewFailed("pending-query");

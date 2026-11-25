@@ -20,6 +20,7 @@ import { parseApplyConfig, type ApplyConfig } from "../apply/config.ts";
 import { killLive, runStopTasks, type Exec } from "../apply/exec.ts";
 import type { ApplyFs } from "../apply/fs.ts";
 import { applyHost, gatekeeperAction } from "../apply/run.ts";
+import { applyPolicy, DEFAULT_POLICY_NAME, parsePolicy } from "../apply/policy.ts";
 import { cleanOldBackups } from "./backups.ts";
 import { readiness } from "./readiness.ts";
 import { ownerDir, realHttpStatus, realReleaseLock, realTakeLock, runOwnerWaiter } from "../apply/owner-waiter.ts";
@@ -145,15 +146,26 @@ export async function readinessMain(c: Extract<HostCommand, { mode: "readiness" 
   return r.rc;
 }
 
-function loadConfig(c: { config: string; host?: string }): ApplyConfig {
+function loadConfig(c: { config: string; host?: string }, usePolicy = false): ApplyConfig {
   let text: string;
   try {
     text = readFileSync(c.config, "utf8");
   } catch {
     throw new Error(`cannot read config ${c.config}`);
   }
-  const cfg = parseApplyConfig(text, c.host ?? hostname().split(".")[0]!);
-  return c.host ? { ...cfg, host: c.host } : cfg;
+  const parsed = parseApplyConfig(text, c.host ?? hostname().split(".")[0]!);
+  // Only the apply run reads the policy: a broken one must not stop readiness, the gatekeeper or the stale-owner waiter.
+  if (!usePolicy) return c.host ? { ...parsed, host: c.host } : parsed;
+  // The policy file: a named one must read; the default beside the config is optional (none: every plain value is ownerless).
+  const policyPath = parsed.policyFile ?? `${dirname(c.config)}/${DEFAULT_POLICY_NAME}`;
+  let policyText: string | undefined;
+  try {
+    policyText = readFileSync(policyPath, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT" || parsed.policyFile) throw new Error(`cannot read policy file ${policyPath}`);
+  }
+  const { cfg, notes } = applyPolicy(parsed, policyText === undefined ? undefined : parsePolicy(policyText, policyPath), basename(policyPath));
+  return { ...cfg, ...(c.host ? { host: c.host } : {}), policyNotes: notes };
 }
 
 /**
@@ -261,7 +273,7 @@ export function digestPath(logFile: string): string {
  */
 export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatekeeper" }>, deps: ApplyDeps & { ownerWaiterArgv?: string[]; renderDigest?: (a: DigestInput) => string }): Promise<{ text: string; rc: number }> {
   const now = deps.now ?? new Date();
-  const loaded = loadConfig(c);
+  const loaded = loadConfig(c, c.mode === "apply");
   const cfg = loaded.logFile ? { ...loaded, logFile: logFileFor(c, logPath(loaded.logFile, now)) } : loaded;
   const write = deps.out ?? ((l: string) => console.log(l));
   const out = (l: string) => {
@@ -339,6 +351,8 @@ export async function applyMain(c: Extract<HostCommand, { mode: "apply" | "gatek
     if (!c.dryRun) mkdirSync(cfg.stateDir, { recursive: true });
     const r = await applyHost(cfg, deps.exec, deps.fs, { dryRun: c.dryRun, now, onLine: (l) => emit(l), isStopping: () => stopCode !== undefined, cliRc: () => stopCode ?? (logBroken ? 1 : undefined), ownerWaiterArgv: deps.ownerWaiterArgv ?? ownerWaiterArgv(c.config), ...(deps.previousUpdater ? { previousUpdater: deps.previousUpdater } : {}), ...(deps.jobRunners ? { jobRunners: deps.jobRunners } : {}) });
     // The end-of-run notice is logged after the summary block: emitted by applyHost already.
+    // The policy check's warnings, after the summary (the digest reads only the run block above it).
+    for (const l of cfg.policyNotes ?? []) emit(l);
     // After a clean run: oUpdate's own old config backups go (a dry run only lists them). Never fails the run.
     // Not after a stop (a signal ends the log) or with a broken log (a deletion nobody can read back).
     if (r.rc === 0 && stopCode === undefined && !logBroken) {
