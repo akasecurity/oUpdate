@@ -220,7 +220,9 @@ export async function finishRun(rt: RunCtx, a: { npmRun: NpmRun; npmStatus: stri
   const npmParts = [...uniq(npmFailed).map((t) => `FAILED — ${t}`), ...(npmStatus ? [npmStatus] : npmFailed.length ? npmPartial : ["nothing to update"])];
   const npmLine = [...npmParts, ...(ccPart ? [ccPart] : [])].join("; ");
   const mas = MAS_NOT_CHECKED;
-  const rc: 0 | 1 = b.failed.length || /FAILED|ERROR/.test(npmLine) ? 1 : 0;
+  // From the structured failures, never from the status text: a hold reason quoted there may contain the word FAILED or ERROR.
+  const ccFailed = !!ccPart?.startsWith("claude-code: FAILED");
+  const rc: 0 | 1 = b.failed.length || npmFailed.length || npmRun.failed.length || npmRun.errored || ccFailed ? 1 : 0;
   const summary = summaryLines(host, dryRun, brewStatus, npmLine, mas);
   for (const l of summary) sink?.(l);
   // A run being stopped by a signal sends no done notice: its ABORTED line is the last word.
@@ -244,7 +246,7 @@ export async function finishRun(rt: RunCtx, a: { npmRun: NpmRun; npmStatus: stri
     fs: rt.fs, stateDir: rt.cfg.stateDir, dryRun, log,
     run: {
       host, pid: process.pid, started: isoZone(rt.now), ended: isoZone(new Date()), rc: opts.cliRc?.() ?? rc, stopped: stoppedRun,
-      failed: uniq([...b.failed.map((t, i) => b.timeoutAt.brew.get(i) ?? t), ...npmTokens, ...(ccPart?.includes("FAILED") ? ["claude-code"] : [])]),
+      failed: uniq([...b.failed.map((t, i) => b.timeoutAt.brew.get(i) ?? t), ...npmTokens, ...(ccFailed ? ["claude-code"] : [])]),
       upgraded: [...b.upgraded, ...b.casksUp, ...b.appUpgraded, ...npmRun.upgraded],
       held: uniq(heldNames),
       linkage: b.linkageNote, log: rt.cfg.logFile ?? "",
