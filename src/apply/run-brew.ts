@@ -3,6 +3,7 @@
 
 import { join } from "node:path";
 import { appBundleUpgrade, realAppNet } from "./appbundle.ts";
+import { upgradeUnits } from "./dependents.ts";
 import type { ApplyConfig, ReleaseCheck } from "./config.ts";
 import { LOG_ONLY, type Exec } from "./exec.ts";
 import { gkCheck, gkRelease, gkSnapshot, realGates, type GkEnv, type GkOptions } from "./gatekeeper.ts";
@@ -137,7 +138,9 @@ export async function brewSection(rt: RunCtx) {
   let formulas: string[] = [];
   if (f.rc !== 0) await brewFailed("outdated-query");
   else formulas = words(f.out);
-  const c = await x([cfg.brew, "outdated", "--cask", "--greedy-auto-updates"]);
+  // Every outdated formula, before any hold takes one out of the list: a dependent's upgrade is widened only by one that stays in it.
+  const outdatedAll = [...formulas];
+  const c =await x([cfg.brew, "outdated", "--cask", "--greedy-auto-updates"]);
   let casks: string[] = [];
   if (c.rc !== 0) await brewFailed("cask-outdated-query");
   else casks = words(c.out);
@@ -406,6 +409,7 @@ export async function brewSection(rt: RunCtx) {
     if (!typeA.length && !keptCasks.length) log.push("Type A: nothing left to upgrade after holds");
     else if (dryRun) {
       log.push(`dry-run: would upgrade Type A formulas=[${typeA.join(" ")}] casks=[${keptCasks.join(" ")}]`);
+      for (const unit of (await upgradeUnits(rt, typeA, outdatedAll)).filter((u) => u.length > 1)) log.push(`dry-run: would upgrade as one unit: ${unit.join(" ")}`);
       for (const n of typeA) b.plan.typeAUp.add(planKey("formula", n));
       for (const n of keptCasks) b.plan.typeAUp.add(planKey("cask", n));
     }
@@ -415,15 +419,36 @@ export async function brewSection(rt: RunCtx) {
         b.deferredCasks = keptCasks;
         log.push(`Type A casks deferred until end of run: ${keptCasks.join(" ")}`);
       }
-      for (const [i, pkg] of typeA.entries()) {
+      const units = await upgradeUnits(rt, typeA, outdatedAll);
+      for (const [i, unit] of units.entries()) {
         if (breakerOpen(rt)) {
-          b.breakerSkipped.push(...typeA.slice(i));
+          b.breakerSkipped.push(...units.slice(i).flat());
           break;
         }
-        const code = await upgradeFormula(rt, pkg);
+        let code: number | "held";
+        if (unit.length === 1) code = await upgradeFormula(rt, unit[0]!);
+        else {
+          // Formulae that use each other, in one upgrade, bounded as one package is.
+          log.push(`  upgrading as one unit: ${unit.join(" ")}`);
+          code = (await x([cfg.brew, "upgrade", ...unit], { env: rt.installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true, ...LOG_ONLY })).rc;
+        }
         if (code === "held") continue;
-        if (code !== 0) await brewFailed(pkg);
-        else if (await versionHeld(rt, pkg, reviewedVersion(pkg, verbose), (await brewView(rt.rcEnv.exec, cfg.brew, pkg))?.current)) b.upgraded.push(pkg);
+        const reached: string[] = [];
+        for (const pkg of unit) {
+          if (code !== 0 && unit.length > 1) {
+            // A set that failed may still have upgraded some members: one now on the reviewed version counts upgraded (so its
+            // relink and restart run), the rest FAILED. The run is never clean after a non-zero exit (see below).
+            const now = (await brewView(rt.rcEnv.exec, cfg.brew, pkg))?.current;
+            if (now !== undefined && !versionMismatch(pkg, reviewedVersion(pkg, verbose), now)) {
+              log.push(`  ${pkg}: the unit's brew upgrade failed, but ${pkg} is on ${now} — counted upgraded`);
+              b.upgraded.push(pkg);
+              reached.push(pkg);
+            } else await brewFailed(pkg);
+          } else if (code !== 0) await brewFailed(pkg);
+          else if (await versionHeld(rt, pkg, reviewedVersion(pkg, verbose), (await brewView(rt.rcEnv.exec, cfg.brew, pkg))?.current)) b.upgraded.push(pkg);
+        }
+        // Every member reached the reviewed version but brew exited non-zero: still a failure, recorded under each member name.
+        if (code !== 0 && unit.length > 1 && reached.length === unit.length) for (const pkg of unit) await brewFailed(pkg);
       }
     }
   }
