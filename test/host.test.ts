@@ -86,20 +86,47 @@ describe("previous updater summary", () => {
   });
   test("npm FLAGGED holds the whole pending batch; FAILED names the package", () => {
     const flag = ["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", "  brew: upgraded: node", "  npm:  FLAGGED — reviewer unavailable; claude-code: 2.1.308"].join("\n");
-    expect(parsePrevSummary(flag, "hostd")!.npm).toEqual({ upgraded: [], flagged: true, failed: [], claudeCode: "2.1.308" });
+    expect(parsePrevSummary(flag, "hostd")!.npm).toEqual({ upgraded: [], flagged: true, failed: [], unrecognized: [], claudeCode: "2.1.308" });
     const wide = ["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", "  npm:        FLAGGED — reviewer unavailable"].join("\n");
     expect(parsePrevSummary(wide, "hostd")!.npm.flagged).toBe(true);
     const fail = ["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", "  npm:  FAILED — agent-browser; claude-code: 2.1.308"].join("\n");
-    expect(parsePrevSummary(fail, "hostd")!.npm).toEqual({ upgraded: [], flagged: false, failed: ["agent-browser"], claudeCode: "2.1.308" });
+    expect(parsePrevSummary(fail, "hostd")!.npm).toEqual({ upgraded: [], flagged: false, failed: ["agent-browser"], unrecognized: [], claudeCode: "2.1.308" });
   });
   test("claude-code: a version, the previous updater's FAILED (rc, on ver) and oupdate's FAILED (timeout, on ver)", () => {
     // Mutant caught: a FAILED claude-code part read as fine (no claudeCodeFailed), or "unknown" kept as a version.
     const npm = (part: string) => parsePrevSummary(["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", `  npm:  nothing to update; ${part}`].join("\n"), "hostd")!.npm;
-    expect(npm("claude-code: 2.1.309")).toEqual({ upgraded: [], flagged: false, failed: [], claudeCode: "2.1.309" });
-    expect(npm("claude-code: FAILED (rc=1, on 2.1.308)")).toEqual({ upgraded: [], flagged: false, failed: [], claudeCode: "2.1.308", claudeCodeFailed: true });
-    expect(npm("claude-code: FAILED (rc=1, on unknown)")).toEqual({ upgraded: [], flagged: false, failed: [], claudeCodeFailed: true });
+    expect(npm("claude-code: 2.1.309")).toEqual({ upgraded: [], flagged: false, failed: [], unrecognized: [], claudeCode: "2.1.309" });
+    expect(npm("claude-code: FAILED (rc=1, on 2.1.308)")).toEqual({ upgraded: [], flagged: false, failed: [], unrecognized: [], claudeCode: "2.1.308", claudeCodeFailed: true });
+    expect(npm("claude-code: FAILED (rc=1, on unknown)")).toEqual({ upgraded: [], flagged: false, failed: [], unrecognized: [], claudeCodeFailed: true });
     expect(npm("claude-code: FAILED (timeout, on 2.1.308)")).toMatchObject({ claudeCode: "2.1.308", claudeCodeFailed: true });
     expect(npm("claude-code: not configured").claudeCode).toBeUndefined();
+  });
+  test("an npm part the parser cannot place is kept in unrecognized, never read as silence", () => {
+    const npm = (line: string) => parsePrevSummary(["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", `  npm:  ${line}`].join("\n"), "hostd")!.npm;
+    // The legacy bare ";" joins a failure to the part before it: failed stays empty, so the part must show.
+    expect(npm("upgraded: a;FAILED — z").unrecognized).toEqual(["upgraded: a;FAILED — z"]);
+    expect(npm("nothing to update; something new; claude-code: 2.1.309").unrecognized).toEqual(["something new"]);
+    // Every part the writers produce is placed.
+    expect(npm("FAILED — x; upgraded: a b; claude-code: 2.1.309").unrecognized).toEqual([]);
+    expect(npm("FLAGGED — a installed 1, reviewed 2; ERROR — pending query failed; STUCK: p=1.0(2 runs, since 2026-10-01); claude-code: not completed").unrecognized).toEqual([]);
+    expect(npm("not completed — still pending: a b; claude-code: FAILED (timeout, on 2.1.308)").unrecognized).toEqual([]);
+    expect(npm("nothing to update").unrecognized).toEqual([]);
+  });
+  test("a bare ';' inside any npm part makes that part unrecognized", () => {
+    const npm = (line: string) => parsePrevSummary(["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", `  npm:  ${line}`].join("\n"), "hostd")!.npm;
+    for (const part of [
+      "FAILED — a;FAILED — z",
+      "claude-code: 2.0.0;FAILED — z",
+      "ERROR — pending query failed;FAILED — z",
+      "STUCK: a=1.0(2 runs, since 2026-10-01);FAILED — z",
+      "not completed — still pending: a;FAILED — z",
+      "not managed here (apply.npm is null);FAILED — z",
+    ]) expect({ part, un: npm(part).unrecognized }).toEqual({ part, un: [part] });
+  });
+  test("a malformed claude-code failure is unrecognized; the writer's forms are placed", () => {
+    const npm = (line: string) => parsePrevSummary(["=== host-update hostd 2026-10-22 07:00 ===", "=== hostd summary ===", `  npm:  ${line}`].join("\n"), "hostd")!.npm;
+    expect(npm("claude-code: FAILED (rc=oops, on 2.0.0)").unrecognized).toEqual(["claude-code: FAILED (rc=oops, on 2.0.0)"]);
+    for (const p of ["claude-code: FAILED (rc=1, on 2.0.0)", "claude-code: FAILED (timeout, on unknown)", "claude-code: not configured", "claude-code: not completed", "claude-code: dry-run", "claude-code: not run (oupdate is stopping)", "claude-code: 2.0.0", "claude-code: unknown"]) expect(npm(p).unrecognized).toEqual([]);
   });
   test("a Type B FLAG and a CASK_EXCLUDE in the run body are held too (the summary line leaves them out)", () => {
     const log = [
@@ -167,6 +194,15 @@ describe("compare", () => {
     expect(c.agree).toBe(true);
     expect(c.upgraded).toEqual({ baseline: true, onlyInventory: [], onlyPrevious: [] });
     expect(c.held).toEqual({ onlyInventory: [], onlyPrevious: [] });
+  });
+  test("an unrecognized npm part is a disagreement even when everything else matches", () => {
+    const outdated = [
+      { kind: "brew-formula" as const, name: "example/tf/terraform", installed: "1.16.5", current: "1.16.6", pinned: false },
+      { kind: "brew-formula" as const, name: "example/svc/svc", installed: "HEAD-a", current: "HEAD", pinned: false },
+    ];
+    const c = compareRun({ prev, cur, outdated, summary: { ...summary, npm: { upgraded: [], unrecognized: ["upgraded: a;FAILED — z"] } } });
+    expect(c.unrecognized).toEqual(["upgraded: a;FAILED — z"]);
+    expect(c.agree).toBe(false);
   });
   test("disagree: an outdated package the previous updater did not hold, a claimed upgrade with no version change", () => {
     const outdated = [{ kind: "brew-formula" as const, name: "brotli", installed: "1.2.0", current: "1.2.0_1", pinned: false }];
@@ -242,6 +278,12 @@ describe("hostReport", () => {
     expect(r.compare?.held.onlyInventory).toEqual(["brotli", "npm"]);
     expect(r.compare?.agree).toBe(false);
     expect(JSON.stringify(r)).not.toMatch(/\/opt\/|\/Users|\/home/);
+  });
+  test("an unrecognized npm part is a note in the report and the comparison carries it", async () => {
+    const log = ["=== host-update hosta 2026-10-21 07:00 ===", "=== hosta summary ===", "  brew: nothing to update", "  npm:  upgraded: a;FAILED — z"].join("\n");
+    const r = await hostReport({ host: "hosta", raw, prevLog: log, prev: undefined, feed: { query: async () => [] }, now: new Date("2026-10-21T20:00:00Z") });
+    expect(r.notes.join(" ")).toContain("npm part(s) the report cannot read: upgraded: a;FAILED — z");
+    expect(r.compare?.unrecognized).toEqual(["upgraded: a;FAILED — z"]);
   });
   test("no previous updater block: compare is null and the report says so", async () => {
     const r = await hostReport({ host: "otherhost", raw, prevLog: "", prev: undefined, feed: { query: async () => [] }, now: new Date("2026-10-21T20:00:00Z") });

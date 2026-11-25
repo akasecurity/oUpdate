@@ -54,6 +54,7 @@ export async function hostReport(a: { host: string; raw: RawProbe; prevLog: stri
   const summary = parsePrevSummary(a.prevLog, a.host, name);
   if (!summary) notes.push(`no ${name} summary for ${a.host}`);
   else if (summary.aborted) notes.push(`${name} run aborted`);
+  if (summary?.npm.unrecognized?.length) notes.push(`${summary.npm.unrecognized.length} npm part(s) the report cannot read: ${summary.npm.unrecognized.join("; ")}`);
   if (summary && !a.prev) notes.push("no previous snapshot: upgrade comparison starts next run");
   const compare = summary ? compareRun({ prev: a.prev, cur: inventory, outdated, summary }) : null;
   return { host: a.host, date: summary?.date ?? localDate(a.now), generatedAt: a.now.toISOString(), inventory, outdated, advisories, previous: summary, compare, notes };

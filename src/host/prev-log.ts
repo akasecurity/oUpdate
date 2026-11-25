@@ -3,7 +3,7 @@
 // own logs read the same way). Two holds show only in the run body, between the two:
 // a Type B FLAG (a third-party tap's formula review) and a CASK_EXCLUDE skip.
 
-import { BATCH_HOLD, npmParts } from "./npm-line.ts";
+import { BATCH_HOLD, isKnownNpmPart, npmParts } from "./npm-line.ts";
 import { MAS_NOT_CHECKED } from "../apply/summary-text.ts";
 import { DEFAULT_COMPAT } from "../targets/compat.ts";
 import { POLICY_NOTE_PREFIX } from "../apply/policy.ts";
@@ -12,9 +12,10 @@ export interface PrevSummary {
   date?: string;
   // pinned: held because a repo's pins.json lists them; brew-pinned ones are left to Outdated.pinned.
   brew: { upgraded: string[]; failed: string[]; flagged: string[]; stuck: string[]; pinned?: string[]; excluded?: string[] };
+  // unrecognized: each part of the npm line the parser cannot place (shown by the report, never dropped).
   // flagged: the whole pending batch was held (FLAGGED, or a structural flag); the summary names none of it.
   // claudeCode: the version reported (on a failure, the one it is stuck on, when known); claudeCodeFailed: its update failed.
-  npm: { upgraded: string[]; flagged?: boolean; failed?: string[]; claudeCode?: string; claudeCodeFailed?: boolean };
+  npm: { upgraded: string[]; flagged?: boolean; failed?: string[]; unrecognized?: string[]; claudeCode?: string; claudeCodeFailed?: boolean };
   aborted: boolean;
 }
 
@@ -36,8 +37,9 @@ function parseBrew(line: string): PrevSummary["brew"] {
 }
 
 function parseNpm(line: string): PrevSummary["npm"] {
-  const n: PrevSummary["npm"] = { upgraded: [], flagged: false, failed: [] };
+  const n: PrevSummary["npm"] = { upgraded: [], flagged: false, failed: [], unrecognized: [] };
   for (const p of npmParts(line)) {
+    if (!isKnownNpmPart(p)) n.unrecognized!.push(p);
     const up = p.match(/^upgraded:(.*)$/);
     if (up) n.upgraded.push(...words(up[1]!));
     if (BATCH_HOLD.test(p)) n.flagged = true;

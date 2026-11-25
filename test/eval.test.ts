@@ -35,6 +35,18 @@ test("agreement: report held differences fail unless waived", () => {
   expect(checkAgreement([{ ...host(d), waive: [{ name: "duckdb", why: "manual pin" }] }]).status).toBe("pass");
 });
 
+test("agreement: an unrecognized npm part in the report is a difference; an old report without the field still reads", () => {
+  const d = mkdtempSync(join(tmpdir(), "ev-"));
+  mkdirSync(join(d, "state/reports"), { recursive: true });
+  const held = { onlyInventory: [], onlyPrevious: [] };
+  writeFileSync(join(d, "state/reports/2026-10-23.json"), JSON.stringify({ compare: { held } }));
+  expect(checkAgreement([host(d)]).status).toBe("pass");
+  writeFileSync(join(d, "state/reports/2026-10-23.json"), JSON.stringify({ compare: { held, unrecognized: ["upgraded: a;FAILED — z"] } }));
+  const r = checkAgreement([host(d)]);
+  expect(r.status).toBe("fail");
+  expect(r.detail).toContain("upgraded: a;FAILED — z");
+});
+
 test("landing and score", () => {
   const d = mkdtempSync(join(tmpdir(), "ev-"));
   expect(checkLanding(join(d, "x.json")).status).toBe("not run");
