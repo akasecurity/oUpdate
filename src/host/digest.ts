@@ -70,6 +70,8 @@ interface Part {
   re: RegExp;
   /** The part can carry "; ": a following fragment that starts no part (and matches this, when given) is joined back. */
   open?: true | RegExp;
+  /** A hold reason: every following fragment matching this is part of the reason, even one that reads like another part ("ERROR — x"). */
+  swallow?: RegExp;
   lane?: "brew" | "npm";
   on: (m: RegExpMatchArray, o: Out, lane: string) => void;
 }
@@ -228,6 +230,8 @@ const PARTS: Part[] = [
     re: /^(?:FLAGGED|STRUCTURAL FLAG)(?: — )?(.*)$/s,
     lane: "npm",
     open: true,
+    // The batch hold is the status itself: only the claude-code part follows it, so what else follows is the reviewer's reason.
+    swallow: /^(?!claude-code: )/,
     on: (m, o) => {
       const why = one(m[1]!.replace(/^FLAG:\s*/, "")) || "the review held it (see the run log)";
       o.held.push(`npm (whole batch): ${why}`);
@@ -283,7 +287,7 @@ function readLine(text: string, lane: string, o: Out) {
     if (!frag) continue;
     const part = partFor(frag, lane);
     const prev = groups.at(-1);
-    if (!part && prev?.part.open && (prev.part.open === true || prev.part.open.test(frag))) prev.text += `; ${frag}`;
+    if (prev?.part.swallow?.test(frag) || (!part && prev?.part.open && (prev.part.open === true || prev.part.open.test(frag)))) prev.text += `; ${frag}`;
     else groups.push({ part: part ?? UNRECOGNIZED, text: frag });
   }
   for (const g of groups) g.part.on(g.text.match(g.part.re)!, o, lane);

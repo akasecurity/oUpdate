@@ -144,6 +144,26 @@ describe("renderDigest: summary parts", () => {
     expect(section(text, "Waiting on you")).toBe("- Gatekeeper: a: 2 unapproved\n- Gatekeeper: b: 1 unapproved + 1 dylib\n- c: pending for 4 runs since 2026-10-01; upgrade it by hand or find what blocks it");
   });
 
+  test("a hold reason quoting a FAILED or ERROR part is one hold and no failure", () => {
+    const text = digest("=== studio summary ===\n  brew: nothing to update\n  npm:  FLAGGED — FLAG: postinstall printed a warning; ERROR — install script needs review; FAILED — x; claude-code: 2.4.0\n");
+    expect(section(text, "Held")).toBe("- npm (whole batch): postinstall printed a warning; ERROR — install script needs review; FAILED — x");
+    expect(section(text, "Waiting on you")).toBe("- npm: read the reason, then update the globals yourself or wait for a newer release");
+    expect(section(text, "Notes")).toBe("- claude-code: 2.4.0 (checked)");
+  });
+
+  test("a real npm install failure still waits on you, and the shadow report counts it", () => {
+    const line = "FAILED — tool; upgraded: other";
+    expect(section(digest(`=== studio summary ===\n  brew: nothing to update\n  npm:  ${line}\n`), "Waiting on you")).toContain("tool: the npm step failed; read the run log");
+    expect(parsePrevSummary(`=== studio summary ===\n  brew: nothing to update\n  npm:  ${line}\n`, "studio", "shadow")!.npm.failed).toEqual(["tool"]);
+  });
+
+  test("the shadow report does not read a failure out of a hold reason", () => {
+    const s = parsePrevSummary("=== studio summary ===\n  brew: nothing to update\n  npm:  FLAGGED — FLAG: a warning; FAILED — x; claude-code: 2.4.0\n", "studio", "shadow")!;
+    expect(s.npm.failed).toEqual([]);
+    expect(s.npm.flagged).toBe(true);
+    expect(s.npm.claudeCode).toBe("2.4.0");
+  });
+
   test("a held reason that contains a semicolon is kept whole", () => {
     const text = digest("=== studio summary ===\n  brew: nothing to update\n  npm:  FLAGGED — FLAG: new or changed install script: a; install script runs unreviewed package files: b (structural pre-gate); claude-code: 2.4.0\n");
     expect(text).toContain("- npm (whole batch): new or changed install script: a; install script runs unreviewed package files: b (structural pre-gate)");
