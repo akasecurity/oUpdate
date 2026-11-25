@@ -168,7 +168,7 @@ describe("old config backups", () => {
 
   test("a failed apply run (rc 1) deletes nothing", async () => {
     const c = setup({ ...OLD });
-    const h = fakeHost({ lsof: ["COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nlaunchd 1 root txt REG 1,4 1 2 /sbin/launchd\n"], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", upgradeRc: { "--cask --greedy app": 1 } });
+    const h = fakeHost({ lsof: ["COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nlaunchd 1 root txt REG 1,4 1 2 /sbin/launchd\n"], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) != 1.1", upgradeRc: { "--cask --greedy app": 1 } });
     const r = await applyMain({ mode: "apply", config: c.cfg, dryRun: false, host: "hosta" }, { exec: h.exec, fs: { ...h.fs, mtimeMs: realFs.mtimeMs!, listDir: (p) => (p === c.dir ? realFs.listDir(p) : h.fs.listDir(p)), remove: realFs.remove }, out: () => {} });
     expect(r.rc).toBe(1);
     for (const f of Object.keys(OLD)) expect(existsSync(join(c.dir, f))).toBe(true);

@@ -179,12 +179,12 @@ describe("last-run.json (OUP-326)", () => {
     expect(r.doc).toMatchObject({ ok: true, rc: 0, failed: [], held: ["tool"] });
   });
   test("npm and cask upgrades are in upgraded", async () => {
-    const r = await run({ casks: "tfapp", caskTaps: { tfapp: "homebrew/cask" }, verbose: "tfapp (1) < 2", npmOutdated: JSON.stringify({ tool: { current: "1.0.0", wanted: "1.1.0", latest: "1.1.0" } }), lsof: ["COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nlaunchd 1 root txt REG 1,4 1 2 /sbin/launchd\n"] });
+    const r = await run({ casks: "tfapp", caskTaps: { tfapp: "homebrew/cask" }, verbose: "tfapp (1) != 2", npmOutdated: JSON.stringify({ tool: { current: "1.0.0", wanted: "1.1.0", latest: "1.1.0" } }), lsof: ["COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\nlaunchd 1 root txt REG 1,4 1 2 /sbin/launchd\n"] });
     expect(r.doc.upgraded).toEqual(expect.arrayContaining(["tfapp", "tool"]));
   });
   test("a cask with a process running from it is held", async () => {
     const RUNNING = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngcloud 55 u txt REG 1,4 1 2 /brew/Caskroom/app/1.0/bin/gcloud\n";
-    const r = await run({ casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", lsof: [RUNNING, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] });
+    const r = await run({ casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) != 1.1", lsof: [RUNNING, "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"] });
     expect(r.doc.held).toEqual(["app"]);
   });
   test("a linkage failure's note is in linkage", async () => {

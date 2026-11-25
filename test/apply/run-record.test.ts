@@ -145,3 +145,45 @@ describe("the per-run from-version record", () => {
     expect(JSON.parse(writes[0]!).entries.map((e: { name: string }) => e.name)).toEqual(["a", "b", "c"]);
   });
 });
+
+describe("a sensitive formula beside an excluded cask of its name (OUP-363)", () => {
+  test("the formula is reviewed on its own row and upgrades; the cask row does not hold it", async () => {
+    const h = fakeHost({
+      formulas: "curl",
+      casks: "curl",
+      verbose: "curl (8.1) < 8.2\ncurl (1.0) != 1.1",
+      formulaTaps: { curl: "homebrew/core" },
+      caskTaps: { curl: "homebrew/cask" },
+    });
+    const res = await applyHost(testConfig({ caskExclude: ["curl"] }), h.exec, h.fs, { dryRun: true, now });
+    const text = JSON.stringify(res);
+    expect(text).not.toContain("HOLD: curl");
+    expect(text).toContain("would upgrade Type A formulas=[curl]");
+  });
+});
+
+describe("a kept same-name cask beside a sensitive formula (OUP-363)", () => {
+  test("only the kind that fails the review is held: the formula upgrades, the cask stays held as before", async () => {
+    const h = fakeHost({
+      formulas: "curl",
+      casks: "curl",
+      verbose: "curl (8.1) < 8.2\ncurl (1.0) != 1.1",
+      formulaTaps: { curl: "homebrew/core" },
+      caskTaps: { curl: "homebrew/cask" },
+    });
+    const res = await applyHost(testConfig(), h.exec, h.fs, { dryRun: true, now });
+    expect(res.plan.typeAHeld).toEqual(["cask:curl"]);
+    expect(res.plan.typeAUp).toEqual(["formula:curl"]);
+  });
+  test("a formula on a major increase and a sensitive same-name cask are each held under their own kind", async () => {
+    const h = fakeHost({
+      formulas: "curl",
+      casks: "curl",
+      verbose: "curl (8.1) < 9.0\ncurl (1.0) != 1.1",
+      formulaTaps: { curl: "homebrew/core" },
+      caskTaps: { curl: "homebrew/cask" },
+    });
+    const res = await applyHost(testConfig(), h.exec, h.fs, { dryRun: true, now });
+    expect(res.plan.typeAHeld).toEqual(["formula:curl", "cask:curl"]);
+  });
+});
