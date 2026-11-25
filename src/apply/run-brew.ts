@@ -96,7 +96,7 @@ export function assembleBrew(rt: RunCtx): string {
 }
 
 export async function brewSection(rt: RunCtx) {
-  const { opts, dryRun, host, r, tb, log, b, brewHeld, x, notify, step, tbEnv, tbOpts, brewFailed, rcEnv, rcPending, rcBroken, rcUnchecked, gatedOutdated, cfg, fs } = rt;
+  const { opts, dryRun, host, r, tb, log, b, brewHeldBase, x, notify, step, tbEnv, tbOpts, brewFailed, rcEnv, rcPending, rcBroken, rcUnchecked, gatedOutdated, cfg, fs } = rt;
   log.push("", "--- brew ---");
   const v = await x([cfg.brew, "--version"]);
   if (v.rc === 127) {
@@ -284,9 +284,13 @@ export async function brewSection(rt: RunCtx) {
     await brewFailed("outdated-query");
     return;
   }
-  // Excluded and held names stay out of the review table too (literal, by last segment).
-  const hide = brewHeld();
-  const verbose = `${vq.out}${vq.err}`.split("\n").filter((l) => !named(hide, l.trim().split(/\s+/)[0] ?? "")).join("\n");
+  // Excluded and held names stay out of the review table too (literal, by last segment). A cask exclusion hides a cask row only:
+  // a formula that shares the name stays in the table (and so in the version record) unless a pin or hold names it.
+  const hold = brewHeldBase();
+  const verbose = `${vq.out}${vq.err}`.split("\n").filter((l) => {
+    const n = l.trim().split(/\s+/)[0] ?? "";
+    return !(named(hold, n) || (named(cfg.caskExclude, n) && !outdatedAll.some((f) => last(f) === last(n))));
+  }).join("\n");
   log.push(verbose.trimEnd(), "");
   b.verbose = verbose;
   // The versions this run moves from, on disk before the first upgrade (run-record.ts).

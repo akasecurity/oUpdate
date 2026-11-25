@@ -263,6 +263,11 @@ test("a tap-qualified excluded cask is matched on its last segment and kept out 
   expect(r.calls).toContain("brew upgrade --cask --greedy app");
 });
 
+test("a cask exclusion does not hide a formula of the same name from the review table or the version record", async () => {
+  const r = await run({ formulas: "big", verbose: "big (1.0) < 1.1", formulaTaps: { big: "homebrew/core" } }, { cfg: { caskExclude: ["big"] } });
+  expect(r.log.some((l) => l.startsWith("big (1.0) < 1.1"))).toBe(true);
+});
+
 describe("the cask phase and Gatekeeper (port 06)", () => {
   test("snapshot before the upgrade, release then check after it", async () => {
     const h = fakeHost({ lsof: [LSOF_NONE], casks: "app other", caskTaps: { app: "homebrew/cask", other: "homebrew/cask" }, verbose: "app (1.0) < 1.1\nother (2) < 3", sudoCasks: ["other"] });

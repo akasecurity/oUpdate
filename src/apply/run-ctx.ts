@@ -249,6 +249,8 @@ export interface RunCtx {
   stamp: string;
   b: BrewState;
   brewHeld: () => string[];
+  /** brewHeld without the cask exclusions: what holds a formula row as well as a cask row. */
+  brewHeldBase: () => string[];
   /** The per-run from-version record (run-record.ts); a dry run writes nothing. */
   record: RunRecord;
   x: Exec;
