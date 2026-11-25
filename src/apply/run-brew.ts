@@ -383,7 +383,7 @@ export async function brewSection(rt: RunCtx) {
       log.push(...a.log);
       if (a.items) items.push(a.items);
     }
-    for (const pkg of unresolvedF) items.push(`(unresolved tap) (${pkg} ${outdatedVersions(pkg, verbose)}, review: n/a)`);
+    for (const pkg of unresolvedF) items.push(`(unresolved tap) (${pkg} ${outdatedVersions(pkg, verbose, "<")}, review: n/a)`);
     const where = cfg.approvedTapsFile ?? "the approved-taps file (apply.approvedTapsFile)";
     if (items.length) {
       const list = items.join("; ");
@@ -400,20 +400,26 @@ export async function brewSection(rt: RunCtx) {
   if (typeA.length || keptCasks.length) {
     const all = [...typeA, ...keptCasks];
     log.push(`--- Type A review (${all.length} packages) ---`);
-    const a = typeAReview(all, verbose, cfg.sensitive);
+    // Each kind reads only its own rows: an excluded cask row that shares a formula's name is not a second row for the formula.
+    const af = typeAReview(typeA, verbose, cfg.sensitive, "<");
+    const ac = typeAReview(keptCasks, verbose, cfg.sensitive, "!=");
+    const heldAll = [...af.held, ...ac.held.filter((n) => !af.held.includes(n))];
+    const a = { held: heldAll, text: heldAll.length ? `FLAG\nHOLD: ${heldAll.join(" ")}\nSensitive major increase or unverifiable version baseline.` : "APPROVE" };
     log.push("┌─ Type A review", ...a.text.split("\n").map((l) => `│ ${l}`), "└─");
     if (a.held.length) {
       b.flagged = true;
-      const held = new Set(a.held);
+      // The held set is kept per kind: a same-name formula and cask are held only by their own review.
+      const heldF = new Set(af.held);
+      const heldC = new Set(ac.held);
       const wasFormula = new Set(typeA);
       const wasCask = new Set(keptCasks);
-      typeA = typeA.filter((p) => !held.has(p));
-      keptCasks = keptCasks.filter((p) => !held.has(p));
+      typeA = typeA.filter((p) => !heldF.has(p));
+      keptCasks = keptCasks.filter((p) => !heldC.has(p));
       await notify(`⚠️ <b>${host} Type A — holding ${a.held.length} pkg(s), upgrading rest</b>\nheld: ${a.held.join(" ")}\nSensitive major increase or unverifiable version baseline.\nLog: ${cfg.logFile ?? "-"}`);
       log.push(`Type A: holding [${a.held.join(" ")}] — upgrading [${[...typeA, ...keptCasks].join(" ")}]`);
       for (const n of a.held) {
-        if (wasFormula.has(n)) b.plan.typeAHeld.add(planKey("formula", n));
-        if (wasCask.has(n)) b.plan.typeAHeld.add(planKey("cask", n));
+        if (heldF.has(n) && wasFormula.has(n)) b.plan.typeAHeld.add(planKey("formula", n));
+        if (heldC.has(n) && wasCask.has(n)) b.plan.typeAHeld.add(planKey("cask", n));
       }
     }
     typeA = await notWaiting(rt, typeA);
@@ -451,13 +457,13 @@ export async function brewSection(rt: RunCtx) {
             // A set that failed may still have upgraded some members: one now on the reviewed version counts upgraded (so its
             // relink and restart run), the rest FAILED. The run is never clean after a non-zero exit (see below).
             const now = (await brewView(rt.rcEnv.exec, cfg.brew, pkg))?.current;
-            if (now !== undefined && !versionMismatch(pkg, reviewedVersion(pkg, verbose), now)) {
+            if (now !== undefined && !versionMismatch(pkg, reviewedVersion(pkg, verbose, "<"), now)) {
               log.push(`  ${pkg}: the unit's brew upgrade failed, but ${pkg} is on ${now} — counted upgraded`);
               b.upgraded.push(pkg);
               reached.push(pkg);
             } else await brewFailed(pkg);
           } else if (code !== 0) await brewFailed(pkg);
-          else if (await versionHeld(rt, pkg, reviewedVersion(pkg, verbose), (await brewView(rt.rcEnv.exec, cfg.brew, pkg))?.current)) b.upgraded.push(pkg);
+          else if (await versionHeld(rt, pkg, reviewedVersion(pkg, verbose, "<"), (await brewView(rt.rcEnv.exec, cfg.brew, pkg))?.current)) b.upgraded.push(pkg);
         }
         // Every member reached the reviewed version but brew exited non-zero: still a failure, recorded under each member name.
         if (code !== 0 && unit.length > 1 && reached.length === unit.length) for (const pkg of unit) await brewFailed(pkg);
@@ -772,7 +778,7 @@ export async function casksSection(rt: RunCtx) {
         } catch {
           got = undefined;
         }
-        const ok = await versionHeld(rt, cask, reviewedVersion(cask, b.verbose), typeof got === "string" ? got : undefined);
+        const ok = await versionHeld(rt, cask, reviewedVersion(cask, b.verbose, "!="), typeof got === "string" ? got : undefined);
         if (ok) {
           b.casksUp.push(cask);
           if (inPlace) log.push(`  ${cask}: pids ${pids.join(" ")} keep running the old build (inPlaceCasks) until restarted`);

@@ -251,10 +251,10 @@ export async function awaitingTapApproval(
     log.push(...v.log);
     let verdict = v.rc === 0 ? "APPROVE" : v.rc === 1 ? "FLAG" : "n/a";
     if (v.kind) verdict += ` (${v.kind})`;
-    items.push(`${tap} (${pkg} ${outdatedVersions(pkg, verbose)}, review: ${verdict})`);
+    items.push(`${tap} (${pkg} ${outdatedVersions(pkg, verbose, "<")}, review: ${verdict})`);
   }
   for (const { pkg, tap } of casks) {
-    items.push(`${tap === "tap-unresolved" ? "(unresolved tap)" : tap} (${pkg} ${outdatedVersions(pkg, verbose)}, review: n/a (cask))`);
+    items.push(`${tap === "tap-unresolved" ? "(unresolved tap)" : tap} (${pkg} ${outdatedVersions(pkg, verbose, "!=")}, review: n/a (cask))`);
   }
   return { items: items.join("; "), log };
 }

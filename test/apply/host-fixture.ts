@@ -264,9 +264,9 @@ export function fakeTypeB(rc: 0 | 1 | 2 = 0, kind = "formula-only, prebuilt", un
       // The advisory review's own notices are logged, never sent (the real one swaps the notify).
       log.push(`[advisory — not notified] ${o.host} Type B FLAG — ${pkg}`);
       const verdict = rc === 0 ? `APPROVE (${kind})` : rc === 1 ? `FLAG (${kind})` : "n/a";
-      items.push(`${tap} (${pkg} ${outdatedVersions(pkg, verbose)}, review: ${verdict})`);
+      items.push(`${tap} (${pkg} ${outdatedVersions(pkg, verbose, "<")}, review: ${verdict})`);
     }
-    for (const { pkg, tap } of casks) items.push(`${tap === "tap-unresolved" ? "(unresolved tap)" : tap} (${pkg} ${outdatedVersions(pkg, verbose)}, review: n/a (cask))`);
+    for (const { pkg, tap } of casks) items.push(`${tap === "tap-unresolved" ? "(unresolved tap)" : tap} (${pkg} ${outdatedVersions(pkg, verbose, "!=")}, review: n/a (cask))`);
     return { items: items.join("; "), log };
   };
   return { seen, typeB: { upgrades, awaiting } };

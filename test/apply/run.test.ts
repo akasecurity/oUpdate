@@ -16,7 +16,7 @@ const T = "\t";
 // As the previous updater's brew mocks: a core formula, a third-party tap formula, a third-party tap cask.
 const BREW: HostScript = {
   formulas: "good-a wm",
-  verbose: ["good-a (1.0) < 1.1", "example/wm/wm (0.1.0) < 0.2.0 [pinned at 0.1.0]", "example/tf/tfapp (1.5) < 1.6"].join("\n"),
+  verbose: ["good-a (1.0) < 1.1", "example/wm/wm (0.1.0) < 0.2.0 [pinned at 0.1.0]", "example/tf/tfapp (1.5) != 1.6"].join("\n"),
   formulaTaps: { "good-a": "homebrew/core", wm: "example/wm" },
   casks: "tfapp",
   caskTaps: { tfapp: "example/tf" },
@@ -161,7 +161,7 @@ describe("stuck tracking in the run (port 04)", () => {
   });
 
   test("successfully upgraded casks are not stuck", async () => {
-    const r = await run({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1" });
+    const r = await run({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) != 1.1" });
     expect(r.calls).toContain("brew upgrade --cask --greedy app");
     expect(r.brew).toContain("casks upgraded: app");
     expect(r.text).not.toContain("STUCK");
@@ -195,7 +195,7 @@ describe("stuck tracking in the run (port 04)", () => {
     });
   });
   test("a cask that fails to upgrade is FAILED and counted toward stuck", async () => {
-    const r = await run({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", upgradeRc: { "--cask --greedy app": 1 } });
+    const r = await run({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) != 1.1", upgradeRc: { "--cask --greedy app": 1 } });
     expect(r.brew).toMatch(/^ {2}brew: FAILED: app; .*casks FAILED: app; STUCK: app=9\.9\(1 runs, since 2026-10-22\)/);
     expect(r.files.get(STATE)).toBe(`brew${T}app=9.9${T}1${T}2026-10-22\n`);
     expect(r.rc).toBe(1);
@@ -216,7 +216,7 @@ describe("stuck tracking in the run (port 04)", () => {
     expect(dev.length).toBeGreaterThan(3);
   });
   test("an unreadable state file is kept and reported, never read as empty", async () => {
-    const h = fakeHost({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", dirs: [STATE] });
+    const h = fakeHost({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) != 1.1", dirs: [STATE] });
     const res = await applyHost(testConfig(), h.exec, h.fs, { dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB });
     expect(brewLine(res.summary)).toMatch(/^ {2}brew: FAILED: stuck-state-unreadable; /);
     expect(h.writes).not.toContain(STATE);
@@ -242,7 +242,7 @@ describe("stuck tracking in the run (port 04)", () => {
   });
   test("pinned and excluded packages are held, reported, and never count as stuck", async () => {
     const r = await run({
-      formulas: "duckdb good-a", casks: "big", verbose: "duckdb (1.5.5) < 2.0.0\ngood-a (1.0) < 1.1\nbig (1) < 2",
+      formulas: "duckdb good-a", casks: "big", verbose: "duckdb (1.5.5) < 2.0.0\ngood-a (1.0) < 1.1\nbig (1) != 2",
       formulaTaps: { duckdb: "homebrew/core", "good-a": "homebrew/core" }, caskTaps: { big: "homebrew/cask" },
       pinFiles: [{ repo: "example-repo", path: "/repos.test/example-repo/pins.json", text: '{"brew":{"duckdb":"1.5.5"}}' }],
     }, { cfg: { caskExclude: ["big"] } });
@@ -257,7 +257,7 @@ describe("stuck tracking in the run (port 04)", () => {
 });
 
 test("a tap-qualified excluded cask is matched on its last segment and kept out of the review table", async () => {
-  const r = await run({ lsof: [LSOF_NONE], casks: "example/tf/big app", caskTaps: { app: "homebrew/cask" }, verbose: "example/tf/big (1) < 2\napp (1.0) < 1.1" }, { cfg: { caskExclude: ["big"] } });
+  const r = await run({ lsof: [LSOF_NONE], casks: "example/tf/big app", caskTaps: { app: "homebrew/cask" }, verbose: "example/tf/big (1) != 2\napp (1.0) != 1.1" }, { cfg: { caskExclude: ["big"] } });
   expect(r.log.some((l) => l.startsWith("  excluding example/tf/big (CASK_EXCLUDE"))).toBe(true);
   expect(r.log.some((l) => l.startsWith("example/tf/big ("))).toBe(false);
   expect(r.calls).toContain("brew upgrade --cask --greedy app");
@@ -270,7 +270,7 @@ test("a cask exclusion does not hide a formula of the same name from the review 
 
 describe("the cask phase and Gatekeeper (port 06)", () => {
   test("snapshot before the upgrade, release then check after it", async () => {
-    const h = fakeHost({ lsof: [LSOF_NONE], casks: "app other", caskTaps: { app: "homebrew/cask", other: "homebrew/cask" }, verbose: "app (1.0) < 1.1\nother (2) < 3", sudoCasks: ["other"] });
+    const h = fakeHost({ lsof: [LSOF_NONE], casks: "app other", caskTaps: { app: "homebrew/cask", other: "homebrew/cask" }, verbose: "app (1.0) != 1.1\nother (2) != 3", sudoCasks: ["other"] });
     const prior = { prior: "ok" as const, team: "TEAMAAAAAA" };
     const gk: GkOps = {
       snapshot: async (c) => (h.calls.push(`gk snapshot ${c}`), prior),
@@ -285,7 +285,7 @@ describe("the cask phase and Gatekeeper (port 06)", () => {
   });
 
   test("a failed cask upgrade gets no release and no check", async () => {
-    const h = fakeHost({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", upgradeRc: { "--cask --greedy app": 1 } });
+    const h = fakeHost({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) != 1.1", upgradeRc: { "--cask --greedy app": 1 } });
     const gk: GkOps = {
       snapshot: async (c) => (h.calls.push(`gk snapshot ${c}`), { prior: "ok", team: "T" }),
       release: async (c) => (h.calls.push(`gk release ${c}`), []),
@@ -335,7 +335,7 @@ describe("waiting is not stuck: exact names, by kind (never matched by a shared 
 
 describe("a cask with a running process is deferred (oupdate#4)", () => {
   const RUN = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngcloud 55 u txt REG 1,4 1 2 /brew/Caskroom/app/1.0/bin/gcloud\n";
-  const base = { casks: "app other", caskTaps: { app: "homebrew/cask", other: "homebrew/cask" }, verbose: "app (1.0) < 1.1\nother (2) < 3" };
+  const base = { casks: "app other", caskTaps: { app: "homebrew/cask", other: "homebrew/cask" }, verbose: "app (1.0) != 1.1\nother (2) != 3" };
   test("it is not upgraded this run, is logged with the reason, is reported as waiting (not counted as stuck), and the rest carry on", async () => {
     const r = await run({ ...base, lsof: [RUN, LSOF_NONE] });
     expect(r.calls).not.toContain("brew upgrade --cask --greedy app");
@@ -608,7 +608,7 @@ describe("service restarts and the phase order (port 07)", () => {
 describe("the run: failures, timeouts and the summary", () => {
   test("individual failures keep the successes, the casks and the summary; rc 1", async () => {
     const r = await run({ lsof: [LSOF_NONE],
-      formulas: "bad-a good-a", casks: "app", verbose: "bad-a (1) < 2\ngood-a (1.0) < 1.1\napp (1.0) < 1.1",
+      formulas: "bad-a good-a", casks: "app", verbose: "bad-a (1) < 2\ngood-a (1.0) < 1.1\napp (1.0) != 1.1",
       formulaTaps: { "bad-a": "homebrew/core", "good-a": "homebrew/core" }, caskTaps: { app: "homebrew/cask" }, upgradeRc: { "bad-a": 9 },
     });
     expect(r.calls).toContain("brew upgrade good-a");
@@ -705,7 +705,7 @@ describe("the run: failures, timeouts and the summary", () => {
 
   test("a second run the same day carries the state through: counts go on, other lanes kept", async () => {
     const STATE = "/state.test/pending-state.tsv";
-    const s: HostScript = { casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", upgradeRc: { "--cask --greedy app": 1 } };
+    const s: HostScript = { casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) != 1.1", upgradeRc: { "--cask --greedy app": 1 } };
     const h = fakeHost({ ...s, files: { [STATE]: `npm${T}tool=2${T}1${T}2026-10-21\n` } });
     const cfg = testConfig({ npm: null, stuckAfter: 2 });
     const go = () => applyHost(cfg, h.exec, h.fs, { dryRun: false, reviewer: scripted([], "APPROVE").r, typeB: fakeTypeB().typeB, now: new Date(2026, 9, 22, 7, 0) });
@@ -732,7 +732,7 @@ describe("slice 7 review", () => {
   test("6: a Type A timeout part-way keeps what was done: summary, casks, relink/restart and cleanup still run", async () => {
     // Mutant caught: the old single brew step lost the casks (deferred after the loop) and skipped restart and cleanup.
     const r = await run({ lsof: [LSOF_NONE],
-      formulas: "good-a slow-b", casks: "app", verbose: "good-a (1.0) < 1.1\nslow-b (1) < 1.1\napp (1.0) < 1.1",
+      formulas: "good-a slow-b", casks: "app", verbose: "good-a (1.0) < 1.1\nslow-b (1) < 1.1\napp (1.0) != 1.1",
       formulaTaps: { "good-a": "homebrew/core", "slow-b": "homebrew/core" }, caskTaps: { app: "homebrew/cask" },
       timeout: ["brew upgrade slow-b"], files: { "/Library/LaunchDaemons/sh.brew.good-a.plist": "" },
     });
@@ -799,7 +799,7 @@ describe("slice 7 review", () => {
 
   test("13: a tap-qualified exclusion entry matches the bare cask name", async () => {
     // Mutant caught: named() looked up only the candidate's segments, never the entry's.
-    const r = await run({ casks: "big app", caskTaps: { big: "homebrew/cask", app: "homebrew/cask" }, verbose: "big (1) < 2\napp (1.0) < 1.1" }, { cfg: { caskExclude: ["example/tf/big"] } });
+    const r = await run({ casks: "big app", caskTaps: { big: "homebrew/cask", app: "homebrew/cask" }, verbose: "big (1) != 2\napp (1.0) != 1.1" }, { cfg: { caskExclude: ["example/tf/big"] } });
     expect(r.calls).not.toContain("brew upgrade --cask --greedy big");
     expect(r.log.some((l) => l.startsWith("big ("))).toBe(false);
   });
@@ -1303,7 +1303,7 @@ describe("which commands keep only a tail of their output", () => {
   });
 
   test("a cask upgrade is log-only too", async () => {
-    const r = await run({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1" });
+    const r = await run({ lsof: [LSOF_NONE], casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) != 1.1" });
     const c = r.callOpts.find((x) => x.line === "brew upgrade --cask --greedy app");
     expect({ maxBytes: c?.opts?.maxBytes, tail: c?.opts?.tail }).toEqual({ maxBytes: LOG_STREAM_BYTES, tail: true });
   });
@@ -1336,7 +1336,7 @@ describe("a failed brew update ends the brew phase (OUP-326)", () => {
   test("a cask with a running process is not counted stuck after a failed update: no STUCK line, the state file as it was", async () => {
     const RUNNING = "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\ngcloud 55 u txt REG 1,4 1 2 /brew/Caskroom/app/1.0/bin/gcloud\n";
     const seed = `brew${T}other=1${T}5${T}2026-10-01\n`;
-    const S: HostScript = { casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) < 1.1", lsof: [RUNNING, LSOF_NONE], files: { [STATE_FILE]: seed } };
+    const S: HostScript = { casks: "app", caskTaps: { app: "homebrew/cask" }, verbose: "app (1.0) != 1.1", lsof: [RUNNING, LSOF_NONE], files: { [STATE_FILE]: seed } };
     const r = await run({ ...S, rc: { "brew update": 1 } }, { cfg: { stuckAfter: 1 } });
     expect(r.brew).not.toContain("STUCK");
     expect(r.files.get(STATE_FILE)).toBe(seed);

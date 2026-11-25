@@ -208,7 +208,7 @@ describe("tapUnchangedSinceReview with a cut git read", () => {
 });
 
 describe("awaitingTapApproval", () => {
-  const VERBOSE = `${TAP}/tool (1.0) < 1.1\nexample/tf/tfapp (1.5) < 1.6\n`;
+  const VERBOSE = `${TAP}/tool (1.0) < 1.1\nexample/tf/tfapp (1.5) != 1.6\n`;
   for (const [label, answer, want] of [
     ["APPROVE", APPROVE, "APPROVE (formula-only, prebuilt)"],
     ["FLAG", FLAG, "FLAG (formula-only, prebuilt)"],
@@ -228,7 +228,7 @@ describe("awaitingTapApproval", () => {
     expect(v.items).toBe(`${TAP} (tool 1.0→1.1, review: n/a)`);
   });
   test("an unresolved cask tap is named as such", async () => {
-    const v = await awaitingTapApproval(fixture().env, scripted([], APPROVE).r, [], [{ pkg: "app", tap: "tap-unresolved" }], "app (1) < 2\n", opts().o);
+    const v = await awaitingTapApproval(fixture().env, scripted([], APPROVE).r, [], [{ pkg: "app", tap: "tap-unresolved" }], "app (1) != 2\n", opts().o);
     expect(v.items).toBe("(unresolved tap) (app 1→2, review: n/a (cask))");
   });
   test("C an advisory review, then a real Type B FLAG in the same run: the real one is notified", async () => {

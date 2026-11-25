@@ -6,13 +6,13 @@
 
 import { outdatedVersions } from "./taps.ts";
 
-export function typeAReview(packages: string[], verbose: string, sensitive: string[]): { held: string[]; text: string } {
+export function typeAReview(packages: string[], verbose: string, sensitive: string[], kind?: "<" | "!="): { held: string[]; text: string } {
   const sens = new Set(sensitive);
   const rows = verbose.split(/\r?\n/);
   const major = (v: string) => /^v?([0-9]+)(?:[.,_+-]|$)/.exec(v)?.[1];
   const held = packages.filter((pkg) => {
     if (!sens.has(pkg.split("/").at(-1)!.split("@")[0]!)) return false;
-    const matches = rows.filter((row) => row.split(/\s+/)[0] === pkg);
+    const matches = rows.filter((row) => row.split(/\s+/)[0] === pkg && (!kind || row.split(/\s+/).includes(kind)));
     if (matches.length !== 1) return true;
     const m = matches[0]!.match(/^\S+\s+\(([^)]+)\)\s*<\s*(\S+)\s*$/);
     if (!m) return true;
@@ -27,8 +27,8 @@ export function typeAReview(packages: string[], verbose: string, sensitive: stri
 }
 
 /** The version `brew outdated --verbose` offered, i.e. the one the review saw, or undefined when its row cannot be read. */
-export function reviewedVersion(pkg: string, verbose: string): string | undefined {
-  const next = outdatedVersions(pkg, verbose).split("→")[1];
+export function reviewedVersion(pkg: string, verbose: string, kind?: "<" | "!="): string | undefined {
+  const next = outdatedVersions(pkg, verbose, kind).split("→")[1];
   return next && next !== "?" ? next : undefined;
 }
 

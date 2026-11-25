@@ -47,12 +47,14 @@ export function tapIn(tap: string, list: string[]): boolean {
  *   example/tf/terraform (1.16.3) < 1.16.4
  *   example/workmux/workmux (0.1.266) < 0.1.268 [pinned at 0.1.266]
  * The name matches bare or as a "/<name>" suffix, compared literally; "?→?" when not found.
+ * A formula row has "<" and a cask row "!="; with `kind` only a row of that kind is read, so a formula and a cask that share a name never read each other's versions.
  */
-export function outdatedVersions(pkg: string, verbose: string): string {
+export function outdatedVersions(pkg: string, verbose: string, kind?: "<" | "!="): string {
   for (const line of verbose.split("\n")) {
     const f = line.trim().split(/\s+/);
     const n = f[0] ?? "";
     if (n !== pkg && !n.endsWith(`/${pkg}`)) continue;
+    if (kind && !f.slice(1, -1).includes(kind)) continue;
     const old = line.match(/\(([^)]*)\)/)?.[1] ?? "";
     let nv = "";
     for (let i = 1; i < f.length - 1; i++) if (f[i] === "<" || f[i] === "!=") { nv = f[i + 1]!; break; }

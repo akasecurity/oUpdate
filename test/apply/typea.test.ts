@@ -46,3 +46,19 @@ describe("reviewedVersion / versionMismatch", () => {
     expect(versionMismatch("git", undefined, "2.5")).toBe("git installed 2.5, reviewed unknown");
   });
 });
+
+describe("same-name formula and cask rows (OUP-363)", () => {
+  const both = "curl (8.1) < 8.2\ncurl (1.0) != 1.1";
+  test("a sensitive formula is judged on its own row, not held by a cask row that shares its name", () => {
+    expect(typeAReview(["curl"], both, DEFAULTS.sensitive, "<").held).toEqual([]);
+  });
+  test("a major increase on the formula row still holds beside a cask row", () => {
+    expect(typeAReview(["curl"], "curl (8.1) < 9.0\ncurl (1.0) != 1.1", DEFAULTS.sensitive, "<").held).toEqual(["curl"]);
+  });
+  test("each kind reads its own version for a shared name", () => {
+    expect(reviewedVersion("curl", both, "<")).toBe("8.2");
+    expect(reviewedVersion("curl", both, "!=")).toBe("1.1");
+    expect(reviewedVersion("curl", "curl (1.0) != 1.1", "<")).toBeUndefined();
+    expect(reviewedVersion("curl", "curl (8.1) < 8.2", "!=")).toBeUndefined();
+  });
+});
