@@ -30,3 +30,23 @@ export function npmParts(line: string): string[] {
   }
   return parts;
 }
+
+/**
+ * A part some writer produces, in its whole form (no stray ";" inside a name list, which is how a legacy line that joined
+ * parts with a bare ";" shows). A part that fits none is kept by the shadow report as unrecognized, never dropped.
+ */
+const KNOWN_PART = [
+  /^upgraded:(?: [^\s;]+)+$/,
+  /^FAILED — [^\s;]+$/,
+  // src/apply/run-steps.ts claudeCodeStep: the version is one field; a failure is "(rc=<n>|timeout, on <version>)".
+  /^claude-code: (?:not configured|not completed|dry-run|not run \([^;]*\)|FAILED \((?:rc=\d+|timeout), on [^\s;]+\)|[^\s;]+)$/,
+  /^(?:nothing to update|nothing approved for upgrade|not run|dry-run OK|not managed here [^;]*)$/,
+  /^not completed(?: — still pending: [^;]+)?$/,
+  // src/apply/npm.ts: the npm path inside the first form is configured text and can hold ";".
+  /^ERROR — (?:.+ not found, npm globals not checked|npm outdated query failed \(rc \d+\)|pending query failed|stuck state unusable)$/,
+  /^STUCK: [^;]+$/,
+];
+
+export function isKnownNpmPart(part: string): boolean {
+  return BATCH_HOLD.test(part) || KNOWN_PART.some((re) => re.test(part));
+}

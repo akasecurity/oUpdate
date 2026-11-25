@@ -22,6 +22,8 @@ function diff(inv: string[], summary: string[]): { onlyInventory: string[]; only
 export interface Comparison {
   upgraded: { baseline: boolean; onlyInventory: string[]; onlyPrevious: string[] };
   held: { onlyInventory: string[]; onlyPrevious: string[] };
+  /** Parts of the previous updater's npm line the parser could not place: the two cannot be said to agree. */
+  unrecognized: string[];
   agree: boolean;
 }
 
@@ -43,7 +45,8 @@ export function compareRun(a: { prev: Item[] | undefined; cur: Item[]; outdated:
     upgraded = { baseline: true, ...diff(changed, [...a.summary.brew.upgraded, ...a.summary.npm.upgraded, ...nodeNpm]) };
   }
   const empty = (d: { onlyInventory: string[]; onlyPrevious: string[] }) => !d.onlyInventory.length && !d.onlyPrevious.length;
-  return { upgraded, held, agree: empty(upgraded) && empty(held) };
+  const unrecognized = a.summary.npm.unrecognized ?? [];
+  return { upgraded, held, unrecognized, agree: empty(upgraded) && empty(held) && !unrecognized.length };
 }
 
 function mondayMs(date: string): number {

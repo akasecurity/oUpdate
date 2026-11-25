@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { Exec } from "../../src/apply/exec.ts";
 import { npmHardHit, npmSection, parseNpmOutdated, type NpmOptions } from "../../src/apply/npm.ts";
 import { scripted } from "./helpers.ts";
+import { parsePrevSummary } from "../../src/host/prev-log.ts";
 
 const APPROVE = "APPROVE\nno attack indicators found";
 const OUTDATED = JSON.stringify({ tool: { current: "1.0.0", wanted: "1.1.0", latest: "1.1.0" }, "@scope/b": { current: "2.0.0", latest: "3.0.0" } });
@@ -196,6 +197,13 @@ describe("npmSection", () => {
   test("npm missing is an ERROR (the run exits 1), never a quiet not-checked", async () => {
     const exec: Exec = async () => ({ rc: 127, out: "", err: "" });
     expect((await npmSection(exec, scripted([]).r, opts().o)).status).toBe("ERROR — npm not found, npm globals not checked");
+  });
+  test("an npm path with a bare semicolon still writes a part the shadow report places", async () => {
+    const exec: Exec = async () => ({ rc: 127, out: "", err: "" });
+    const status = (await npmSection(exec, scripted([]).r, opts({ npm: "/opt/tools;archive/npm" }).o)).status;
+    expect(status).toBe("ERROR — /opt/tools;archive/npm not found, npm globals not checked");
+    const log = ["=== host-update hosta 2026-10-22 07:00 ===", "=== hosta summary ===", `  npm:  ${status}`].join("\n");
+    expect(parsePrevSummary(log, "hosta")!.npm.unrecognized).toEqual([]);
   });
   test("a failed npm view holds the batch: unread scripts are not '(no scripts)'", async () => {
     // Mutant caught: a failed `npm view … scripts` read as "(no scripts)" and the batch upgraded on APPROVE.

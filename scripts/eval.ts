@@ -247,7 +247,9 @@ export function checkAgreement(hosts: HostCfg[] | undefined): CheckResult {
     }
     const waived = new Set((h.waive ?? []).map((w) => w.name));
     const diff = [...r.compare.held.onlyInventory, ...r.compare.held.onlyPrevious].filter((n) => !waived.has(n));
-    if (diff.length) bad.push(`${h.name} (${diff.join(" ")})`);
+    // An older report has no unrecognized field.
+    const unread = r.compare.unrecognized ?? [];
+    if (diff.length || unread.length) bad.push(`${h.name} (${[...diff, ...unread].join(" ")})`);
   }
   const ok = hosts.length - bad.length - none.length;
   const detail = `${ok} of ${hosts.length} hosts agree${bad.length ? `; differ: ${bad.join(", ")}` : ""}${none.length ? `; no report: ${none.join(", ")}` : ""}`;

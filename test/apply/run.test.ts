@@ -1043,7 +1043,7 @@ describe("Claude Code native update in the npm phase (port 12c)", () => {
     const at = r.log.indexOf("--- claude code (native) ---");
     expect(at).toBeGreaterThan(r.log.findIndex((l) => l.startsWith("--- npm")));
     expect(r.log.slice(at + 1, at + 3)).toEqual(["  Checking for updates", "  Successfully updated from 1.0.0 to 2.0.0"]);
-    expect(parsePrevSummary(r.text, "hosta")!.npm).toEqual({ upgraded: [], flagged: false, failed: [], claudeCode: "2.0.0" });
+    expect(parsePrevSummary(r.text, "hosta")!.npm).toEqual({ upgraded: [], flagged: false, failed: [], unrecognized: [], claudeCode: "2.0.0" });
     expect(r.rc).toBe(0);
   });
 
