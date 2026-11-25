@@ -34,6 +34,61 @@ describe("the per-run from-version record", () => {
     });
   });
 
+  test("a formula and a cask of the same name are each recorded once, with their own versions", async () => {
+    const h = fakeHost({
+      formulas: "dup",
+      casks: "dup",
+      verbose: "dup (1.0) < 1.1\ndup (5.0) != 5.1",
+      formulaTaps: { dup: "homebrew/core" },
+      caskTaps: { dup: "homebrew/cask" },
+    });
+    await applyHost(testConfig(), h.exec, h.fs, { dryRun: false, now });
+    expect(JSON.parse(h.files.get(FILE)!).entries).toEqual([
+      { manager: "brew-formula", name: "dup", from: "1.0", to: "1.1" },
+      { manager: "brew-cask", name: "dup", from: "5.0", to: "5.1" },
+    ]);
+  });
+
+  // brew prints a formula row as "<name> (<installed>) < <new>" and a cask row as "<token> (<installed>) != <new>" (Homebrew cmd/outdated.rb, cask/cask.rb).
+  const dupRows = async (over: Record<string, unknown>, cfg: Record<string, unknown> = {}) => {
+    const h = fakeHost({ formulaTaps: { dup: "homebrew/core" }, caskTaps: { dup: "homebrew/cask" }, ...over });
+    await applyHost(testConfig(cfg), h.exec, h.fs, { dryRun: false, now });
+    return JSON.parse(h.files.get(FILE)!).entries;
+  };
+  test("an excluded cask that shares a formula's name is dropped as a cask row; the formula row stays", async () => {
+    expect(await dupRows({ formulas: "dup", casks: "dup", verbose: "dup (1.0) < 1.1\ndup (5.0) != 5.1" }, { caskExclude: ["dup"] })).toEqual([
+      { manager: "brew-formula", name: "dup", from: "1.0", to: "1.1" },
+    ]);
+  });
+  test("two tap formulas of one name and a cask are recorded by their rows' shapes", async () => {
+    expect(await dupRows({ formulas: "a/b/dup c/d/dup", casks: "dup", verbose: "a/b/dup (1.0) < 1.1\nc/d/dup (2.0) < 2.1\ndup (5.0) != 5.1" })).toEqual([
+      { manager: "brew-formula", name: "dup", from: "1.0", to: "1.1" },
+      { manager: "brew-formula", name: "dup", from: "2.0", to: "2.1" },
+      { manager: "brew-cask", name: "dup", from: "5.0", to: "5.1" },
+    ]);
+  });
+  test("a cask row before the formula row is still the cask", async () => {
+    expect(await dupRows({ formulas: "dup", casks: "dup", verbose: "dup (5.0) != 5.1\ndup (1.0) < 1.1" })).toEqual([
+      { manager: "brew-cask", name: "dup", from: "5.0", to: "5.1" },
+      { manager: "brew-formula", name: "dup", from: "1.0", to: "1.1" },
+    ]);
+  });
+  test("a third row of the same name is recorded, not dropped", async () => {
+    expect(await dupRows({ formulas: "a/b/dup c/d/dup", casks: "dup", verbose: "dup (5.0) != 5.1\na/b/dup (1.0) < 1.1\nc/d/dup (2.0) < 2.1" })).toHaveLength(3);
+  });
+
+  test("a grouped formula row (kegs from two full names, joined by \", \") is recorded from its first group", async () => {
+    expect(await dupRows({ formulas: "grouped multi", casks: "", verbose: "grouped (1.0), a/b/grouped (1.1) < 1.2\nmulti (2.0), multi (2.1) < 2.3" })).toEqual([
+      { manager: "brew-formula", name: "grouped", from: "1.0", to: "1.2" },
+      { manager: "brew-formula", name: "multi", from: "2.0", to: "2.3" },
+    ]);
+  });
+  test("a grouped formula row beside a same-name cask row keeps each its own", async () => {
+    expect(await dupRows({ formulas: "dup", casks: "dup", verbose: "dup (1.0), a/b/dup (1.1) < 1.2\ndup (5.0) != 5.1" })).toEqual([
+      { manager: "brew-formula", name: "dup", from: "1.0", to: "1.2" },
+      { manager: "brew-cask", name: "dup", from: "5.0", to: "5.1" },
+    ]);
+  });
   test("the record is on disk before the first upgrade command runs", async () => {
     const h = fakeHost(base);
     let seen: string | undefined;
