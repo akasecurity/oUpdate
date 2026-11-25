@@ -387,7 +387,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
 
   const record = makeRunRecord({ fs, stateDir: cfg.stateDir, host, now, stamp, dryRun, log });
   const rt: RunCtx = {
-    opts, cfg, fs, exec, dryRun, now, host, r, tb, log, stamp, b, brewHeld, record, x, notify, step, tbEnv, tbOpts, brewFailed, quarantined, installEnv,
+    opts, cfg, fs, exec, dryRun, now, host, r, tb, log, stamp, b, brewHeld, brewHeldBase, record, x, notify, step, tbEnv, tbOpts, brewFailed, quarantined, installEnv,
     rcEnv, rcPending, rcBroken, rcThisRun, rcUnchecked, rcJobs, mergeOwners, rcStopOff, stoppingNow, afterOwed, oweAfter, expectedKeg, retiredFor, gatedOutdated,
     ownerLock, clock, restartOpts, waiterEnv, kegEnv, ownerHanded, helperRunning, track, recoverTo, releaseRacks, npmFailed, st,
   };
