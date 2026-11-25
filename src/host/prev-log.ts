@@ -36,11 +36,18 @@ function parseBrew(line: string): PrevSummary["brew"] {
 
 function parseNpm(line: string): PrevSummary["npm"] {
   const n: PrevSummary["npm"] = { upgraded: [], flagged: false, failed: [] };
+  // A batch hold's reason can quote "; FAILED — x" or "; ERROR": until the claude-code part, what follows a hold is its reason.
+  let inHold = false;
   for (const raw of line.split(";")) {
     const p = raw.trim();
+    if (inHold && !p.startsWith("claude-code: ")) continue;
     const up = p.match(/^upgraded:(.*)$/);
     if (up) n.upgraded.push(...words(up[1]!));
-    if (/^(?:FLAGGED|STRUCTURAL FLAG)\b/.test(p)) n.flagged = true;
+    if (/^(?:FLAGGED|STRUCTURAL FLAG)\b/.test(p)) {
+      n.flagged = true;
+      // "FLAGGED — <pkg> installed <v>, reviewed <v>" is an install that already happened: real parts can follow it.
+      inHold = !/^FLAGGED — \S+ installed \S+, reviewed /.test(p);
+    }
     const failed = p.match(/^FAILED — (\S+)$/);
     if (failed) n.failed!.push(failed[1]!);
     const cc = p.match(/^claude-code: (\S+)$/);
