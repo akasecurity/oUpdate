@@ -3,6 +3,7 @@
 // own logs read the same way). Two holds show only in the run body, between the two:
 // a Type B FLAG (a third-party tap's formula review) and a CASK_EXCLUDE skip.
 
+import { BATCH_HOLD, npmParts } from "./npm-line.ts";
 import { MAS_NOT_CHECKED } from "../apply/summary-text.ts";
 import { DEFAULT_COMPAT } from "../targets/compat.ts";
 import { POLICY_NOTE_PREFIX } from "../apply/policy.ts";
@@ -36,18 +37,10 @@ function parseBrew(line: string): PrevSummary["brew"] {
 
 function parseNpm(line: string): PrevSummary["npm"] {
   const n: PrevSummary["npm"] = { upgraded: [], flagged: false, failed: [] };
-  // A batch hold's reason can quote "; FAILED — x" or "; ERROR": until the claude-code part, what follows a hold is its reason.
-  let inHold = false;
-  for (const raw of line.split(";")) {
-    const p = raw.trim();
-    if (inHold && !p.startsWith("claude-code: ")) continue;
+  for (const p of npmParts(line)) {
     const up = p.match(/^upgraded:(.*)$/);
     if (up) n.upgraded.push(...words(up[1]!));
-    if (/^(?:FLAGGED|STRUCTURAL FLAG)\b/.test(p)) {
-      n.flagged = true;
-      // "FLAGGED — <pkg> installed <v>, reviewed <v>" is an install that already happened: real parts can follow it.
-      inHold = !/^FLAGGED — \S+ installed \S+, reviewed /.test(p);
-    }
+    if (BATCH_HOLD.test(p)) n.flagged = true;
     const failed = p.match(/^FAILED — (\S+)$/);
     if (failed) n.failed!.push(failed[1]!);
     const cc = p.match(/^claude-code: (\S+)$/);
