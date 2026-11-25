@@ -82,6 +82,8 @@ export interface ApplyConfig {
   approvedTapsFile?: string;
   /** The policy file naming an owner and reason per pin entry (policy.ts); default: oupdate-policy.json beside the config file. */
   policyFile?: string;
+  /** The directory whose scripts count as adopted wrappers for `host --cruft-count` (absolute, or "~/" for the home directory); default <home>/scripts. */
+  adoptedScriptsDir?: string;
   /** Set when the config is loaded from a file: the policy's ownerless warnings, logged after the run. */
   policyNotes?: string[];
   /** The policy's own pinRoots and caskExclude entries (policy.ts), so a run logs the owner and reason of an exclusion it came from. */
@@ -171,7 +173,7 @@ export const DEFAULTS = {
 };
 
 const KEYS = new Set([
-  "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "policyFile", "hostPrefixes", "pinRoots",
+  "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "policyFile", "adoptedScriptsDir", "hostPrefixes", "pinRoots",
   "caskExclude", "inPlaceCasks", "heldByDesign", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "jobRunners", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "upgradeTimeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
@@ -189,6 +191,13 @@ function str(o: Obj, k: string, where: string): string | undefined {
 function path(o: Obj, k: string, where: string): string | undefined {
   const v = str(o, k, where);
   if (v !== undefined && !isAbsolute(v)) throw new Error(`${where}.${k} must be an absolute path`);
+  return v;
+}
+
+/** An absolute path, or "~/<rest>" (expanded against the home directory where it is used). */
+function pathOrHome(o: Obj, k: string, where: string): string | undefined {
+  const v = str(o, k, where);
+  if (v !== undefined && !isAbsolute(v) && !v.startsWith("~/")) throw new Error(`${where}.${k} must be an absolute path or start with ~/`);
   return v;
 }
 
@@ -386,6 +395,7 @@ export function parseApplyConfig(text: string, fallbackHost: string, env: Record
     upstreamTaps: (list(a, "upstreamTaps", w) ?? []).map((t) => t.toLowerCase()),
     approvedTapsFile: path(a, "approvedTapsFile", w),
     policyFile: path(a, "policyFile", w),
+    adoptedScriptsDir: pathOrHome(a, "adoptedScriptsDir", w),
     hostPrefixes: list(a, "hostPrefixes", w) ?? [],
     pinRoots: (list(a, "pinRoots", w) ?? []).map((p, i) => {
       if (!isAbsolute(p)) throw new Error(`${w}.pinRoots[${i}] must be an absolute path`);

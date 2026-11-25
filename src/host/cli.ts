@@ -20,7 +20,8 @@ import { parseApplyConfig, type ApplyConfig } from "../apply/config.ts";
 import { killLive, runStopTasks, type Exec } from "../apply/exec.ts";
 import type { ApplyFs } from "../apply/fs.ts";
 import { applyHost, gatekeeperAction } from "../apply/run.ts";
-import { applyPolicy, DEFAULT_POLICY_NAME, parsePolicy } from "../apply/policy.ts";
+import { applyPolicy, DEFAULT_POLICY_NAME, parsePolicy, POLICY_NOTE_PREFIX } from "../apply/policy.ts";
+import { cruftCount, cruftLines } from "./cruft.ts";
 import { cleanOldBackups } from "./backups.ts";
 import { readiness } from "./readiness.ts";
 import { ownerDir, realHttpStatus, realReleaseLock, realTakeLock, runOwnerWaiter } from "../apply/owner-waiter.ts";
@@ -96,6 +97,7 @@ export type HostCommand =
   | { mode: "gatekeeper"; action: "approve" | "revert"; cask: string; config: string; host?: string }
   | { mode: "owner-waiter"; config: string; host?: string }
   | { mode: "readiness"; config: string; host?: string }
+  | { mode: "cruft"; config: string; host?: string }
   | { mode: "launchd"; args: LaunchdArgs };
 
 export const defaultConfigPath = () => join(homedir(), ".config", "oupdate", "config.json");
@@ -106,7 +108,7 @@ export const defaultConfigPath = () => join(homedir(), ".config", "oupdate", "co
  */
 export function parseHostCommand(argv: string[]): HostCommand {
   const has = (f: string) => argv.includes(f);
-  const modes = ["--report-only", "--apply", "--gatekeeper-approve", "--gatekeeper-revert", "--launchd-plist", "--stale-owners-waiter", "--readiness"].filter(has);
+  const modes = ["--report-only", "--apply", "--gatekeeper-approve", "--gatekeeper-revert", "--launchd-plist", "--stale-owners-waiter", "--readiness", "--cruft-count"].filter(has);
   if (modes.length > 1) throw new Error(`host takes one of ${modes.join(", ")}`);
   if (modes[0] === "--launchd-plist") return { mode: "launchd", args: parseLaunchdArgs(argv) };
   if (!modes.length || modes[0] === "--report-only") {
@@ -124,7 +126,7 @@ export function parseHostCommand(argv: string[]): HostCommand {
       if (v === undefined || v.startsWith("--")) throw new Error(`${a} needs a value`);
       return v;
     };
-    if (a === "--apply" || a === "--stale-owners-waiter" || a === "--readiness") continue;
+    if (a === "--apply" || a === "--stale-owners-waiter" || a === "--readiness" || a === "--cruft-count") continue;
     else if (a === "--dry-run") dryRun = true;
     else if (a === "--config") config = value();
     else if (a === "--host") host = value();
@@ -135,6 +137,7 @@ export function parseHostCommand(argv: string[]): HostCommand {
   if (modes[0] === "--apply") return { mode: "apply", config, dryRun, ...(host ? { host } : {}) };
   if (dryRun) throw new Error("--dry-run goes with --apply");
   if (modes[0] === "--readiness") return { mode: "readiness", config, ...(host ? { host } : {}) };
+  if (modes[0] === "--cruft-count") return { mode: "cruft", config, ...(host ? { host } : {}) };
   if (modes[0] === "--stale-owners-waiter") return { mode: "owner-waiter", config, ...(host ? { host } : {}) };
   return { mode: "gatekeeper", action: modes[0] === "--gatekeeper-approve" ? "approve" : "revert", cask: cask!, config, ...(host ? { host } : {}) };
 }
@@ -144,6 +147,18 @@ export async function readinessMain(c: Extract<HostCommand, { mode: "readiness" 
   const r = await readiness(loadConfig(c), deps.exec, deps.fs, { ...(deps.now ? { now: deps.now } : {}) });
   for (const l of r.lines) (deps.out ?? ((x: string) => console.log(x)))(l);
   return r.rc;
+}
+
+/** `host --cruft-count`: the read-only count of ownerless pins, tool-made backups and unadopted wrappers on this host (cruft.ts). Prints it; writes and deletes nothing. */
+export async function cruftMain(c: Extract<HostCommand, { mode: "cruft" }>, deps: { fs: ApplyFs; out?: (line: string) => void }): Promise<number> {
+  const cfg = loadConfig(c, true);
+  const ownerlessConfigValues = (cfg.policyNotes ?? []).flatMap((n) => {
+    const m = new RegExp(`^${POLICY_NOTE_PREFIX}(pinRoots|caskExclude) ("(?:[^"\\\\]|\\\\.)*") has no owner`).exec(n);
+    return m ? [`config ${m[1]} ${JSON.parse(m[2]!) as string}`] : [];
+  });
+  const c2 = await cruftCount({ fs: deps.fs, configDir: dirname(resolve(c.config)), pinRoots: cfg.pinRoots, ownerlessConfigValues, ...(cfg.adoptedScriptsDir ? { adoptedScriptsDir: cfg.adoptedScriptsDir } : {}) });
+  for (const l of cruftLines(c2)) (deps.out ?? ((x: string) => console.log(x)))(l);
+  return 0;
 }
 
 function loadConfig(c: { config: string; host?: string }, usePolicy = false): ApplyConfig {

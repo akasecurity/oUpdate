@@ -1,11 +1,11 @@
 // oupdate-policy.json: an owner and a reason per pin entry; a plain config value without one is a warning.
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseApplyConfig } from "../../src/apply/config.ts";
 import { applyPolicy, parsePolicy } from "../../src/apply/policy.ts";
-import { applyMain, readinessMain } from "../../src/host/cli.ts";
+import { applyMain, cruftMain, readinessMain } from "../../src/host/cli.ts";
 import { pendingFromOutdated } from "../../src/apply/stuck.ts";
 import { renderDigest } from "../../src/host/digest.ts";
 import { fakeHost } from "./host-fixture.ts";
@@ -168,5 +168,31 @@ describe("round 1 fixes", () => {
   });
   test("an unknown policy key prints escaped", () => {
     expect(() => parsePolicy(E({ "a\nb\u001b": [] }), "p.json")).toThrow('p.json: unknown key "a\\nb\\u001b"');
+  });
+});
+
+describe("host --cruft-count and the policy file (OUP-349)", () => {
+  test("a config value the policy lists is not counted; one it does not list is, beside this directory's backups", async () => {
+    const policy = JSON.stringify({ caskExclude: [{ value: "one", owner: "o", reason: "r" }] });
+    const c = host({ caskExclude: ["one", "two"], pinRoots: ["/srv/a"] }, policy);
+    writeFileSync(join(c.dir, "config.json.bak-1"), "{}");
+    const out: string[] = [];
+    const fs = { ...fakeHost().fs, listDir: async (d: string) => (d === c.dir ? readdirSync(d) : []) };
+    const rc = await cruftMain({ mode: "cruft", config: c.config, host: "hosta" }, { fs, out: (l) => out.push(l) });
+    expect(rc).toBe(0);
+    expect(out[0]).toBe("cruft: pins 2 ownerless, backups 1, wrappers 0 unadopted (this host only)");
+    expect(out).toContain("  pin: config caskExclude two");
+    expect(out).toContain("  pin: config pinRoots /srv/a");
+    expect(out).toContain(`  backup: ${c.dir}/config.json.bak-1`);
+  });
+  test("the config's adoptedScriptsDir reaches the wrapper count", async () => {
+    const c = host({ adoptedScriptsDir: "/opt/adopted" });
+    const A = `${fakeHost().fs.home}/Library/LaunchAgents`;
+    const plist = (p: string) => JSON.stringify({ ProgramArguments: [p] });
+    const files: Record<string, string> = { [`${A}/in.plist`]: plist("/opt/adopted/in.sh"), [`${A}/out.plist`]: plist("/opt/other/out.sh"), "/opt/adopted/in.sh": "#!/bin/sh\n# owner: t\n", "/opt/other/out.sh": "#!/bin/sh\n# owner: t\n" };
+    const fs = { ...fakeHost().fs, listDir: async (d: string) => (d === A ? ["in.plist", "out.plist"] : []), readHead: async (p: string) => (p.endsWith(".plist") && p in files ? `<plist>${files[p]}` : files[p]), plistJson: async (p: string) => (p.endsWith(".plist") && p in files ? (JSON.parse(files[p]!) as Record<string, unknown>) : undefined) };
+    const out: string[] = [];
+    await cruftMain({ mode: "cruft", config: c.config, host: "hosta" }, { fs, out: (l) => out.push(l) });
+    expect(out).toEqual(["cruft: pins 0 ownerless, backups 0, wrappers 1 unadopted (this host only)", `  wrapper: ${A}/out.plist runs /opt/other/out.sh`]);
   });
 });
