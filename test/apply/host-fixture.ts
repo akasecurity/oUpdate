@@ -26,6 +26,8 @@ export interface HostScript {
   pinned?: string;
   /** rc of `brew upgrade <args>` keyed by the args after "upgrade". */
   upgradeRc?: Record<string, number>;
+  /** Names brew installs although `brew upgrade <args>` exits nonzero (a set that partly succeeded), keyed like upgradeRc. */
+  upgradePartial?: Record<string, string[]>;
   /** Command lines (or prefixes) that time out. */
   timeout?: string[];
   /** rc for a command line (exact). */
@@ -34,6 +36,8 @@ export interface HostScript {
   deps?: Record<string, string>;
   /** `brew info --json=v2 --formula <name>`: its build_dependencies (default: none). */
   buildDeps?: Record<string, string[]>;
+  /** `brew uses --installed --recursive --formula <name>`: the installed dependents by name (default: none; a name with no entry and `usesRc` unset answers empty). */
+  uses?: Record<string, string>;
   /** Only when `--include-implicit` is in the argv / only when `--include-optional` is: the extra `brew deps` output by name. */
   implicitDeps?: Record<string, string>;
   optionalDeps?: Record<string, string>;
@@ -92,6 +96,7 @@ export function fakeHost(s: HostScript = {}) {
       if (rest === "list --formula") return ok("good-a\n");
       if (rest.startsWith("linkage")) return ok();
       if (rest.startsWith("reinstall ")) return ok();
+      if (rest.startsWith("uses ")) return ok(s.uses?.[a.at(-1)!] ?? "");
       if (rest.startsWith("deps ")) {
         // The plain answer always; the implicit and optional ones only when the argv asks (so a missing flag is a red row).
         const nm = a.at(-1)!;
@@ -123,7 +128,8 @@ export function fakeHost(s: HostScript = {}) {
       if (a[0] === "upgrade") {
         const what = a.slice(1).join(" ");
         const rc = s.upgradeRc?.[what] ?? 0;
-        if (rc === 0) upgraded.add(a.at(-1)!);
+        if (rc === 0) for (const n of a.slice(1)) upgraded.add(n);
+        else for (const n of s.upgradePartial?.[what] ?? []) upgraded.add(n);
         return { rc, out: `ATTEMPT ${line}\n`, err: "" };
       }
       return { rc: 99, out: "", err: `UNEXPECTED ${line}` };
