@@ -172,20 +172,21 @@ export async function readiness(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, o: { 
     else out.push(`disk: ${(kb / 1048576).toFixed(1)} GiB free on ${prefix}`);
   }
   for (const raw of [cfg.npmRegistry, "https://formulae.brew.sh"]) {
-    // Only an http(s) URL without credentials is probed, and only its origin is printed.
+    // Only an http(s) URL without credentials, a query or a fragment is probed (a token in a query would sit on curl's argv), and only its origin is printed.
     let u: URL | undefined;
     try {
       u = new URL(raw);
     } catch {
       u = undefined;
     }
-    if (!u || !/^https?:$/.test(u.protocol) || u.username || u.password) {
-      out.push(note(`network: registry URL not probed (${!u || !/^https?:$/.test(u.protocol) ? "not an http(s) URL" : "it carries credentials"})`));
+    if (!u || !/^https?:$/.test(u.protocol) || u.username || u.password || u.search || u.hash || /[[\]{}]/.test(u.pathname)) {
+      const why = !u || !/^https?:$/.test(u.protocol) ? "not an http(s) URL" : u.username || u.password ? "it carries credentials" : "it carries a query, a fragment or a glob";
+      out.push(note(`network: registry URL not probed (${why})`));
       continue;
     }
-    const url = raw;
     const label = u.origin;
-    const c = await x(["curl", "-q", "-sS", "-o", "/dev/null", "-I", "-m", "10", "-w", "%{http_code}", "--", url]);
+    // -q: no ~/.curlrc; -g: no URL globbing; --: the URL is never an option; the parsed href, not the raw string, is what is probed.
+    const c = await x(["curl", "-q", "-g", "-sS", "-o", "/dev/null", "-I", "-m", "10", "-w", "%{http_code}", "--", u.href]);
     const code = c.out.trim();
     if (c.rc === 0 && /^[23]\d\d$/.test(code)) out.push(`network: ${label} ok (http ${code})`);
     else out.push(note(`network: ${label} FAILED (rc ${c.rc}${c.rc === 6 ? ", DNS" : ""}${code && code !== "000" ? `, http ${code}` : ""})`));

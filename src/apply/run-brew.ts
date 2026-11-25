@@ -294,11 +294,17 @@ export async function brewSection(rt: RunCtx) {
   log.push(verbose.trimEnd(), "");
   b.verbose = verbose;
   // The versions this run moves from, on disk before the first upgrade (run-record.ts).
+  // brew prints a formula row as "<name> (<installed>) < <new>" and a cask row as "<token> (<installed>) != <new>"
+  // (Homebrew cmd/outdated.rb and cask/cask.rb; a formula with kegs from two full names lists its groups joined by ", "), so a formula and a cask that share a name are told apart by their own
+  // row, never by order. A row whose kind has no entry left in the list (an excluded cask) is not recorded.
   await rt.record.add(
-    verbose.split("\n").map((l) => l.trim().split(/\s+/)[0] ?? "").filter(Boolean).flatMap((n) => {
-      const manager = formulas.some((f) => last(f) === last(n)) ? "brew-formula" : casks.some((k) => last(k) === last(n)) ? "brew-cask" : undefined;
-      const [from = "?", to = "?"] = outdatedVersions(last(n), verbose).split("→");
-      return manager ? [{ manager, name: last(n), from, to } as const] : [];
+    verbose.split("\n").flatMap((l) => {
+      const m = l.trim().match(/^(\S+) \([^)]*\)(?:, \S+ \([^)]*\))* (<|!=) /);
+      if (!m) return [];
+      const name = last(m[1]!);
+      const manager = m[2] === "<" ? (formulas.some((f) => last(f) === name) ? "brew-formula" : undefined) : casks.some((k) => last(k) === name) ? "brew-cask" : undefined;
+      const [from = "?", to = "?"] = outdatedVersions(name, l).split("→");
+      return manager ? [{ manager, name, from, to } as const] : [];
     }),
   );
 

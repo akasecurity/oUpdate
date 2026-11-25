@@ -21,8 +21,8 @@ const base = {
     "brew outdated --formula --verbose": { rc: 0, out: "alpha (1.0) < 2.0\nbeta (1.0) < 2.0\nhomebrew/core/tailscale (1.104.4) < 1.106.0\n" },
     "brew outdated --cask --greedy-auto-updates --verbose": { rc: 0, out: "brave-browser (1.97) != 1.98.60.0\n" },
     "df -k -- /brew": { rc: 0, out: "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3s5 971350180 400000000 52428800 89% /System/Volumes/Data\n" },
-    "curl -q -sS -o /dev/null -I -m 10 -w %{http_code} -- https://registry.npmjs.org": { rc: 0, out: "200" },
-    "curl -q -sS -o /dev/null -I -m 10 -w %{http_code} -- https://formulae.brew.sh": { rc: 6, out: "" },
+    "curl -q -g -sS -o /dev/null -I -m 10 -w %{http_code} -- https://registry.npmjs.org/": { rc: 0, out: "200" },
+    "curl -q -g -sS -o /dev/null -I -m 10 -w %{http_code} -- https://formulae.brew.sh/": { rc: 6, out: "" },
     "mas outdated": { rc: 127, out: "" },
   },
 };
@@ -81,7 +81,8 @@ describe("host --readiness", () => {
 });
 
 // Rows added after the first review reads (OUP-302 phase 0).
-const CURL = (u: string) => `curl -q -sS -o /dev/null -I -m 10 -w %{http_code} -- ${u}`;
+// -g: no URL globbing; the parsed href (a bare origin gains its "/"), not the raw string, is what is probed.
+const CURL = (u: string) => `curl -q -g -sS -o /dev/null -I -m 10 -w %{http_code} -- ${new URL(u).href}`;
 const okAnswers = {
   ...base.answers,
   [CURL("https://formulae.brew.sh")]: { rc: 0, out: "200" },
@@ -394,11 +395,19 @@ describe("fourth amend: survivors and lows", () => {
     expect(t).toContain("registry URL not probed (not an http(s) URL)");
     expect(h.calls.filter((c) => c.startsWith("curl ") && (c.includes("ftp:") || c.includes("file:") || c.includes("gopher:")))).toEqual([]);
   });
-  test("only the origin of the registry URL is printed: no path, query or fragment", async () => {
-    const reg = "https://registry.example/team/path?token=abc#frag";
+  test("only the origin of the registry URL is printed: no path", async () => {
+    const reg = "https://registry.example/team/path";
     const { t } = await run({}, { [CURL(reg)]: { rc: 0, out: "200" } }, testConfig({ pinRoots: ["/r"], npmRegistry: reg }));
     expect(t).toContain("network: https://registry.example ok (http 200)");
-    expect(t).not.toMatch(/token=abc|team\/path|#frag/);
+    expect(t).not.toMatch(/team\/path/);
+  });
+  test("a registry URL with a query, a fragment or a glob is not handed to curl (a token in a query would sit on its argv)", async () => {
+    for (const reg of ["https://registry.example/team?token=abc", "https://registry.example/team#frag", "https://registry.example/[a-b]"]) {
+      const { h, t } = await run({}, {}, testConfig({ pinRoots: ["/r"], npmRegistry: reg }));
+      expect(h.calls.filter((c) => c.startsWith("curl ") && c.includes("registry.example"))).toEqual([]);
+      expect(t).toContain("network: registry URL not probed (it carries a query, a fragment or a glob)");
+      expect(t).not.toMatch(/token=abc/);
+    }
   });
   test("an unterminated OSC in a name does not eat the version, pin and plan after it", async () => {
     const { t } = await run({}, { "brew outdated --formula --verbose": { rc: 0, out: "foo\u001b] (1.0) < 2.0\n" } });
@@ -1357,7 +1366,7 @@ describe("amend 18: a separator-only stdout is never silent", () => {
     const d = await run({}, { "df -k -- /brew": { rc: 0, out: NEL } });
     expect(d.t).toContain("disk: not checked");
     expect(d.r.rc).toBe(1);
-    const c = await run({}, { "curl -q -sS -o /dev/null -I -m 10 -w %{http_code} -- https://registry.npmjs.org": { rc: 0, out: NEL } });
+    const c = await run({}, { "curl -q -g -sS -o /dev/null -I -m 10 -w %{http_code} -- https://registry.npmjs.org/": { rc: 0, out: NEL } });
     expect(c.t).toContain("network: https://registry.npmjs.org FAILED");
     expect(c.r.rc).toBe(1);
   });
