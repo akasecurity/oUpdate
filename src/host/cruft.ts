@@ -26,10 +26,41 @@ export const CRUFT_BACKUP_PREFIXES = ["config.json.bak-", "config.json.pre-oq4e"
 const INTERPRETER = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh)(?:[0-9]+(?:\.[0-9]+)*)?$/;
 /** Where an interpreter (and, alone in /usr/bin, env) must sit to be one: a program of that name anywhere else is "complex". */
 const INTERPRETER_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
-/** Variables that make an interpreter run other code than the script that was checked; a plist setting one is "complex". */
-const CODE_ENV = ["BASH_ENV", "ENV", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT", "PYTHONPATH", "PYTHONSTARTUP", "BUN_OPTIONS", "ZDOTDIR", "HOME", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "PERL5LIB", "RUBYLIB", "NODE_PATH", "PYTHONHOME"];
-/** Top-level keys that change how launchd resolves the program or its arguments. */
-const RESOLVE_KEYS = ["RootDirectory", "EnableGlobbing"];
+/** The system dirs a judged plist's PATH may name (each entry exactly one of these). */
+const SYSTEM_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin"];
+/** Locale values that keep a script's bytes read as the script wrote them: C, POSIX, or letters_letters.UTF-8. */
+const PLAIN_LOCALE = /^(?:C|POSIX|[A-Za-z]+(?:_[A-Za-z]+)?\.UTF-8)$/;
+/**
+ * Why an EnvironmentVariables dictionary is not safe for a judged plist, or undefined. Only PATH (exact system dirs, so a
+ * planted dir cannot shadow env, bash or date), LANG, LC_ALL, LC_CTYPE (a plain locale: a multibyte one such as Big5 or
+ * GBK makes bash read part of a UTF-8 script as a quote) and TZ are allowed; any other name, the empty one included, is
+ * a variable that may make an interpreter run other code.
+ */
+function envProblem(env: Record<string, unknown>): string | undefined {
+  for (const [k, v] of Object.entries(env)) {
+    if (k === "TZ" && typeof v === "string") continue;
+    if (k === "PATH" && typeof v === "string" && v.split(":").every((d) => SYSTEM_DIRS.includes(d))) continue;
+    if ((k === "LANG" || k === "LC_ALL" || k === "LC_CTYPE") && typeof v === "string" && PLAIN_LOCALE.test(v)) continue;
+    return `sets ${k}`;
+  }
+  return undefined;
+}
+/**
+ * The only top-level keys (lower case: launchd lowercases every job key, so Foo, foo and FOO are one key) a judged plist
+ * may have, each one in `man launchd.plist`. None changes the program, its argv, cwd, stdin, user, group, home or
+ * environment. Any other key, the unknown and underscore-prefixed ones included, makes the plist "complex".
+ * Accepted lows, no behavior change: StandardOutPath, StandardErrorPath, Umask and the resource limits can feed or
+ * overwrite an owned script that reads its stdio or is writable, and rejecting them would leave most real wrappers
+ * (which log) unadopted.
+ */
+const ALLOWED_KEYS = new Set([
+  "label", "program", "programarguments", "environmentvariables", "disabled", "runatload", "keepalive", "ondemand",
+  "startinterval", "startcalendarinterval", "startonmount", "watchpaths", "queuedirectories", "throttleinterval",
+  "standardoutpath", "standarderrorpath", "processtype", "nice", "lowpriorityio", "lowprioritybackgroundio",
+  "abandonprocessgroup", "launchonlyonce", "exittimeout", "timeout", "umask", "limitloadtohosts", "limitloadfromhosts",
+  "limitloadtosessiontype", "limitloadtohardware", "limitloadfromhardware", "softresourcelimits", "hardresourcelimits",
+  "enabletransactions", "enablepressuredexit", "sessioncreate", "associatedbundleidentifiers", "machservices",
+]);
 const dirOf = (p: string) => p.slice(0, Math.max(p.lastIndexOf("/"), 0)) || "/";
 const OWNER_LINE = /^#\s*owner:\s*\S/;
 
@@ -72,18 +103,27 @@ function ownerlessPins(file: string, text: string): string[] {
  */
 export function plistLaunch(o: Record<string, unknown>): { program?: string; argv: string[] } | string {
   const str = (v: unknown): v is string => typeof v === "string" && v !== "";
-  const { Program: program, ProgramArguments: args, EnvironmentVariables: env } = o;
-  const resolves = RESOLVE_KEYS.find((k) => k in o);
-  if (resolves) return `sets ${resolves}`;
   // launchctl reads the file with libxpc, plutil with CoreFoundation; a NUL (cut off by one, kept by the other) is a form they read differently.
   if (JSON.stringify(o).includes("\\u0000")) return "NUL";
+  // launchd lowercases (ASCII) every job key before it stores or looks one up: read the keys the same way.
+  const byLower = new Map<string, string>();
+  for (const k of Object.keys(o)) {
+    const l = k.replace(/[A-Z]/g, (c) => c.toLowerCase());
+    if (byLower.has(l)) return `duplicate key ${k}`;
+    if (!ALLOWED_KEYS.has(l)) return `sets ${k}`;
+    byLower.set(l, k);
+  }
+  const at = (l: string) => (byLower.has(l) ? o[byLower.get(l)!] : undefined);
+  const program = at("program");
+  const args = at("programarguments");
+  const env = at("environmentvariables");
   if (program === undefined && args === undefined) return "no Program or ProgramArguments";
   if (program !== undefined && !str(program)) return "Program is not a string";
   if (args !== undefined && !(Array.isArray(args) && args.length > 0 && args.every(str))) return "ProgramArguments is not a list of strings";
   if (env !== undefined) {
     if (typeof env !== "object" || env === null || Array.isArray(env)) return "EnvironmentVariables is not a dictionary";
-    const code = Object.keys(env).find((k) => CODE_ENV.includes(k));
-    if (code) return `sets ${code}`;
+    const bad = envProblem(env as Record<string, unknown>);
+    if (bad !== undefined) return bad;
   }
   // launchd runs Program when it is present, with ProgramArguments as the argv; with no ProgramArguments the argv is [Program].
   const argv = (args as string[] | undefined) ?? [program as string];
@@ -171,7 +211,7 @@ export function sourceProblem(raw: string): string | undefined {
   // plutil follows a declared encoding (UTF-7, windows-1252...), libxpc reads the bytes as written: the only accepted
   // mention of an encoding is the leading XML declaration naming UTF-8.
   if (/encoding/i.test(raw)) {
-    const m = /^<\?xml[^>?]*\sencoding\s*=\s*(["'])utf-8\1[^>?]*\?>/i.exec(t);
+    const m = /^<\?xml[^>?]{0,256}\sencoding\s{0,8}=\s{0,8}(["'])utf-8\1[^>?]{0,256}\?>/i.exec(t);
     if (!m || (m[0].match(/encoding/gi) ?? []).length !== 1 || /encoding/i.test(t.slice(m[0].length))) return "plist encoding";
   }
   if (raw.includes("<![CDATA[")) return "CDATA";

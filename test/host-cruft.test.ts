@@ -1,12 +1,12 @@
 // `host --cruft-count` (OUP-349): read-only count of ownerless pins, tool-made backups, unadopted wrappers.
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realFs } from "../src/apply/fs.ts";
 import { parseApplyConfig } from "../src/apply/config.ts";
-import { cruftCount, cruftLines, launchScript, plistLaunch, safeName } from "../src/host/cruft.ts";
+import { cruftCount, cruftLines, launchScript, plistLaunch, safeName, sourceProblem } from "../src/host/cruft.ts";
 import { parseHostCommand } from "../src/host/cli.ts";
 
 /** A plist as the OS parser gives it: the fake plistJson reads the JSON text kept under the plist's name. */
@@ -206,9 +206,32 @@ describe("cruft count", () => {
       const o = JSON.stringify({ ProgramArguments: ["/h/scripts/own.sh"], EnvironmentVariables: { [key]: "x" } });
       expect({ key, w: await wrappersOf(o, files) }).toEqual({ key, w: [`${A}/t.plist complex plist: sets ${key}`] });
     }
-    expect(await wrappersOf(JSON.stringify({ ProgramArguments: ["/h/scripts/own.sh"], EnvironmentVariables: { LANG: "C", bash_env: "x" } }), files)).toEqual([]);
   });
-  test("a NUL anywhere in the parsed plist, an entity in its source, RootDirectory and EnableGlobbing are complex", async () => {
+  test("only a listed environment variable keeps a plist judged: any other name is complex", async () => {
+    const files = { "/h/scripts/own.sh": owned };
+    const env = (e: Record<string, string>) => wrappersOf(JSON.stringify({ ProgramArguments: ["/h/scripts/own.sh"], EnvironmentVariables: e }), files);
+    expect(await env({ PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/sbin", LANG: "en_US.UTF-8", LC_ALL: "C", LC_CTYPE: "POSIX", TZ: "UTC" })).toEqual([]);
+    const sets = (k: string) => [`${A}/t.plist complex plist: sets ${k}`];
+    // PATH: only exact system dirs (a planted dir ahead of /usr/bin runs its own env, bash or date for the owned script).
+    for (const path of ["/tmp/planted:/usr/bin:/bin", "", "/usr/bin::/bin", "bin:/usr/bin", "/usr/bin/../../tmp", "/usr/bin/", "/Users/x/bin:/usr/bin"])
+      expect({ path, w: await env({ PATH: path }) }).toEqual({ path, w: sets("PATH") });
+    // Locale: C, POSIX, or <letters>_<letters>.UTF-8 only (a Big5 or GBK locale makes bash read a multibyte tail as a quote).
+    for (const [k, v] of [["LANG", "zh_TW.Big5"], ["LC_ALL", "zh_CN.GBK"], ["LC_CTYPE", "en_US"], ["LANG", ""], ["LANG", "en_US.UTF-8x"], ["LANG", "../x.UTF-8"]] as const)
+      expect({ k, v, w: await env({ [k]: v }) }).toEqual({ k, v, w: sets(k) });
+    // An empty name is complex itself and does not hide a later key.
+    expect(await env({ "": "v", BASH_ENV: "x" })).toEqual(sets(""));
+    expect(await env({ TMPDIR: "/tmp" })).toEqual(sets("TMPDIR"));
+    // TZ: a string, and it does not end the loop (a later bad key is still judged).
+    expect(await env({ TZ: "UTC", BASH_ENV: "x" })).toEqual(sets("BASH_ENV"));
+    expect(await env({ TZ: ["UTC"] as unknown as string })).toEqual(sets("TZ"));
+    expect(await env({ TZ: { a: "b" } as unknown as string })).toEqual(sets("TZ"));
+    expect(await env({ PATH: ["/usr/bin"] as unknown as string })).toEqual(sets("PATH"));
+    for (const path of [".", "/tmp", "/usr/bin:.", "/var/tmp:/usr/bin"]) expect({ path, w: await env({ PATH: path }) }).toEqual({ path, w: sets("PATH") });
+    // Names the old list of code-running variables did not hold: lower case, other interpreters' hooks, loader and shell settings.
+    for (const key of ["bash_env", "LD_PRELOAD", "GEM_HOME", "RUBYGEMS_GEMDEPS", "PYTHONUSERBASE", "BASH_FUNC_x%%", "SHELLOPTS", "PS4", "NODE_EXTRA_CA_CERTS", "MY_FLAG"])
+      expect({ key, w: await env({ LANG: "C", [key]: "x" }) }).toEqual({ key, w: [`${A}/t.plist complex plist: sets ${key}`] });
+  });
+  test("a NUL anywhere in the parsed plist, an entity in its source, and a key that changes what runs are complex", async () => {
     const files = { "/h/scripts/own.sh": owned };
     const nul = (o: object) => JSON.stringify(o);
     expect(await wrappersOf(nul({ "Program\u0000x": "/opt/evil.sh", ProgramArguments: ["/h/scripts/own.sh"] }), files)).toEqual([`${A}/t.plist complex plist: NUL`]);
@@ -216,7 +239,54 @@ describe("cruft count", () => {
     expect(await wrappersOf(nul({ ProgramArguments: ["/h/scripts/own.sh\u0000x"] }), files)).toEqual([`${A}/t.plist complex plist: NUL`]);
     for (const e of ["&#x2F;", "&#X2f;"]) expect(await wrappersOf(`{"ProgramArguments":["/h/scripts${e}own.sh"]}`, files)).toEqual([`${A}/t.plist complex plist: entity`]);
     expect(await wrappersOf(`{"ProgramArguments":["/h/scripts/own.sh"],"Label":"a&amp;b &lt; c"}`, files)).toEqual([]); // the five named entities read the same in both parsers
-    for (const key of ["RootDirectory", "EnableGlobbing"]) expect(await wrappersOf(nul({ ProgramArguments: ["/h/scripts/own.sh"], [key]: true }), files)).toEqual([`${A}/t.plist complex plist: sets ${key}`]);
+    for (const key of ["RootDirectory", "EnableGlobbing", "WorkingDirectory", "BundleProgram", "StandardInPath", "inetdCompatibility"]) expect(await wrappersOf(nul({ ProgramArguments: ["/h/scripts/own.sh"], [key]: true }), files)).toEqual([`${A}/t.plist complex plist: sets ${key}`]);
+  });
+  test("top-level keys are matched without case and only a listed key keeps a plist judged", async () => {
+    const own = ["/h/scripts/own.sh"];
+    const files = { "/h/scripts/own.sh": owned };
+    const w = (o: object) => wrappersOf(JSON.stringify(o), files);
+    const sets = (k: string) => [`${A}/t.plist complex plist: sets ${k}`];
+    const PROGRAM_DIFFERS = [`${A}/t.plist complex argv: /h/scripts/own.sh`];
+    // launchd lowercases every job key, so a differently cased spelling is the same key.
+    for (const key of ["workingdirectory", "workingDirectory", "WORKINGDIRECTORY", "rootdirectory", "enableglobbing"]) expect({ key, w: await w({ ProgramArguments: own, [key]: "/tmp/planted" }) }).toEqual({ key, w: sets(key) });
+    expect(await w({ programarguments: own, LABEL: "x", runatload: true })).toEqual([]); // fails at cruft.ts:118 if programarguments is read by exact case
+    expect(await w({ PROGRAM: "/h/scripts/own.sh", programarguments: own })).toEqual([]); // Program equal to argv[0] is shape (a)
+    for (const key of ["PROGRAM", "pRoGrAm"]) expect({ key, w: await w({ [key]: "/opt/evil.sh", ProgramArguments: own }) }).toEqual({ key, w: PROGRAM_DIFFERS }); // fails at cruft.ts:117 if Program is read as o.Program or o.program ?? o.Program
+    expect(await w({ program: "/opt/evil.sh", ProgramArguments: own })).toEqual(PROGRAM_DIFFERS); // fails at cruft.ts:117 if Program is read as o.Program: the lowercase one is missed and the plist counts adopted
+    expect(await w({ programarguments: ["/opt/evil.sh"], ProgramArguments: own })).toEqual([`${A}/t.plist complex plist: duplicate key ProgramArguments`]); // fails at cruft.ts:112 if the duplicate check is dropped
+    expect(await w({ Program: "/opt/evil.sh", program: "/h/scripts/own.sh", ProgramArguments: own })).toEqual([`${A}/t.plist complex plist: duplicate key program`]);
+    expect(await w({ ProgramArguments: own, environmentvariables: { BASH_ENV: "/tmp/x.sh" } })).toEqual(sets("BASH_ENV")); // fails at cruft.ts:119 if EnvironmentVariables is read as o.EnvironmentVariables
+    expect(await w({ ProgramArguments: own, EnvironmentVARIABLES: { LANG: "zh_TW.Big5" } })).toEqual(sets("LANG"));
+    expect(await w({ ProgramArguments: own, environmentvariables: { LANG: "C" } })).toEqual([]);
+    // Only a key on the list keeps it judged: unknown, underscore-prefixed, and the keys that change who or how it runs.
+    for (const key of ["Bogus", "_SubsystemRoot", "BinaryOrderPreference", "DisableASLR", "UserEnvironmentVariables", "UserName", "GroupName", "InitGroups", "Sockets", "Debug", "LaunchEvents", "HopefullyExitsLast"])
+      expect({ key, w: await w({ ProgramArguments: own, [key]: key === "UserEnvironmentVariables" ? { BASH_ENV: "/tmp/x.sh" } : "x" }) }).toEqual({ key, w: sets(key) });
+    // The listed keys (each is in `man launchd.plist`) keep it judged. This only checks that each name is admitted, so every value is a placeholder.
+    for (const key of ["Label", "Disabled", "RunAtLoad", "KeepAlive", "OnDemand", "StartInterval", "StartCalendarInterval", "StartOnMount", "WatchPaths", "QueueDirectories", "ThrottleInterval", "StandardOutPath", "StandardErrorPath", "ProcessType", "Nice", "LowPriorityIO", "LowPriorityBackgroundIO", "AbandonProcessGroup", "LaunchOnlyOnce", "ExitTimeOut", "TimeOut", "Umask", "LimitLoadToHosts", "LimitLoadFromHosts", "LimitLoadToSessionType", "LimitLoadToHardware", "LimitLoadFromHardware", "SoftResourceLimits", "HardResourceLimits", "EnableTransactions", "EnablePressuredExit", "SessionCreate", "AssociatedBundleIdentifiers", "MachServices"])
+      expect({ key, w: await w({ ProgramArguments: own, [key]: "x" }) }).toEqual({ key, w: [] });
+  });
+  test("the encoding declaration is matched in bounded time on a crafted full-size plist", () => {
+    // Many UTF-8 encoding attributes and no "?>": an unbounded [^>?]* pair retries the whole tail from each one (quadratic).
+    const raw = `<?xml${' encoding="utf-8"'.repeat(Math.floor((256 * 1024 - 8) / 17))}`;
+    const t0 = performance.now();
+    expect(sourceProblem(raw)).toBe("plist encoding");
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(sourceProblem('<?xml version="1.0" encoding="UTF-8"?>\n<plist/>')).toBeUndefined();
+  });
+  test("the encoding declaration bounds are exact: 8 spaces around = and a 256-character tail pass, 9 and 257 do not", () => {
+    const decl = (sp: number, tail: number) => `<?xml version="1.0" encoding${" ".repeat(sp)}=${" ".repeat(sp)}"utf-8"${"x".repeat(tail)}?><plist/>`;
+    expect(sourceProblem(decl(8, 0))).toBeUndefined(); // fails if \s{0,8} is widened or narrowed
+    expect(sourceProblem(decl(9, 0))).toBe("plist encoding");
+    const side = (before: number, after: number) => `<?xml version="1.0" encoding${" ".repeat(before)}=${" ".repeat(after)}"utf-8"?><plist/>`;
+    expect(sourceProblem(side(9, 0))).toBe("plist encoding"); // fails if the \s{0,8} before = is widened
+    expect(sourceProblem(side(0, 9))).toBe("plist encoding"); // fails if the \s{0,8} after = is widened
+    expect(sourceProblem(side(8, 0))).toBeUndefined();
+    expect(sourceProblem(side(0, 8))).toBeUndefined();
+    expect(sourceProblem(decl(1, 256))).toBeUndefined(); // fails if the tail {0,256} is widened or narrowed
+    expect(sourceProblem(decl(1, 257))).toBe("plist encoding");
+    const head = (n: number) => `<?xml${" ".repeat(n)} encoding="utf-8"?><plist/>`;
+    expect(sourceProblem(head(255))).toBeUndefined(); // fails if the head run before encoding is widened or narrowed
+    expect(sourceProblem(head(257))).toBe("plist encoding");
   });
   test("a text plist is judged only when its source is plain: encoding, CDATA, entity, an unreadable or full raw read", async () => {
     const own = "/h/scripts/own.sh";
@@ -270,13 +340,16 @@ describe("cruft count", () => {
 describe("realFs.readHead", () => {
   const root = mkdtempSync(join(tmpdir(), "oupdate-cruft-"));
   afterAll(() => rmSync(root, { recursive: true, force: true }));
-  test("reads only the first bytes of a regular file; a directory and a FIFO are never opened", async () => {
+  test("reads only the first bytes of a regular file; a directory, a FIFO and a link to a FIFO read as nothing, without waiting", async () => {
     writeFileSync(join(root, "f"), "#!/bin/sh\n0123456789");
     execFileSync("mkfifo", [join(root, "p")]);
     expect(await realFs.readHead!(join(root, "f"), 9)).toBe("#!/bin/sh");
     expect(await realFs.readHead!(root, 9)).toBeUndefined();
     expect(await realFs.readHead!(join(root, "p"), 9)).toBeUndefined();
+    symlinkSync(join(root, "p"), join(root, "l"));
+    expect(await realFs.readHead!(join(root, "l"), 9)).toBeUndefined();
     expect(await realFs.readHead!(join(root, "missing"), 9)).toBeUndefined();
+    expect(await realFs.readHead!("/dev/null", 6)).toBeUndefined(); // a character device: only the fstat guard refuses it
   });
 });
 

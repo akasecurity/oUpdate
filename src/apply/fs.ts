@@ -1,7 +1,7 @@
 // The small file-system surface of the host apply, so a run can be scripted in tests.
 
 import { execFile } from "node:child_process";
-import { accessSync, appendFileSync, closeSync, constants, lstatSync, mkdirSync, openSync, readSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
 import { readPinFiles, type PinFile } from "./pins.ts";
@@ -125,9 +125,11 @@ export const realFs: ApplyFs = {
   },
   readHead: async (p, bytes) => {
     try {
-      if (!statSync(p).isFile()) return undefined;
-      const fd = openSync(p, "r");
+      // O_NONBLOCK: opening a FIFO that something swapped in after a path check would otherwise wait for a writer forever.
+      // The kind is read from the open descriptor, so what is read is what was checked.
+      const fd = openSync(p, constants.O_RDONLY | constants.O_NONBLOCK);
       try {
+        if (!fstatSync(fd).isFile()) return undefined;
         const buf = Buffer.alloc(bytes);
         return buf.subarray(0, readSync(fd, buf, 0, bytes, 0)).toString("utf8");
       } finally {
