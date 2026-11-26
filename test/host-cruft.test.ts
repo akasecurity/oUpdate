@@ -421,19 +421,24 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     expect(await host(own, `${adopted}/missing/..`)).toEqual(runs(own));
     expect(await host(own, join(root, "no-such-dir"))).toEqual(runs(own));
     // A failed lookup of the adopted dir, with a script whose real path (stubbed) reads "undefined/...": fails at the
-    // `realAdopted !== undefined` term in cruft.ts, where startsWith(undefined) would look for the string "undefined".
+    // `realAdopted !== undefined` term in cruft.ts:219, where startsWith(undefined) would look for the string "undefined".
     const ghost = join(root, "no-such-dir", "own.sh");
     const odd = "undefined/own.sh";
     expect(await host(ghost, join(root, "no-such-dir"), { realPath: async (p: string) => (p === ghost ? odd : realFs.realPath!(p)), readHead: async (p: string, n: number) => (p === odd ? owned : p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n)) })).toEqual(runs(ghost));
     // A dot segment that does resolve still adopts the files really inside it.
     expect(await host(own, `${adopted}/.`)).toEqual([]);
+    // The plain prefix is the configured string, never resolve()d (cruft.ts:174): toSub -> scripts/sub, so outside/toSub/.. is
+    // really scripts; resolve() would make it outside/, and outside/w2 (a link to scripts) would look adopted.
+    mkdirSync(join(adopted, "sub"), { recursive: true });
+    symlinkSync(join(adopted, "sub"), join(outside, "toSub"));
+    expect(await host(join(outside, "w2", "own.sh"), `${outside}/toSub/..`)).toEqual(runs(join(outside, "w2", "own.sh")));
   });
   test("a no-shebang program is checked for a second resolution before it is skipped as a binary", async () => {
     const bin = join(adopted, "bin.out");
     writeFileSync(bin, "\u0001\u0002 not a script");
     expect(await host(bin, adopted)).toEqual([]);
     let n = 0;
-    // Fails at the order of cruft.ts:211 and the binary skip after it: the binary shortcut returned before the second realPath, so a swapped path counted as 0.
+    // Fails at the order of cruft.ts:210 (second realPath), :211 (`stable`) and :213 (binary skip): the binary shortcut returned before the second realPath, so a swapped path counted as 0.
     expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++n === 2 ? join(outside, "x.sh") : realFs.realPath!(p)) })).toEqual(runs(bin));
   });
   test("the file read and the file judged are one: a path that resolves differently on the second look is unadopted", async () => {
@@ -444,7 +449,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     let n = 0;
     // The first resolution says outside (owned), the second says inside: readHead read the outside file, the check sees the inside one.
     const retarget = { realPath: async (p: string) => (p === script ? (++n === 1 ? elsewhere : inside) : realFs.realPath!(p)), readHead: async (p: string, b: number) => { reads.push(p); return p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b); } };
-    // Outside first, inside second: red at cruft.ts:219 only through real!.startsWith (the first path is outside), so it does not pin `stable`.
+    // Outside first, inside second: cruft.ts:211 (`stable`) and cruft.ts:219 (`real!.startsWith`) each block this fixture alone, so it pins neither; the next two fixtures pin `stable`.
     expect(await host(script, adopted, retarget)).toEqual(runs(script));
     expect(reads).toContain(elsewhere); // what was read is the first resolved path, not the one as given
     // The dangerous direction: inside first (owned, adopted), outside second. Fails at cruft.ts:211 (`stable`) if `again === real` is dropped.

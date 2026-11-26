@@ -168,7 +168,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // (alias.sh -> an outside link -> own.sh); (c) the configured dir being a symlink that retargets during one scan;
   // (d) a different spelling of the same place (case, NFC/NFD, /var for /private/var), which only overcounts.
   const dotted = (p: string) => p.split("/").some((x) => x === "." || x === "..");
-  // An fs with no realPath (a test fake) has no links: the raw string is its real path. A lookup that fails adopts nothing.
+  // An fs with no realPath (a test fake) has no links: the lexically resolved path (resolve()) is its real path. A lookup that fails adopts nothing.
   const realRaw = fs.realPath ? await fs.realPath(adoptedRaw) : resolve(adoptedRaw);
   const realAdopted = realRaw === undefined ? undefined : `${realRaw.replace(/\/+$/, "")}/`;
   const plainAdopted = `${adoptedRaw}/`;
