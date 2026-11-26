@@ -231,7 +231,7 @@ describe("cruft count", () => {
     for (const key of ["bash_env", "LD_PRELOAD", "GEM_HOME", "RUBYGEMS_GEMDEPS", "PYTHONUSERBASE", "BASH_FUNC_x%%", "SHELLOPTS", "PS4", "NODE_EXTRA_CA_CERTS", "MY_FLAG"])
       expect({ key, w: await env({ LANG: "C", [key]: "x" }) }).toEqual({ key, w: [`${A}/t.plist complex plist: sets ${key}`] });
   });
-  test("a NUL anywhere in the parsed plist, an entity in its source, RootDirectory and EnableGlobbing are complex", async () => {
+  test("a NUL anywhere in the parsed plist, an entity in its source, and a key that changes what runs are complex", async () => {
     const files = { "/h/scripts/own.sh": owned };
     const nul = (o: object) => JSON.stringify(o);
     expect(await wrappersOf(nul({ "Program\u0000x": "/opt/evil.sh", ProgramArguments: ["/h/scripts/own.sh"] }), files)).toEqual([`${A}/t.plist complex plist: NUL`]);
@@ -240,6 +240,27 @@ describe("cruft count", () => {
     for (const e of ["&#x2F;", "&#X2f;"]) expect(await wrappersOf(`{"ProgramArguments":["/h/scripts${e}own.sh"]}`, files)).toEqual([`${A}/t.plist complex plist: entity`]);
     expect(await wrappersOf(`{"ProgramArguments":["/h/scripts/own.sh"],"Label":"a&amp;b &lt; c"}`, files)).toEqual([]); // the five named entities read the same in both parsers
     for (const key of ["RootDirectory", "EnableGlobbing", "WorkingDirectory", "BundleProgram", "StandardInPath", "inetdCompatibility"]) expect(await wrappersOf(nul({ ProgramArguments: ["/h/scripts/own.sh"], [key]: true }), files)).toEqual([`${A}/t.plist complex plist: sets ${key}`]);
+  });
+  test("top-level keys are matched without case and only a listed key keeps a plist judged", async () => {
+    const own = ["/h/scripts/own.sh"];
+    const files = { "/h/scripts/own.sh": owned };
+    const w = (o: object) => wrappersOf(JSON.stringify(o), files);
+    const sets = (k: string) => [`${A}/t.plist complex plist: sets ${k}`];
+    // launchd lowercases every job key, so a differently cased spelling is the same key.
+    for (const key of ["workingdirectory", "workingDirectory", "WORKINGDIRECTORY", "rootdirectory", "enableglobbing"]) expect({ key, w: await w({ ProgramArguments: own, [key]: "/tmp/planted" }) }).toEqual({ key, w: sets(key) });
+    expect(await w({ programarguments: own, LABEL: "x", runatload: true })).toEqual([]); // fails if Program/ProgramArguments are read by exact case
+    expect(await w({ PROGRAM: "/h/scripts/own.sh", programarguments: own })).toEqual([]);
+    expect(await w({ programarguments: ["/opt/evil.sh"], ProgramArguments: own })).toEqual([`${A}/t.plist complex plist: duplicate key ProgramArguments`]); // fails if the duplicate check is dropped
+    expect(await w({ Program: "/opt/evil.sh", program: "/h/scripts/own.sh", ProgramArguments: own })).toEqual([`${A}/t.plist complex plist: duplicate key program`]);
+    expect(await w({ ProgramArguments: own, environmentvariables: { BASH_ENV: "/tmp/x.sh" } })).toEqual(sets("BASH_ENV")); // fails if EnvironmentVariables is read by exact case
+    expect(await w({ ProgramArguments: own, EnvironmentVARIABLES: { LANG: "zh_TW.Big5" } })).toEqual(sets("LANG"));
+    expect(await w({ ProgramArguments: own, environmentvariables: { LANG: "C" } })).toEqual([]);
+    // Only a key on the list keeps it judged: unknown, underscore-prefixed, and the keys that change who or how it runs.
+    for (const key of ["Bogus", "_SubsystemRoot", "BinaryOrderPreference", "DisableASLR", "UserEnvironmentVariables", "UserName", "GroupName", "InitGroups", "Sockets", "Debug", "LaunchEvents", "HopefullyExitsLast"])
+      expect({ key, w: await w({ ProgramArguments: own, [key]: key === "UserEnvironmentVariables" ? { BASH_ENV: "/tmp/x.sh" } : "x" }) }).toEqual({ key, w: sets(key) });
+    // The listed keys (each is in `man launchd.plist`) keep it judged.
+    for (const key of ["Label", "Disabled", "RunAtLoad", "KeepAlive", "OnDemand", "StartInterval", "StartCalendarInterval", "StartOnMount", "WatchPaths", "QueueDirectories", "ThrottleInterval", "StandardOutPath", "StandardErrorPath", "ProcessType", "Nice", "LowPriorityIO", "LowPriorityBackgroundIO", "AbandonProcessGroup", "LaunchOnlyOnce", "ExitTimeOut", "TimeOut", "Umask", "LimitLoadToHosts", "LimitLoadFromHosts", "LimitLoadToSessionType", "LimitLoadToHardware", "LimitLoadFromHardware", "SoftResourceLimits", "HardResourceLimits", "EnableTransactions", "EnablePressuredExit", "SessionCreate", "AssociatedBundleIdentifiers", "MachServices"])
+      expect({ key, w: await w({ ProgramArguments: own, [key]: "x" }) }).toEqual({ key, w: [] });
   });
   test("the encoding declaration is matched in bounded time on a crafted full-size plist", () => {
     // Many UTF-8 encoding attributes and no "?>": an unbounded [^>?]* pair retries the whole tail from each one (quadratic).

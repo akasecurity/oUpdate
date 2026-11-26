@@ -45,8 +45,19 @@ function envProblem(env: Record<string, unknown>): string | undefined {
   }
   return undefined;
 }
-/** Top-level keys that change how launchd resolves the program or its arguments. */
-const RESOLVE_KEYS = ["RootDirectory", "EnableGlobbing", "WorkingDirectory", "BundleProgram", "StandardInPath", "inetdCompatibility"];
+/**
+ * The only top-level keys (lower case: launchd lowercases every job key, so Foo, foo and FOO are one key) a judged plist
+ * may have, each one in `man launchd.plist`. None changes the program, its argv, cwd, stdin, user, group, home or
+ * environment. Any other key, the unknown and underscore-prefixed ones included, makes the plist "complex".
+ */
+const ALLOWED_KEYS = new Set([
+  "label", "program", "programarguments", "environmentvariables", "disabled", "runatload", "keepalive", "ondemand",
+  "startinterval", "startcalendarinterval", "startonmount", "watchpaths", "queuedirectories", "throttleinterval",
+  "standardoutpath", "standarderrorpath", "processtype", "nice", "lowpriorityio", "lowprioritybackgroundio",
+  "abandonprocessgroup", "launchonlyonce", "exittimeout", "timeout", "umask", "limitloadtohosts", "limitloadfromhosts",
+  "limitloadtosessiontype", "limitloadtohardware", "limitloadfromhardware", "softresourcelimits", "hardresourcelimits",
+  "enabletransactions", "enablepressuredexit", "sessioncreate", "associatedbundleidentifiers", "machservices",
+]);
 const dirOf = (p: string) => p.slice(0, Math.max(p.lastIndexOf("/"), 0)) || "/";
 const OWNER_LINE = /^#\s*owner:\s*\S/;
 
@@ -89,11 +100,20 @@ function ownerlessPins(file: string, text: string): string[] {
  */
 export function plistLaunch(o: Record<string, unknown>): { program?: string; argv: string[] } | string {
   const str = (v: unknown): v is string => typeof v === "string" && v !== "";
-  const { Program: program, ProgramArguments: args, EnvironmentVariables: env } = o;
-  const resolves = RESOLVE_KEYS.find((k) => k in o);
-  if (resolves) return `sets ${resolves}`;
   // launchctl reads the file with libxpc, plutil with CoreFoundation; a NUL (cut off by one, kept by the other) is a form they read differently.
   if (JSON.stringify(o).includes("\\u0000")) return "NUL";
+  // launchd lowercases (ASCII) every job key before it stores or looks one up: read the keys the same way.
+  const byLower = new Map<string, string>();
+  for (const k of Object.keys(o)) {
+    const l = k.replace(/[A-Z]/g, (c) => c.toLowerCase());
+    if (byLower.has(l)) return `duplicate key ${k}`;
+    if (!ALLOWED_KEYS.has(l)) return `sets ${k}`;
+    byLower.set(l, k);
+  }
+  const at = (l: string) => (byLower.has(l) ? o[byLower.get(l)!] : undefined);
+  const program = at("program");
+  const args = at("programarguments");
+  const env = at("environmentvariables");
   if (program === undefined && args === undefined) return "no Program or ProgramArguments";
   if (program !== undefined && !str(program)) return "Program is not a string";
   if (args !== undefined && !(Array.isArray(args) && args.length > 0 && args.every(str))) return "ProgramArguments is not a list of strings";
