@@ -246,19 +246,21 @@ describe("cruft count", () => {
     const files = { "/h/scripts/own.sh": owned };
     const w = (o: object) => wrappersOf(JSON.stringify(o), files);
     const sets = (k: string) => [`${A}/t.plist complex plist: sets ${k}`];
+    const PROGRAM_DIFFERS = [`${A}/t.plist complex argv: /h/scripts/own.sh`];
     // launchd lowercases every job key, so a differently cased spelling is the same key.
     for (const key of ["workingdirectory", "workingDirectory", "WORKINGDIRECTORY", "rootdirectory", "enableglobbing"]) expect({ key, w: await w({ ProgramArguments: own, [key]: "/tmp/planted" }) }).toEqual({ key, w: sets(key) });
-    expect(await w({ programarguments: own, LABEL: "x", runatload: true })).toEqual([]); // fails if Program/ProgramArguments are read by exact case
-    expect(await w({ PROGRAM: "/h/scripts/own.sh", programarguments: own })).toEqual([]);
-    expect(await w({ programarguments: ["/opt/evil.sh"], ProgramArguments: own })).toEqual([`${A}/t.plist complex plist: duplicate key ProgramArguments`]); // fails if the duplicate check is dropped
+    expect(await w({ programarguments: own, LABEL: "x", runatload: true })).toEqual([]); // fails at cruft.ts:117-118 if program/programarguments are read by exact case
+    expect(await w({ PROGRAM: "/h/scripts/own.sh", programarguments: own })).toEqual([]); // Program equal to argv[0] is shape (a)
+    expect(await w({ program: "/opt/evil.sh", ProgramArguments: own })).toEqual(PROGRAM_DIFFERS); // fails at cruft.ts:117 if Program is read as o.Program: the lowercase one is missed and the plist counts adopted
+    expect(await w({ programarguments: ["/opt/evil.sh"], ProgramArguments: own })).toEqual([`${A}/t.plist complex plist: duplicate key ProgramArguments`]); // fails at cruft.ts:112 if the duplicate check is dropped
     expect(await w({ Program: "/opt/evil.sh", program: "/h/scripts/own.sh", ProgramArguments: own })).toEqual([`${A}/t.plist complex plist: duplicate key program`]);
-    expect(await w({ ProgramArguments: own, environmentvariables: { BASH_ENV: "/tmp/x.sh" } })).toEqual(sets("BASH_ENV")); // fails if EnvironmentVariables is read by exact case
+    expect(await w({ ProgramArguments: own, environmentvariables: { BASH_ENV: "/tmp/x.sh" } })).toEqual(sets("BASH_ENV")); // fails at cruft.ts:119 if EnvironmentVariables is read as o.EnvironmentVariables
     expect(await w({ ProgramArguments: own, EnvironmentVARIABLES: { LANG: "zh_TW.Big5" } })).toEqual(sets("LANG"));
     expect(await w({ ProgramArguments: own, environmentvariables: { LANG: "C" } })).toEqual([]);
     // Only a key on the list keeps it judged: unknown, underscore-prefixed, and the keys that change who or how it runs.
     for (const key of ["Bogus", "_SubsystemRoot", "BinaryOrderPreference", "DisableASLR", "UserEnvironmentVariables", "UserName", "GroupName", "InitGroups", "Sockets", "Debug", "LaunchEvents", "HopefullyExitsLast"])
       expect({ key, w: await w({ ProgramArguments: own, [key]: key === "UserEnvironmentVariables" ? { BASH_ENV: "/tmp/x.sh" } : "x" }) }).toEqual({ key, w: sets(key) });
-    // The listed keys (each is in `man launchd.plist`) keep it judged.
+    // The listed keys (each is in `man launchd.plist`) keep it judged. This only checks that each name is admitted, so every value is a placeholder.
     for (const key of ["Label", "Disabled", "RunAtLoad", "KeepAlive", "OnDemand", "StartInterval", "StartCalendarInterval", "StartOnMount", "WatchPaths", "QueueDirectories", "ThrottleInterval", "StandardOutPath", "StandardErrorPath", "ProcessType", "Nice", "LowPriorityIO", "LowPriorityBackgroundIO", "AbandonProcessGroup", "LaunchOnlyOnce", "ExitTimeOut", "TimeOut", "Umask", "LimitLoadToHosts", "LimitLoadFromHosts", "LimitLoadToSessionType", "LimitLoadToHardware", "LimitLoadFromHardware", "SoftResourceLimits", "HardResourceLimits", "EnableTransactions", "EnablePressuredExit", "SessionCreate", "AssociatedBundleIdentifiers", "MachServices"])
       expect({ key, w: await w({ ProgramArguments: own, [key]: "x" }) }).toEqual({ key, w: [] });
   });

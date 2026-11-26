@@ -49,6 +49,9 @@ function envProblem(env: Record<string, unknown>): string | undefined {
  * The only top-level keys (lower case: launchd lowercases every job key, so Foo, foo and FOO are one key) a judged plist
  * may have, each one in `man launchd.plist`. None changes the program, its argv, cwd, stdin, user, group, home or
  * environment. Any other key, the unknown and underscore-prefixed ones included, makes the plist "complex".
+ * Accepted lows, no behavior change: StandardOutPath, StandardErrorPath, Umask and the resource limits can feed or
+ * overwrite an owned script that reads its stdio or is writable, and rejecting them would leave most real wrappers
+ * (which log) unadopted.
  */
 const ALLOWED_KEYS = new Set([
   "label", "program", "programarguments", "environmentvariables", "disabled", "runatload", "keepalive", "ondemand",
