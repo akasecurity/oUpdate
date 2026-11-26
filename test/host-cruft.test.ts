@@ -1,7 +1,7 @@
 // `host --cruft-count` (OUP-349): read-only count of ownerless pins, tool-made backups, unadopted wrappers.
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realFs } from "../src/apply/fs.ts";
@@ -285,12 +285,14 @@ describe("cruft count", () => {
 describe("realFs.readHead", () => {
   const root = mkdtempSync(join(tmpdir(), "oupdate-cruft-"));
   afterAll(() => rmSync(root, { recursive: true, force: true }));
-  test("reads only the first bytes of a regular file; a directory and a FIFO are never opened", async () => {
+  test("reads only the first bytes of a regular file; a directory, a FIFO and a link to a FIFO read as nothing, without waiting", async () => {
     writeFileSync(join(root, "f"), "#!/bin/sh\n0123456789");
     execFileSync("mkfifo", [join(root, "p")]);
     expect(await realFs.readHead!(join(root, "f"), 9)).toBe("#!/bin/sh");
     expect(await realFs.readHead!(root, 9)).toBeUndefined();
     expect(await realFs.readHead!(join(root, "p"), 9)).toBeUndefined();
+    symlinkSync(join(root, "p"), join(root, "l"));
+    expect(await realFs.readHead!(join(root, "l"), 9)).toBeUndefined();
     expect(await realFs.readHead!(join(root, "missing"), 9)).toBeUndefined();
   });
 });
