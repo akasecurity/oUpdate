@@ -206,7 +206,14 @@ describe("cruft count", () => {
       const o = JSON.stringify({ ProgramArguments: ["/h/scripts/own.sh"], EnvironmentVariables: { [key]: "x" } });
       expect({ key, w: await wrappersOf(o, files) }).toEqual({ key, w: [`${A}/t.plist complex plist: sets ${key}`] });
     }
-    expect(await wrappersOf(JSON.stringify({ ProgramArguments: ["/h/scripts/own.sh"], EnvironmentVariables: { LANG: "C", bash_env: "x" } }), files)).toEqual([]);
+  });
+  test("only a listed environment variable keeps a plist judged: any other name is complex", async () => {
+    const files = { "/h/scripts/own.sh": owned };
+    const env = (e: Record<string, string>) => wrappersOf(JSON.stringify({ ProgramArguments: ["/h/scripts/own.sh"], EnvironmentVariables: e }), files);
+    expect(await env({ PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C", LC_CTYPE: "UTF-8", TZ: "UTC", TMPDIR: "/tmp" })).toEqual([]);
+    // Names the old list of code-running variables did not hold: lower case, other interpreters' hooks, loader and shell settings.
+    for (const key of ["bash_env", "LD_PRELOAD", "GEM_HOME", "RUBYGEMS_GEMDEPS", "PYTHONUSERBASE", "BASH_FUNC_x%%", "SHELLOPTS", "PS4", "NODE_EXTRA_CA_CERTS", "MY_FLAG"])
+      expect({ key, w: await env({ LANG: "C", [key]: "x" }) }).toEqual({ key, w: [`${A}/t.plist complex plist: sets ${key}`] });
   });
   test("a NUL anywhere in the parsed plist, an entity in its source, RootDirectory and EnableGlobbing are complex", async () => {
     const files = { "/h/scripts/own.sh": owned };
