@@ -1,7 +1,7 @@
 // The small file-system surface of the host apply, so a run can be scripted in tests.
 
 import { execFile } from "node:child_process";
-import { accessSync, appendFileSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, appendFileSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
 import { readPinFiles, type PinFile } from "./pins.ts";
@@ -33,6 +33,8 @@ export interface ApplyFs {
   mtimeMs?(path: string): Promise<number | undefined>;
   /** The first `bytes` bytes as text of a regular file (a link to one counts); undefined when it is missing, unreadable or not a regular file (a FIFO or device is never opened). */
   readHead?(path: string, bytes: number): Promise<string | undefined>;
+  /** The path with every symlink resolved (fs.realpathSync), or undefined when it cannot be (missing, a loop, no access). */
+  realPath?(path: string): Promise<string | undefined>;
   /**
    * A property list read by the OS's own parser (/usr/bin/plutil, the reader launchd's files are written for), as the
    * parsed top-level object. undefined for anything else: not a regular file, over 256 KiB, no plutil, a non-zero exit,
@@ -119,6 +121,13 @@ export const realFs: ApplyFs = {
     try {
       const s = lstatSync(p);
       return s.isFile() ? s.mtimeMs : undefined;
+    } catch {
+      return undefined;
+    }
+  },
+  realPath: async (p) => {
+    try {
+      return realpathSync(p);
     } catch {
       return undefined;
     }

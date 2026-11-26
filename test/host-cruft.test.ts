@@ -68,10 +68,14 @@ describe("cruft count", () => {
     const c = await cruftCount({ fs: fs(files, { [A]: ["far.plist"] }), configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
     expect(c.wrappers).toEqual([`${A}/far.plist runs /h/scripts/far.sh`]);
   });
-  test("a script readHead cannot give (a FIFO) is skipped", async () => {
+  test("a script that is missing or that readHead cannot give (a FIFO) is unadopted, not left out", async () => {
     const A = "/h/Library/LaunchAgents";
-    const c = await cruftCount({ fs: fs({ [`${A}/fifo.plist`]: plist("/opt/fifo.sh") }, { [A]: ["fifo.plist"] }), configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
-    expect(c.wrappers).toEqual([]);
+    // Fails at cruft.ts:192 if the body === undefined branch goes back to `continue`: the plist is then left out of the count.
+    const c = await cruftCount({ fs: fs({ [`${A}/fifo.plist`]: plist("/opt/fifo.sh"), [`${A}/gone.plist`]: plist("/bin/sh", "/h/scripts/gone.sh") }, { [A]: ["fifo.plist", "gone.plist"] }), configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
+    expect(c.wrappers).toEqual([`${A}/fifo.plist runs /opt/fifo.sh`, `${A}/gone.plist runs /h/scripts/gone.sh`]);
+    // A shape (a) program with no shebang stays a binary, not counted.
+    const bin = await cruftCount({ fs: fs({ [`${A}/b.plist`]: plist("/opt/prog"), "/opt/prog": "\u0000ELF" }, { [A]: ["b.plist"] }), configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
+    expect(bin.wrappers).toEqual([]);
   });
   test("a sibling directory that only shares the prefix is not adopted", async () => {
     const A = "/h/Library/LaunchAgents";
@@ -350,6 +354,39 @@ describe("realFs.readHead", () => {
     expect(await realFs.readHead!(join(root, "l"), 9)).toBeUndefined();
     expect(await realFs.readHead!(join(root, "missing"), 9)).toBeUndefined();
     expect(await realFs.readHead!("/dev/null", 6)).toBeUndefined(); // a character device: only the fstat guard refuses it
+  });
+});
+
+describe("adoption resolves symlinks (OUP-366)", () => {
+  const root = mkdtempSync(join(tmpdir(), "oupdate-link-"));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  test("a link inside the adopted directory that points outside it, or a directory that is itself a link, is judged by its real path", async () => {
+    const A = "/h/Library/LaunchAgents";
+    const adopted = join(root, "scripts");
+    const outside = join(root, "outside");
+    const real = join(root, "real-scripts");
+    mkdirSync(adopted);
+    mkdirSync(outside);
+    mkdirSync(real);
+    writeFileSync(join(outside, "x.sh"), "#!/bin/sh\n# owner: t\n");
+    writeFileSync(join(adopted, "own.sh"), "#!/bin/sh\n# owner: t\n");
+    writeFileSync(join(real, "r.sh"), "#!/bin/sh\n# owner: t\n");
+    symlinkSync(join(outside, "x.sh"), join(adopted, "link.sh"));
+    symlinkSync(real, join(root, "scripts-link"));
+    const run = async (script: string, dir: string) =>
+      (await cruftCount({
+        fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n)), realPath: realFs.realPath!, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
+        configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
+      })).wrappers;
+    // These fail at cruft.ts:199 if the script is compared by its lexical path (the link counts adopted); the link-directory cases fail at :163 if the adopted dir is compared lexically.
+    expect(await run(join(adopted, "link.sh"), adopted)).toEqual([`${A}/t.plist runs ${join(adopted, "link.sh")}`]);
+    expect(await run(join(adopted, "own.sh"), adopted)).toEqual([]);
+    // A directory that is a link: its real files are inside its real path.
+    expect(await run(join(root, "scripts-link", "r.sh"), join(root, "scripts-link"))).toEqual([]);
+    expect(await run(join(real, "r.sh"), join(root, "scripts-link"))).toEqual([]);
+    // An unresolvable path is unadopted (a dangling link has no body, so it is counted as missing).
+    symlinkSync(join(root, "nowhere"), join(adopted, "dangling.sh"));
+    expect(await run(join(adopted, "dangling.sh"), adopted)).toEqual([`${A}/t.plist runs ${join(adopted, "dangling.sh")}`]);
   });
 });
 
