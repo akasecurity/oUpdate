@@ -159,10 +159,15 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   const home = fs.home.replace(/\/+$/, "");
   const dirCfg = a.adoptedScriptsDir ?? `${home}/scripts`;
   const adoptedRaw = (dirCfg.startsWith("~/") ? `${home}/${dirCfg.slice(2)}` : dirCfg).replace(/\/+$/, "");
-  // The plain form (".." collapsed textually) and the real form. The real one is canonicalized from the raw string by the
-  // OS, which follows a link before a ".." after it: resolve() first would collapse scripts/hop/.. to scripts.
-  const plainAdopted = `${resolve(adoptedRaw).replace(/\/+$/, "")}/`;
-  const realAdopted = `${((fs.realPath ? await fs.realPath(adoptedRaw) : undefined) ?? resolve(adoptedRaw)).replace(/\/+$/, "")}/`;
+  // The adopted dir is canonicalized from the raw string by the OS (native realpath: a link is followed before a ".." after
+  // it). If that lookup fails, nothing is adopted: no lexical fallback (scripts/missing/.. is not scripts). The plain
+  // spelling is also accepted, but only when the configured dir has no "." or ".." segment. A different spelling of the
+  // same place (case, NFC/NFD, /var for /private/var) only overcounts, which is accepted.
+  const dotted = (p: string) => p.split("/").some((x) => x === "." || x === "..");
+  // An fs with no realPath (a test fake) has no links: the raw string is its real path. A lookup that fails adopts nothing.
+  const realRaw = fs.realPath ? await fs.realPath(adoptedRaw) : resolve(adoptedRaw);
+  const realAdopted = realRaw === undefined ? undefined : `${realRaw.replace(/\/+$/, "")}/`;
+  const plainAdopted = dotted(adoptedRaw) ? undefined : `${adoptedRaw}/`;
   for (const d of [`${fs.home}/Library/LaunchAgents`, "/Library/LaunchAgents", "/Library/LaunchDaemons"]) {
     for (const n of (await fs.listDir(d)).filter((x) => x.endsWith(".plist")).sort()) {
       const obj = await fs.plistJson?.(`${d}/${n}`);
@@ -197,12 +202,17 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         wrappers.push(`${d}/${n} runs ${run.script}`);
         continue;
       }
-      // Shape (a) with no shebang is a binary program: not counted.
-      if (run.shebang && !body.startsWith("#!")) continue;
-      // Both forms must be inside the directory: the path as given (outside/w -> scripts is not adopted) and its real
-      // path (a link inside that points outside is not), and the real path must be the same on the second look.
+      // The second look comes before any skip, so no path is left out of the count before it has been resolved twice.
       const again = fs.realPath ? await fs.realPath(run.script) : real;
-      const inside = (resolve(run.script).startsWith(plainAdopted) || run.script.startsWith(realAdopted)) && real!.startsWith(realAdopted) && again === real;
+      const stable = again === real;
+      // Shape (a) with no shebang is a binary program: not counted (once it resolved the same twice).
+      if (stable && run.shebang && !body.startsWith("#!")) continue;
+      // The path as given must have no "." or ".." segment: resolve() erases link/.. as text while the kernel follows the
+      // link first, so such a path is never adopted. Then both the path as given and its real path must be inside the
+      // directory (outside/w -> scripts is not adopted; a link inside that points outside is not).
+      // A same-path content swap between the read and the second lookup (an atomic replace of an owned script) is an
+      // accepted low: it needs write access inside the adopted dir, where an owned script can be edited anyway.
+      const inside = !dotted(run.script) && stable && realAdopted !== undefined && real!.startsWith(realAdopted) && (run.script.startsWith(realAdopted) || (plainAdopted !== undefined && run.script.startsWith(plainAdopted)));
       const owned = inside && body.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
       if (!owned) wrappers.push(`${d}/${n} runs ${run.script}`);
     }

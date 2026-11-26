@@ -33,7 +33,7 @@ export interface ApplyFs {
   mtimeMs?(path: string): Promise<number | undefined>;
   /** The first `bytes` bytes as text of a regular file (a link to one counts); undefined when it is missing, unreadable or not a regular file (a FIFO or device is never opened). */
   readHead?(path: string, bytes: number): Promise<string | undefined>;
-  /** The path with every symlink resolved (fs.realpathSync), or undefined when it cannot be (missing, a loop, no access). */
+  /** The path with every symlink resolved (fs.realpathSync.native, which follows a link before a ".." after it), or undefined when it cannot be (missing, a loop, no access). */
   realPath?(path: string): Promise<string | undefined>;
   /**
    * A property list read by the OS's own parser (/usr/bin/plutil, the reader launchd's files are written for), as the

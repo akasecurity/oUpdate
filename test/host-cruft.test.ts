@@ -386,10 +386,10 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     }).then((c) => c.wrappers);
   const runs = (s: string) => [`${A}/t.plist runs ${s}`];
   test("a link inside the adopted directory that points outside it, or a directory that is itself a link, is judged by its real path", async () => {
-    // Fail at cruft.ts:205 (the real path of the script) if the script is judged by its lexical path: the link counts adopted.
+    // Fail at cruft.ts:215 (`real!.startsWith(realAdopted)`) if the script is judged by its lexical path: the link counts adopted.
     expect(await host(join(adopted, "link.sh"), adopted)).toEqual(runs(join(adopted, "link.sh")));
     expect(await host(join(adopted, "own.sh"), adopted)).toEqual([]);
-    // Fail at cruft.ts:165 if the adopted dir is compared lexically: its real files are inside its real path.
+    // Fail at cruft.ts:168 if the adopted dir is compared lexically: its real files are inside its real path.
     expect(await host(join(root, "scripts-link", "r.sh"), join(root, "scripts-link"))).toEqual([]);
     expect(await host(join(real, "r.sh"), join(root, "scripts-link"))).toEqual([]);
     expect(await host(join(adopted, "dangling.sh"), adopted)).toEqual(runs(join(adopted, "dangling.sh"))); // no body: counted as missing
@@ -397,13 +397,38 @@ describe("adoption resolves symlinks (OUP-366)", () => {
   test("a .. after a link is followed by the link first, as the kernel does; so is the adopted dir's own ..", async () => {
     // Fails at fs.ts realPath if it collapses .. textually (realpathSync, not .native): link/../own.sh is outside/own.sh.
     expect(await host(`${adopted}/link/../own.sh`, adopted)).toEqual(runs(`${adopted}/link/../own.sh`));
-    // Fails at cruft.ts:165 if the adopted dir is collapsed by resolve() before it is canonicalized: scripts/hop/.. is outside.
+    // Fails at cruft.ts:168 if the adopted dir is collapsed by resolve() before it is canonicalized (scripts/hop/.. is outside).
     expect(await host(join(adopted, "own.sh"), `${adopted}/hop/..`)).toEqual(runs(join(adopted, "own.sh")));
   });
   test("both the path as given and its real path must be inside the adopted directory", async () => {
-    // Fails at cruft.ts:205 if the plain path is not also checked: outside/w2 links to scripts, so the real path is inside.
+    // Fails at cruft.ts:215 (the `run.script.startsWith` terms) if the plain path is not also checked: outside/w2 links to scripts, so the real path is inside.
     expect(await host(join(outside, "w2", "own.sh"), adopted)).toEqual(runs(join(outside, "w2", "own.sh")));
     expect(await host(join(outside, "w", "in", "own.sh"), adopted)).toEqual(runs(join(outside, "w", "in", "own.sh")));
+  });
+  test("a script path with a . or .. segment is unadopted, even when the plain and the real form both land inside", async () => {
+    mkdirSync(join(adopted, "sub"), { recursive: true });
+    writeFileSync(join(adopted, "sub", "own.sh"), owned);
+    symlinkSync(join(adopted, "sub"), join(adopted, "inlink"));
+    // Fails at the `!dotted(run.script)` term in cruft.ts:215: adopted/inlink/../own.sh is adopted/own.sh both as resolve() and as the kernel reads it.
+    expect(await host(`${adopted}/inlink/../own.sh`, adopted)).toEqual(runs(`${adopted}/inlink/../own.sh`));
+    expect(await host(`${adopted}/./own.sh`, adopted)).toEqual(runs(`${adopted}/./own.sh`));
+    expect(await host(join(adopted, "own.sh"), adopted)).toEqual([]); // the plain spelling stays adopted
+  });
+  test("a configured adopted dir that does not resolve adopts nothing, and one with a dot segment is compared by its real path only", async () => {
+    const own = join(adopted, "own.sh");
+    // Fails at cruft.ts:168-169 (realAdopted): the lexical fallback turns scripts/missing/.. into scripts.
+    expect(await host(own, `${adopted}/missing/..`)).toEqual(runs(own));
+    expect(await host(own, join(root, "no-such-dir"))).toEqual(runs(own));
+    // A dot segment that does resolve still adopts the files really inside it.
+    expect(await host(own, `${adopted}/.`)).toEqual([]);
+  });
+  test("a no-shebang program is checked for a second resolution before it is skipped as a binary", async () => {
+    const bin = join(adopted, "bin.out");
+    writeFileSync(bin, "\u0001\u0002 not a script");
+    expect(await host(bin, adopted)).toEqual([]);
+    let n = 0;
+    // Fails at the order of cruft.ts:207 and the binary skip after it: the binary shortcut returned before the second realPath, so a swapped path counted as 0.
+    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++n === 2 ? join(outside, "x.sh") : realFs.realPath!(p)) })).toEqual(runs(bin));
   });
   test("the file read and the file judged are one: a path that resolves differently on the second look is unadopted", async () => {
     const script = join(adopted, "job.sh");
@@ -413,10 +438,13 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     let n = 0;
     // The first resolution says outside (owned), the second says inside: readHead read the outside file, the check sees the inside one.
     const retarget = { realPath: async (p: string) => (p === script ? (++n === 1 ? elsewhere : inside) : realFs.realPath!(p)), readHead: async (p: string, b: number) => { reads.push(p); return p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b); } };
-    // Fails at cruft.ts:205 (`again === real`) if the real path is not resolved again and compared with the first.
+    // Outside first, inside second: red at cruft.ts:215 only through real!.startsWith (the first path is outside), so it does not pin `stable`.
     expect(await host(script, adopted, retarget)).toEqual(runs(script));
     expect(reads).toContain(elsewhere); // what was read is the first resolved path, not the one as given
-    // Fails at cruft.ts:205 (`again === real`) too: a second resolution that fails is unadopted, not adopted.
+    // The dangerous direction: inside first (owned, adopted), outside second. Fails at cruft.ts:207 (`stable`) if `again === real` is dropped.
+    let k = 0;
+    expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside && ++k === 2 ? elsewhere : realFs.realPath!(p)) })).toEqual(runs(inside));
+    // Fails at cruft.ts:207 (`stable`) too: a second resolution that fails is unadopted, not adopted.
     let m = 0;
     expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside && ++m === 2 ? undefined : realFs.realPath!(p)) })).toEqual(runs(inside));
     // And a script that does not resolve at all is counted, not left out.
