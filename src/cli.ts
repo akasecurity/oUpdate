@@ -21,7 +21,7 @@ import type { Forge } from "./adapters/forge/types.ts";
 import { BOT_LOGINS, PRIVATE_REGISTRY_DEFAULT, PRIVATE_REGISTRY_POLICIES, runGate, type PrivateRegistryPolicy } from "./gate.ts";
 import { lockKind } from "./lockfile/index.ts";
 import type { LockedFile } from "./lockfile/types.ts";
-import { parseHostCommand, hostMain, applyMain, ownerWaiterMain, readinessMain } from "./host/cli.ts";
+import { parseHostCommand, hostMain, applyMain, ownerWaiterMain, readinessMain, cruftMain } from "./host/cli.ts";
 import { launchdPlist } from "./host/launchd.ts";
 import { killLive, realExec } from "./apply/exec.ts";
 import { realFs } from "./apply/fs.ts";
@@ -611,6 +611,7 @@ if (import.meta.main) {
         process.exit(0);
       }
       if (hc.mode === "owner-waiter") process.exit(await ownerWaiterMain(hc, { exec: realExec }));
+      if (hc.mode === "cruft") process.exit(await cruftMain(hc, { fs: realFs }));
       if (hc.mode === "readiness") process.exit(await readinessMain(hc, { exec: realExec, fs: realFs }));
       // A target plugin may keep an older deployment's updater name in the run header (targets/compat.ts).
       const compat = (await loadRegistry()).compat;
