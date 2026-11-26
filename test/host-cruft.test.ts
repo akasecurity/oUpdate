@@ -220,7 +220,7 @@ describe("cruft count", () => {
   });
   test("a text plist is judged only when its source is plain: encoding, CDATA, entity, an unreadable or full raw read", async () => {
     const own = "/h/scripts/own.sh";
-    const files = { [own]: owned };
+    const files: Record<string, string> = { [own]: owned };
     const judge = async (raw: string | undefined) => (await cruftCount({ fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number) => (p.endsWith(".plist") ? raw?.slice(0, n) : files[p]), plistJson: async () => ({ ProgramArguments: [own] }), pinFiles: () => [] }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] })).wrappers;
     const w = (why: string) => [`${A}/t.plist complex plist: ${why}`];
     expect(await judge("<plist><dict/></plist>")).toEqual([]);
