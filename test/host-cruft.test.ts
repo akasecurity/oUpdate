@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realFs } from "../src/apply/fs.ts";
 import { parseApplyConfig } from "../src/apply/config.ts";
-import { cruftCount, cruftLines, launchScript, plistLaunch, safeName } from "../src/host/cruft.ts";
+import { cruftCount, cruftLines, launchScript, plistLaunch, safeName, sourceProblem } from "../src/host/cruft.ts";
 import { parseHostCommand } from "../src/host/cli.ts";
 
 /** A plist as the OS parser gives it: the fake plistJson reads the JSON text kept under the plist's name. */
@@ -217,6 +217,14 @@ describe("cruft count", () => {
     for (const e of ["&#x2F;", "&#X2f;"]) expect(await wrappersOf(`{"ProgramArguments":["/h/scripts${e}own.sh"]}`, files)).toEqual([`${A}/t.plist complex plist: entity`]);
     expect(await wrappersOf(`{"ProgramArguments":["/h/scripts/own.sh"],"Label":"a&amp;b &lt; c"}`, files)).toEqual([]); // the five named entities read the same in both parsers
     for (const key of ["RootDirectory", "EnableGlobbing"]) expect(await wrappersOf(nul({ ProgramArguments: ["/h/scripts/own.sh"], [key]: true }), files)).toEqual([`${A}/t.plist complex plist: sets ${key}`]);
+  });
+  test("the encoding declaration is matched in bounded time on a crafted full-size plist", () => {
+    // Many UTF-8 encoding attributes and no "?>": an unbounded [^>?]* pair retries the whole tail from each one (quadratic).
+    const raw = `<?xml${' encoding="utf-8"'.repeat(Math.floor((256 * 1024 - 8) / 17))}`;
+    const t0 = performance.now();
+    expect(sourceProblem(raw)).toBe("plist encoding");
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(sourceProblem('<?xml version="1.0" encoding="UTF-8"?>\n<plist/>')).toBeUndefined();
   });
   test("a text plist is judged only when its source is plain: encoding, CDATA, entity, an unreadable or full raw read", async () => {
     const own = "/h/scripts/own.sh";

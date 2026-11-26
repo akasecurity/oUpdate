@@ -171,7 +171,7 @@ export function sourceProblem(raw: string): string | undefined {
   // plutil follows a declared encoding (UTF-7, windows-1252...), libxpc reads the bytes as written: the only accepted
   // mention of an encoding is the leading XML declaration naming UTF-8.
   if (/encoding/i.test(raw)) {
-    const m = /^<\?xml[^>?]*\sencoding\s*=\s*(["'])utf-8\1[^>?]*\?>/i.exec(t);
+    const m = /^<\?xml[^>?]{0,256}\sencoding\s{0,8}=\s{0,8}(["'])utf-8\1[^>?]{0,256}\?>/i.exec(t);
     if (!m || (m[0].match(/encoding/gi) ?? []).length !== 1 || /encoding/i.test(t.slice(m[0].length))) return "plist encoding";
   }
   if (raw.includes("<![CDATA[")) return "CDATA";
