@@ -249,8 +249,9 @@ describe("cruft count", () => {
     const PROGRAM_DIFFERS = [`${A}/t.plist complex argv: /h/scripts/own.sh`];
     // launchd lowercases every job key, so a differently cased spelling is the same key.
     for (const key of ["workingdirectory", "workingDirectory", "WORKINGDIRECTORY", "rootdirectory", "enableglobbing"]) expect({ key, w: await w({ ProgramArguments: own, [key]: "/tmp/planted" }) }).toEqual({ key, w: sets(key) });
-    expect(await w({ programarguments: own, LABEL: "x", runatload: true })).toEqual([]); // fails at cruft.ts:117-118 if program/programarguments are read by exact case
+    expect(await w({ programarguments: own, LABEL: "x", runatload: true })).toEqual([]); // fails at cruft.ts:118 if programarguments is read by exact case
     expect(await w({ PROGRAM: "/h/scripts/own.sh", programarguments: own })).toEqual([]); // Program equal to argv[0] is shape (a)
+    for (const key of ["PROGRAM", "pRoGrAm"]) expect({ key, w: await w({ [key]: "/opt/evil.sh", ProgramArguments: own }) }).toEqual({ key, w: PROGRAM_DIFFERS }); // fails at cruft.ts:117 if Program is read as o.Program or o.program ?? o.Program
     expect(await w({ program: "/opt/evil.sh", ProgramArguments: own })).toEqual(PROGRAM_DIFFERS); // fails at cruft.ts:117 if Program is read as o.Program: the lowercase one is missed and the plist counts adopted
     expect(await w({ programarguments: ["/opt/evil.sh"], ProgramArguments: own })).toEqual([`${A}/t.plist complex plist: duplicate key ProgramArguments`]); // fails at cruft.ts:112 if the duplicate check is dropped
     expect(await w({ Program: "/opt/evil.sh", program: "/h/scripts/own.sh", ProgramArguments: own })).toEqual([`${A}/t.plist complex plist: duplicate key program`]);
