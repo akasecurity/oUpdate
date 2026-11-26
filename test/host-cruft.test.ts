@@ -221,6 +221,12 @@ describe("cruft count", () => {
     // An empty name is complex itself and does not hide a later key.
     expect(await env({ "": "v", BASH_ENV: "x" })).toEqual(sets(""));
     expect(await env({ TMPDIR: "/tmp" })).toEqual(sets("TMPDIR"));
+    // TZ: a string, and it does not end the loop (a later bad key is still judged).
+    expect(await env({ TZ: "UTC", BASH_ENV: "x" })).toEqual(sets("BASH_ENV"));
+    expect(await env({ TZ: ["UTC"] as unknown as string })).toEqual(sets("TZ"));
+    expect(await env({ TZ: { a: "b" } as unknown as string })).toEqual(sets("TZ"));
+    expect(await env({ PATH: ["/usr/bin"] as unknown as string })).toEqual(sets("PATH"));
+    for (const path of [".", "/tmp", "/usr/bin:.", "/var/tmp:/usr/bin"]) expect({ path, w: await env({ PATH: path }) }).toEqual({ path, w: sets("PATH") });
     // Names the old list of code-running variables did not hold: lower case, other interpreters' hooks, loader and shell settings.
     for (const key of ["bash_env", "LD_PRELOAD", "GEM_HOME", "RUBYGEMS_GEMDEPS", "PYTHONUSERBASE", "BASH_FUNC_x%%", "SHELLOPTS", "PS4", "NODE_EXTRA_CA_CERTS", "MY_FLAG"])
       expect({ key, w: await env({ LANG: "C", [key]: "x" }) }).toEqual({ key, w: [`${A}/t.plist complex plist: sets ${key}`] });
@@ -233,7 +239,7 @@ describe("cruft count", () => {
     expect(await wrappersOf(nul({ ProgramArguments: ["/h/scripts/own.sh\u0000x"] }), files)).toEqual([`${A}/t.plist complex plist: NUL`]);
     for (const e of ["&#x2F;", "&#X2f;"]) expect(await wrappersOf(`{"ProgramArguments":["/h/scripts${e}own.sh"]}`, files)).toEqual([`${A}/t.plist complex plist: entity`]);
     expect(await wrappersOf(`{"ProgramArguments":["/h/scripts/own.sh"],"Label":"a&amp;b &lt; c"}`, files)).toEqual([]); // the five named entities read the same in both parsers
-    for (const key of ["RootDirectory", "EnableGlobbing"]) expect(await wrappersOf(nul({ ProgramArguments: ["/h/scripts/own.sh"], [key]: true }), files)).toEqual([`${A}/t.plist complex plist: sets ${key}`]);
+    for (const key of ["RootDirectory", "EnableGlobbing", "WorkingDirectory", "BundleProgram", "StandardInPath", "inetdCompatibility"]) expect(await wrappersOf(nul({ ProgramArguments: ["/h/scripts/own.sh"], [key]: true }), files)).toEqual([`${A}/t.plist complex plist: sets ${key}`]);
   });
   test("the encoding declaration is matched in bounded time on a crafted full-size plist", () => {
     // Many UTF-8 encoding attributes and no "?>": an unbounded [^>?]* pair retries the whole tail from each one (quadratic).
@@ -247,6 +253,11 @@ describe("cruft count", () => {
     const decl = (sp: number, tail: number) => `<?xml version="1.0" encoding${" ".repeat(sp)}=${" ".repeat(sp)}"utf-8"${"x".repeat(tail)}?><plist/>`;
     expect(sourceProblem(decl(8, 0))).toBeUndefined(); // fails if \s{0,8} is widened or narrowed
     expect(sourceProblem(decl(9, 0))).toBe("plist encoding");
+    const side = (before: number, after: number) => `<?xml version="1.0" encoding${" ".repeat(before)}=${" ".repeat(after)}"utf-8"?><plist/>`;
+    expect(sourceProblem(side(9, 0))).toBe("plist encoding"); // fails if the \s{0,8} before = is widened
+    expect(sourceProblem(side(0, 9))).toBe("plist encoding"); // fails if the \s{0,8} after = is widened
+    expect(sourceProblem(side(8, 0))).toBeUndefined();
+    expect(sourceProblem(side(0, 8))).toBeUndefined();
     expect(sourceProblem(decl(1, 256))).toBeUndefined(); // fails if the tail {0,256} is widened or narrowed
     expect(sourceProblem(decl(1, 257))).toBe("plist encoding");
     const head = (n: number) => `<?xml${" ".repeat(n)} encoding="utf-8"?><plist/>`;

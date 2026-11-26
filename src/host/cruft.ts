@@ -38,7 +38,7 @@ const PLAIN_LOCALE = /^(?:C|POSIX|[A-Za-z]+(?:_[A-Za-z]+)?\.UTF-8)$/;
  */
 function envProblem(env: Record<string, unknown>): string | undefined {
   for (const [k, v] of Object.entries(env)) {
-    if (k === "TZ") continue;
+    if (k === "TZ" && typeof v === "string") continue;
     if (k === "PATH" && typeof v === "string" && v.split(":").every((d) => SYSTEM_DIRS.includes(d))) continue;
     if ((k === "LANG" || k === "LC_ALL" || k === "LC_CTYPE") && typeof v === "string" && PLAIN_LOCALE.test(v)) continue;
     return `sets ${k}`;
@@ -46,7 +46,7 @@ function envProblem(env: Record<string, unknown>): string | undefined {
   return undefined;
 }
 /** Top-level keys that change how launchd resolves the program or its arguments. */
-const RESOLVE_KEYS = ["RootDirectory", "EnableGlobbing"];
+const RESOLVE_KEYS = ["RootDirectory", "EnableGlobbing", "WorkingDirectory", "BundleProgram", "StandardInPath", "inetdCompatibility"];
 const dirOf = (p: string) => p.slice(0, Math.max(p.lastIndexOf("/"), 0)) || "/";
 const OWNER_LINE = /^#\s*owner:\s*\S/;
 
