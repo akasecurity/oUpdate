@@ -26,8 +26,25 @@ export const CRUFT_BACKUP_PREFIXES = ["config.json.bak-", "config.json.pre-oq4e"
 const INTERPRETER = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh)(?:[0-9]+(?:\.[0-9]+)*)?$/;
 /** Where an interpreter (and, alone in /usr/bin, env) must sit to be one: a program of that name anywhere else is "complex". */
 const INTERPRETER_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
-/** The only variables a judged plist may set: none of them makes an interpreter run other code than the script that was checked. Any other name (HOME and every interpreter, loader or shell hook included) makes it "complex". */
-const SAFE_ENV = ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR"];
+/** The system dirs a judged plist's PATH may name (each entry exactly one of these). */
+const SYSTEM_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin"];
+/** Locale values that keep a script's bytes read as the script wrote them: C, POSIX, or letters_letters.UTF-8. */
+const PLAIN_LOCALE = /^(?:C|POSIX|[A-Za-z]+(?:_[A-Za-z]+)?\.UTF-8)$/;
+/**
+ * Why an EnvironmentVariables dictionary is not safe for a judged plist, or undefined. Only PATH (exact system dirs, so a
+ * planted dir cannot shadow env, bash or date), LANG, LC_ALL, LC_CTYPE (a plain locale: a multibyte one such as Big5 or
+ * GBK makes bash read part of a UTF-8 script as a quote) and TZ are allowed; any other name, the empty one included, is
+ * a variable that may make an interpreter run other code.
+ */
+function envProblem(env: Record<string, unknown>): string | undefined {
+  for (const [k, v] of Object.entries(env)) {
+    if (k === "TZ") continue;
+    if (k === "PATH" && typeof v === "string" && v.split(":").every((d) => SYSTEM_DIRS.includes(d))) continue;
+    if ((k === "LANG" || k === "LC_ALL" || k === "LC_CTYPE") && typeof v === "string" && PLAIN_LOCALE.test(v)) continue;
+    return `sets ${k}`;
+  }
+  return undefined;
+}
 /** Top-level keys that change how launchd resolves the program or its arguments. */
 const RESOLVE_KEYS = ["RootDirectory", "EnableGlobbing"];
 const dirOf = (p: string) => p.slice(0, Math.max(p.lastIndexOf("/"), 0)) || "/";
@@ -82,8 +99,8 @@ export function plistLaunch(o: Record<string, unknown>): { program?: string; arg
   if (args !== undefined && !(Array.isArray(args) && args.length > 0 && args.every(str))) return "ProgramArguments is not a list of strings";
   if (env !== undefined) {
     if (typeof env !== "object" || env === null || Array.isArray(env)) return "EnvironmentVariables is not a dictionary";
-    const code = Object.keys(env).find((k) => !SAFE_ENV.includes(k));
-    if (code) return `sets ${code}`;
+    const bad = envProblem(env as Record<string, unknown>);
+    if (bad !== undefined) return bad;
   }
   // launchd runs Program when it is present, with ProgramArguments as the argv; with no ProgramArguments the argv is [Program].
   const argv = (args as string[] | undefined) ?? [program as string];

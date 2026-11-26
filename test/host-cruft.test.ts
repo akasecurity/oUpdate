@@ -210,7 +210,17 @@ describe("cruft count", () => {
   test("only a listed environment variable keeps a plist judged: any other name is complex", async () => {
     const files = { "/h/scripts/own.sh": owned };
     const env = (e: Record<string, string>) => wrappersOf(JSON.stringify({ ProgramArguments: ["/h/scripts/own.sh"], EnvironmentVariables: e }), files);
-    expect(await env({ PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C", LC_CTYPE: "UTF-8", TZ: "UTC", TMPDIR: "/tmp" })).toEqual([]);
+    expect(await env({ PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/sbin", LANG: "en_US.UTF-8", LC_ALL: "C", LC_CTYPE: "POSIX", TZ: "UTC" })).toEqual([]);
+    const sets = (k: string) => [`${A}/t.plist complex plist: sets ${k}`];
+    // PATH: only exact system dirs (a planted dir ahead of /usr/bin runs its own env, bash or date for the owned script).
+    for (const path of ["/tmp/planted:/usr/bin:/bin", "", "/usr/bin::/bin", "bin:/usr/bin", "/usr/bin/../../tmp", "/usr/bin/", "/Users/x/bin:/usr/bin"])
+      expect({ path, w: await env({ PATH: path }) }).toEqual({ path, w: sets("PATH") });
+    // Locale: C, POSIX, or <letters>_<letters>.UTF-8 only (a Big5 or GBK locale makes bash read a multibyte tail as a quote).
+    for (const [k, v] of [["LANG", "zh_TW.Big5"], ["LC_ALL", "zh_CN.GBK"], ["LC_CTYPE", "en_US"], ["LANG", ""], ["LANG", "en_US.UTF-8x"], ["LANG", "../x.UTF-8"]] as const)
+      expect({ k, v, w: await env({ [k]: v }) }).toEqual({ k, v, w: sets(k) });
+    // An empty name is complex itself and does not hide a later key.
+    expect(await env({ "": "v", BASH_ENV: "x" })).toEqual(sets(""));
+    expect(await env({ TMPDIR: "/tmp" })).toEqual(sets("TMPDIR"));
     // Names the old list of code-running variables did not hold: lower case, other interpreters' hooks, loader and shell settings.
     for (const key of ["bash_env", "LD_PRELOAD", "GEM_HOME", "RUBYGEMS_GEMDEPS", "PYTHONUSERBASE", "BASH_FUNC_x%%", "SHELLOPTS", "PS4", "NODE_EXTRA_CA_CERTS", "MY_FLAG"])
       expect({ key, w: await env({ LANG: "C", [key]: "x" }) }).toEqual({ key, w: [`${A}/t.plist complex plist: sets ${key}`] });
@@ -232,6 +242,16 @@ describe("cruft count", () => {
     expect(sourceProblem(raw)).toBe("plist encoding");
     expect(performance.now() - t0).toBeLessThan(500);
     expect(sourceProblem('<?xml version="1.0" encoding="UTF-8"?>\n<plist/>')).toBeUndefined();
+  });
+  test("the encoding declaration bounds are exact: 8 spaces around = and a 256-character tail pass, 9 and 257 do not", () => {
+    const decl = (sp: number, tail: number) => `<?xml version="1.0" encoding${" ".repeat(sp)}=${" ".repeat(sp)}"utf-8"${"x".repeat(tail)}?><plist/>`;
+    expect(sourceProblem(decl(8, 0))).toBeUndefined(); // fails if \s{0,8} is widened or narrowed
+    expect(sourceProblem(decl(9, 0))).toBe("plist encoding");
+    expect(sourceProblem(decl(1, 256))).toBeUndefined(); // fails if the tail {0,256} is widened or narrowed
+    expect(sourceProblem(decl(1, 257))).toBe("plist encoding");
+    const head = (n: number) => `<?xml${" ".repeat(n)} encoding="utf-8"?><plist/>`;
+    expect(sourceProblem(head(255))).toBeUndefined(); // fails if the head run before encoding is widened or narrowed
+    expect(sourceProblem(head(257))).toBe("plist encoding");
   });
   test("a text plist is judged only when its source is plain: encoding, CDATA, entity, an unreadable or full raw read", async () => {
     const own = "/h/scripts/own.sh";
@@ -294,6 +314,7 @@ describe("realFs.readHead", () => {
     symlinkSync(join(root, "p"), join(root, "l"));
     expect(await realFs.readHead!(join(root, "l"), 9)).toBeUndefined();
     expect(await realFs.readHead!(join(root, "missing"), 9)).toBeUndefined();
+    expect(await realFs.readHead!("/dev/null", 6)).toBeUndefined(); // a character device: only the fstat guard refuses it
   });
 });
 
