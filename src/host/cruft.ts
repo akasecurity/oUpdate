@@ -158,9 +158,11 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   const wrappers: string[] = [];
   const home = fs.home.replace(/\/+$/, "");
   const dirCfg = a.adoptedScriptsDir ?? `${home}/scripts`;
-  const adoptedPath = resolve(dirCfg.startsWith("~/") ? `${home}/${dirCfg.slice(2)}` : dirCfg).replace(/\/+$/, "");
-  // The directory itself may be a link: compare real paths on both sides.
-  const realAdopted = `${((fs.realPath ? await fs.realPath(adoptedPath) : undefined) ?? adoptedPath).replace(/\/+$/, "")}/`;
+  const adoptedRaw = (dirCfg.startsWith("~/") ? `${home}/${dirCfg.slice(2)}` : dirCfg).replace(/\/+$/, "");
+  // The plain form (".." collapsed textually) and the real form. The real one is canonicalized from the raw string by the
+  // OS, which follows a link before a ".." after it: resolve() first would collapse scripts/hop/.. to scripts.
+  const plainAdopted = `${resolve(adoptedRaw).replace(/\/+$/, "")}/`;
+  const realAdopted = `${((fs.realPath ? await fs.realPath(adoptedRaw) : undefined) ?? resolve(adoptedRaw)).replace(/\/+$/, "")}/`;
   for (const d of [`${fs.home}/Library/LaunchAgents`, "/Library/LaunchAgents", "/Library/LaunchDaemons"]) {
     for (const n of (await fs.listDir(d)).filter((x) => x.endsWith(".plist")).sort()) {
       const obj = await fs.plistJson?.(`${d}/${n}`);
@@ -187,7 +189,9 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         wrappers.push(`${d}/${n} complex argv: ${launch.argv.slice(0, 4).join(" ")}`);
         continue;
       }
-      const body = await fs.readHead?.(run.script, SCRIPT_BYTES);
+      // Resolve the script to its real path, read that path, then resolve again: the file read and the file judged are one.
+      const real = fs.realPath ? await fs.realPath(run.script) : resolve(run.script);
+      const body = real === undefined ? undefined : await fs.readHead?.(fs.realPath ? real : run.script, SCRIPT_BYTES);
       // A script that is missing or cannot be read (a FIFO, no access) is unadopted: it is not left out of the count.
       if (body === undefined) {
         wrappers.push(`${d}/${n} runs ${run.script}`);
@@ -195,9 +199,11 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       }
       // Shape (a) with no shebang is a binary program: not counted.
       if (run.shebang && !body.startsWith("#!")) continue;
-      // Symlinks are resolved first (and ".." with them): a link inside the directory that points outside it is outside.
-      const real = fs.realPath ? await fs.realPath(run.script) : resolve(run.script);
-      const owned = real !== undefined && real.startsWith(realAdopted) && body.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
+      // Both forms must be inside the directory: the path as given (outside/w -> scripts is not adopted) and its real
+      // path (a link inside that points outside is not), and the real path must be the same on the second look.
+      const again = fs.realPath ? await fs.realPath(run.script) : real;
+      const inside = (resolve(run.script).startsWith(plainAdopted) || run.script.startsWith(realAdopted)) && real!.startsWith(realAdopted) && again === real;
+      const owned = inside && body.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
       if (!owned) wrappers.push(`${d}/${n} runs ${run.script}`);
     }
   }

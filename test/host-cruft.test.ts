@@ -1,7 +1,7 @@
 // `host --cruft-count` (OUP-349): read-only count of ownerless pins, tool-made backups, unadopted wrappers.
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realFs } from "../src/apply/fs.ts";
@@ -70,7 +70,7 @@ describe("cruft count", () => {
   });
   test("a script that is missing or that readHead cannot give (a FIFO) is unadopted, not left out", async () => {
     const A = "/h/Library/LaunchAgents";
-    // Fails at cruft.ts:192 if the body === undefined branch goes back to `continue`: the plist is then left out of the count.
+    // Fails at cruft.ts:196 if the body === undefined branch goes back to `continue`: the plist is then left out of the count.
     const c = await cruftCount({ fs: fs({ [`${A}/fifo.plist`]: plist("/opt/fifo.sh"), [`${A}/gone.plist`]: plist("/bin/sh", "/h/scripts/gone.sh") }, { [A]: ["fifo.plist", "gone.plist"] }), configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
     expect(c.wrappers).toEqual([`${A}/fifo.plist runs /opt/fifo.sh`, `${A}/gone.plist runs /h/scripts/gone.sh`]);
     // A shape (a) program with no shebang stays a binary, not counted.
@@ -358,35 +358,69 @@ describe("realFs.readHead", () => {
 });
 
 describe("adoption resolves symlinks (OUP-366)", () => {
-  const root = mkdtempSync(join(tmpdir(), "oupdate-link-"));
+  // The temp root is canonical (/var is /private/var on macOS), so a failing link check is the link, not the prefix.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "oupdate-link-")));
   afterAll(() => rmSync(root, { recursive: true, force: true }));
+  const A = "/h/Library/LaunchAgents";
+  const owned = "#!/bin/sh\n# owner: t\n";
+  const adopted = join(root, "scripts");
+  const outside = join(root, "outside");
+  const real = join(root, "real-scripts");
+  for (const d of [adopted, outside, real, join(outside, "d"), join(outside, "w")]) mkdirSync(d, { recursive: true });
+  writeFileSync(join(outside, "x.sh"), owned);
+  writeFileSync(join(outside, "d", "x.sh"), owned);
+  writeFileSync(join(outside, "own.sh"), owned);
+  writeFileSync(join(adopted, "own.sh"), owned);
+  writeFileSync(join(real, "r.sh"), owned);
+  symlinkSync(join(outside, "x.sh"), join(adopted, "link.sh"));
+  symlinkSync(join(outside, "d"), join(adopted, "link"));
+  symlinkSync(join(outside, "d"), join(adopted, "hop"));
+  symlinkSync(adopted, join(outside, "w", "in"));
+  symlinkSync(real, join(root, "scripts-link"));
+  symlinkSync(adopted, join(outside, "w2"));
+  symlinkSync(join(root, "nowhere"), join(adopted, "dangling.sh"));
+  const host = (script: string, dir: string, over: Record<string, unknown> = {}) =>
+    cruftCount({
+      fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n)), realPath: realFs.realPath!, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [], ...over },
+      configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
+    }).then((c) => c.wrappers);
+  const runs = (s: string) => [`${A}/t.plist runs ${s}`];
   test("a link inside the adopted directory that points outside it, or a directory that is itself a link, is judged by its real path", async () => {
-    const A = "/h/Library/LaunchAgents";
-    const adopted = join(root, "scripts");
-    const outside = join(root, "outside");
-    const real = join(root, "real-scripts");
-    mkdirSync(adopted);
-    mkdirSync(outside);
-    mkdirSync(real);
-    writeFileSync(join(outside, "x.sh"), "#!/bin/sh\n# owner: t\n");
-    writeFileSync(join(adopted, "own.sh"), "#!/bin/sh\n# owner: t\n");
-    writeFileSync(join(real, "r.sh"), "#!/bin/sh\n# owner: t\n");
-    symlinkSync(join(outside, "x.sh"), join(adopted, "link.sh"));
-    symlinkSync(real, join(root, "scripts-link"));
-    const run = async (script: string, dir: string) =>
-      (await cruftCount({
-        fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n)), realPath: realFs.realPath!, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
-        configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
-      })).wrappers;
-    // These fail at cruft.ts:199 if the script is compared by its lexical path (the link counts adopted); the link-directory cases fail at :163 if the adopted dir is compared lexically.
-    expect(await run(join(adopted, "link.sh"), adopted)).toEqual([`${A}/t.plist runs ${join(adopted, "link.sh")}`]);
-    expect(await run(join(adopted, "own.sh"), adopted)).toEqual([]);
-    // A directory that is a link: its real files are inside its real path.
-    expect(await run(join(root, "scripts-link", "r.sh"), join(root, "scripts-link"))).toEqual([]);
-    expect(await run(join(real, "r.sh"), join(root, "scripts-link"))).toEqual([]);
-    // An unresolvable path is unadopted (a dangling link has no body, so it is counted as missing).
-    symlinkSync(join(root, "nowhere"), join(adopted, "dangling.sh"));
-    expect(await run(join(adopted, "dangling.sh"), adopted)).toEqual([`${A}/t.plist runs ${join(adopted, "dangling.sh")}`]);
+    // Fail at cruft.ts:205 (the real path of the script) if the script is judged by its lexical path: the link counts adopted.
+    expect(await host(join(adopted, "link.sh"), adopted)).toEqual(runs(join(adopted, "link.sh")));
+    expect(await host(join(adopted, "own.sh"), adopted)).toEqual([]);
+    // Fail at cruft.ts:165 if the adopted dir is compared lexically: its real files are inside its real path.
+    expect(await host(join(root, "scripts-link", "r.sh"), join(root, "scripts-link"))).toEqual([]);
+    expect(await host(join(real, "r.sh"), join(root, "scripts-link"))).toEqual([]);
+    expect(await host(join(adopted, "dangling.sh"), adopted)).toEqual(runs(join(adopted, "dangling.sh"))); // no body: counted as missing
+  });
+  test("a .. after a link is followed by the link first, as the kernel does; so is the adopted dir's own ..", async () => {
+    // Fails at fs.ts realPath if it collapses .. textually (realpathSync, not .native): link/../own.sh is outside/own.sh.
+    expect(await host(`${adopted}/link/../own.sh`, adopted)).toEqual(runs(`${adopted}/link/../own.sh`));
+    // Fails at cruft.ts:165 if the adopted dir is collapsed by resolve() before it is canonicalized: scripts/hop/.. is outside.
+    expect(await host(join(adopted, "own.sh"), `${adopted}/hop/..`)).toEqual(runs(join(adopted, "own.sh")));
+  });
+  test("both the path as given and its real path must be inside the adopted directory", async () => {
+    // Fails at cruft.ts:205 if the plain path is not also checked: outside/w2 links to scripts, so the real path is inside.
+    expect(await host(join(outside, "w2", "own.sh"), adopted)).toEqual(runs(join(outside, "w2", "own.sh")));
+    expect(await host(join(outside, "w", "in", "own.sh"), adopted)).toEqual(runs(join(outside, "w", "in", "own.sh")));
+  });
+  test("the file read and the file judged are one: a path that resolves differently on the second look is unadopted", async () => {
+    const script = join(adopted, "job.sh");
+    const inside = join(adopted, "own.sh");
+    const elsewhere = join(outside, "x.sh");
+    const reads: string[] = [];
+    let n = 0;
+    // The first resolution says outside (owned), the second says inside: readHead read the outside file, the check sees the inside one.
+    const retarget = { realPath: async (p: string) => (p === script ? (++n === 1 ? elsewhere : inside) : realFs.realPath!(p)), readHead: async (p: string, b: number) => { reads.push(p); return p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b); } };
+    // Fails at cruft.ts:205 (`again === real`) if the real path is not resolved again and compared with the first.
+    expect(await host(script, adopted, retarget)).toEqual(runs(script));
+    expect(reads).toContain(elsewhere); // what was read is the first resolved path, not the one as given
+    // Fails at cruft.ts:205 (`again === real`) too: a second resolution that fails is unadopted, not adopted.
+    let m = 0;
+    expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside && ++m === 2 ? undefined : realFs.realPath!(p)) })).toEqual(runs(inside));
+    // And a script that does not resolve at all is counted, not left out.
+    expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside ? undefined : realFs.realPath!(p)) })).toEqual(runs(inside));
   });
 });
 

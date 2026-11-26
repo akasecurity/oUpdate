@@ -127,7 +127,7 @@ export const realFs: ApplyFs = {
   },
   realPath: async (p) => {
     try {
-      return realpathSync(p);
+      return realpathSync.native(p);
     } catch {
       return undefined;
     }
