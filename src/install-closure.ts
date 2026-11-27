@@ -133,6 +133,9 @@ interface Ctx {
   stagesRead?: Set<string>;
   // The unsplit lines the reading met, for the stage pass that runs after the reading (runStageJobs), and the maker of its context.
   stageJobs?: Map<string, { text: string; cwd: string; ignoreHooks?: boolean; noEnvIgnore?: boolean }>;
+  // The lines with an expansion the scan cannot resolve: their other commands are read apart, and what they reach is recorded in `wsFiles` only.
+  looseJobs?: Map<string, { text: string; cwd: string; ignoreHooks?: boolean; noEnvIgnore?: boolean }>;
+  wsWriters?: Set<string>; // the files that write and spawn (or write an argument array), the ones a self-run target is compared on
   freshStage?: () => Ctx;
   // The files the stage pass reached (finish).
   stageFiles?: Set<string>;
@@ -5679,6 +5682,7 @@ function widenJsScan(ctx: Ctx, key: string, text: string): void {
   addScannedLiterals(ctx);
   if (tier.late && !tier.all) widenEveryLate(ctx);
   // widenEvery and noteWriteSpawn touch separate state (noteWriteSpawn reads no ctx.files), so their order does not matter.
+  if (ws || (tier.late && !tier.all)) (ctx.wsWriters ??= new Set<string>()).add(key);
   if (ws) noteWriteSpawn(ctx);
 }
 
@@ -11652,14 +11656,31 @@ function runStageJobs(ctx: Ctx): void {
     if (sc.hold) {
       ctx.hold = sc.hold;
       carryWriteSpawn(ctx, sc);
-      // The files the stages before the stop reached are published too: a stop that does not hold alone (an unresolved manifest variable) would
-      // otherwise leave a changed file of an earlier stage in no comparison.
-      ctx.stageFiles = new Set([...sc.files, ...(sc.selfFiles ?? []), ...(sc.escFiles ?? [])]);
       return;
     }
   }
   carryWriteSpawn(ctx, sc);
   ctx.stageFiles = new Set([...sc.files, ...(sc.selfFiles ?? []), ...(sc.escFiles ?? [])]);
+}
+
+// The commands of a line with an unresolved expansion, read on a context of their own after the stage pass. A stop there is dropped (the parent read
+// nothing of the line, so it must not read less), and no file goes into any reach set: every file reached is held on a byte change in `wsFiles`.
+function runLooseJobs(ctx: Ctx): void {
+  const jobs = ctx.looseJobs;
+  const make = ctx.freshStage;
+  ctx.looseJobs = undefined;
+  if (!jobs || !make || ctx.hold) return;
+  const sc = make();
+  sc.stagePass = true;
+  for (const job of jobs.values()) {
+    sc.cwd = job.cwd;
+    sc.ignoreHooks = job.ignoreHooks;
+    sc.noEnvIgnore = job.noEnvIgnore;
+    dispatchScriptStages(sc, job.text, 0, true);
+    carryWriteSpawn(ctx, sc);
+    const rec = (ctx.wsFiles ??= new Set<string>());
+    for (const k of [...sc.files, ...(sc.selfFiles ?? []), ...(sc.escFiles ?? [])]) rec.add(k);
+  }
 }
 
 // The files a write-and-spawn file of the stage pass put in play go to the parent's record (the stage context is dropped).
@@ -12655,9 +12676,14 @@ function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
     // An expansion that cannot be resolved may name another directory: widen when the body moves the run.
     if (sub === null && noteBody(ctx, body)) widenAll(ctx);
     // The commands of the line that hold no expansion are still read, as an unsplit line is (a pipe, a redirect): `echo $X | cat && node .`.
-    if (sub === null && !ctx.hold) {
+    // They take no file into the reach (a retarget the other reads compare would be hidden): runLooseJobs records them apart.
+    if (sub === null && !ctx.hold && ctx.freshStage) {
       const loose = subst(ctx, body, true);
-      if (loose !== null) noteUnreadable(ctx, loose, true);
+      if (loose !== null) {
+        const key = `${ctx.cwd}\0${ctx.ignoreHooks ? "i" : "n"}${ctx.noEnvIgnore ? "w" : "e"}\0${loose}`;
+        const jobs = (ctx.looseJobs ??= new Map());
+        if (!jobs.has(key)) jobs.set(key, { text: loose, cwd: ctx.cwd, ignoreHooks: ctx.ignoreHooks, noEnvIgnore: ctx.noEnvIgnore });
+      }
     }
     return;
   }
@@ -15476,6 +15502,7 @@ function walkStrings(v: unknown, fn: (s: string) => void): void {
 
 function finish(ctx: Ctx, manifest: string, gyp: string | undefined, hook: boolean, binStamp: string): InstallView {
   runStageJobs(ctx);
+  runLooseJobs(ctx);
   const arFiles = new Set([...(ctx.arRec?.files ?? []), ...(ctx.stageFiles ?? [])]);
   return {
     hold: ctx.hold,
@@ -15489,7 +15516,7 @@ function finish(ctx: Ctx, manifest: string, gyp: string | undefined, hook: boole
     stageOnly: [...(ctx.stageFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     npmFiles: [...(ctx.npmFiles ?? [])].sort(),
     wsFiles: [...(ctx.wsFiles ?? [])].sort(),
-    selfWs: [...(ctx.selfRan ?? [])].map((t) => ctx.logical.get(t) ?? t).filter((k) => ctx.wsFiles?.has(k)).sort(),
+    selfWs: [...(ctx.selfRan ?? [])].map((t) => ctx.logical.get(t) ?? t).filter((k) => ctx.wsWriters?.has(k)).sort(),
     gypFiles: [...ctx.gypFiles].sort(),
     missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? []), ...(ctx.escMissing ?? []), ...(ctx.arRec?.missing ?? [])])].sort(),
     selfMissing: [...(ctx.selfMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
