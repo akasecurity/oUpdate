@@ -70,7 +70,7 @@ export interface Cruft {
   wrappers: string[];
 }
 
-type CruftFs = Pick<ApplyFs, "home" | "listDir" | "readHead" | "linkCount" | "realPath" | "plistJson" | "pinFiles">;
+type CruftFs = Pick<ApplyFs, "home" | "listDir" | "readHead" | "realPath" | "plistJson" | "pinFiles">;
 /** How much of a script is read: the shebang and the owner line sit at the top; a later `# owner:` is not seen. */
 const SCRIPT_BYTES = 512;
 const base = (p: string) => p.split("/").at(-1)!;
@@ -167,6 +167,9 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // (a) a same-path content swap between the read and the second lookup; (b) a link chain created inside the adopted dir
   // (alias.sh -> an outside link -> own.sh); (c) the configured dir being a symlink that retargets during one scan;
   // (d) a different spelling of the same place (case, NFC/NFD, /var for /private/var), which only overcounts.
+  // (e) the depth rule still adopts a shared top-level-plus-one directory (/private/tmp, /Users/Shared, another user's home);
+  // (f) two names for one owned script inside the adopted dir count as unadopted by design (overcount); (g) a device swapped in
+  // between the stat and the open of a script reaches openSync before the descriptor check rejects it (needs write access there).
   const dotted = (p: string) => p.split("/").some((x) => x === "." || x === "..");
   // An fs with no realPath (a test fake) has no links: the lexically resolved path (resolve()) is its real path. A lookup that fails adopts nothing.
   const realRaw = fs.realPath ? await fs.realPath(adoptedRaw) : resolve(adoptedRaw);
@@ -174,9 +177,13 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // A root, a top-level directory, the home dir or an ancestor of it is too broad to be a scripts directory: it adopts
   // nothing (an overcount is the fail-closed side). Home is checked as given and by its real path.
   const homeReal = (fs.realPath ? await fs.realPath(home) : undefined) ?? home;
-  const broad = (d: string) => d.split("/").filter(Boolean).length < 2 || [`${home}/`, `${homeReal}/`].some((h) => h.startsWith(d));
+  // Spellings only widen the test: names are folded (case, NFC), and the configured dir is also taken with its "." and ".."
+  // collapsed as text, so Alias/. and Alias/dir/.. count as Alias. Wrong-spelling only overcounts.
+  const fold = (x: string) => x.normalize("NFC").toLowerCase();
+  const broad = (d: string) => d.split("/").filter(Boolean).length < 2 || [`${home}/`, `${homeReal}/`].some((h) => fold(h).startsWith(fold(d)));
   const realSlash = realRaw === undefined ? undefined : `${realRaw.replace(/\/+$/, "")}/`;
-  const realAdopted = realSlash === undefined || broad(realSlash) || broad(plainAdopted) ? undefined : realSlash;
+  const collapsed = `${resolve(adoptedRaw).replace(/\/+$/, "")}/`;
+  const realAdopted = realSlash === undefined || [realSlash, plainAdopted, collapsed].some(broad) ? undefined : realSlash;
   for (const d of [`${fs.home}/Library/LaunchAgents`, "/Library/LaunchAgents", "/Library/LaunchDaemons"]) {
     for (const n of (await fs.listDir(d)).filter((x) => x.endsWith(".plist")).sort()) {
       const obj = await fs.plistJson?.(`${d}/${n}`);
@@ -205,7 +212,9 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       }
       // Resolve the script to its real path, read that path, then resolve again: the file read and the file judged are one.
       const real = fs.realPath ? await fs.realPath(run.script) : resolve(run.script);
-      const body = real === undefined ? undefined : await fs.readHead?.(fs.realPath ? real : run.script, SCRIPT_BYTES);
+      // The head and the link count come from one open (meta.links); no link is followed at the resolved path.
+      const m1: { links?: number; noFollow?: boolean } = { noFollow: true };
+      const body = real === undefined ? undefined : await fs.readHead?.(fs.realPath ? real : run.script, SCRIPT_BYTES, m1);
       // A script that is missing or cannot be read (a FIFO, no access) is unadopted: it is not left out of the count.
       if (body === undefined) {
         wrappers.push(`${d}/${n} runs ${run.script}`);
@@ -216,19 +225,26 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       const stable = again === real;
       // Shape (a) with no shebang is a binary program: not counted, once it resolved the same twice and a second read of the
       // head still says binary. An empty file is not a binary: it falls to the owner check and is counted.
+      // Whatever the second read says is what is judged from here on (head and link count): a swap is never judged on the
+      // first read's owner line; a second read that fails counts.
+      let head = body;
+      let links = m1.links;
       if (stable && run.shebang && body !== "" && !body.startsWith("#!")) {
-        const body2 = await fs.readHead?.(fs.realPath ? real! : run.script, SCRIPT_BYTES);
+        const m2: { links?: number; noFollow?: boolean } = { noFollow: true };
+        const body2 = await fs.readHead?.(fs.realPath ? real! : run.script, SCRIPT_BYTES, m2);
         if (body2 !== undefined && body2 !== "" && !body2.startsWith("#!")) continue;
+        head = body2 ?? "";
+        links = m2.links;
       }
-      // A file with another name (a hard link) is shared with a place outside the directory: unadopted.
-      const links = fs.linkCount ? await fs.linkCount(fs.realPath ? real! : run.script) : 1;
+      // A file with another name (a hard link) is shared with a place outside the directory: unadopted. A fake fs with no
+      // link count (links undefined) has no hard links.
       // The path as given must have no "." or ".." segment: resolve() erases link/.. as text while the kernel follows the
       // link first, so such a path is never adopted. Then both the path as given and its real path must be inside the
       // directory (outside/w -> scripts is not adopted; a link inside that points outside is not).
       // Accepted lows (a)-(d) are listed where realAdopted is built: they need write access in the adopted dir, where an
       // owned script can be edited anyway, or only overcount.
-      const inside = !dotted(run.script) && stable && links === 1 && realAdopted !== undefined && real!.startsWith(realAdopted) && (run.script.startsWith(realAdopted) || run.script.startsWith(plainAdopted));
-      const owned = inside && body.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
+      const inside = !dotted(run.script) && stable && (links === undefined || links === 1) && realAdopted !== undefined && real!.startsWith(realAdopted) && (run.script.startsWith(realAdopted) || run.script.startsWith(plainAdopted));
+      const owned = inside && head.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
       if (!owned) wrappers.push(`${d}/${n} runs ${run.script}`);
     }
   }
