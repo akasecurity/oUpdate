@@ -696,7 +696,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     const cut = join(adopted, "cut.sh");
     writeFileSync(cut, `${"a".repeat(511)}\u00e9\n`);
     expect((await realFs.readHead!(cut, 512))!.endsWith("\ufffd")).toBe(true);
-    // Fails at cruft.ts looksBinary (the trailing-cut term): the cut read as a binary and the unowned text script was skipped.
+    // Fails at cruft.ts isBinaryProgram if a head ending in half a character reads as a binary: the unowned text script would be skipped.
     expect(await host(cut, adopted)).toEqual(runs(cut));
     // A four-byte character cut after three bytes: the head is exactly 512 bytes once decoded (the bound term is >=, not >).
     const emoji = join(adopted, "cut4.sh");
@@ -815,7 +815,7 @@ describe("the real plutil read (OUP-349)", () => {
 
 describe("cruft count follow-ups (OUP-368)", () => {
   const owned = "#!/bin/sh\n# owner: me\n";
-  type Over = { realPath?: (p: string) => Promise<string | undefined>; listDir?: (d: string) => Promise<string[]>; listDirStrict?: (d: string) => Promise<string[] | undefined>; head?: (p: string, meta?: { links?: number; noFollow?: boolean }) => string | undefined; argv?: string[] };
+  type Over = { realPath?: (p: string) => Promise<string | undefined>; listDir?: (d: string) => Promise<string[]>; listDirStrict?: (d: string) => Promise<string[] | undefined>; head?: (p: string, meta?: { links?: number; noFollow?: boolean }) => string | undefined; argv?: string[]; raw?: boolean };
   // One plist under home's LaunchAgents running `script`; the number of wrappers counted.
   const stub = (home: string, script: string, dir: string, o: Over = {}) =>
     cruftCount({
@@ -823,7 +823,7 @@ describe("cruft count follow-ups (OUP-368)", () => {
         home,
         listDir: o.listDir ?? (async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : [])),
         ...(o.listDirStrict ? { listDirStrict: o.listDirStrict } : {}),
-        readHead: async (p: string, _n: number, meta?: { links?: number; noFollow?: boolean }) => (withMeta(meta), p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
+        readHead: async (p: string, _n: number, meta?: { links?: number; noFollow?: boolean }) => (o.raw || withMeta(meta), p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
         realPath: o.realPath ?? (async (p: string) => p),
         plistJson: async () => ({ ProgramArguments: o.argv ?? [script] }),
         pinFiles: () => [],
@@ -868,7 +868,7 @@ describe("cruft count follow-ups (OUP-368)", () => {
   });
   test("a no-shebang text script is judged as a script, not skipped as a binary (OUP-368 item 4)", async () => {
     const direct = (head: string) => stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => head });
-    // Fails at cruft.ts `looksBinary`: any head without #! was a binary, so this unowned text script was left out of the count.
+    // Fails at cruft.ts isBinaryProgram if any head without #! is a binary: this unowned text script would be left out of the count.
     expect(await direct("echo hi\n")).toBe(1);
     expect(await direct("# not an owner line\necho hi\n")).toBe(1);
     // An owned script with no #! is not adopted (OUP-370 item 3): launchd cannot run it as program (a).
@@ -877,7 +877,9 @@ describe("cruft count follow-ups (OUP-368)", () => {
     expect(await direct("\u0000ELF")).toBe(0);
     expect(await direct("\u0000\u0002 binary")).toBe(0);
     expect(await direct("\ufffd\ufffd\ufffd\ufffd rest")).toBe(0);
-    expect(await direct("\u007fELF\u0001\u0001")).toBe(0);
+    expect(await direct("\u007fELF\u0002\u0001\u0001\u0000\u0000\u0000")).toBe(0);
+    // An ELF magic with no NUL is text to read: counted, as before OUP-370 (every real ELF has a NUL in its first bytes).
+    expect(await direct("\u007fELF\u0001\u0001")).toBe(1);
     // A control byte or one replacement character in a text head is no binary (OUP-370 item 2): the unowned script is counted.
     for (const c of ["\u0008", "\u000b", "\u000e", "\u001b", "\u001f", "\ufffd"]) expect({ c, n: await direct(`${c}echo\n`) }).toEqual({ c, n: 1 });
     for (const c of ["\u0009", "\u000c", "\u0020"]) expect({ c, n: await direct(`${c}echo\n`) }).toEqual({ c, n: 1 });
@@ -896,13 +898,13 @@ describe("cruft count follow-ups (OUP-368)", () => {
   });
   test("a hard-linked no-shebang program is counted, not skipped (OUP-368 item 7)", async () => {
     const withLinks = (links: number | undefined, head = "\u0000ELF") =>
-      stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: (_p, meta) => { if (meta && links !== undefined) meta.links = links; return head; } });
+      stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { raw: links === undefined, head: (_p, meta) => { if (meta && links !== undefined) meta.links = links; return head; } });
     // Fails at cruft.ts binary skip: a binary read with a link count of 2 was skipped before the count was judged.
     expect(await withLinks(2)).toBe(1);
     expect(await withLinks(3, "echo hi\n")).toBe(1); // text, two names: counted by the owner check as before
-    // One name, or no count at all (a fake fs): a binary is still not counted.
+    // One name: a binary is still not counted. No count at all (no proof of one name): counted (OUP-370 round 3).
     expect(await withLinks(1)).toBe(0);
-    expect(await withLinks(undefined)).toBe(0);
+    expect(await withLinks(undefined)).toBe(1);
     // The second read's count is the one judged: first read says one name, second says two.
     let k = 0;
     expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: (_p, meta) => { if (meta) meta.links = ++k === 1 ? 1 : 2; return "\u0000ELF"; } })).toBe(1);
@@ -941,6 +943,9 @@ describe("cruft count follow-ups (OUP-368)", () => {
     expect(await direct((k) => (k === 1 ? ownedText : "#!/bin/sh\necho swapped\n"))).toBe(1); // ownerless shebang
     expect(await direct((k) => (k === 1 ? ownedText : undefined))).toBe(1); // a second read that fails
     expect(await direct((k) => (k === 1 ? ownedText : "echo other\n"))).toBe(1); // ownerless text
+    // Only the second read decides: an unowned text first read and an owned shebang second read is adopted; the reverse is counted.
+    expect(await direct((k) => (k === 1 ? "echo hi\n" : owned))).toBe(0);
+    expect(await direct((k) => (k === 1 ? "echo hi\n# owner: me\n" : owned))).toBe(0);
     // The same owned text on both reads is not adopted without #! (OUP-370 item 3); an owned shebang on both reads, or on the second read, is.
     expect(await direct(() => ownedText)).toBe(1);
     expect(await direct(() => owned)).toBe(0);
@@ -1100,6 +1105,8 @@ describe("cruft count follow-ups (OUP-370)", () => {
     expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/bin/sh", script], head: () => sheb("#!/usr/bin/python3"), realPath: to("/usr/bin/python3", "/bin/dash") })).toBe(1);
     // env itself a link to a launcher, in shape (c).
     expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/usr/bin/env", "/usr/bin/python3", script], realPath: to("/usr/bin/env", "/bin/dash") })).toBe(1);
+    // A bare launcher name after env, with an option, an option's value or a VAR=val in front of it.
+    for (const line of ["#!/usr/bin/env dash", "#!/usr/bin/env -S dash -e", "#!/usr/bin/env -i dash", "#!/usr/bin/env -u X dash", "#!/usr/bin/env A=b ksh93"]) expect({ line, n: await stub("/hm/x", script, "/hm/x/scripts", { head: () => sheb(line) }) }).toEqual({ line, n: 1 });
     // Controls: an ordinary shebang is adopted.
     expect(await stub("/hm/x", script, "/hm/x/scripts", { head: () => sheb("#!/bin/sh") })).toBe(0);
     expect(await stub("/hm/x", script, "/hm/x/scripts", { head: () => sheb("#!/usr/bin/env python3") })).toBe(0);
@@ -1117,11 +1124,12 @@ describe("cruft count follow-ups (OUP-370)", () => {
     expect(await run(["/bin/BASH", "/hm/x/scripts/own.sh"], "/bin/BASH")).toBe(1);
     expect(await run(["/usr/bin/Python3.12", "/hm/x/scripts/own.sh"], "/usr/bin/Python3.12")).toBe(1);
   });
-  test("a bare ELF magic is a binary; a text head cut at the read bound is not (OUP-370 round 2, items 2 and 3)", async () => {
+  test("an ELF magic is a binary only with a NUL after it; a text head cut at the read bound is not (OUP-370 round 3, items 2 and 3)", async () => {
     const direct = (head: string) => stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => head });
-    // Fails at cruft.ts isBinaryProgram if the ELF term is dropped (a head of the magic alone has no control byte).
-    expect(await direct("\u007fELF")).toBe(0);
-    expect(await direct("\u007fELF rest")).toBe(0);
+    // Fails at cruft.ts isBinaryProgram if the magic alone is a binary: a head of `\x7fELF` and text, no NUL, was skipped where it was counted before.
+    expect(await direct("\u007fELF\u0000")).toBe(0);
+    expect(await direct("\u007fELF\n# owner: me\n")).toBe(1);
+    expect(await direct("\u007fELF rest")).toBe(1);
     // A text head ends in half a character (U+FFFD) when the read cuts it: no binary, the unowned script is counted.
     expect(await direct(`${"a".repeat(511)}\ufffd`)).toBe(1);
   });
@@ -1130,5 +1138,15 @@ describe("cruft count follow-ups (OUP-370)", () => {
       const prog = `/usr/bin/${name}`;
       expect({ name, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: binHead(prog) }) }).toEqual({ name, n: 1 });
     }
+  });
+  test("more runners and launchers are counted, not skipped as a binary (OUP-370 round 3)", async () => {
+    // Fails at cruft.ts LAUNCHERS: removing any one of these names lets that program be skipped as a binary.
+    const names = ["uv", "pypy3", "nodejs", "go", "cargo", "dotnet", "mono", "vim", "nvim", "emacs", "sed", "m4", "gnuplot", "dtrace", "socat", "ncat", "nc", "tini", "dumb-init", "entr", "watchexec", "nix", "mise", "pkgx", "ssh-agent", "dbus-launch", "shortcuts", "automator", "runuser", "unshare", "nsenter", "chpst", "pkexec", "at", "batch", "pnpm", "erl", "escript", "elixir", "racket", "guile", "nu", "elvish", "xonsh", "rc", "osh", "ysh", "qemu-aarch64"];
+    for (const name of names) {
+      const prog = `/usr/bin/${name}`;
+      expect({ name, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: binHead(prog) }) }).toEqual({ name, n: 1 });
+    }
+    // A name that only contains one of them is still a binary to skip.
+    expect(await stub("/hm/x", "/usr/bin/atlas", "/hm/x/scripts", { argv: ["/usr/bin/atlas", "/hm/x/scripts/own.sh"], head: binHead("/usr/bin/atlas") })).toBe(0);
   });
 });

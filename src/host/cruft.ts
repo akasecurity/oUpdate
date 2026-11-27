@@ -27,7 +27,7 @@ const INTERPRETER = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh)(?:[0-9]+(?:\.[
 /** Programs that run another file or command (shells and launchers the interpreter list lacks): never a binary to skip, by basename (any case), also of the path the program resolves to. A binary with arguments that is not on this list is still skipped. */
 /** The interpreter names in any case: a program of such a name in another case is no binary to skip (interp() still needs the exact name and a standard dir). */
 const INTERPRETER_ANY = new RegExp(INTERPRETER.source, "i");
-const LAUNCHERS = /^g?(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid|ash|mksh|yash|busybox|deno|php|lua|luajit|julia|Rscript|pwsh|powershell|awk|gawk|mawk|xcrun|open|launchctl|timeout|gtimeout|stdbuf|su|doas|chroot|unbuffer|flock|ionice|taskset|strace|ltrace|watch|script|screen|tmux|parallel|make|gmake|find|ssh|lldb|gdb|rlwrap|genv|sandbox-exec|taskpolicy|swift|toybox|login|java|npx|uvx|git|docker|sbcl)(?:[0-9]+(?:\.[0-9]+)*)?$/i;
+const LAUNCHERS = /^g?(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid|ash|mksh|yash|busybox|deno|php|lua|luajit|julia|Rscript|pwsh|powershell|awk|gawk|mawk|xcrun|open|launchctl|timeout|gtimeout|stdbuf|su|doas|chroot|unbuffer|flock|ionice|taskset|strace|ltrace|watch|script|screen|tmux|parallel|make|gmake|find|ssh|lldb|gdb|rlwrap|genv|uv|pypy3|nodejs|go|cargo|dotnet|mono|vim|nvim|emacs|sed|m4|gnuplot|dtrace|socat|ncat|nc|tini|dumb-init|entr|watchexec|nix|mise|pkgx|ssh-agent|dbus-launch|shortcuts|automator|runuser|unshare|nsenter|chpst|pkexec|at|batch|pnpm|erl|escript|elixir|racket|guile|nu|elvish|xonsh|rc|osh|ysh|qemu-aarch64|sandbox-exec|taskpolicy|swift|toybox|login|java|npx|uvx|git|docker|sbcl)(?:[0-9]+(?:\.[0-9]+)*)?$/i;
 /** Where an interpreter (and, alone in /usr/bin, env) must sit to be one: a program of that name anywhere else is "complex". */
 const INTERPRETER_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
 /** The system dirs a judged plist's PATH may name (each entry exactly one of these). */
@@ -77,8 +77,8 @@ export interface Cruft {
 type CruftFs = Pick<ApplyFs, "home" | "listDir" | "listDirStrict" | "readHead" | "realPath" | "plistJson" | "pinFiles">;
 /** How much of a script is read: the shebang and the owner line sit at the top; a later `# owner:` is not seen. */
 const SCRIPT_BYTES = 512;
-/** A head that is a program, not a text file that has a control byte or U+FFFD in it: a NUL, or what the magic of a Mach-O (a lead of two U+FFFD) or an ELF file starts with. */
-const isBinaryProgram = (h: string) => h.includes("\u0000") || h.startsWith("\ufffd\ufffd") || h.startsWith("\u007fELF");
+/** A head that is a program, not a text file that has a control byte or U+FFFD in it: a NUL, or the lead of two U+FFFD a Mach-O magic decodes to (an ELF header has a NUL in its first bytes). */
+const isBinaryProgram = (h: string) => h.includes("\u0000") || h.startsWith("\ufffd\ufffd");
 const base = (p: string) => p.split("/").at(-1)!;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -155,17 +155,21 @@ export function launchScript(l: { program?: string; argv: string[] }): { script:
   return abs(first) ? { script: first, shebang: true } : "complex";
 }
 
-/** The program words of a #! line: the interpreter, and for env the command word after it (an option such as -S is passed over). */
+/** The program words of a #! line: the interpreter, and for env every word after it (a command word, an option, an option's value or VAR=val: a launcher named by any of them is counted). */
 function shebangWords(head: string): (string | undefined)[] {
   const words = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
   if (words[0] === undefined || base(words[0]).toLowerCase() !== "env") return [words[0]];
-  return [words[0], words.slice(1).find((w) => !w.startsWith("-"))];
+  return words;
 }
-/** Whether a program path (each word of the list) is a link to a launcher or cannot be resolved: it then runs the script as another program would. A word that is no path is skipped. */
+/** Whether a program path (each word of the list) is a link to a launcher or cannot be resolved, or a bare word names a launcher: it then runs the script as another program would. */
 async function badInterpreter(fs: CruftFs, words: (string | undefined)[]): Promise<boolean> {
-  if (!fs.realPath) return false;
   for (const w of words) {
-    if (w === undefined || !w.startsWith("/")) continue;
+    if (w === undefined) continue;
+    if (!w.startsWith("/")) {
+      if (LAUNCHERS.test(w)) return true;
+      continue;
+    }
+    if (!fs.realPath) continue;
     const real = await fs.realPath(w);
     if (real === undefined || LAUNCHERS.test(base(real))) return true;
   }
