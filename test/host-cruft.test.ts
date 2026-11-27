@@ -682,6 +682,37 @@ describe("adoption resolves symlinks (OUP-366)", () => {
       if (existsSync(join(adopted, "sub.gone"))) renameSync(join(adopted, "sub.gone"), join(adopted, "sub")); // the swap may not have run
     }
   });
+  test("a text script cut in the middle of a multibyte character at the read bound is judged as a script (OUP-368 round 1)", async () => {
+    // 511 ASCII bytes, then an e-acute whose first byte is byte 512: the 512-byte head ends in half a character, which decodes to U+FFFD.
+    const cut = join(adopted, "cut.sh");
+    writeFileSync(cut, `${"a".repeat(511)}\u00e9\n`);
+    expect((await realFs.readHead!(cut, 512))!.endsWith("\ufffd")).toBe(true);
+    // Fails at cruft.ts looksBinary (the trailing-cut term): the cut read as a binary and the unowned text script was skipped.
+    expect(await host(cut, adopted)).toEqual(runs(cut));
+    // A four-byte character cut after three bytes: the head is exactly 512 bytes once decoded (the bound term is >=, not >).
+    const emoji = join(adopted, "cut4.sh");
+    writeFileSync(emoji, `${"a".repeat(509)}\u{1F600}\n`);
+    expect(Buffer.byteLength((await realFs.readHead!(emoji, 512))!)).toBe(512);
+    expect(await host(emoji, adopted)).toEqual(runs(emoji));
+    // A U+FFFD inside the body is still a binary, and so is one at the end of a head shorter than the bound.
+    const inner = join(adopted, "inner.out");
+    writeFileSync(inner, `a\ufffdb${"a".repeat(600)}`);
+    expect(await host(inner, adopted)).toEqual([]);
+    const short = join(adopted, "short.out");
+    writeFileSync(short, "abc\ufffd");
+    expect(await host(short, adopted)).toEqual([]);
+    // Only the cut character is dropped: a control byte right before it, or at the end of a full-size head, still makes a binary.
+    const ctlCut = join(adopted, "ctlcut.out");
+    writeFileSync(ctlCut, `${"a".repeat(510)}\u0001\u00e9`);
+    expect(await host(ctlCut, adopted)).toEqual([]);
+    const ctlEnd = join(adopted, "ctlend.out");
+    writeFileSync(ctlEnd, `${"a".repeat(600)}`.slice(0, 511) + "\u0001");
+    expect(await host(ctlEnd, adopted)).toEqual([]);
+    // A binary whose head is full size and ends in a cut character still shows its other bytes.
+    const bin = join(adopted, "cutbin.out");
+    writeFileSync(bin, `\u0000${"a".repeat(510)}\u00e9`);
+    expect(await host(bin, adopted)).toEqual([]);
+  });
 });
 
 describe("the real plutil read (OUP-349)", () => {

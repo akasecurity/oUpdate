@@ -76,7 +76,12 @@ type CruftFs = Pick<ApplyFs, "home" | "listDir" | "listDirStrict" | "readHead" |
 /** How much of a script is read: the shebang and the owner line sit at the top; a later `# owner:` is not seen. */
 const SCRIPT_BYTES = 512;
 /** A head that reads as a binary: a NUL, a control byte other than tab, newline, form feed and CR, or a replacement character (what a Mach-O or ELF magic decodes to). */
-const looksBinary = (h: string) => /[\u0000-\u0008\u000b\u000e-\u001f\ufffd]/.test(h);
+const looksBinary = (h: string) => {
+  // A multibyte character cut by the end of a full-size head decodes to one trailing U+FFFD (the head is then at least the read bound
+  // in bytes): that one is the cut, not a binary. A U+FFFD anywhere else still is one.
+  const t = Buffer.byteLength(h) >= SCRIPT_BYTES && h.endsWith("\ufffd") ? h.slice(0, -1) : h;
+  return /[\u0000-\u0008\u000b\u000e-\u001f\ufffd]/.test(t);
+};
 const base = (p: string) => p.split("/").at(-1)!;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
