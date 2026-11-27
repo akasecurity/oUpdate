@@ -101,7 +101,7 @@ describe("cruft count", () => {
   });
   test("config adoptedScriptsDir must be absolute or start with ~/", () => {
     const cfg = (v: unknown) => parseApplyConfig(JSON.stringify({ apply: { stateDir: "/state.test", adoptedScriptsDir: v } }), "hosta");
-    expect(cfg("/home/u/scripts").adoptedScriptsDir).toBe("/home/u/scripts");
+    expect(cfg("/hm/u/scripts").adoptedScriptsDir).toBe("/hm/u/scripts");
     expect(cfg("~/scripts").adoptedScriptsDir).toBe("~/scripts");
     expect(parseApplyConfig(JSON.stringify({ apply: { stateDir: "/state.test" } }), "hosta").adoptedScriptsDir).toBeUndefined();
     expect(() => cfg("scripts")).toThrow("adoptedScriptsDir must be an absolute path or start with ~/");
@@ -218,7 +218,7 @@ describe("cruft count", () => {
     expect(await env({ PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/sbin", LANG: "en_US.UTF-8", LC_ALL: "C", LC_CTYPE: "POSIX", TZ: "UTC" })).toEqual([]);
     const sets = (k: string) => [`${A}/t.plist complex plist: sets ${k}`];
     // PATH: only exact system dirs (a planted dir ahead of /usr/bin runs its own env, bash or date for the owned script).
-    for (const path of ["/tmp/planted:/usr/bin:/bin", "", "/usr/bin::/bin", "bin:/usr/bin", "/usr/bin/../../tmp", "/usr/bin/", "/Users/x/bin:/usr/bin"])
+    for (const path of ["/tmp/planted:/usr/bin:/bin", "", "/usr/bin::/bin", "bin:/usr/bin", "/usr/bin/../../tmp", "/usr/bin/", "/hm/x/bin:/usr/bin"])
       expect({ path, w: await env({ PATH: path }) }).toEqual({ path, w: sets("PATH") });
     // Locale: C, POSIX, or <letters>_<letters>.UTF-8 only (a Big5 or GBK locale makes bash read a multibyte tail as a quote).
     for (const [k, v] of [["LANG", "zh_TW.Big5"], ["LC_ALL", "zh_CN.GBK"], ["LC_CTYPE", "en_US"], ["LANG", ""], ["LANG", "en_US.UTF-8x"], ["LANG", "../x.UTF-8"]] as const)
@@ -629,8 +629,8 @@ describe("adoption resolves symlinks (OUP-366)", () => {
         fs: { home, listDir: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), readHead: async (p: string) => (p.endsWith(".plist") ? "<plist/>" : owned), realPath: async (p: string) => p, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
         configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
       }).then((c) => c.wrappers.length);
-    expect(await stub("/Users/Jose\u0301", "/Users/Jos\u00e9/own.sh", "/Users/Jos\u00e9")).toBe(1);
-    expect(await stub("/Users/Jose\u0301", "/Users/Jos\u00e9/scripts/own.sh", "/Users/Jos\u00e9/scripts")).toBe(0);
+    expect(await stub("/hm/Jose\u0301", "/hm/Jos\u00e9/own.sh", "/hm/Jos\u00e9")).toBe(1);
+    expect(await stub("/hm/Jose\u0301", "/hm/Jos\u00e9/scripts/own.sh", "/hm/Jos\u00e9/scripts")).toBe(0);
   });
   test("a root, a top-level directory, the home dir or an ancestor of it adopts nothing (OUP-367)", async () => {
     const stub = (home: string, script: string, dir: string) =>
@@ -639,14 +639,14 @@ describe("adoption resolves symlinks (OUP-366)", () => {
         configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
       }).then((c) => c.wrappers.length);
     // Fails at the broad-dir test in cruft.ts: each of these adopted every script under it.
-    expect(await stub("/Users/x", "/opt/own.sh", "/")).toBe(1);
-    expect(await stub("/Users/x", "/Users/y/own.sh", "/Users")).toBe(1);
-    expect(await stub("/Users/x", "/Users/x/own.sh", "/Users/x")).toBe(1);
-    expect(await stub("/Users/x", "/Users/own.sh", "/Users")).toBe(1);
-    expect(await stub("/Users/x", "/opt/own.sh", "/opt")).toBe(1); // top level, not an ancestor of home: the depth test alone
+    expect(await stub("/hm/x", "/opt/own.sh", "/")).toBe(1);
+    expect(await stub("/hm/x", "/hm/y/own.sh", "/hm")).toBe(1);
+    expect(await stub("/hm/x", "/hm/x/own.sh", "/hm/x")).toBe(1);
+    expect(await stub("/hm/x", "/hm/own.sh", "/hm")).toBe(1);
+    expect(await stub("/hm/x", "/opt/own.sh", "/opt")).toBe(1); // top level, not an ancestor of home: the depth test alone
     // A directory of its own, two levels down or inside home, is still adopted.
-    expect(await stub("/Users/x", "/opt/scripts/own.sh", "/opt/scripts")).toBe(0);
-    expect(await stub("/Users/x", "/Users/x/scripts/own.sh", "~/scripts")).toBe(0);
+    expect(await stub("/hm/x", "/opt/scripts/own.sh", "/opt/scripts")).toBe(0);
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "~/scripts")).toBe(0);
   });
 });
 

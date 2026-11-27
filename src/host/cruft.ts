@@ -167,7 +167,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // (a) a same-path content swap between the read and the second lookup; (b) a link chain created inside the adopted dir
   // (alias.sh -> an outside link -> own.sh); (c) the configured dir being a symlink that retargets during one scan;
   // (d) a different spelling of the same place (case, NFC/NFD, /var for /private/var), which only overcounts.
-  // (e) the depth rule still adopts a shared top-level-plus-one directory (/private/tmp, /Users/Shared, another user's home);
+  // (e) the depth rule still adopts a shared top-level-plus-one directory (/private/tmp, a shared directory under the users root, another user's home);
   // (h) a hard link made between the fstat of the read and the second realPath; (i) `~/scripts/..` through a symlinked home is
   // now broad where it was adopted before: an overcount. Not fixed here (tracked as follow-up rows): a redundant slash in a
   // symlinked home spelling, and a LaunchAgents directory that cannot be listed (its plists vanish from the count).
