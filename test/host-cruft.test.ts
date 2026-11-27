@@ -13,11 +13,20 @@ import { parseHostCommand } from "../src/host/cli.ts";
 /** A plist as the OS parser gives it: the fake plistJson reads the JSON text kept under the plist's name. */
 const plist = (...args: string[]) => JSON.stringify({ Label: "x", ProgramArguments: args });
 
+/** A fake fs gives the link count, device and inode of the file it reads, as the real one does (the skip of a binary needs them on both reads). */
+const withMeta = (m?: { links?: number; dev?: number; ino?: number }) => {
+  if (m) {
+    m.links ??= 1;
+    m.dev ??= 1;
+    m.ino ??= 1;
+  }
+};
+
 function fs(files: Record<string, string>, dirs: Record<string, string[]>, pins: { path: string; text: string | undefined }[] = []) {
   return {
     home: "/h",
     listDir: async (d: string) => dirs[d] ?? [],
-    readHead: async (p: string, n: number) => (p in files ? (p.endsWith(".plist") ? `<plist>${files[p]}` : files[p]!).slice(0, n) : undefined),
+    readHead: async (p: string, n: number, m?: { links?: number }) => (withMeta(m), p in files ? (p.endsWith(".plist") ? `<plist>${files[p]}` : files[p]!).slice(0, n) : undefined),
     plistJson: async (p: string) => (p.endsWith(".plist") && p in files ? (JSON.parse(files[p]!) as Record<string, unknown>) : undefined),
     pinFiles: () => pins.map((p) => ({ repo: "r", ...p })),
   };
@@ -814,7 +823,7 @@ describe("cruft count follow-ups (OUP-368)", () => {
         home,
         listDir: o.listDir ?? (async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : [])),
         ...(o.listDirStrict ? { listDirStrict: o.listDirStrict } : {}),
-        readHead: async (p: string, _n: number, meta?: { links?: number; noFollow?: boolean }) => (p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
+        readHead: async (p: string, _n: number, meta?: { links?: number; noFollow?: boolean }) => (withMeta(meta), p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
         realPath: o.realPath ?? (async (p: string) => p),
         plistJson: async () => ({ ProgramArguments: o.argv ?? [script] }),
         pinFiles: () => [],
@@ -972,7 +981,7 @@ describe("cruft count follow-ups (OUP-368)", () => {
 describe("cruft count follow-ups (OUP-370)", () => {
   const owned = "#!/bin/sh\n# owner: me\n";
   type Meta = { links?: number; noFollow?: boolean; dev?: number; ino?: number };
-  type Over = { realPath?: (p: string) => Promise<string | undefined>; listDir?: (d: string) => Promise<string[]>; listDirStrict?: (d: string) => Promise<string[] | undefined>; head?: (p: string, meta?: Meta) => string | undefined; argv?: string[] };
+  type Over = { realPath?: (p: string) => Promise<string | undefined>; listDir?: (d: string) => Promise<string[]>; listDirStrict?: (d: string) => Promise<string[] | undefined>; head?: (p: string, meta?: Meta) => string | undefined; argv?: string[]; argvFor?: (plist: string) => string[] | undefined; raw?: boolean };
   // One plist under home's LaunchAgents; the number of wrappers counted.
   const stub = (home: string, script: string, dir: string, o: Over = {}) =>
     cruftCount({
@@ -980,9 +989,9 @@ describe("cruft count follow-ups (OUP-370)", () => {
         home,
         listDir: o.listDir ?? (async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : [])),
         ...(o.listDirStrict ? { listDirStrict: o.listDirStrict } : {}),
-        readHead: async (p: string, _n: number, meta?: Meta) => (p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
+        readHead: async (p: string, _n: number, meta?: Meta) => (o.raw || withMeta(meta), p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
         realPath: o.realPath ?? (async (p: string) => p),
-        plistJson: async () => ({ ProgramArguments: o.argv ?? [script] }),
+        plistJson: async (p: string) => ({ ProgramArguments: o.argvFor?.(p) ?? o.argv ?? [script] }),
         pinFiles: () => [],
       },
       configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
@@ -1035,7 +1044,7 @@ describe("cruft count follow-ups (OUP-370)", () => {
   test("a binary is skipped only when both reads show one file with one name (OUP-370 item 4)", async () => {
     const run = (m1: Meta, m2: Meta) => {
       let k = 0;
-      return stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: (_p, meta) => { Object.assign(meta ?? {}, ++k === 1 ? m1 : m2); return "\u0000ELF"; } });
+      return stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { raw: true, head: (_p, meta) => { Object.assign(meta ?? {}, ++k === 1 ? m1 : m2); return "\u0000ELF"; } });
     };
     // Control: the same file on both reads, one name: a binary, not counted.
     expect(await run({ links: 1, dev: 1, ino: 7 }, { links: 1, dev: 1, ino: 7 })).toBe(0);
@@ -1044,8 +1053,10 @@ describe("cruft count follow-ups (OUP-370)", () => {
     expect(await run({ links: 1, dev: 1, ino: 7 }, { links: 1, dev: 2, ino: 7 })).toBe(1);
     // Fails at cruft.ts (the second read's link count is taken as 1 when unset): a second read that gives no link count after a first that did.
     expect(await run({ links: 1, dev: 1, ino: 7 }, { dev: 1, ino: 7 })).toBe(1);
-    // A first read that gave no identity at all (a fake fs, no links) is not compared.
-    expect(await run({}, {})).toBe(0);
+    // A value missing on either read counts (the skip needs the proof): no link count, or no device and inode, on both reads.
+    expect(await run({}, {})).toBe(1);
+    expect(await run({ links: 1 }, { links: 1 })).toBe(1);
+    expect(await run({ dev: 1, ino: 7 }, { dev: 1, ino: 7 })).toBe(1);
   });
   test("realFs.readHead gives the device and inode of the file it read (OUP-370 item 4)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "oup370-"));
@@ -1060,16 +1071,64 @@ describe("cruft count follow-ups (OUP-370)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
-  test("a directory whose two listings disagree is one problem to count (OUP-370 item 6)", async () => {
+  test("a directory whose two listings disagree is one problem to count, and every plist either shows is judged (OUP-370 item 6)", async () => {
     const agents = "/hm/x/Library/LaunchAgents";
-    const only = (names: string[]) => async (d: string) => (d === agents ? names : []);
-    // Fails at cruft.ts (the plain listing is never compared with the strict one): the extra plist was either never judged or judged without a word.
-    const both = (listDir: string[], listDirStrict: string[]) => stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { listDir: only(listDir), listDirStrict: async (d: string) => (d === agents ? listDirStrict : []) });
-    // The plain listing has a plist the strict one lacks: the listing is one problem to count, and both plists are judged (each runs an owned script, so they add nothing).
-    expect(await both(["t.plist", "u.plist"], ["t.plist"])).toBe(1);
-    // The strict listing has a plist the plain one lacks.
-    expect(await both(["t.plist"], ["t.plist", "u.plist"])).toBe(1);
+    const only = (names: string[] | undefined) => async (d: string) => (d === agents ? names : []);
+    // u.plist runs an unowned script outside the adopted dir; t.plist runs an owned one inside it.
+    const argvFor = (p: string) => (p.endsWith("u.plist") ? ["/opt/other.sh"] : undefined);
+    const both = (listDir: string[], listDirStrict: string[] | undefined) =>
+      stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { listDir: only(listDir) as (d: string) => Promise<string[]>, listDirStrict: only(listDirStrict), argvFor });
+    // Fails at cruft.ts (the union of the two listings): a plist only the plain listing shows is never judged, so the count is the one listing line (1), not 2.
+    expect(await both(["t.plist", "u.plist"], ["t.plist"])).toBe(2);
+    // The strict listing has a plist the plain one lacks: also one line for the listings and one for the plist.
+    expect(await both(["t.plist"], ["t.plist", "u.plist"])).toBe(2);
+    // A strict listing that fails is one line, and the plists the plain listing shows are judged too.
+    expect(await both(["t.plist", "u.plist"], undefined)).toBe(2);
     // Control: the two agree.
     expect(await both(["t.plist"], ["t.plist"])).toBe(0);
+    expect(await both(["t.plist", "u.plist"], ["t.plist", "u.plist"])).toBe(1);
+  });
+  test("a script whose shebang interpreter is a launcher, or cannot be resolved, is counted (OUP-370 round 2, item 7)", async () => {
+    const script = "/hm/x/scripts/own.sh";
+    const to = (from: string, real: string | undefined) => async (p: string) => (p === from ? real : p);
+    const sheb = (line: string) => `${line}\n# owner: me\n`;
+    // Fails at cruft.ts (only argv[0] was resolved): the shebang names python3, a link to dash.
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { head: () => sheb("#!/usr/bin/python3"), realPath: to("/usr/bin/python3", "/bin/dash") })).toBe(1);
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { head: () => sheb("#!/usr/bin/python3"), realPath: to("/usr/bin/python3", undefined) })).toBe(1);
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { head: () => sheb("#!/usr/bin/env python3"), realPath: to("/usr/bin/env", "/bin/dash") })).toBe(1);
+    // Shape (b) and (c) too: the head of the script names it.
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/bin/sh", script], head: () => sheb("#!/usr/bin/python3"), realPath: to("/usr/bin/python3", "/bin/dash") })).toBe(1);
+    // env itself a link to a launcher, in shape (c).
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/usr/bin/env", "/usr/bin/python3", script], realPath: to("/usr/bin/env", "/bin/dash") })).toBe(1);
+    // Controls: an ordinary shebang is adopted.
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { head: () => sheb("#!/bin/sh") })).toBe(0);
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { head: () => sheb("#!/usr/bin/env python3") })).toBe(0);
+  });
+  test("env and a program of another case in a dispatcher's arguments, or as the program, are counted (OUP-370 round 2, item 5)", async () => {
+    const prog = "/opt/dispatch";
+    const run = (argv: string[], p = prog) => stub("/hm/x", p, "/hm/x/scripts", { argv, head: binHead(p) });
+    // Fails at cruft.ts (env is no launcher and the matches are case-sensitive): each of these was skipped as a binary.
+    expect(await run([prog, "/usr/bin/env", "x"])).toBe(1);
+    expect(await run([prog, "/usr/bin/ENV"])).toBe(1);
+    expect(await run([prog, "Python3.12"])).toBe(1);
+    expect(await run([prog, "/bin/BASH"])).toBe(1);
+    // As the program: a name that is env or an interpreter in another case is no binary to skip.
+    expect(await run(["/usr/bin/ENV", "/hm/x/scripts/own.sh"], "/usr/bin/ENV")).toBe(1);
+    expect(await run(["/bin/BASH", "/hm/x/scripts/own.sh"], "/bin/BASH")).toBe(1);
+    expect(await run(["/usr/bin/Python3.12", "/hm/x/scripts/own.sh"], "/usr/bin/Python3.12")).toBe(1);
+  });
+  test("a bare ELF magic is a binary; a text head cut at the read bound is not (OUP-370 round 2, items 2 and 3)", async () => {
+    const direct = (head: string) => stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => head });
+    // Fails at cruft.ts isBinaryProgram if the ELF term is dropped (a head of the magic alone has no control byte).
+    expect(await direct("\u007fELF")).toBe(0);
+    expect(await direct("\u007fELF rest")).toBe(0);
+    // A text head ends in half a character (U+FFFD) when the read cuts it: no binary, the unowned script is counted.
+    expect(await direct(`${"a".repeat(511)}\ufffd`)).toBe(1);
+  });
+  test("more programs that start another program are counted, with the GNU g prefix (OUP-370 round 2)", async () => {
+    for (const name of ["genv", "gxargs", "gfind", "sandbox-exec", "taskpolicy", "swift", "toybox", "login", "java", "npx", "uvx", "git", "docker", "sbcl"]) {
+      const prog = `/usr/bin/${name}`;
+      expect({ name, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: binHead(prog) }) }).toEqual({ name, n: 1 });
+    }
   });
 });
