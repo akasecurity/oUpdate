@@ -261,6 +261,8 @@ let tookBackslash = false;
 // happened in this read (widened), and a read that leaves all of them out (noWiden).
 let widened = false;
 let noWiden = false;
+// The replay of an unresolved line (runLooseJobs) reads with `noWiden` and still records what a writer file holds: those records touch no reach set.
+let inLoose = false;
 function words(cmd: string): string[] {
   // No quote, backslash or tilde: the words are the runs between blanks.
   if (!/['"\\~]/.test(cmd)) return cmd.split(/\s+/).filter((w) => w !== "");
@@ -5640,7 +5642,7 @@ function widenEvery(ctx: Ctx): void {
 // `wsFiles`, held on a byte change) and the reach stays as main had it.
 function widenEveryLate(ctx: Ctx): void {
   widened = true;
-  if (noWiden) return;
+  if (noWiden && !inLoose) return;
   const rec = (ctx.wsFiles ??= new Set<string>());
   for (const [logical, key] of ctx.logical) if (!isManifest(logical)) rec.add(key);
 }
@@ -11672,14 +11674,26 @@ function runLooseJobs(ctx: Ctx): void {
   if (!jobs || !make || ctx.hold) return;
   const sc = make();
   sc.stagePass = true;
-  for (const job of jobs.values()) {
-    sc.cwd = job.cwd;
-    sc.ignoreHooks = job.ignoreHooks;
-    sc.noEnvIgnore = job.noEnvIgnore;
-    dispatchScriptStages(sc, job.text, 0, true);
-    carryWriteSpawn(ctx, sc);
-    const rec = (ctx.wsFiles ??= new Set<string>());
-    for (const k of [...sc.files, ...(sc.selfFiles ?? []), ...(sc.escFiles ?? [])]) rec.add(k);
+  // The read names what the line names: a widening (every file, a directory) is left out, as the parent read nothing of the line and a package that
+  // only the unresolved word could reach through a widening stays quiet; `widened` is put back so the narrow read is asked for as before.
+  const savedNoWiden = noWiden;
+  const savedWidened = widened;
+  noWiden = true;
+  inLoose = true;
+  try {
+    for (const job of jobs.values()) {
+      sc.cwd = job.cwd;
+      sc.ignoreHooks = job.ignoreHooks;
+      sc.noEnvIgnore = job.noEnvIgnore;
+      dispatchScriptStages(sc, job.text, 0, true);
+      carryWriteSpawn(ctx, sc);
+      const rec = (ctx.wsFiles ??= new Set<string>());
+      for (const k of [...sc.files, ...(sc.selfFiles ?? []), ...(sc.escFiles ?? [])]) rec.add(k);
+    }
+  } finally {
+    noWiden = savedNoWiden;
+    inLoose = false;
+    widened = savedWidened;
   }
 }
 
