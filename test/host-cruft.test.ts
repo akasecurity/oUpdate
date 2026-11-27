@@ -2,7 +2,7 @@
 import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as nodeFs from "node:fs";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realFs } from "../src/apply/fs.ts";
@@ -658,6 +658,29 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     // A third lookup that fails counts too.
     let k = 0;
     expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++k === 3 ? undefined : realFs.realPath!(p)) })).toEqual(runs(bin));
+  });
+  test("a directory component swapped for a link after the lookup is counted: O_NOFOLLOW covers the last component only (OUP-368 item 6)", async () => {
+    mkdirSync(join(adopted, "sub"), { recursive: true });
+    const script = join(adopted, "sub", "own.sh");
+    writeFileSync(script, owned);
+    expect(await host(script, adopted)).toEqual([]);
+    let swapped = false;
+    // The first read finds sub turned into a link to outside (which holds an owned own.sh): the read follows it, the file judged is another one.
+    // Fails at cruft.ts `again === real` (`stable`): the real path still looks inside, only the second lookup sees outside.
+    const swap = { readHead: async (p: string, b: number, m?: { links?: number; noFollow?: boolean }) => {
+      if (p === script && !swapped) {
+        swapped = true;
+        renameSync(join(adopted, "sub"), join(adopted, "sub.gone"));
+        symlinkSync(outside, join(adopted, "sub"));
+      }
+      return p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b, m);
+    } };
+    try {
+      expect(await host(script, adopted, swap)).toEqual(runs(script));
+    } finally {
+      rmSync(join(adopted, "sub"), { force: true });
+      renameSync(join(adopted, "sub.gone"), join(adopted, "sub"));
+    }
   });
 });
 
