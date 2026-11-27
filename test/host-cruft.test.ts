@@ -648,6 +648,17 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     expect(await stub("/hm/x", "/opt/scripts/own.sh", "/opt/scripts")).toBe(0);
     expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "~/scripts")).toBe(0);
   });
+  test("a path that resolves differently after the second read of a binary-looking head is counted (OUP-368 item 5)", async () => {
+    const bin = join(adopted, "third.out");
+    writeFileSync(bin, "\u0001\u0002 binary");
+    expect(await host(bin, adopted)).toEqual([]);
+    let n = 0;
+    // Fails at cruft.ts (the realPath after the second read): the lookups before it agree, only the third says outside, and the skip came first.
+    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++n === 3 ? join(outside, "x.sh") : realFs.realPath!(p)) })).toEqual(runs(bin));
+    // A third lookup that fails counts too.
+    let k = 0;
+    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++k === 3 ? undefined : realFs.realPath!(p)) })).toEqual(runs(bin));
+  });
 });
 
 describe("the real plutil read (OUP-349)", () => {

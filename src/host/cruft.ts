@@ -231,7 +231,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       }
       // The second look comes before any skip, so no path is left out of the count before it has been resolved twice.
       const again = fs.realPath ? await fs.realPath(run.script) : real;
-      const stable = again === real;
+      let stable = again === real;
       // Shape (a) with no shebang is a binary program: not counted, once it resolved the same twice and a second read of the
       // head still says binary. An empty file is not a binary: it falls to the owner check and is counted.
       // Whatever the second read says is what is judged from here on (head and link count): a swap is never judged on the
@@ -241,8 +241,10 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       if (stable && run.shebang && body !== "" && !body.startsWith("#!") && looksBinary(body)) {
         const m2: { links?: number; noFollow?: boolean } = { noFollow: true };
         const body2 = await fs.readHead?.(fs.realPath ? real! : run.script, SCRIPT_BYTES, m2);
+        // A third lookup after the second read: a path retargeted during that read is unstable, so it is counted, never skipped.
+        if (fs.realPath && (await fs.realPath(run.script)) !== real) stable = false;
         // A binary with another name (a hard link) is shared with a place outside the directory: counted, not skipped.
-        if (body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2) && (m2.links === undefined || m2.links === 1)) continue;
+        if (stable && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2) && (m2.links === undefined || m2.links === 1)) continue;
         head = body2 ?? "";
         links = m2.links;
       }
