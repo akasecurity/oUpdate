@@ -259,7 +259,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         continue;
       }
       // The head and the link count come from one open (meta.links); no link is followed at the resolved path.
-      const m1: { links?: number; noFollow?: boolean } = { noFollow: true };
+      const m1: { links?: number; noFollow?: boolean; dev?: number; ino?: number } = { noFollow: true };
       const body = real === undefined ? undefined : await fs.readHead?.(fs.realPath ? real : run.script, SCRIPT_BYTES, m1);
       // A script that is missing or cannot be read (a FIFO, no access) is unadopted: it is not left out of the count.
       if (body === undefined) {
@@ -276,12 +276,12 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       let head = body;
       let links = m1.links;
       if (stable && run.shebang && body !== "" && !body.startsWith("#!")) {
-        const m2: { links?: number; noFollow?: boolean } = { noFollow: true };
+        const m2: { links?: number; noFollow?: boolean; dev?: number; ino?: number } = { noFollow: true };
         const body2 = await fs.readHead?.(fs.realPath ? real! : run.script, SCRIPT_BYTES, m2);
         // A third lookup after the second read: a path retargeted during that read is unstable, so it is counted, never skipped.
         if (fs.realPath && (await fs.realPath(run.script)) !== real) stable = false;
         // A binary with another name (a hard link) is shared with a place outside the directory: counted, not skipped.
-        if (stable && !argRuns && isBinaryProgram(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && isBinaryProgram(body2) && (m2.links === undefined || m2.links === 1)) continue;
+        if (stable && !argRuns && isBinaryProgram(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && isBinaryProgram(body2) && m2.links === m1.links && (m2.links === undefined || m2.links === 1) && m2.dev === m1.dev && m2.ino === m1.ino) continue;
         head = body2 ?? "";
         links = m2.links;
       }

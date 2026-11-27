@@ -1032,4 +1032,32 @@ describe("cruft count follow-ups (OUP-370)", () => {
     expect(await run([prog, "--flag", "/hm/x/scripts/own.sh"])).toBe(0);
     expect(await run([prog, "/opt/dashboard"])).toBe(0);
   });
+  test("a binary is skipped only when both reads show one file with one name (OUP-370 item 4)", async () => {
+    const run = (m1: Meta, m2: Meta) => {
+      let k = 0;
+      return stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: (_p, meta) => { Object.assign(meta ?? {}, ++k === 1 ? m1 : m2); return "\u0000ELF"; } });
+    };
+    // Control: the same file on both reads, one name: a binary, not counted.
+    expect(await run({ links: 1, dev: 1, ino: 7 }, { links: 1, dev: 1, ino: 7 })).toBe(0);
+    // Fails at cruft.ts (the identity of the two reads is never compared): the path was replaced by another binary between the reads and the skip stood.
+    expect(await run({ links: 1, dev: 1, ino: 7 }, { links: 1, dev: 1, ino: 8 })).toBe(1);
+    expect(await run({ links: 1, dev: 1, ino: 7 }, { links: 1, dev: 2, ino: 7 })).toBe(1);
+    // Fails at cruft.ts (the second read's link count is taken as 1 when unset): a second read that gives no link count after a first that did.
+    expect(await run({ links: 1, dev: 1, ino: 7 }, { dev: 1, ino: 7 })).toBe(1);
+    // A first read that gave no identity at all (a fake fs, no links) is not compared.
+    expect(await run({}, {})).toBe(0);
+  });
+  test("realFs.readHead gives the device and inode of the file it read (OUP-370 item 4)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "oup370-"));
+    try {
+      const f = join(dir, "f");
+      writeFileSync(f, "x");
+      const meta: Meta = {};
+      await realFs.readHead!(f, 8, meta);
+      // Fails at fs.ts readHead: dev and ino were never set on the meta.
+      expect(meta).toMatchObject({ dev: nodeFs.statSync(f).dev, ino: nodeFs.statSync(f).ino, links: 1 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

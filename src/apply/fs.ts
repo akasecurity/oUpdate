@@ -34,7 +34,7 @@ export interface ApplyFs {
   /** Modification time in ms of a regular file (a link or directory is not one); undefined when missing or not a regular file. */
   mtimeMs?(path: string): Promise<number | undefined>;
   /** The first `bytes` bytes as text of a regular file (a link to one counts); undefined when it is missing, unreadable or not a regular file (a FIFO or device is never opened: the kind is checked by a stat first, then again on the open descriptor). */
-  readHead?(path: string, bytes: number, meta?: { links?: number; noFollow?: boolean }): Promise<string | undefined>;
+  readHead?(path: string, bytes: number, meta?: { links?: number; noFollow?: boolean; dev?: number; ino?: number }): Promise<string | undefined>;
   /** The path with every symlink resolved (fs.realpathSync.native, which follows a link before a ".." after it), or undefined when it cannot be (missing, a loop, no access). */
   realPath?(path: string): Promise<string | undefined>;
   /**
@@ -153,7 +153,11 @@ export const realFs: ApplyFs = {
         const st = fstatSync(fd);
         if (!st.isFile()) return undefined;
         // The link count is taken from the descriptor the head is read from: no later path lookup can disagree with it.
-        if (meta) meta.links = st.nlink;
+        if (meta) {
+          meta.links = st.nlink;
+          meta.dev = st.dev;
+          meta.ino = st.ino;
+        }
         const buf = Buffer.alloc(bytes);
         return buf.subarray(0, readSync(fd, buf, 0, bytes, 0)).toString("utf8");
       } finally {
