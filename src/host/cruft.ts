@@ -15,7 +15,7 @@
 //             interpreter, a relative path, a plist the OS parser cannot read, a variable that
 //             makes an interpreter run other code) is counted UNADOPTED as "complex": an overcount is visible
 //             and a person can judge it, an undercount would be a false green. A program that is a binary
-//             (shape (a), no shebang) is not counted, unless it is a shell or launcher (dash, ksh, osascript, nohup...): those run other files.
+//             (shape (a), no shebang and a binary-looking head) is not counted, unless it is a shell or launcher (dash, ksh, osascript, nohup...): those run other files.
 
 import { resolve } from "node:path";
 import { PLIST_MAX_BYTES, type ApplyFs } from "../apply/fs.ts";
@@ -75,6 +75,8 @@ export interface Cruft {
 type CruftFs = Pick<ApplyFs, "home" | "listDir" | "readHead" | "realPath" | "plistJson" | "pinFiles">;
 /** How much of a script is read: the shebang and the owner line sit at the top; a later `# owner:` is not seen. */
 const SCRIPT_BYTES = 512;
+/** A head that reads as a binary: a NUL, a control byte other than tab, newline, form feed and CR, or a replacement character (what a Mach-O or ELF magic decodes to). */
+const looksBinary = (h: string) => /[\u0000-\u0008\u000b\u000e-\u001f\ufffd]/.test(h);
 const base = (p: string) => p.split("/").at(-1)!;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -236,10 +238,10 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       // first read's owner line; a second read that fails counts.
       let head = body;
       let links = m1.links;
-      if (stable && run.shebang && body !== "" && !body.startsWith("#!")) {
+      if (stable && run.shebang && body !== "" && !body.startsWith("#!") && looksBinary(body)) {
         const m2: { links?: number; noFollow?: boolean } = { noFollow: true };
         const body2 = await fs.readHead?.(fs.realPath ? real! : run.script, SCRIPT_BYTES, m2);
-        if (body2 !== undefined && body2 !== "" && !body2.startsWith("#!")) continue;
+        if (body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2)) continue;
         head = body2 ?? "";
         links = m2.links;
       }

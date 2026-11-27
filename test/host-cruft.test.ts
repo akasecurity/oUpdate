@@ -792,4 +792,28 @@ describe("cruft count follow-ups (OUP-368)", () => {
     // Control: another binary program is still not counted.
     expect(await stub("/hm/x", "/opt/prog", "/hm/x/scripts", { argv: ["/opt/prog", "/hm/x/scripts/own.sh"], head: (p) => (p === "/opt/prog" ? "\u0000ELF" : owned) })).toBe(0);
   });
+  test("a no-shebang text script is judged as a script, not skipped as a binary (OUP-368 item 4)", async () => {
+    const direct = (head: string) => stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => head });
+    // Fails at cruft.ts `looksBinary`: any head without #! was a binary, so this unowned text script was left out of the count.
+    expect(await direct("echo hi\n")).toBe(1);
+    expect(await direct("# not an owner line\necho hi\n")).toBe(1);
+    // An owned no-shebang text script inside the adopted dir is adopted.
+    expect(await direct("echo hi\n# owner: me\n")).toBe(0);
+    // Binary heads are still not counted: NUL, a control byte, or the replacement characters a Mach-O magic decodes to.
+    expect(await direct("\u0000ELF")).toBe(0);
+    expect(await direct("\u0001\u0002 binary")).toBe(0);
+    expect(await direct("\ufffd\ufffd\ufffd\ufffd rest")).toBe(0);
+    // Each edge of the control-byte class on its own (the first byte of the class, the last, the one after the gap, VT).
+    for (const c of ["\u0008", "\u000b", "\u000e", "\u001f"]) expect({ c, n: await direct(`${c}ELF`) }).toEqual({ c, n: 0 });
+    for (const c of ["\u0009", "\u000c", "\u0020"]) expect({ c, n: await direct(`${c}echo\n`) }).toEqual({ c, n: 1 });
+    // A text head is read once; only a head that looks binary is read again.
+    let reads = 0;
+    await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => { reads++; return "echo hi\n"; } });
+    expect(reads).toBe(1);
+    // First read binary, second read text: the second read is what is judged (an unowned text script is counted).
+    let k = 0;
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => (++k === 1 ? "\u0000ELF" : "echo hi\n") })).toBe(1);
+    // Text controls (tab, newline, carriage return, form feed) are not binary.
+    expect(await direct("\techo\r\n\fhi\n")).toBe(1);
+  });
 });
