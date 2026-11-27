@@ -816,4 +816,17 @@ describe("cruft count follow-ups (OUP-368)", () => {
     // Text controls (tab, newline, carriage return, form feed) are not binary.
     expect(await direct("\techo\r\n\fhi\n")).toBe(1);
   });
+  test("a hard-linked no-shebang program is counted, not skipped (OUP-368 item 7)", async () => {
+    const withLinks = (links: number | undefined, head = "\u0000ELF") =>
+      stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: (_p, meta) => { if (meta && links !== undefined) meta.links = links; return head; } });
+    // Fails at cruft.ts binary skip: a binary read with a link count of 2 was skipped before the count was judged.
+    expect(await withLinks(2)).toBe(1);
+    expect(await withLinks(3, "echo hi\n")).toBe(1); // text, two names: counted by the owner check as before
+    // One name, or no count at all (a fake fs): a binary is still not counted.
+    expect(await withLinks(1)).toBe(0);
+    expect(await withLinks(undefined)).toBe(0);
+    // The second read's count is the one judged: first read says one name, second says two.
+    let k = 0;
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: (_p, meta) => { if (meta) meta.links = ++k === 1 ? 1 : 2; return "\u0000ELF"; } })).toBe(1);
+  });
 });

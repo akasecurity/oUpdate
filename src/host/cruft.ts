@@ -241,7 +241,8 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       if (stable && run.shebang && body !== "" && !body.startsWith("#!") && looksBinary(body)) {
         const m2: { links?: number; noFollow?: boolean } = { noFollow: true };
         const body2 = await fs.readHead?.(fs.realPath ? real! : run.script, SCRIPT_BYTES, m2);
-        if (body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2)) continue;
+        // A binary with another name (a hard link) is shared with a place outside the directory: counted, not skipped.
+        if (body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2) && (m2.links === undefined || m2.links === 1)) continue;
         head = body2 ?? "";
         links = m2.links;
       }
