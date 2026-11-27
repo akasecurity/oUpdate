@@ -736,3 +736,29 @@ describe("the real plutil read (OUP-349)", () => {
     expect(Date.now() - t).toBeLessThan(50);
   });
 });
+
+describe("cruft count follow-ups (OUP-368)", () => {
+  const owned = "#!/bin/sh\n# owner: me\n";
+  type Over = { realPath?: (p: string) => Promise<string | undefined>; listDir?: (d: string) => Promise<string[]>; listDirOk?: (d: string) => Promise<string[] | undefined>; head?: (p: string, meta?: { links?: number; noFollow?: boolean }) => string | undefined; argv?: string[] };
+  // One plist under home's LaunchAgents running `script`; the number of wrappers counted.
+  const stub = (home: string, script: string, dir: string, o: Over = {}) =>
+    cruftCount({
+      fs: {
+        home,
+        listDir: o.listDir ?? (async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : [])),
+        ...(o.listDirOk ? { listDirOk: o.listDirOk } : {}),
+        readHead: async (p: string, _n: number, meta?: { links?: number; noFollow?: boolean }) => (p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
+        realPath: o.realPath ?? (async (p: string) => p),
+        plistJson: async () => ({ ProgramArguments: o.argv ?? [script] }),
+        pinFiles: () => [],
+      },
+      configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
+    }).then((c) => c.wrappers.length);
+
+  test("a redundant slash in the home spelling does not hide a broad dir (OUP-368 item 1)", async () => {
+    // Fails at cruft.ts `broad`: "/hm//x/" does not start with "/hm/x/" until runs of slashes are folded to one.
+    expect(await stub("/hm//x", "/hm/x/own.sh", "/hm/x")).toBe(1);
+    expect(await stub("/hm/x", "/hm/x/own.sh", "/hm//x")).toBe(1);
+    expect(await stub("/hm//x", "/hm//x/scripts/own.sh", "~/scripts")).toBe(0); // control: a directory of its own is still adopted
+  });
+});
