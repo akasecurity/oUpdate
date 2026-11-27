@@ -284,9 +284,9 @@ for (const [name, post] of [["a pipe", "node . | cat"]] as const) {
 // Whitespace around a `Reflect.apply(` call is read in time linear in its length: the callable is read from a non-space on, and the optional `(` of the
 // receiver and the spaces after it are one group. A quadratic read grows 64 times from 8,000 to 64,000 characters, a linear one 8 times.
 for (const [name, tail] of [
-  ["leading spaces before the callable", (n: number) => `Reflect.apply(${" ".repeat(n)}Array.prototype.push, args, [1]);\n`],
+  ["spaces before a parenthesized callable", (n: number) => `Reflect.apply(${" ".repeat(n)}(Array.prototype.push), args, [1]);\n`],
   ["spaces before a receiver in brackets", (n: number) => `Reflect.apply(Array.prototype.push,${" ".repeat(n)}[args], [1]);\n`],
-  ["spaces before a parenthesized receiver", (n: number) => `Reflect.apply(Array.prototype.push,${" ".repeat(n)}( ${" ".repeat(n)}`],
+  ["spaces around a parenthesized receiver", (n: number) => `Reflect.apply(Array.prototype.push,${" ".repeat(n)}(${" ".repeat(n)}[args] ), [1]);\n`],
 ] as const) {
   test(`reading Reflect.apply with ${name} is linear in its size`, () => {
     const time = (n: number): number => {
