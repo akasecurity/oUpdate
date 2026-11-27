@@ -184,7 +184,7 @@ test("a hidden default and an argument array pushed to and read by 40 run calls 
 
 // A widening that only the read of the written names finds is applied after the literals of the files scanned are read: widening first takes every
 // file in, and a literal that reaches docs/addon.node by its stem finds it taken in, so the scan raises no stop (script depth) that it raises
-// without the widening. The hook below reaches 63 more files, then a stem that names an addon, then an argument array written by index.
+// without the widening. The hook below reaches 62 more files, then a stem that names an addon, then an argument array written by index.
 test("a written argument array in a file that reaches the scan cap holds as the file without the write holds", () => {
   const mk = (ver: string): FileMap => {
     const o: Record<string, string> = {
@@ -214,4 +214,31 @@ test("a hidden default with an unrelated write and run calls on a long name hold
   const p = `var p = ${Array.from({ length: 150 }, (_, i) => `a${i}`).join(" + ")};\n`;
   const body = `var cp = require("child_process");\n${parts}${p}var n = "a.js";\nfunction f(n, q = "(") {}\nvar other = [];\nother.push(1);\n` + `cp.spawnSync("node", [p]);\n`.repeat(40) + `require("./" + n);\n`;
   expect(prepass("npm", release("1.0.0", body), release("1.0.1", body)).hard.some((s) => s.kind === "install-script")).toBe(true);
+});
+
+// The widening of the read of the written names must not settle an addon for the stem lookup of a LATER file: early.js writes the argument array, then
+// h0.js reaches 62 more files and names docs/addon.node by its stem, and the scan raises the stop (script depth) as it does without the write.
+for (const [name, cmd] of [["&&", "node early.js && node h0.js"], ["a pipe", "node early.js | node h0.js"]] as const) {
+  test(`an argv write in an earlier hook ${name} a later hook that reaches the scan cap and names an addon by stem holds on script depth`, () => {
+    const mk = (ver: string): FileMap => {
+      const o: Record<string, string> = {
+        "package.json": JSON.stringify({ name: "x", version: ver, scripts: { postinstall: cmd } }),
+        "early.js": `${CPX}const a = [];\na[0] = process.argv[2];\ncp.spawnSync("echo", a);\n`,
+        "h0.js": `require("./h1.js");\nconst path = require("path");\n${CPX}cp.spawnSync("echo", ["hello"]);\npath.join("x", "addon");\n`,
+        "h62.js": "1;\n",
+        "docs/addon.node": "x",
+      };
+      for (let i = 1; i <= 61; i++) o[`h${i}.js`] = `require("./h${i + 1}.js");\n`;
+      return files(o);
+    };
+    const details = prepass("npm", mk("1.0.0"), mk("1.0.1")).hard.map((s) => `${s.kind}|${s.detail ?? ""}`);
+    expect(details).toContain("install-script|unresolved: script depth");
+  });
+}
+
+// The index scan stops at its budget before it reaches the write by index: the file widens, as it does with a push (which the other read finds).
+test("a written argument array after an index scan that stops at its budget holds the changed docs/evil.js", () => {
+  const nest = `x = ${"a[".repeat(130)}${"]".repeat(130)};\n`.repeat(10);
+  const body = `${CPX}${nest}const args = ["lib/a.js"];\nargs[0] = ${DE};\ncp.spawnSync(process.execPath, args);\n`;
+  expect(held(body)).toBe(true);
 });

@@ -194,6 +194,8 @@ interface Ctx {
   // The files a write-and-spawn file puts in play (a record of its own) and whether they were added.
   wsFiles?: Set<string>;
   wsDone?: boolean;
+  // The `.node` files a late widening added to the file set: settled() does not count them taken in, as main's scan has not added them yet.
+  lateAddons?: Set<string>;
   filesLog?: Set<string>;
   escMarks?: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> };
   selfFiles?: Set<string>;
@@ -5626,6 +5628,17 @@ function widenEvery(ctx: Ctx): void {
   }
 }
 
+// The widening of a `late` tier: every `.node` file it newly adds stays unsettled for a stem lookup in a later file, so that lookup adds it (and
+// reaches the scan cap) as the scan without the widening does.
+function widenEveryLate(ctx: Ctx): void {
+  if (!noWiden) {
+    for (const [logical, key] of ctx.logical) {
+      if (!isManifest(logical) && !ctx.files.has(key) && key.endsWith(".node")) (ctx.lateAddons ??= new Set()).add(key);
+    }
+  }
+  widenEvery(ctx);
+}
+
 // A non-static JS file with no computed file load keeps its own directory.
 // Python, shell, and extensionless entries use that same floor.
 function narrowWiden(ctx: Ctx, fromKey: string): void {
@@ -5661,7 +5674,8 @@ function widenJsScan(ctx: Ctx, key: string, text: string): void {
   for (const path of tier.lits) addLogical(ctx, path);
   addNative(ctx);
   addScannedLiterals(ctx);
-  if (tier.late && !tier.all) widenEvery(ctx);
+  if (tier.late && !tier.all) widenEveryLate(ctx);
+  // widenEvery and noteWriteSpawn touch separate state (noteWriteSpawn reads no ctx.files), so their order does not matter.
   if (ws) noteWriteSpawn(ctx);
 }
 
@@ -7133,6 +7147,7 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
   const otherWr = new Set<string>(); // names a literal value no longer tells about: written to in place; read apart from `otherNew`, on a memo and a counter of their own
   let useWr = false;
   let widenWr = false; // what only the read of the written names finds: read at the exit alone
+  let idxStopped = false; // the index scan stopped at its budget: a write it did not reach is unseen
   let xs3 = 0; // the work of the index scan, the alias walk and that read: never charged to `xs2`, which is the second read of the string defaults
   let widenStr = false; // the second read's own: what only it finds, read at the exit alone, so main's flag and counter stay as they were
   let poison = false;
@@ -7231,7 +7246,10 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
   // The work of this and the next step is counted in `xs3`, never in `spent`: the budget stops of main stay where they were. Past the budget the
   // steps are not run, which is main's result.
   for (const m of text.matchAll(/(?<![\w$.])(?:\(\s*)?([A-Za-z_$][\w$]*)\s*(?:\)\s*)?(?:\?\.\s*)?\[/g)) {
-    if (xs3 > budget) break;
+    if (xs3 > budget) {
+      idxStopped = true;
+      break;
+    }
     const open = (m.index ?? 0) + m[0].length - 1;
     const end = closeAt(text.slice(open, open + 400), 0);
     xs3 += end < 0 ? 400 : end + 1;
@@ -7602,7 +7620,7 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
   // after the last read inside a run call.
   late.all = widenNew || widenStr || spent + xs > budget;
   // What only the read of the written names finds, or the budget it passes (the index scan stopped, or the read was not run): applied after the literals are read.
-  late.wr = widenWr || ((otherWr.size > 0 || arrayEscapes) && xs3 > budget);
+  late.wr = widenWr || ((otherWr.size > 0 || arrayEscapes || idxStopped) && xs3 > budget);
   return spent > budget;
 }
 
@@ -10716,7 +10734,7 @@ function operandTokens(text: string, commands?: string[], escCommands?: string[]
 // A key the scan has fully taken in: in the file set, scanned if it is scannable, and in the gyp set when a gyp command is the caller.
 function settled(ctx: Ctx, key: string | undefined): boolean {
   if (!key || !ctx.files.has(key) || (ctx.fromGyp && !ctx.gypFiles.has(key))) return false;
-  return scanDone(ctx, key) || key.endsWith(".node");
+  return scanDone(ctx, key) || (key.endsWith(".node") && !ctx.lateAddons?.has(key));
 }
 
 function addLiteralToken(ctx: Ctx, token: string, operand = false): void {
