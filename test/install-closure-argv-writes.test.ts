@@ -281,14 +281,37 @@ for (const [name, post] of [["a pipe", "node . | cat"]] as const) {
   });
 }
 
-// Spaces after `Reflect.apply(` before a parenthesized callable are read in time linear in their number (the pattern backtracked over them twice).
-test("reading Reflect.apply( followed by a long run of spaces is linear in its size", () => {
-  const time = (n: number): number => {
-    const t0 = performance.now();
-    classifyJs("lib/x.js", `${CPX}const args = [];\nargs.push(1);\nReflect.apply(${" ".repeat(n)}(Array.prototype.push), args, [1]);\n`);
-    return performance.now() - t0;
-  };
-  time(1000);
-  const small = Math.max(time(8000), 1);
-  expect(time(64000)).toBeLessThan(small * 40 + 300);
+// Whitespace around a `Reflect.apply(` call is read in time linear in its length: the callable is read from a non-space on, and the optional `(` of the
+// receiver and the spaces after it are one group. A quadratic read grows 64 times from 8,000 to 64,000 characters, a linear one 8 times.
+for (const [name, tail] of [
+  ["leading spaces before the callable", (n: number) => `Reflect.apply(${" ".repeat(n)}Array.prototype.push, args, [1]);\n`],
+  ["spaces before a receiver in brackets", (n: number) => `Reflect.apply(Array.prototype.push,${" ".repeat(n)}[args], [1]);\n`],
+  ["spaces before a parenthesized receiver", (n: number) => `Reflect.apply(Array.prototype.push,${" ".repeat(n)}( ${" ".repeat(n)}`],
+] as const) {
+  test(`reading Reflect.apply with ${name} is linear in its size`, () => {
+    const time = (n: number): number => {
+      const t0 = performance.now();
+      classifyJs("lib/x.js", `${CPX}const args = [];\nargs.push(1);\n${tail(n)}`);
+      return performance.now() - t0;
+    };
+    time(1000);
+    const small = Math.max(time(8000), 5);
+    expect(time(64000)).toBeLessThan(small * 24);
+  });
+}
+
+// A late widening in the ordinary pass must not fill the file set before the scope of an arithmetic hook records its additions: the main moved between
+// two files that the postinstall hook also reaches, and the record of the bare-line reading is the only place that shows it.
+test("a main retargeted between two writer files holds beside an arithmetic hook and a node . hook", () => {
+  const W = `${CPX}const args = ["./local.js"];\nargs[0] = "./local.js";\ncp.spawnSync(process.execPath, args);\n`;
+  const mk = (ver: string, main: string): FileMap =>
+    files({
+      "package.json": JSON.stringify({ name: "p", version: ver, main, scripts: { preinstall: "node .", install: "(( '$(cat n)' ))", postinstall: "node src/a/a.js && node src/b/b.js" } }),
+      "src/a/a.js": W,
+      "src/b/b.js": W,
+      "n": "1\n",
+      "local.js": "module.exports = 1\n",
+    });
+  const details = prepass("npm", mk("1.0.0", "src/a/a.js"), mk("1.0.1", "src/b/b.js")).hard.map((s) => s.kind);
+  expect(details).toContain("install-script");
 });

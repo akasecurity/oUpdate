@@ -194,8 +194,6 @@ interface Ctx {
   // The files a write-and-spawn file puts in play (a record of its own) and whether they were added.
   wsFiles?: Set<string>;
   wsDone?: boolean;
-  // The `.node` files a late widening added to the file set: settled() does not count them taken in, as main's scan has not added them yet.
-  lateAddons?: Set<string>;
   filesLog?: Set<string>;
   escMarks?: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> };
   selfFiles?: Set<string>;
@@ -5628,24 +5626,16 @@ function widenEvery(ctx: Ctx): void {
   }
 }
 
-// The widening of a `late` tier: every `.node` file it newly takes in (into the gyp set too, in a gyp action) stays unsettled for a stem lookup in a later file, so that lookup adds it (and
-// reaches the scan cap) as the scan without the widening does.
+// The widening of a `late` tier (what only the read of the written names finds): it takes no file into the reach. The scopes that run after it (the
+// stage pass, the self-run, backslash and bare-line readings) record the files they add beyond the file set, and the sets they are compared on show a
+// main or bin moved between two files; a file set filled first leaves those records empty on both sides, and a literal that names an addon by its
+// stem finds it taken in and raises no stop (script depth). So every file but the manifests goes to the record of its own (ctx.wsFiles, carried as
+// `wsFiles`, held on a byte change) and the reach stays as main had it.
 function widenEveryLate(ctx: Ctx): void {
-  // The stage pass is compared apart (stageAll): taking every file into its set would make both sides' sets equal and hide a main or bin retarget
-  // that its set shows without the widening. Every file but the manifests goes to the record of its own instead (carried to the reading, held on a byte change).
-  if (ctx.stagePass) {
-    widened = true;
-    if (noWiden) return;
-    const rec = (ctx.wsFiles ??= new Set<string>());
-    for (const [logical, key] of ctx.logical) if (!isManifest(logical)) rec.add(key);
-    return;
-  }
-  if (!noWiden) {
-    for (const [logical, key] of ctx.logical) {
-      if (!isManifest(logical) && !(ctx.files.has(key) && (!ctx.fromGyp || ctx.gypFiles.has(key))) && key.endsWith(".node")) (ctx.lateAddons ??= new Set()).add(key);
-    }
-  }
-  widenEvery(ctx);
+  widened = true;
+  if (noWiden) return;
+  const rec = (ctx.wsFiles ??= new Set<string>());
+  for (const [logical, key] of ctx.logical) if (!isManifest(logical)) rec.add(key);
 }
 
 // A non-static JS file with no computed file load keeps its own directory.
@@ -7248,7 +7238,7 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
   wnames(new RegExp(`\\.\\s*(?:${MUT})\\s*\\.\\s*(?:call|apply)\\s*\\(\\s*([A-Za-z_$][\\w$]*)`, "g"));
   wnames(/\b(?:Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)|Reflect\s*\.\s*(?:set|defineProperty|deleteProperty|setPrototypeOf))\s*\(\s*([A-Za-z_$][\w$]*)/g);
   // Reflect.apply(fn, thisArg, args) and fn.apply(thisArg, args) take the receiver second: Reflect.apply(Array.prototype.push, args, [x]).
-  wnames(/\bReflect\s*\.\s*apply\s*\(\s*[\w$.][\w$.\s]*?,\s*\(?\s*([A-Za-z_$][\w$]*)/g);
+  wnames(/\bReflect\s*\.\s*apply\s*\(\s*[\w$.][\w$.\s]*?,\s*(?:\(\s*)?([A-Za-z_$][\w$]*)/g);
   // A parenthesized receiver: (args).push(x).
   wnames(new RegExp(`(?<![\\w$.])\\(\\s*([A-Za-z_$][\\w$]*)\\s*\\)\\s*(?:\\?\\.|\\.)\\s*(?:${MUT})(?![\\w$])`, "g"));
   const INDEX_WRITE = /\s*(?:\+\+|--|(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|(?<=\s|\])(?:of|in)(?![\w$]))/y;
@@ -10743,7 +10733,7 @@ function operandTokens(text: string, commands?: string[], escCommands?: string[]
 // A key the scan has fully taken in: in the file set, scanned if it is scannable, and in the gyp set when a gyp command is the caller.
 function settled(ctx: Ctx, key: string | undefined): boolean {
   if (!key || !ctx.files.has(key) || (ctx.fromGyp && !ctx.gypFiles.has(key))) return false;
-  return scanDone(ctx, key) || (key.endsWith(".node") && !ctx.lateAddons?.has(key));
+  return scanDone(ctx, key) || key.endsWith(".node");
 }
 
 function addLiteralToken(ctx: Ctx, token: string, operand = false): void {
