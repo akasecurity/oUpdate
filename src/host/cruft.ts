@@ -82,6 +82,8 @@ const looksBinary = (h: string) => {
   const t = Buffer.byteLength(h) >= SCRIPT_BYTES && h.endsWith("\ufffd") ? h.slice(0, -1) : h;
   return /[\u0000-\u0008\u000b\u000e-\u001f\ufffd]/.test(t);
 };
+/** A head that is a program, not a text file that has a control byte or U+FFFD in it: a NUL, or what the magic of a Mach-O (a lead of U+FFFD) or an ELF file starts with. */
+const isBinaryProgram = (h: string) => looksBinary(h) && (h.includes("\u0000") || h.startsWith("\ufffd\ufffd") || h.startsWith("\u007fELF"));
 const base = (p: string) => p.split("/").at(-1)!;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -279,7 +281,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         // A third lookup after the second read: a path retargeted during that read is unstable, so it is counted, never skipped.
         if (fs.realPath && (await fs.realPath(run.script)) !== real) stable = false;
         // A binary with another name (a hard link) is shared with a place outside the directory: counted, not skipped.
-        if (stable && !argRuns && looksBinary(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2) && (m2.links === undefined || m2.links === 1)) continue;
+        if (stable && !argRuns && isBinaryProgram(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && isBinaryProgram(body2) && (m2.links === undefined || m2.links === 1)) continue;
         head = body2 ?? "";
         links = m2.links;
       }
@@ -291,7 +293,8 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       // Accepted lows (a)-(d) are listed where realAdopted is built: they need write access in the adopted dir, where an
       // owned script can be edited anyway, or only overcount.
       const inside = !dotted(run.script) && stable && (links === undefined || links === 1) && realAdopted !== undefined && real!.startsWith(realAdopted) && (run.script.startsWith(realAdopted) || run.script.startsWith(plainAdopted));
-      const owned = inside && head.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
+      // Shape (a) runs the file itself, so it must start with #!: a text file with an owner line and no #! cannot be run as the program and is not adopted.
+      const owned = inside && (!run.shebang || head.startsWith("#!")) && head.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
       if (!owned) wrappers.push(`${d}/${n} runs ${run.script}`);
     }
   }
