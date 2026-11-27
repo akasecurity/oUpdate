@@ -31,6 +31,9 @@ export interface InstallView {
   npmFiles?: string[];
   // The files a file that writes a loader surface and starts a process puts in play: a changed one holds, and they are in no reach comparison.
   wsFiles?: string[];
+  // The write-and-spawn files a self-run (`node .`, `npx .`, a bin) runs: compared as a set, because the files it reaches can be the same on both sides
+  // (a preinstall names both) while the one it runs moved.
+  selfWs?: string[];
   gypFiles: string[];
   missing: string[];
   scripts: Record<string, string>;
@@ -197,6 +200,7 @@ interface Ctx {
   filesLog?: Set<string>;
   escMarks?: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> };
   selfFiles?: Set<string>;
+  selfRan?: Set<string>; // the targets a self-run was asked to read, whether or not a read already had them
   selfMissing?: Set<string>;
   selfScripts?: Record<string, string>;
   selfGyp?: boolean;
@@ -7241,7 +7245,43 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
   wnames(/\bReflect\s*\.\s*apply\s*\(\s*[\w$.][\w$.\s]*?,\s*(?:\(\s*)?([A-Za-z_$][\w$]*)/g);
   // A parenthesized receiver: (args).push(x).
   wnames(new RegExp(`(?<![\\w$.])\\(\\s*([A-Za-z_$][\\w$]*)\\s*\\)\\s*(?:\\?\\.|\\.)\\s*(?:${MUT})(?![\\w$])`, "g"));
-  const INDEX_WRITE = /\s*(?:\+\+|--|(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|(?<=\s|\])(?:of|in)(?![\w$]))/y;
+  // The shapes whose receiver is more than a name (`((args)).push(x)`, `(args || y).push(x)`, `[args][0][0] = x`, `o.l.push(x)`, `Object.assign((args), x)`): the array they change cannot be named, so any array literal handed to a call may be changed (`arrayEscapes`).
+  // A receiver that is only a name, possibly in parentheses, is that name. Scans are windows of 400 characters, counted in `xs3`.
+  let complexWrite = false;
+  const recv = (src: string | undefined): void => {
+    const r = (src ?? "").trim().replace(/^(?:\(\s*)+([\s\S]*?)(?:\s*\))+$/, "$1").trim();
+    if (/^[A-Za-z_$][\w$]*$/.test(r)) written.add(r);
+    else if (!/^\{\s*\}$/.test(r)) {
+      complexWrite = true;
+      for (const n of ids(r)) written.add(n);
+    }
+  };
+  const callArgs = (open: number): string[] => {
+    const end = closeAt(text.slice(open, open + 400), 0);
+    xs3 += end < 0 ? 400 : end + 1;
+    if (end < 0) return []; // no receiver read: recv() takes the empty text as unknown
+    return splitTop(text.slice(open + 1, open + end), ",");
+  };
+  const callSites: [RegExp, (args: string[]) => void][] = [
+    // A call on a name, a bracket or a paren that is changed in place: `)`, `]`, `}` or a member name before `.push(`.
+    [new RegExp(`(?:[)\\]}]|\\.\\s*[\\w$]+)\\s*(?:\\?\\.\\s*|\\.\\s*)(?:${MUT})(?![\\w$])`, "g"), () => (complexWrite = true)],
+    [new RegExp(`(?:[)\\]}]|\\.\\s*[\\w$]+)\\s*(?:\\?\\.\\s*)?\\[\\s*(["'\`])(?:${MUT})\\1\\s*\\]`, "g"), () => (complexWrite = true)],
+    // Object.assign, Object["assign"], Reflect.set ...: the first argument is the receiver.
+    [/\b(?:Object|Reflect)\s*(?:\.\s*|\[\s*["'`])(?:assign|defineProperty|defineProperties|setPrototypeOf|set|deleteProperty)(?:["'`]\s*\])?\s*\(/g, (a) => recv(a[0])],
+    // Array.prototype.push.call(receiver, ...), .apply(...), .bind(receiver).
+    [new RegExp(`\\.\\s*(?:${MUT})\\s*\\.\\s*(?:call|apply|bind)\\s*\\(`, "g"), (a) => recv(a[0])],
+  ];
+  for (const [re, act] of callSites)
+    for (const m of text.matchAll(re)) {
+      if (xs3 > budget) {
+        idxStopped = true;
+        break;
+      }
+      const end = (m.index ?? 0) + m[0].length;
+      if (text[end - 1] === "(") act(callArgs(end - 1));
+      else act([]);
+    }
+  const INDEX_WRITE = /(?:\s*\))*\s*(?:\+\+|--|(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|(?<=\s|\])(?:of|in)(?![\w$]))/y;
   // The work of this and the next step is counted in `xs3`, never in `spent`: the budget stops of main stay where they were. Past the budget the
   // steps are not run, which is main's result.
   for (const m of text.matchAll(/(?<![\w$.])(?:\(\s*)?([A-Za-z_$][\w$]*)\s*(?:\)\s*)?(?:\?\.\s*)?\[/g)) {
@@ -7258,6 +7298,22 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
     }
     INDEX_WRITE.lastIndex = open + end + 1;
     if (INDEX_WRITE.test(text)) written.add(m[1]!);
+  }
+  // An index write whose base is more than a name: `[args][0][0] = x`, `({ l: args }).l[0] = x`, `o.l[0] = x`, `f()[0] = x`.
+  for (const m of text.matchAll(/(?:[)\]}]|\.\s*[\w$]+)\s*(?:\?\.\s*)?\[/g)) {
+    if (xs3 > budget) {
+      idxStopped = true;
+      break;
+    }
+    const open = (m.index ?? 0) + m[0].length - 1;
+    const end = closeAt(text.slice(open, open + 400), 0);
+    xs3 += end < 0 ? 400 : end + 1;
+    if (end < 0) {
+      complexWrite = true;
+      continue;
+    }
+    INDEX_WRITE.lastIndex = open + end + 1;
+    if (INDEX_WRITE.test(text)) complexWrite = true;
   }
   // The names that hold a value written to through another name (`const b = args; b.push(x)`, `const c = b`) are written to as well. A name that is
   // given the written one (`const b = args` with `args` written) reads through it.
@@ -7296,7 +7352,8 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
       }
     }
   }
-  for (const n of written) if (params.has(n)) arrayEscapes = true;
+  for (const n of written) if (params.has(n) || other.has(n) || otherNew.has(n)) arrayEscapes = true;
+  if (complexWrite) arrayEscapes = true;
   // Run functions renamed or held by a name (`{ execSync: run }`, `import { exec as run }`, `const run = cp.execSync`, `promisify(cp.exec)`).
   const runs = new Set<string>();
   names(new RegExp(`\\b(?:${RUN_FN})\\s*(?::|\\bas\\b)\\s*([A-Za-z_$][\\w$]*)`, "g"), runs);
@@ -10921,6 +10978,7 @@ function noteRootMain(ctx: Ctx): void {
   }
   const name = (rel ? nodeFile(ctx, rel) ?? nodeFile(ctx, `${rel}/index`) : undefined) ?? nodeFile(ctx, "index");
   if (!name) return;
+  if (!ctx.inEsc) (ctx.selfRan ??= new Set()).add(name);
   markHookFile(ctx, name);
   addLogical(ctx, name);
 }
@@ -11594,6 +11652,9 @@ function runStageJobs(ctx: Ctx): void {
     if (sc.hold) {
       ctx.hold = sc.hold;
       carryWriteSpawn(ctx, sc);
+      // The files the stages before the stop reached are published too: a stop that does not hold alone (an unresolved manifest variable) would
+      // otherwise leave a changed file of an earlier stage in no comparison.
+      ctx.stageFiles = new Set([...sc.files, ...(sc.selfFiles ?? []), ...(sc.escFiles ?? [])]);
       return;
     }
   }
@@ -12593,6 +12654,11 @@ function runBody(ctx: Ctx, body: string, carry?: HotLookup): void {
     if (sub === null && !ctx.hold) noteUnparsedMake(ctx, body); // `echo $(make -C sub)`, `${MAKE:-make} -C sub`
     // An expansion that cannot be resolved may name another directory: widen when the body moves the run.
     if (sub === null && noteBody(ctx, body)) widenAll(ctx);
+    // The commands of the line that hold no expansion are still read, as an unsplit line is (a pipe, a redirect): `echo $X | cat && node .`.
+    if (sub === null && !ctx.hold) {
+      const loose = subst(ctx, body, true);
+      if (loose !== null) noteUnreadable(ctx, loose, true);
+    }
     return;
   }
   splitEscaped = false;
@@ -15423,6 +15489,7 @@ function finish(ctx: Ctx, manifest: string, gyp: string | undefined, hook: boole
     stageOnly: [...(ctx.stageFiles ?? [])].filter((k) => !ctx.files.has(k)).sort(),
     npmFiles: [...(ctx.npmFiles ?? [])].sort(),
     wsFiles: [...(ctx.wsFiles ?? [])].sort(),
+    selfWs: [...(ctx.selfRan ?? [])].map((t) => ctx.logical.get(t) ?? t).filter((k) => ctx.wsFiles?.has(k)).sort(),
     gypFiles: [...ctx.gypFiles].sort(),
     missing: [...new Set([...ctx.missing, ...(ctx.selfMissing ?? []), ...(ctx.escMissing ?? []), ...(ctx.arRec?.missing ?? [])])].sort(),
     selfMissing: [...(ctx.selfMissing ?? [])].filter((k) => !ctx.missing.has(k)).sort(),
@@ -15618,6 +15685,7 @@ export function shebangCommand(first: string): string[] | undefined {
 // (selfGyp) are kept apart too, and the gyp read of a package only a self-run reached gyp for runs as a self-run.
 // The self-run reads of one trigger: each target once, and none that a read already took in, in a single copy of the records.
 function readSelfTargets(ctx: Ctx, targets: string[]): void {
+  if (!ctx.inEsc) for (const t of targets) (ctx.selfRan ??= new Set()).add(t);
   // Nothing left to read: every target self-read (selfBinsRead holds only self.targets), or a pass under this same binsRead found none left
   // (neither record ever drops an entry, so that stays true).
   // Inside the backslash reading a self-run reads on the records of that reading only: the real self-run records are left alone.
