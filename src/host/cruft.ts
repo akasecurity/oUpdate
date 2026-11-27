@@ -191,14 +191,17 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // A root, a top-level directory, the home dir or an ancestor of it is too broad to be a scripts directory: it adopts
   // nothing (an overcount is the fail-closed side). Home is checked as given and by its real path.
   const homeReal = (fs.realPath ? await fs.realPath(home) : undefined) ?? home;
-  // Spellings only widen the test: names are folded (case, NFC, runs of slashes, the /System/Volumes/Data firmlink root), and the configured dir is also taken with its "." and ".."
+  // Spellings only widen the test: names are folded (case, NFC, runs of slashes; the /System/Volumes/Data firmlink root is handled in `spellings` below), and the configured dir is also taken with its "." and ".."
   // collapsed as text, so Alias/. and Alias/dir/.. count as Alias. Wrong-spelling only overcounts.
   const fold = (x: string) => x.normalize("NFC").toLowerCase().replace(/\/{2,}/g, "/");
   // Home is compared in three spellings (as given, the /System/Volumes/Data firmlink root dropped, and that root added) with the
   // dir as given: a dir spelled either way is met by one of them (more spellings only overcount).
   const FIRM = "/system/volumes/data";
   const strip = (x: string) => x.replace(/^\/system\/volumes\/data(?=\/|$)/, "");
-  const spellings = (x: string) => [fold(x), strip(fold(x)), FIRM + strip(fold(x))];
+  const spellings = (x: string) => {
+    const bare = strip(fold(x));
+    return [fold(x), bare, FIRM + (bare.startsWith("/") ? bare : `/${bare}`)];
+  };
   const broad = (d: string) => d.split("/").filter(Boolean).length < 2 || [`${home}/`, `${homeReal}/`].some((h) => spellings(h).some((hs) => hs.startsWith(fold(d))));
   const realSlash = realRaw === undefined ? undefined : `${realRaw.replace(/\/+$/, "")}/`;
   const collapsed = `${resolve(adoptedRaw).replace(/\/+$/, "")}/`;

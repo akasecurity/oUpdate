@@ -586,7 +586,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
       symlinkSync(join(hm, "Elsewhere"), join(hm, "R", "x"));
       symlinkSync(join(hm, "target"), join(hm, "hl"));
       mkdirSync(join(hm, "R", "dir"));
-      // Fails at cruft.ts:183-186 (broad, lexically collapsed plain dir): Alias/. and Alias/dir/.. are Alias, whose home Alias/x is under it.
+      // Fails at cruft.ts `broad` on the lexically collapsed plain dir: Alias/. and Alias/dir/.. are Alias, whose home Alias/x is under it.
       expect(await at(`${hm}/Alias/x`, `${hm}/R/owned.sh`, `${hm}/Alias/.`)).toBe(1);
       expect(await at(`${hm}/Alias/x`, `${hm}/R/owned.sh`, `${hm}/Alias/dir/..`)).toBe(1);
       // Fails at the homeReal entry: home is a link, and its real target (or the real parent of it) is the configured dir.
@@ -836,12 +836,12 @@ describe("cruft count follow-ups (OUP-368)", () => {
     expect(await stub("/hm/x", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
   });
   test("a case-different spelling of home is broad, with no real filesystem (OUP-368)", async () => {
-    // Pins cruft.ts:185 `.toLowerCase()` in a stub: home /hm/X and configured dir /hm/x. Green on the parent by design (a mutant pin).
+    // Pins the `.toLowerCase()` of `fold` in cruft.ts, in a stub: home /hm/X and configured dir /hm/x. Green on the parent by design (a mutant pin).
     expect(await stub("/hm/X", "/hm/x/own.sh", "/hm/x")).toBe(1);
     expect(await stub("/hm/x", "/hm/X/own.sh", "/hm/X")).toBe(1);
   });
   test("the home dir as given is checked on its own, not only by its real path (OUP-368)", async () => {
-    // Pins cruft.ts:186 `${home}/`: home resolves to /other/x and the configured dir "/hm/x/." to /other2/x, so only its collapsed spelling "/hm/x/" matches home as given. Green on the parent by design.
+    // Pins the `${home}/` term of `broad` in cruft.ts: home resolves to /other/x and the configured dir "/hm/x/." to /other2/x, so only its collapsed spelling "/hm/x/" matches home as given. Green on the parent by design.
     const realPath = async (p: string) => (p === "/hm/x" ? "/other/x" : p === "/hm/x/." ? "/other2/x" : p);
     expect(await stub("/hm/x", "/other2/x/own.sh", "/hm/x/.", { realPath })).toBe(1);
     // Control: a directory of its own under that home is still adopted.
@@ -948,5 +948,19 @@ describe("cruft count follow-ups (OUP-368)", () => {
       expect({ prog, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: (p) => (p === prog ? "\u0000ELF" : owned) }) }).toEqual({ prog, n: 1 });
     // Fails at cruft.ts (LAUNCHERS on the resolved path): /opt/x/tool is a link to dash.
     expect(await stub("/hm/x", "/opt/x/tool", "/hm/x/scripts", { argv: ["/opt/x/tool"], realPath: async (p: string) => (p === "/opt/x/tool" ? "/bin/dash" : p), head: (p) => (p === "/bin/dash" ? "\u0000ELF" : owned) })).toBe(1);
+  });
+  test("every launcher name is counted, bare (OUP-368 round 2)", async () => {
+    // Fails at cruft.ts LAUNCHERS: removing any one name lets that program be skipped as a binary.
+    const names = ["dash", "ksh", "ksh93", "tcsh", "csh", "fish", "osascript", "nohup", "caffeinate", "arch", "nice", "xargs", "sudo", "tclsh", "wish", "expect", "time", "exec", "command", "setsid"];
+    for (const name of names) {
+      const prog = `/bin/${name}`;
+      expect({ name, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: (p) => (p === prog ? "\u0000ELF" : owned) }) }).toEqual({ name, n: 1 });
+    }
+    // Control: a binary that is not a launcher is still skipped.
+    expect(await stub("/hm/x", "/bin/notalauncher", "/hm/x/scripts", { argv: ["/bin/notalauncher", "/hm/x/scripts/own.sh"], head: (p) => (p === "/bin/notalauncher" ? "\u0000ELF" : owned) })).toBe(0);
+  });
+  test("a relative home never matches through the firmlink root (OUP-368 round 2)", async () => {
+    // Fails at cruft.ts `spellings` if the added root has no "/" before a relative home: "base/own" would become ".../database/own".
+    expect(await stub("base/own", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
   });
 });
