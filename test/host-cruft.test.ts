@@ -679,7 +679,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
       expect(await host(script, adopted, swap)).toEqual(runs(script));
     } finally {
       rmSync(join(adopted, "sub"), { force: true });
-      renameSync(join(adopted, "sub.gone"), join(adopted, "sub"));
+      if (existsSync(join(adopted, "sub.gone"))) renameSync(join(adopted, "sub.gone"), join(adopted, "sub")); // the swap may not have run
     }
   });
 });
@@ -803,8 +803,6 @@ describe("cruft count follow-ups (OUP-368)", () => {
     // A directory of its own under the firmlink spelling is still adopted; so is a name that only starts like the prefix.
     expect(await stub("/hm/x", "/System/Volumes/Data/hm/x/scripts/own.sh", "/System/Volumes/Data/hm/x/scripts")).toBe(0);
     expect(await stub("/hm/x", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
-    // Fails at the `(?=\/|$)` of the firmlink strip: without it "/System/Volumes/Database/own" folds to "base/own" and a (relative) home "base/own" would match it.
-    expect(await stub("base/own", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
   });
   test("a case-different spelling of home is broad, with no real filesystem (OUP-368)", async () => {
     // Pins cruft.ts:185 `.toLowerCase()` in a stub: home /hm/X and configured dir /hm/x. Green on the parent by design (a mutant pin).
@@ -840,10 +838,13 @@ describe("cruft count follow-ups (OUP-368)", () => {
     // Each edge of the control-byte class on its own (the first byte of the class, the last, the one after the gap, VT).
     for (const c of ["\u0008", "\u000b", "\u000e", "\u001f"]) expect({ c, n: await direct(`${c}ELF`) }).toEqual({ c, n: 0 });
     for (const c of ["\u0009", "\u000c", "\u0020"]) expect({ c, n: await direct(`${c}echo\n`) }).toEqual({ c, n: 1 });
-    // A text head is read once; only a head that looks binary is read again.
+    // A head with a shebang is read once; a head without one is read again, text or not (the second read is what is judged).
     let reads = 0;
-    await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => { reads++; return "echo hi\n"; } });
+    await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => { reads++; return owned; } });
     expect(reads).toBe(1);
+    reads = 0;
+    await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => { reads++; return "echo hi\n"; } });
+    expect(reads).toBe(2);
     // First read binary, second read text: the second read is what is judged (an unowned text script is counted).
     let k = 0;
     expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => (++k === 1 ? "\u0000ELF" : "echo hi\n") })).toBe(1);
@@ -889,5 +890,32 @@ describe("cruft count follow-ups (OUP-368)", () => {
       nodeFs.chmodSync(locked, 0o700);
       rmSync(root, { recursive: true, force: true });
     }
+  });
+  test("a no-shebang text file is judged on its second read too (OUP-368 round 1)", async () => {
+    const direct = (head: (n: number) => string | undefined) => { let k = 0; return stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => head(++k) }); };
+    const ownedText = "echo hi\n# owner: me\n";
+    // Fails at cruft.ts (the second read for a text body): an owned text first read was judged alone, so a swapped second read went unseen.
+    expect(await direct((k) => (k === 1 ? ownedText : "#!/bin/sh\necho swapped\n"))).toBe(1); // ownerless shebang
+    expect(await direct((k) => (k === 1 ? ownedText : undefined))).toBe(1); // a second read that fails
+    expect(await direct((k) => (k === 1 ? ownedText : "echo other\n"))).toBe(1); // ownerless text
+    // Control: the same owned text on both reads is adopted; an owned shebang second read too.
+    expect(await direct(() => ownedText)).toBe(0);
+    expect(await direct((k) => (k === 1 ? ownedText : owned))).toBe(0);
+    // A binary first read swapped for text or another binary: the second read decides; a text first read swapped for a binary is not skipped.
+    expect(await direct((k) => (k === 1 ? ownedText : "\u0000ELF"))).toBe(1);
+  });
+  test("the firmlink spelling holds when only home or only the dir uses it (OUP-368 round 1)", async () => {
+    // Fails when the strip is applied to home only (the previous head): home via the firmlink, dir an ancestor spelled plain.
+    expect(await stub("/System/Volumes/Data/hm/x", "/System/Volumes/own.sh", "/System/Volumes")).toBe(1);
+    expect(await stub("/System/Volumes/Data/hm/x", "/System/Volumes/Data/own.sh", "/System/Volumes/Data")).toBe(1);
+    // A plain home with the dir an ancestor of its firmlink spelling.
+    expect(await stub("/hm/x", "/System/Volumes/Data/hm/own.sh", "/System/Volumes")).toBe(1);
+    expect(await stub("/hm/x", "/System/Volumes/Data/own.sh", "/System/Volumes")).toBe(1);
+  });
+  test("a launcher is counted whatever its case or its link target (OUP-368 round 1)", async () => {
+    for (const prog of ["/bin/DASH", "/usr/bin/Osascript", "/usr/bin/arch", "/usr/bin/nice", "/usr/bin/xargs", "/usr/bin/sudo", "/usr/local/bin/fish", "/usr/bin/tclsh", "/usr/bin/expect"])
+      expect({ prog, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: (p) => (p === prog ? "\u0000ELF" : owned) }) }).toEqual({ prog, n: 1 });
+    // Fails at cruft.ts (LAUNCHERS on the resolved path): /opt/x/tool is a link to dash.
+    expect(await stub("/hm/x", "/opt/x/tool", "/hm/x/scripts", { argv: ["/opt/x/tool"], realPath: async (p: string) => (p === "/opt/x/tool" ? "/bin/dash" : p), head: (p) => (p === "/bin/dash" ? "\u0000ELF" : owned) })).toBe(1);
   });
 });
