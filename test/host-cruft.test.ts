@@ -994,4 +994,14 @@ describe("cruft count follow-ups (OUP-370)", () => {
     // Control: a name that only starts like a launcher is still a binary to skip.
     expect(await stub("/hm/x", "/bin/dashboard", "/hm/x/scripts", { argv: ["/bin/dashboard", "/hm/x/scripts/own.sh"], head: binHead("/bin/dashboard") })).toBe(0);
   });
+  test("more programs that run another file are counted, not skipped as a binary (OUP-370 item 8)", async () => {
+    // Fails at cruft.ts LAUNCHERS: removing any one of these names lets that program be skipped as a binary.
+    const names = ["ash", "mksh", "yash", "busybox", "deno", "php", "lua", "luajit", "julia", "Rscript", "pwsh", "powershell", "awk", "gawk", "mawk", "xcrun", "open", "launchctl", "timeout", "gtimeout", "stdbuf", "su", "doas", "chroot", "unbuffer", "flock", "ionice", "taskset", "strace", "ltrace", "watch", "script", "screen", "tmux", "parallel", "make", "gmake", "find", "ssh", "lldb", "gdb", "rlwrap"];
+    for (const name of names) {
+      const prog = `/usr/bin/${name}`;
+      expect({ name, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: binHead(prog) }) }).toEqual({ name, n: 1 });
+    }
+    // Control: a binary that is not on the list is still skipped.
+    expect(await stub("/hm/x", "/usr/bin/true", "/hm/x/scripts", { argv: ["/usr/bin/true", "/hm/x/scripts/own.sh"], head: binHead("/usr/bin/true") })).toBe(0);
+  });
 });

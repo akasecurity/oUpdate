@@ -25,7 +25,7 @@ export const CRUFT_BACKUP_PREFIXES = ["config.json.bak-", "config.json.pre-oq4e"
 /** Interpreters shapes (b) and (c) accept, by basename (versioned names such as python3.12 included). */
 const INTERPRETER = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh)(?:[0-9]+(?:\.[0-9]+)*)?$/;
 /** Programs that run another file or command (shells and launchers the interpreter list lacks): never a binary to skip, by basename (any case), also of the path the program resolves to. A binary with arguments that is not on this list is still skipped. */
-const LAUNCHERS = /^(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid)(?:[0-9]+(?:\.[0-9]+)*)?$/i;
+const LAUNCHERS = /^(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid|ash|mksh|yash|busybox|deno|php|lua|luajit|julia|Rscript|pwsh|powershell|awk|gawk|mawk|xcrun|open|launchctl|timeout|gtimeout|stdbuf|su|doas|chroot|unbuffer|flock|ionice|taskset|strace|ltrace|watch|script|screen|tmux|parallel|make|gmake|find|ssh|lldb|gdb|rlwrap)(?:[0-9]+(?:\.[0-9]+)*)?$/i;
 /** Where an interpreter (and, alone in /usr/bin, env) must sit to be one: a program of that name anywhere else is "complex". */
 const INTERPRETER_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
 /** The system dirs a judged plist's PATH may name (each entry exactly one of these). */
