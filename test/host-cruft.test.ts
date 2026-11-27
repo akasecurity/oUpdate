@@ -784,4 +784,12 @@ describe("cruft count follow-ups (OUP-368)", () => {
     // Control: a directory of its own under that home is still adopted.
     expect(await stub("/hm/x", "/other2/x/scripts/own.sh", "/hm/x/scripts/.", { realPath: async (p: string) => (p === "/hm/x" ? "/other/x" : p === "/hm/x/scripts/." ? "/other2/x/scripts" : p) })).toBe(0);
   });
+  test("a launcher program that runs another file is counted, not skipped as a binary (OUP-368 item 3)", async () => {
+    // Fails at cruft.ts launchScript (the LAUNCHERS test): /bin/dash is a binary with no shebang, so shape (a) skipped the plist unread.
+    for (const prog of ["/bin/dash", "/bin/ksh", "/bin/tcsh", "/bin/csh", "/usr/bin/osascript", "/usr/bin/nohup", "/usr/bin/caffeinate", "/opt/x/dash"])
+      expect({ prog, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: (p) => (p === prog ? "\u0000ELF" : owned) }) }).toEqual({ prog, n: 1 });
+    expect(launchScript({ argv: ["/bin/dash", "/hm/x/scripts/own.sh"] })).toBe("complex");
+    // Control: another binary program is still not counted.
+    expect(await stub("/hm/x", "/opt/prog", "/hm/x/scripts", { argv: ["/opt/prog", "/hm/x/scripts/own.sh"], head: (p) => (p === "/opt/prog" ? "\u0000ELF" : owned) })).toBe(0);
+  });
 });

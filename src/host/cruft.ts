@@ -15,7 +15,7 @@
 //             interpreter, a relative path, a plist the OS parser cannot read, a variable that
 //             makes an interpreter run other code) is counted UNADOPTED as "complex": an overcount is visible
 //             and a person can judge it, an undercount would be a false green. A program that is a binary
-//             (shape (a), no shebang) is not counted.
+//             (shape (a), no shebang) is not counted, unless it is a shell or launcher (dash, ksh, osascript, nohup...): those run other files.
 
 import { resolve } from "node:path";
 import { PLIST_MAX_BYTES, type ApplyFs } from "../apply/fs.ts";
@@ -24,6 +24,8 @@ import { PLIST_MAX_BYTES, type ApplyFs } from "../apply/fs.ts";
 export const CRUFT_BACKUP_PREFIXES = ["config.json.bak-", "config.json.pre-oq4e", "oharness.pre-", "ilane.stale-"] as const;
 /** Interpreters shapes (b) and (c) accept, by basename (versioned names such as python3.12 included). */
 const INTERPRETER = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh)(?:[0-9]+(?:\.[0-9]+)*)?$/;
+/** Programs that run another file or command (shells and launchers the interpreter list lacks): never a binary to skip, by basename. */
+const LAUNCHERS = /^(?:dash|ksh|ksh93|tcsh|csh|osascript|nohup|caffeinate)$/;
 /** Where an interpreter (and, alone in /usr/bin, env) must sit to be one: a program of that name anywhere else is "complex". */
 const INTERPRETER_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
 /** The system dirs a judged plist's PATH may name (each entry exactly one of these). */
@@ -141,6 +143,8 @@ export function launchScript(l: { program?: string; argv: string[] }): { script:
   const abs = (w: string | undefined): w is string => w !== undefined && w.startsWith("/");
   const interp = (w: string | undefined) => w !== undefined && INTERPRETER.test(base(w)) && INTERPRETER_DIRS.includes(dirOf(w));
   const first = argv[0]!;
+  // A launcher is no binary to skip: it runs whatever file or command it is given, so the plist is counted.
+  if (LAUNCHERS.test(base(first))) return "complex";
   // A program named env or like an interpreter that is not in a standard place is not trusted to be one.
   if (base(first) === "env") return first === "/usr/bin/env" && interp(argv[1]) && abs(argv[2]) ? { script: argv[2], shebang: false } : "complex";
   if (INTERPRETER.test(base(first))) return interp(first) && abs(argv[1]) ? { script: argv[1], shebang: false } : "complex";
