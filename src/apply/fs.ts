@@ -31,8 +31,10 @@ export interface ApplyFs {
   mtimeDay(path: string): Promise<string>;
   /** Modification time in ms of a regular file (a link or directory is not one); undefined when missing or not a regular file. */
   mtimeMs?(path: string): Promise<number | undefined>;
-  /** The first `bytes` bytes as text of a regular file (a link to one counts); undefined when it is missing, unreadable or not a regular file (a FIFO or device is never opened). */
+  /** The first `bytes` bytes as text of a regular file (a link to one counts); undefined when it is missing, unreadable or not a regular file (a FIFO or device is never opened: the kind is checked by a stat first, then again on the open descriptor). */
   readHead?(path: string, bytes: number): Promise<string | undefined>;
+  /** How many names (hard links) the regular file at the path has (a link to one is followed); undefined when it is missing or not a regular file. */
+  linkCount?(path: string): Promise<number | undefined>;
   /** The path with every symlink resolved (fs.realpathSync.native, which follows a link before a ".." after it), or undefined when it cannot be (missing, a loop, no access). */
   realPath?(path: string): Promise<string | undefined>;
   /**
@@ -134,6 +136,8 @@ export const realFs: ApplyFs = {
   },
   readHead: async (p, bytes) => {
     try {
+      // A stat first, so a device, a FIFO or a directory is never opened (opening some devices has effects of its own).
+      if (!statSync(p).isFile()) return undefined;
       // O_NONBLOCK: opening a FIFO that something swapped in after a path check would otherwise wait for a writer forever.
       // The kind is read from the open descriptor, so what is read is what was checked.
       const fd = openSync(p, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -144,6 +148,14 @@ export const realFs: ApplyFs = {
       } finally {
         closeSync(fd);
       }
+    } catch {
+      return undefined;
+    }
+  },
+  linkCount: async (p) => {
+    try {
+      const st = statSync(p);
+      return st.isFile() ? st.nlink : undefined;
     } catch {
       return undefined;
     }

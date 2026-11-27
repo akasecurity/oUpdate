@@ -1,7 +1,8 @@
 // `host --cruft-count` (OUP-349): read-only count of ownerless pins, tool-made backups, unadopted wrappers.
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realFs } from "../src/apply/fs.ts";
@@ -357,6 +358,36 @@ describe("realFs.readHead", () => {
   });
 });
 
+describe("realFs.readHead opens only a regular file (OUP-367)", () => {
+  test("a device or a directory is rejected by a stat before any open", async () => {
+    const opened: string[] = [];
+    const spy = spyOn(nodeFs, "openSync").mockImplementation(((p: string) => { opened.push(String(p)); throw new Error("blocked by the test"); }) as typeof nodeFs.openSync);
+    try {
+      // Fails at fs.ts readHead (the stat before openSync): the old code opened /dev/null, then asked the descriptor.
+      expect(await realFs.readHead!("/dev/null", 6)).toBeUndefined();
+      expect(await realFs.readHead!("/dev", 6)).toBeUndefined();
+      expect(opened).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+  test("a regular file is still read, and linkCount counts the names of a file", async () => {
+    const r = realpathSync(mkdtempSync(join(tmpdir(), "oupdate-head-")));
+    try {
+      writeFileSync(join(r, "f"), "#!/bin/sh\n");
+      linkSync(join(r, "f"), join(r, "g"));
+      writeFileSync(join(r, "solo"), "x");
+      expect(await realFs.readHead!(join(r, "f"), 9)).toBe("#!/bin/sh");
+      expect(await realFs.linkCount!(join(r, "f"))).toBe(2);
+      expect(await realFs.linkCount!(join(r, "solo"))).toBe(1);
+      expect(await realFs.linkCount!(join(r, "missing"))).toBeUndefined();
+      expect(await realFs.linkCount!(r)).toBeUndefined(); // a directory is not a file
+    } finally {
+      rmSync(r, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("adoption resolves symlinks (OUP-366)", () => {
   // The temp root is canonical (/var is /private/var on macOS), so a failing link check is the link, not the prefix.
   const root = realpathSync(mkdtempSync(join(tmpdir(), "oupdate-link-")));
@@ -381,7 +412,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
   symlinkSync(join(root, "nowhere"), join(adopted, "dangling.sh"));
   const host = (script: string, dir: string, over: Record<string, unknown> = {}) =>
     cruftCount({
-      fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n)), realPath: realFs.realPath!, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [], ...over },
+      fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n)), realPath: realFs.realPath!, linkCount: realFs.linkCount, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [], ...over },
       configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
     }).then((c) => c.wrappers);
   const runs = (s: string) => [`${A}/t.plist runs ${s}`];
@@ -460,6 +491,45 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside && ++m === 2 ? undefined : realFs.realPath!(p)) })).toEqual(runs(inside));
     // And a script that does not resolve at all is counted, not left out.
     expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside ? undefined : realFs.realPath!(p)) })).toEqual(runs(inside));
+  });
+  test("an empty direct script is counted, and a binary is still not (OUP-367)", async () => {
+    const empty = join(adopted, "empty.sh");
+    writeFileSync(empty, "");
+    // Fails at the binary skip in cruft.ts (`!body.startsWith("#!")`): an empty body is not a binary, it falls to the owner check.
+    expect(await host(empty, adopted)).toEqual(runs(empty));
+    const bin = join(adopted, "mach.bin");
+    writeFileSync(bin, "\u0001\u0002 binary");
+    expect(await host(bin, adopted)).toEqual([]);
+  });
+  test("a script with more than one name (a hard link) is unadopted (OUP-367)", async () => {
+    const hl = join(adopted, "hard.sh");
+    linkSync(join(outside, "own.sh"), hl);
+    // Fails at the link-count term in cruft.ts: the hard link is inside, owned, its real path is inside, and the file is also outside.
+    expect(await host(hl, adopted)).toEqual(runs(hl));
+    expect(await host(join(adopted, "own.sh"), adopted)).toEqual([]);
+  });
+  test("a binary that is swapped for a script after it was read is counted, not skipped (OUP-367)", async () => {
+    const bin = join(adopted, "swap.out");
+    writeFileSync(bin, "\u0001\u0002 binary");
+    let n = 0;
+    // Fails at the second read in cruft.ts before the binary skip: the first read says binary, the second says an unowned script.
+    expect(await host(bin, adopted, { readHead: async (p: string, b: number) => (p === bin ? (++n === 1 ? "\u0001\u0002 binary" : "#!/bin/sh\n") : p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b)) })).toEqual(runs(bin));
+  });
+  test("a root, a top-level directory, the home dir or an ancestor of it adopts nothing (OUP-367)", async () => {
+    const stub = (home: string, script: string, dir: string) =>
+      cruftCount({
+        fs: { home, listDir: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), readHead: async (p: string) => (p.endsWith(".plist") ? "<plist/>" : owned), realPath: async (p: string) => p, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
+        configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
+      }).then((c) => c.wrappers.length);
+    // Fails at the broad-dir test in cruft.ts: each of these adopted every script under it.
+    expect(await stub("/Users/x", "/opt/own.sh", "/")).toBe(1);
+    expect(await stub("/Users/x", "/Users/y/own.sh", "/Users")).toBe(1);
+    expect(await stub("/Users/x", "/Users/x/own.sh", "/Users/x")).toBe(1);
+    expect(await stub("/Users/x", "/Users/own.sh", "/Users")).toBe(1);
+    expect(await stub("/Users/x", "/opt/own.sh", "/opt")).toBe(1); // top level, not an ancestor of home: the depth test alone
+    // A directory of its own, two levels down or inside home, is still adopted.
+    expect(await stub("/Users/x", "/opt/scripts/own.sh", "/opt/scripts")).toBe(0);
+    expect(await stub("/Users/x", "/Users/x/scripts/own.sh", "~/scripts")).toBe(0);
   });
 });
 
