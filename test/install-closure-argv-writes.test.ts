@@ -184,7 +184,7 @@ test("a hidden default and an argument array pushed to and read by 40 run calls 
 
 // A widening that only the read of the written names finds is applied after the literals of the files scanned are read: widening first takes every
 // file in, and a literal that reaches docs/addon.node by its stem finds it taken in, so the scan raises no stop (script depth) that it raises
-// without the widening. The hook below reaches 63 more files, then a stem that names an addon, then an argument array written by index.
+// without the widening. The hook below reaches 63 more files, then writes an argument array by index, then names an addon by a stem.
 test("a written argument array in a file that reaches the scan cap holds as the file without the write holds", () => {
   const mk = (ver: string): FileMap => {
     const o: Record<string, string> = {
@@ -261,4 +261,34 @@ test("an argv write in an earlier gyp action and a later action that reaches the
   };
   const details = prepass("npm", mk("1.0.0"), mk("1.0.1")).hard.map((s) => `${s.kind}|${s.detail ?? ""}`);
   expect(details).toContain("install-script|unresolved: script depth");
+});
+
+// A late widening in the stage pass of `node . | cat` must not make the stage sets of both sides equal: the main moved between two files that
+// the preinstall hook also reaches, and the stage set is the only read that shows it.
+const PIPE_WRITER = `${CPX}const args = ["./local.js"];\nargs[0] = ${DE.replace("docs%2Fevil.js", "docs%2Fchanged.js")};\ncp.spawnSync(process.execPath, args);\n`;
+for (const [name, post] of [["a pipe", "node . | cat"]] as const) {
+  test(`a main retargeted between two writer files that the preinstall hook reaches holds behind ${name}`, () => {
+    const mk = (ver: string, main: string): FileMap =>
+      files({
+        "package.json": JSON.stringify({ name: "p", version: ver, main, scripts: { preinstall: "node docs/a.js && node docs/b.js", postinstall: post } }),
+        "docs/a.js": PIPE_WRITER,
+        "docs/b.js": PIPE_WRITER,
+        "local.js": "module.exports = 1\n",
+        "docs/changed.js": `console.log("c")\n`,
+      });
+    const details = prepass("npm", mk("1.0.0", "docs/a.js"), mk("1.0.1", "docs/b.js")).hard.map((s) => `${s.kind}|${s.path ?? ""}`);
+    expect(details.some((d) => d.startsWith("install-script"))).toBe(true);
+  });
+}
+
+// Spaces after `Reflect.apply(` before a parenthesized callable are read in time linear in their number (the pattern backtracked over them twice).
+test("reading Reflect.apply( followed by a long run of spaces is linear in its size", () => {
+  const time = (n: number): number => {
+    const t0 = performance.now();
+    classifyJs("lib/x.js", `${CPX}const args = [];\nargs.push(1);\nReflect.apply(${" ".repeat(n)}(Array.prototype.push), args, [1]);\n`);
+    return performance.now() - t0;
+  };
+  time(1000);
+  const small = Math.max(time(8000), 1);
+  expect(time(64000)).toBeLessThan(small * 40 + 300);
 });

@@ -5631,6 +5631,15 @@ function widenEvery(ctx: Ctx): void {
 // The widening of a `late` tier: every `.node` file it newly takes in (into the gyp set too, in a gyp action) stays unsettled for a stem lookup in a later file, so that lookup adds it (and
 // reaches the scan cap) as the scan without the widening does.
 function widenEveryLate(ctx: Ctx): void {
+  // The stage pass is compared apart (stageAll): taking every file into its set would make both sides' sets equal and hide a main or bin retarget
+  // that its set shows without the widening. Every file but the manifests goes to the record of its own instead (carried to the reading, held on a byte change).
+  if (ctx.stagePass) {
+    widened = true;
+    if (noWiden) return;
+    const rec = (ctx.wsFiles ??= new Set<string>());
+    for (const [logical, key] of ctx.logical) if (!isManifest(logical)) rec.add(key);
+    return;
+  }
   if (!noWiden) {
     for (const [logical, key] of ctx.logical) {
       if (!isManifest(logical) && !(ctx.files.has(key) && (!ctx.fromGyp || ctx.gypFiles.has(key))) && key.endsWith(".node")) (ctx.lateAddons ??= new Set()).add(key);
@@ -7239,7 +7248,7 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
   wnames(new RegExp(`\\.\\s*(?:${MUT})\\s*\\.\\s*(?:call|apply)\\s*\\(\\s*([A-Za-z_$][\\w$]*)`, "g"));
   wnames(/\b(?:Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)|Reflect\s*\.\s*(?:set|defineProperty|deleteProperty|setPrototypeOf))\s*\(\s*([A-Za-z_$][\w$]*)/g);
   // Reflect.apply(fn, thisArg, args) and fn.apply(thisArg, args) take the receiver second: Reflect.apply(Array.prototype.push, args, [x]).
-  wnames(/\bReflect\s*\.\s*apply\s*\(\s*[\w$.\s]+?,\s*\(?\s*([A-Za-z_$][\w$]*)/g);
+  wnames(/\bReflect\s*\.\s*apply\s*\(\s*[\w$.][\w$.\s]*?,\s*\(?\s*([A-Za-z_$][\w$]*)/g);
   // A parenthesized receiver: (args).push(x).
   wnames(new RegExp(`(?<![\\w$.])\\(\\s*([A-Za-z_$][\\w$]*)\\s*\\)\\s*(?:\\?\\.|\\.)\\s*(?:${MUT})(?![\\w$])`, "g"));
   const INDEX_WRITE = /\s*(?:\+\+|--|(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|(?<=\s|\])(?:of|in)(?![\w$]))/y;
