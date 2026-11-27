@@ -238,6 +238,8 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         wrappers.push(`${d}/${n} complex argv: ${launch.argv.slice(0, 4).join(" ")}`);
         continue;
       }
+      // A program given a launcher or an interpreter by name as an argument may start it (an unknown native dispatcher): it is no binary to skip.
+      const argRuns = launch.argv.slice(1).some((w) => LAUNCHERS.test(base(w)) || INTERPRETER.test(base(w)));
       // An interpreter that is a link to a launcher (python3 -> dash) runs the script as that launcher would: counted. A lookup that fails counts too.
       const interpPath = base(launch.argv[0]!) === "env" ? launch.argv[1] : INTERPRETER.test(base(launch.argv[0]!)) ? launch.argv[0] : undefined;
       if (interpPath !== undefined && fs.realPath) {
@@ -277,7 +279,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         // A third lookup after the second read: a path retargeted during that read is unstable, so it is counted, never skipped.
         if (fs.realPath && (await fs.realPath(run.script)) !== real) stable = false;
         // A binary with another name (a hard link) is shared with a place outside the directory: counted, not skipped.
-        if (stable && looksBinary(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2) && (m2.links === undefined || m2.links === 1)) continue;
+        if (stable && !argRuns && looksBinary(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2) && (m2.links === undefined || m2.links === 1)) continue;
         head = body2 ?? "";
         links = m2.links;
       }

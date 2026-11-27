@@ -1016,4 +1016,16 @@ describe("cruft count follow-ups (OUP-370)", () => {
     expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/usr/bin/python3", script], realPath: to("/usr/bin/python3", "/usr/bin/python3.12") })).toBe(0);
     expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/usr/bin/env", "/usr/bin/python3", script] })).toBe(0);
   });
+  test("a binary program that is given a launcher or an interpreter as an argument is counted (OUP-370 item 5)", async () => {
+    const prog = "/opt/dispatch";
+    const run = (argv: string[]) => stub("/hm/x", prog, "/hm/x/scripts", { argv, head: binHead(prog) });
+    // Fails at cruft.ts (the binary skip never reads argv[1...]): an unknown native dispatcher that starts dash, a shell or an interpreter was left out of the count.
+    expect(await run([prog, "/bin/dash", "-c", "x"])).toBe(1);
+    expect(await run([prog, "--", "/bin/sh", "/hm/x/scripts/own.sh"])).toBe(1);
+    expect(await run([prog, "-x", "/usr/bin/python3.12"])).toBe(1);
+    expect(await run([prog, "/usr/bin/osascript"])).toBe(1);
+    // Controls: arguments that name no program are still skipped.
+    expect(await run([prog, "--flag", "/hm/x/scripts/own.sh"])).toBe(0);
+    expect(await run([prog, "/opt/dashboard"])).toBe(0);
+  });
 });
