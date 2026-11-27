@@ -772,4 +772,16 @@ describe("cruft count follow-ups (OUP-368)", () => {
     // Fails at the `(?=\/|$)` of the firmlink strip: without it "/System/Volumes/Database/own" folds to "base/own" and a (relative) home "base/own" would match it.
     expect(await stub("base/own", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
   });
+  test("a case-different spelling of home is broad, with no real filesystem (OUP-368)", async () => {
+    // Pins cruft.ts:185 `.toLowerCase()` in a stub: home /hm/X and configured dir /hm/x. Green on the parent by design (a mutant pin).
+    expect(await stub("/hm/X", "/hm/x/own.sh", "/hm/x")).toBe(1);
+    expect(await stub("/hm/x", "/hm/X/own.sh", "/hm/X")).toBe(1);
+  });
+  test("the home dir as given is checked on its own, not only by its real path (OUP-368)", async () => {
+    // Pins cruft.ts:186 `${home}/`: home resolves elsewhere, so only the spelling as given matches the configured dir. Green on the parent by design.
+    const realPath = async (p: string) => (p === "/hm/x" ? "/other/x" : p);
+    expect(await stub("/hm/x", "/hm/x/own.sh", "/hm/x", { realPath })).toBe(1);
+    // Control: a directory of its own under that home is still adopted.
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "~/scripts", { realPath })).toBe(0);
+  });
 });
