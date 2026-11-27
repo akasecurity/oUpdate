@@ -964,3 +964,34 @@ describe("cruft count follow-ups (OUP-368)", () => {
     expect(await stub("base/own", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
   });
 });
+
+describe("cruft count follow-ups (OUP-370)", () => {
+  const owned = "#!/bin/sh\n# owner: me\n";
+  type Meta = { links?: number; noFollow?: boolean; dev?: number; ino?: number };
+  type Over = { realPath?: (p: string) => Promise<string | undefined>; listDir?: (d: string) => Promise<string[]>; listDirStrict?: (d: string) => Promise<string[] | undefined>; head?: (p: string, meta?: Meta) => string | undefined; argv?: string[] };
+  // One plist under home's LaunchAgents; the number of wrappers counted.
+  const stub = (home: string, script: string, dir: string, o: Over = {}) =>
+    cruftCount({
+      fs: {
+        home,
+        listDir: o.listDir ?? (async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : [])),
+        ...(o.listDirStrict ? { listDirStrict: o.listDirStrict } : {}),
+        readHead: async (p: string, _n: number, meta?: Meta) => (p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
+        realPath: o.realPath ?? (async (p: string) => p),
+        plistJson: async () => ({ ProgramArguments: o.argv ?? [script] }),
+        pinFiles: () => [],
+      },
+      configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
+    }).then((c) => c.wrappers.length);
+  const binHead = (prog: string) => (p: string) => (p === prog ? "\u0000ELF" : owned);
+
+  test("a launcher with a version suffix is counted, not skipped as a binary (OUP-370 item 1)", async () => {
+    // Fails at cruft.ts LAUNCHERS: no optional version suffix, so /bin/ksh2020 and /bin/dash5 were skipped as binaries.
+    for (const name of ["ksh2020", "dash5", "tcsh6.0.1", "csh2", "fish3.7", "expect5.45", "tclsh8.6", "wish8.6"]) {
+      const prog = `/bin/${name}`;
+      expect({ name, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: binHead(prog) }) }).toEqual({ name, n: 1 });
+    }
+    // Control: a name that only starts like a launcher is still a binary to skip.
+    expect(await stub("/hm/x", "/bin/dashboard", "/hm/x/scripts", { argv: ["/bin/dashboard", "/hm/x/scripts/own.sh"], head: binHead("/bin/dashboard") })).toBe(0);
+  });
+});
