@@ -550,14 +550,18 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     writeFileSync(bin, "\u0000\u0002 binary");
     let n = 0;
     // Fails at the second read in cruft.ts before the binary skip: the first read says binary, the second says an unowned script.
-    expect(await host(bin, adopted, { readHead: async (p: string, b: number) => (p === bin ? (++n === 1 ? "\u0000\u0002 binary" : "#!/bin/sh\n") : p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b)) })).toEqual(runs(bin));
+    // The fake gives a link count, device and inode on both reads (a missing one counts on its own), so only the second read decides.
+    expect(await host(bin, adopted, { readHead: async (p: string, b: number, m?: { links?: number }) => (withMeta(m), p === bin ? (++n === 1 ? "\u0000\u0002 binary" : "#!/bin/sh\n") : p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b)) })).toEqual(runs(bin));
+    // Control: the same swap to an owned script is adopted.
+    n = 0;
+    expect(await host(bin, adopted, { readHead: async (p: string, b: number, m?: { links?: number }) => (withMeta(m), p === bin ? (++n === 1 ? "\u0000\u0002 binary" : "#!/bin/sh\n# owner: x\n") : p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b)) })).toEqual([]);
   });
   test("a first head that carries an owner, swapped before the second read for an ownerless script, is counted (OUP-367)", async () => {
     const bin = join(adopted, "own-swap.out");
     writeFileSync(bin, "x");
     const reads = (second: string | undefined, third?: string) => {
       let n = 0;
-      return { readHead: async (p: string, b: number) => (p === bin ? (++n === 1 ? "\u0000\u0002\n# owner: x\n" : second) : p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b)) };
+      return { readHead: async (p: string, b: number, m?: { links?: number }) => (withMeta(m), p === bin ? (++n === 1 ? "\u0000\u0002\n# owner: x\n" : second) : p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b)) };
     };
     // Fails at cruft.ts (the owner is judged on the second head): the first head's owner line was used after the second read.
     expect(await host(bin, adopted, reads("#!/bin/sh\n"))).toEqual(runs(bin));
@@ -878,7 +882,7 @@ describe("cruft count follow-ups (OUP-368)", () => {
     expect(await direct("\u0000\u0002 binary")).toBe(0);
     expect(await direct("\ufffd\ufffd\ufffd\ufffd rest")).toBe(0);
     expect(await direct("\u007fELF\u0002\u0001\u0001\u0000\u0000\u0000")).toBe(0);
-    // An ELF magic with no NUL is text to read: counted, as before OUP-370 (every real ELF has a NUL in its first bytes).
+    // An ELF magic and control bytes with no NUL: the base skipped this head (it read a control byte as a binary); it is counted now (every real ELF has a NUL in its first bytes).
     expect(await direct("\u007fELF\u0001\u0001")).toBe(1);
     // A control byte or one replacement character in a text head is no binary (OUP-370 item 2): the unowned script is counted.
     for (const c of ["\u0008", "\u000b", "\u000e", "\u001b", "\u001f", "\ufffd"]) expect({ c, n: await direct(`${c}echo\n`) }).toEqual({ c, n: 1 });
@@ -1128,6 +1132,7 @@ describe("cruft count follow-ups (OUP-370)", () => {
     const direct = (head: string) => stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => head });
     // Fails at cruft.ts isBinaryProgram if the magic alone is a binary: a head of `\x7fELF` and text, no NUL, was skipped where it was counted before.
     expect(await direct("\u007fELF\u0000")).toBe(0);
+    expect(await direct("\u007fELF")).toBe(1);
     expect(await direct("\u007fELF\n# owner: me\n")).toBe(1);
     expect(await direct("\u007fELF rest")).toBe(1);
     // A text head ends in half a character (U+FFFD) when the read cuts it: no binary, the unowned script is counted.
