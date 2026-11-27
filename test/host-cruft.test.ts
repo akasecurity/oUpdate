@@ -2,7 +2,7 @@
 import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as nodeFs from "node:fs";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { realFs } from "../src/apply/fs.ts";
@@ -576,7 +576,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     try {
       const at = (home: string, script: string, dir: string) =>
         cruftCount({
-          fs: { ...realFs, home, listDir: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
+          fs: { ...realFs, home, listDir: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), listDirStrict: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
           configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
         }).then((c) => c.wrappers.length);
       for (const d of ["Accounts", "Elsewhere", "R", "target", "h1", "h1/scripts"]) mkdirSync(join(hm, d), { recursive: true });
@@ -586,7 +586,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
       symlinkSync(join(hm, "Elsewhere"), join(hm, "R", "x"));
       symlinkSync(join(hm, "target"), join(hm, "hl"));
       mkdirSync(join(hm, "R", "dir"));
-      // Fails at cruft.ts:183-186 (broad, lexically collapsed plain dir): Alias/. and Alias/dir/.. are Alias, whose home Alias/x is under it.
+      // Fails at cruft.ts `broad` on the lexically collapsed plain dir: Alias/. and Alias/dir/.. are Alias, whose home Alias/x is under it.
       expect(await at(`${hm}/Alias/x`, `${hm}/R/owned.sh`, `${hm}/Alias/.`)).toBe(1);
       expect(await at(`${hm}/Alias/x`, `${hm}/R/owned.sh`, `${hm}/Alias/dir/..`)).toBe(1);
       // Fails at the homeReal entry: home is a link, and its real target (or the real parent of it) is the configured dir.
@@ -648,6 +648,71 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     expect(await stub("/hm/x", "/opt/scripts/own.sh", "/opt/scripts")).toBe(0);
     expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "~/scripts")).toBe(0);
   });
+  test("a path that resolves differently after the second read of a binary-looking head is counted (OUP-368 item 5)", async () => {
+    const bin = join(adopted, "third.out");
+    writeFileSync(bin, "\u0001\u0002 binary");
+    expect(await host(bin, adopted)).toEqual([]);
+    let n = 0;
+    // Fails at cruft.ts (the realPath after the second read): the lookups before it agree, only the third says outside, and the skip came first.
+    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++n === 3 ? join(outside, "x.sh") : realFs.realPath!(p)) })).toEqual(runs(bin));
+    // A third lookup that fails counts too.
+    let k = 0;
+    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++k === 3 ? undefined : realFs.realPath!(p)) })).toEqual(runs(bin));
+  });
+  test("a directory component swapped for a link after the lookup is counted: O_NOFOLLOW covers the last component only (OUP-368 item 6)", async () => {
+    mkdirSync(join(adopted, "sub"), { recursive: true });
+    const script = join(adopted, "sub", "own.sh");
+    writeFileSync(script, owned);
+    expect(await host(script, adopted)).toEqual([]);
+    let swapped = false;
+    // The first read finds sub turned into a link to outside (which holds an owned own.sh): the read follows it, the file judged is another one.
+    // Fails at cruft.ts `again === real` (`stable`): the real path still looks inside, only the second lookup sees outside.
+    const swap = { readHead: async (p: string, b: number, m?: { links?: number; noFollow?: boolean }) => {
+      if (p === script && !swapped) {
+        swapped = true;
+        renameSync(join(adopted, "sub"), join(adopted, "sub.gone"));
+        symlinkSync(outside, join(adopted, "sub"));
+      }
+      return p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b, m);
+    } };
+    try {
+      expect(await host(script, adopted, swap)).toEqual(runs(script));
+    } finally {
+      rmSync(join(adopted, "sub"), { force: true });
+      if (existsSync(join(adopted, "sub.gone"))) renameSync(join(adopted, "sub.gone"), join(adopted, "sub")); // the swap may not have run
+    }
+  });
+  test("a text script cut in the middle of a multibyte character at the read bound is judged as a script (OUP-368 round 1)", async () => {
+    // 511 ASCII bytes, then an e-acute whose first byte is byte 512: the 512-byte head ends in half a character, which decodes to U+FFFD.
+    const cut = join(adopted, "cut.sh");
+    writeFileSync(cut, `${"a".repeat(511)}\u00e9\n`);
+    expect((await realFs.readHead!(cut, 512))!.endsWith("\ufffd")).toBe(true);
+    // Fails at cruft.ts looksBinary (the trailing-cut term): the cut read as a binary and the unowned text script was skipped.
+    expect(await host(cut, adopted)).toEqual(runs(cut));
+    // A four-byte character cut after three bytes: the head is exactly 512 bytes once decoded (the bound term is >=, not >).
+    const emoji = join(adopted, "cut4.sh");
+    writeFileSync(emoji, `${"a".repeat(509)}\u{1F600}\n`);
+    expect(Buffer.byteLength((await realFs.readHead!(emoji, 512))!)).toBe(512);
+    expect(await host(emoji, adopted)).toEqual(runs(emoji));
+    // A U+FFFD inside the body is still a binary, and so is one at the end of a head shorter than the bound.
+    const inner = join(adopted, "inner.out");
+    writeFileSync(inner, `a\ufffdb${"a".repeat(600)}`);
+    expect(await host(inner, adopted)).toEqual([]);
+    const short = join(adopted, "short.out");
+    writeFileSync(short, "abc\ufffd");
+    expect(await host(short, adopted)).toEqual([]);
+    // Only the cut character is dropped: a control byte right before it, or at the end of a full-size head, still makes a binary.
+    const ctlCut = join(adopted, "ctlcut.out");
+    writeFileSync(ctlCut, `${"a".repeat(510)}\u0001\u00e9`);
+    expect(await host(ctlCut, adopted)).toEqual([]);
+    const ctlEnd = join(adopted, "ctlend.out");
+    writeFileSync(ctlEnd, `${"a".repeat(600)}`.slice(0, 511) + "\u0001");
+    expect(await host(ctlEnd, adopted)).toEqual([]);
+    // A binary whose head is full size and ends in a cut character still shows its other bytes.
+    const bin = join(adopted, "cutbin.out");
+    writeFileSync(bin, `\u0000${"a".repeat(510)}\u00e9`);
+    expect(await host(bin, adopted)).toEqual([]);
+  });
 });
 
 describe("the real plutil read (OUP-349)", () => {
@@ -672,7 +737,7 @@ describe("the real plutil read (OUP-349)", () => {
       writeFileSync(join(agents, "sp ace\nnl.plist"), wrap(args));
       execFileSync("mkfifo", [join(agents, "f-fifo.plist")]);
       const t0 = Date.now();
-      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
+      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []), listDirStrict: async (d) => (d.startsWith(root) ? realFs.listDirStrict!(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
       expect(Date.now() - t0).toBeLessThan(3000); // a FIFO never reaches plutil (it would wait out the 5 s timeout)
       const names = c.wrappers.map((w) => w.replace(`${agents}/`, ""));
       expect(names.filter((w) => w.startsWith("a-attr") || w.startsWith("b-pi")).length).toBe(2);
@@ -712,7 +777,7 @@ describe("the real plutil read (OUP-349)", () => {
       writeFileSync(join(agents, "o-lower.plist"), `<?xml version='1.0' encoding='utf-8'?><plist version="1.0"><dict>${args}</dict></plist>`);
       writeFileSync(join(agents, "p-none.plist"), `<?xml version="1.0"?><plist version="1.0"><dict>${args}</dict></plist>`);
       writeFileSync(join(agents, "i-amp.plist"), wrap(`${args}<key>Label</key><string>a&amp;b &lt;c&gt;</string>`));
-      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
+      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []), listDirStrict: async (d) => (d.startsWith(root) ? realFs.listDirStrict!(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
       const names = c.wrappers.map((w) => w.replace(`${agents}/`, ""));
       // Whichever way plutil reads each (an error is "unreadable"), none is adopted; the legit one is.
       expect(names.map((w) => w.slice(0, 1)).sort()).toEqual(["a", "b", "c", "d", "f", "g", "h", "j", "k", "l", "m"]);
@@ -734,5 +799,168 @@ describe("the real plutil read (OUP-349)", () => {
     const t = Date.now();
     expect(launchScript({ argv: [`/usr/bin/python3${"1".repeat(40)}.`, "/opt/a.sh"] })).toEqual({ script: `/usr/bin/python3${"1".repeat(40)}.`, shebang: true });
     expect(Date.now() - t).toBeLessThan(50);
+  });
+});
+
+describe("cruft count follow-ups (OUP-368)", () => {
+  const owned = "#!/bin/sh\n# owner: me\n";
+  type Over = { realPath?: (p: string) => Promise<string | undefined>; listDir?: (d: string) => Promise<string[]>; listDirStrict?: (d: string) => Promise<string[] | undefined>; head?: (p: string, meta?: { links?: number; noFollow?: boolean }) => string | undefined; argv?: string[] };
+  // One plist under home's LaunchAgents running `script`; the number of wrappers counted.
+  const stub = (home: string, script: string, dir: string, o: Over = {}) =>
+    cruftCount({
+      fs: {
+        home,
+        listDir: o.listDir ?? (async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : [])),
+        ...(o.listDirStrict ? { listDirStrict: o.listDirStrict } : {}),
+        readHead: async (p: string, _n: number, meta?: { links?: number; noFollow?: boolean }) => (p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
+        realPath: o.realPath ?? (async (p: string) => p),
+        plistJson: async () => ({ ProgramArguments: o.argv ?? [script] }),
+        pinFiles: () => [],
+      },
+      configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
+    }).then((c) => c.wrappers.length);
+
+  test("a redundant slash in the home spelling does not hide a broad dir (OUP-368 item 1)", async () => {
+    // Fails at cruft.ts `broad`: "/hm//x/" does not start with "/hm/x/" until runs of slashes are folded to one.
+    expect(await stub("/hm//x", "/hm/x/own.sh", "/hm/x")).toBe(1);
+    expect(await stub("/hm/x", "/hm/x/own.sh", "/hm//x")).toBe(1);
+    expect(await stub("/hm//x", "/hm//x/scripts/own.sh", "~/scripts")).toBe(0); // control: a directory of its own is still adopted
+  });
+  test("the firmlink spelling of home is as broad as home (OUP-368 item 8)", async () => {
+    // Fails at cruft.ts `fold`: /System/Volumes/Data/hm/x names the same directory as /hm/x and is not a prefix match until the firmlink root is dropped.
+    expect(await stub("/hm/x", "/System/Volumes/Data/hm/x/own.sh", "/System/Volumes/Data/hm/x")).toBe(1);
+    expect(await stub("/System/Volumes/Data/hm/x", "/hm/x/own.sh", "/hm/x")).toBe(1);
+    expect(await stub("/hm/x", "/System/Volumes/Data/hm/own.sh", "/System/Volumes/Data/hm")).toBe(1);
+    // A directory of its own under the firmlink spelling is still adopted; so is a name that only starts like the prefix.
+    expect(await stub("/hm/x", "/System/Volumes/Data/hm/x/scripts/own.sh", "/System/Volumes/Data/hm/x/scripts")).toBe(0);
+    expect(await stub("/hm/x", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
+  });
+  test("a case-different spelling of home is broad, with no real filesystem (OUP-368)", async () => {
+    // Pins the `.toLowerCase()` of `fold` in cruft.ts, in a stub: home /hm/X and configured dir /hm/x. Green on the parent by design (a mutant pin).
+    expect(await stub("/hm/X", "/hm/x/own.sh", "/hm/x")).toBe(1);
+    expect(await stub("/hm/x", "/hm/X/own.sh", "/hm/X")).toBe(1);
+  });
+  test("the home dir as given is checked on its own, not only by its real path (OUP-368)", async () => {
+    // Pins the `${home}/` term of `broad` in cruft.ts: home resolves to /other/x and the configured dir "/hm/x/." to /other2/x, so only its collapsed spelling "/hm/x/" matches home as given. Green on the parent by design.
+    const realPath = async (p: string) => (p === "/hm/x" ? "/other/x" : p === "/hm/x/." ? "/other2/x" : p);
+    expect(await stub("/hm/x", "/other2/x/own.sh", "/hm/x/.", { realPath })).toBe(1);
+    // Control: a directory of its own under that home is still adopted.
+    expect(await stub("/hm/x", "/other2/x/scripts/own.sh", "/hm/x/scripts/.", { realPath: async (p: string) => (p === "/hm/x" ? "/other/x" : p === "/hm/x/scripts/." ? "/other2/x/scripts" : p) })).toBe(0);
+  });
+  test("a launcher program that runs another file is counted, not skipped as a binary (OUP-368 item 3)", async () => {
+    // Fails at cruft.ts launchScript (the LAUNCHERS test): /bin/dash is a binary with no shebang, so shape (a) skipped the plist unread.
+    for (const prog of ["/bin/dash", "/bin/ksh", "/bin/tcsh", "/bin/csh", "/usr/bin/osascript", "/usr/bin/nohup", "/usr/bin/caffeinate", "/opt/x/dash"])
+      expect({ prog, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: (p) => (p === prog ? "\u0000ELF" : owned) }) }).toEqual({ prog, n: 1 });
+    expect(launchScript({ argv: ["/bin/dash", "/hm/x/scripts/own.sh"] })).toBe("complex");
+    // Control: another binary program is still not counted.
+    expect(await stub("/hm/x", "/opt/prog", "/hm/x/scripts", { argv: ["/opt/prog", "/hm/x/scripts/own.sh"], head: (p) => (p === "/opt/prog" ? "\u0000ELF" : owned) })).toBe(0);
+  });
+  test("a no-shebang text script is judged as a script, not skipped as a binary (OUP-368 item 4)", async () => {
+    const direct = (head: string) => stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => head });
+    // Fails at cruft.ts `looksBinary`: any head without #! was a binary, so this unowned text script was left out of the count.
+    expect(await direct("echo hi\n")).toBe(1);
+    expect(await direct("# not an owner line\necho hi\n")).toBe(1);
+    // An owned no-shebang text script inside the adopted dir is adopted.
+    expect(await direct("echo hi\n# owner: me\n")).toBe(0);
+    // Binary heads are still not counted: NUL, a control byte, or the replacement characters a Mach-O magic decodes to.
+    expect(await direct("\u0000ELF")).toBe(0);
+    expect(await direct("\u0001\u0002 binary")).toBe(0);
+    expect(await direct("\ufffd\ufffd\ufffd\ufffd rest")).toBe(0);
+    // Each edge of the control-byte class on its own (the first byte of the class, the last, the one after the gap, VT).
+    for (const c of ["\u0008", "\u000b", "\u000e", "\u001f"]) expect({ c, n: await direct(`${c}ELF`) }).toEqual({ c, n: 0 });
+    for (const c of ["\u0009", "\u000c", "\u0020"]) expect({ c, n: await direct(`${c}echo\n`) }).toEqual({ c, n: 1 });
+    // A head with a shebang is read once; a head without one is read again, text or not (the second read is what is judged).
+    let reads = 0;
+    await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => { reads++; return owned; } });
+    expect(reads).toBe(1);
+    reads = 0;
+    await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => { reads++; return "echo hi\n"; } });
+    expect(reads).toBe(2);
+    // First read binary, second read text: the second read is what is judged (an unowned text script is counted).
+    let k = 0;
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => (++k === 1 ? "\u0000ELF" : "echo hi\n") })).toBe(1);
+    // Text controls (tab, newline, carriage return, form feed) are not binary.
+    expect(await direct("\techo\r\n\fhi\n")).toBe(1);
+  });
+  test("a hard-linked no-shebang program is counted, not skipped (OUP-368 item 7)", async () => {
+    const withLinks = (links: number | undefined, head = "\u0000ELF") =>
+      stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: (_p, meta) => { if (meta && links !== undefined) meta.links = links; return head; } });
+    // Fails at cruft.ts binary skip: a binary read with a link count of 2 was skipped before the count was judged.
+    expect(await withLinks(2)).toBe(1);
+    expect(await withLinks(3, "echo hi\n")).toBe(1); // text, two names: counted by the owner check as before
+    // One name, or no count at all (a fake fs): a binary is still not counted.
+    expect(await withLinks(1)).toBe(0);
+    expect(await withLinks(undefined)).toBe(0);
+    // The second read's count is the one judged: first read says one name, second says two.
+    let k = 0;
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: (_p, meta) => { if (meta) meta.links = ++k === 1 ? 1 : 2; return "\u0000ELF"; } })).toBe(1);
+  });
+  test("a LaunchAgents or LaunchDaemons dir that cannot be listed is counted, not read as empty (OUP-368 item 2)", async () => {
+    const A = "/hm/x/Library/LaunchAgents";
+    const unlistable = async (d: string) => (d === A || d === "/Library/LaunchDaemons" ? undefined : []);
+    const wrappersOf = (strict: (d: string) => Promise<string[] | undefined>) =>
+      cruftCount({ fs: { home: "/hm/x", listDir: async () => [], listDirStrict: strict, pinFiles: () => [] }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] }).then((c) => c.wrappers);
+    // Fails at cruft.ts (the listDirStrict check): the plists in an unreadable dir vanished from the count.
+    expect(await wrappersOf(unlistable)).toEqual([`${A} complex dir: unlistable`, "/Library/LaunchDaemons complex dir: unlistable"]);
+    // A missing dir is an empty one, not a problem.
+    expect(await wrappersOf(async () => [])).toEqual([]);
+  });
+  test("realFs.listDirStrict: undefined for a dir it cannot read, [] for a missing one (OUP-368 item 2)", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "oupdate-list-")));
+    const locked = join(root, "locked");
+    mkdirSync(locked);
+    writeFileSync(join(locked, "a.plist"), "x");
+    try {
+      expect(await realFs.listDirStrict!(locked)).toEqual(["a.plist"]);
+      expect(await realFs.listDirStrict!(join(locked, "a.plist"))).toBeUndefined(); // not a directory: not listable
+      nodeFs.chmodSync(locked, 0o000);
+      // Fails at fs.ts listDirStrict (it must not turn an EACCES into []); skipped when the process can read it anyway (root).
+      if (process.getuid?.() !== 0) expect(await realFs.listDirStrict!(locked)).toBeUndefined();
+      expect(await realFs.listDirStrict!(join(root, "missing"))).toEqual([]);
+    } finally {
+      nodeFs.chmodSync(locked, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  test("a no-shebang text file is judged on its second read too (OUP-368 round 1)", async () => {
+    const direct = (head: (n: number) => string | undefined) => { let k = 0; return stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: () => head(++k) }); };
+    const ownedText = "echo hi\n# owner: me\n";
+    // Fails at cruft.ts (the second read for a text body): an owned text first read was judged alone, so a swapped second read went unseen.
+    expect(await direct((k) => (k === 1 ? ownedText : "#!/bin/sh\necho swapped\n"))).toBe(1); // ownerless shebang
+    expect(await direct((k) => (k === 1 ? ownedText : undefined))).toBe(1); // a second read that fails
+    expect(await direct((k) => (k === 1 ? ownedText : "echo other\n"))).toBe(1); // ownerless text
+    // Control: the same owned text on both reads is adopted; an owned shebang second read too.
+    expect(await direct(() => ownedText)).toBe(0);
+    expect(await direct((k) => (k === 1 ? ownedText : owned))).toBe(0);
+    // A binary first read swapped for text or another binary: the second read decides; a text first read swapped for a binary is not skipped.
+    expect(await direct((k) => (k === 1 ? ownedText : "\u0000ELF"))).toBe(1);
+  });
+  test("the firmlink spelling holds when only home or only the dir uses it (OUP-368 round 1)", async () => {
+    // Fails when the strip is applied to home only (the previous head): home via the firmlink, dir an ancestor spelled plain.
+    expect(await stub("/System/Volumes/Data/hm/x", "/System/Volumes/own.sh", "/System/Volumes")).toBe(1);
+    expect(await stub("/System/Volumes/Data/hm/x", "/System/Volumes/Data/own.sh", "/System/Volumes/Data")).toBe(1);
+    // A plain home with the dir an ancestor of its firmlink spelling.
+    expect(await stub("/hm/x", "/System/Volumes/Data/hm/own.sh", "/System/Volumes")).toBe(1);
+    expect(await stub("/hm/x", "/System/Volumes/Data/own.sh", "/System/Volumes")).toBe(1);
+  });
+  test("a launcher is counted whatever its case or its link target (OUP-368 round 1)", async () => {
+    for (const prog of ["/bin/DASH", "/usr/bin/Osascript", "/usr/bin/arch", "/usr/bin/nice", "/usr/bin/xargs", "/usr/bin/sudo", "/usr/local/bin/fish", "/usr/bin/tclsh", "/usr/bin/expect"])
+      expect({ prog, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: (p) => (p === prog ? "\u0000ELF" : owned) }) }).toEqual({ prog, n: 1 });
+    // Fails at cruft.ts (LAUNCHERS on the resolved path): /opt/x/tool is a link to dash.
+    expect(await stub("/hm/x", "/opt/x/tool", "/hm/x/scripts", { argv: ["/opt/x/tool"], realPath: async (p: string) => (p === "/opt/x/tool" ? "/bin/dash" : p), head: (p) => (p === "/bin/dash" ? "\u0000ELF" : owned) })).toBe(1);
+  });
+  test("every launcher name is counted, bare (OUP-368 round 2)", async () => {
+    // Fails at cruft.ts LAUNCHERS: removing any one name lets that program be skipped as a binary.
+    const names = ["dash", "ksh", "ksh93", "tcsh", "csh", "fish", "osascript", "nohup", "caffeinate", "arch", "nice", "xargs", "sudo", "tclsh", "wish", "expect", "time", "exec", "command", "setsid"];
+    for (const name of names) {
+      const prog = `/bin/${name}`;
+      expect({ name, n: await stub("/hm/x", prog, "/hm/x/scripts", { argv: [prog, "/hm/x/scripts/own.sh"], head: (p) => (p === prog ? "\u0000ELF" : owned) }) }).toEqual({ name, n: 1 });
+    }
+    // Control: a binary that is not a launcher is still skipped.
+    expect(await stub("/hm/x", "/bin/notalauncher", "/hm/x/scripts", { argv: ["/bin/notalauncher", "/hm/x/scripts/own.sh"], head: (p) => (p === "/bin/notalauncher" ? "\u0000ELF" : owned) })).toBe(0);
+  });
+  test("a relative home never matches through the firmlink root (OUP-368 round 2)", async () => {
+    // Fails at cruft.ts `spellings` if the added root has no "/" before a relative home: "base/own" would become ".../database/own".
+    expect(await stub("base/own", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
   });
 });

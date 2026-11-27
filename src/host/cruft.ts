@@ -15,7 +15,7 @@
 //             interpreter, a relative path, a plist the OS parser cannot read, a variable that
 //             makes an interpreter run other code) is counted UNADOPTED as "complex": an overcount is visible
 //             and a person can judge it, an undercount would be a false green. A program that is a binary
-//             (shape (a), no shebang) is not counted.
+//             (shape (a), no shebang and a binary-looking head) is not counted, unless it is a shell or launcher (dash, ksh, osascript, nohup...): those run other files.
 
 import { resolve } from "node:path";
 import { PLIST_MAX_BYTES, type ApplyFs } from "../apply/fs.ts";
@@ -24,6 +24,8 @@ import { PLIST_MAX_BYTES, type ApplyFs } from "../apply/fs.ts";
 export const CRUFT_BACKUP_PREFIXES = ["config.json.bak-", "config.json.pre-oq4e", "oharness.pre-", "ilane.stale-"] as const;
 /** Interpreters shapes (b) and (c) accept, by basename (versioned names such as python3.12 included). */
 const INTERPRETER = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh)(?:[0-9]+(?:\.[0-9]+)*)?$/;
+/** Programs that run another file or command (shells and launchers the interpreter list lacks): never a binary to skip, by basename (any case), also of the path the program resolves to. A binary with arguments that is not on this list is still skipped. */
+const LAUNCHERS = /^(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid)$/i;
 /** Where an interpreter (and, alone in /usr/bin, env) must sit to be one: a program of that name anywhere else is "complex". */
 const INTERPRETER_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
 /** The system dirs a judged plist's PATH may name (each entry exactly one of these). */
@@ -70,9 +72,16 @@ export interface Cruft {
   wrappers: string[];
 }
 
-type CruftFs = Pick<ApplyFs, "home" | "listDir" | "readHead" | "realPath" | "plistJson" | "pinFiles">;
+type CruftFs = Pick<ApplyFs, "home" | "listDir" | "listDirStrict" | "readHead" | "realPath" | "plistJson" | "pinFiles">;
 /** How much of a script is read: the shebang and the owner line sit at the top; a later `# owner:` is not seen. */
 const SCRIPT_BYTES = 512;
+/** A head that reads as a binary: a NUL, a control byte other than tab, newline, form feed and CR, or a replacement character (what a Mach-O or ELF magic decodes to). */
+const looksBinary = (h: string) => {
+  // A multibyte character cut by the end of a full-size head decodes to one trailing U+FFFD (the head is then at least the read bound
+  // in bytes): that one is the cut, not a binary. A U+FFFD anywhere else still is one.
+  const t = Buffer.byteLength(h) >= SCRIPT_BYTES && h.endsWith("\ufffd") ? h.slice(0, -1) : h;
+  return /[\u0000-\u0008\u000b\u000e-\u001f\ufffd]/.test(t);
+};
 const base = (p: string) => p.split("/").at(-1)!;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -141,6 +150,8 @@ export function launchScript(l: { program?: string; argv: string[] }): { script:
   const abs = (w: string | undefined): w is string => w !== undefined && w.startsWith("/");
   const interp = (w: string | undefined) => w !== undefined && INTERPRETER.test(base(w)) && INTERPRETER_DIRS.includes(dirOf(w));
   const first = argv[0]!;
+  // A launcher is no binary to skip: it runs whatever file or command it is given, so the plist is counted.
+  if (LAUNCHERS.test(base(first))) return "complex";
   // A program named env or like an interpreter that is not in a standard place is not trusted to be one.
   if (base(first) === "env") return first === "/usr/bin/env" && interp(argv[1]) && abs(argv[2]) ? { script: argv[2], shebang: false } : "complex";
   if (INTERPRETER.test(base(first))) return interp(first) && abs(argv[1]) ? { script: argv[1], shebang: false } : "complex";
@@ -169,8 +180,8 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // (d) a different spelling of the same place (case, NFC/NFD, /var for /private/var), which only overcounts.
   // (e) the depth rule still adopts a shared top-level-plus-one directory (/private/tmp, a shared directory under the users root, another user's home);
   // (h) a hard link made between the fstat of the read and the second realPath; (i) `~/scripts/..` through a symlinked home is
-  // now broad where it was adopted before: an overcount. Not fixed here (tracked as follow-up rows): a redundant slash in a
-  // symlinked home spelling, and a LaunchAgents directory that cannot be listed (its plists vanish from the count).
+  // now broad where it was adopted before: an overcount. (A redundant slash in a symlinked home spelling and an unlistable
+  // LaunchAgents directory are handled since OUP-368.)
   // (f) two names for one owned script inside the adopted dir count as unadopted by design (overcount); (g) a device swapped in
   // between the stat and the open of a script reaches openSync before the descriptor check rejects it (needs write access there).
   const dotted = (p: string) => p.split("/").some((x) => x === "." || x === "..");
@@ -180,15 +191,29 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // A root, a top-level directory, the home dir or an ancestor of it is too broad to be a scripts directory: it adopts
   // nothing (an overcount is the fail-closed side). Home is checked as given and by its real path.
   const homeReal = (fs.realPath ? await fs.realPath(home) : undefined) ?? home;
-  // Spellings only widen the test: names are folded (case, NFC), and the configured dir is also taken with its "." and ".."
+  // Spellings only widen the test: names are folded (case, NFC, runs of slashes; the /System/Volumes/Data firmlink root is handled in `spellings` below), and the configured dir is also taken with its "." and ".."
   // collapsed as text, so Alias/. and Alias/dir/.. count as Alias. Wrong-spelling only overcounts.
-  const fold = (x: string) => x.normalize("NFC").toLowerCase();
-  const broad = (d: string) => d.split("/").filter(Boolean).length < 2 || [`${home}/`, `${homeReal}/`].some((h) => fold(h).startsWith(fold(d)));
+  const fold = (x: string) => x.normalize("NFC").toLowerCase().replace(/\/{2,}/g, "/");
+  // Home is compared in three spellings (as given, the /System/Volumes/Data firmlink root dropped, and that root added) with the
+  // dir as given: a dir spelled either way is met by one of them (more spellings only overcount).
+  const FIRM = "/system/volumes/data";
+  const strip = (x: string) => x.replace(/^\/system\/volumes\/data(?=\/|$)/, "");
+  const spellings = (x: string) => {
+    const bare = strip(fold(x));
+    return [fold(x), bare, FIRM + (bare.startsWith("/") ? bare : `/${bare}`)];
+  };
+  const broad = (d: string) => d.split("/").filter(Boolean).length < 2 || [`${home}/`, `${homeReal}/`].some((h) => spellings(h).some((hs) => hs.startsWith(fold(d))));
   const realSlash = realRaw === undefined ? undefined : `${realRaw.replace(/\/+$/, "")}/`;
   const collapsed = `${resolve(adoptedRaw).replace(/\/+$/, "")}/`;
   const realAdopted = realSlash === undefined || [realSlash, plainAdopted, collapsed].some(broad) ? undefined : realSlash;
   for (const d of [`${fs.home}/Library/LaunchAgents`, "/Library/LaunchAgents", "/Library/LaunchDaemons"]) {
-    for (const n of (await fs.listDir(d)).filter((x) => x.endsWith(".plist")).sort()) {
+    // A directory that exists but cannot be listed (no access) is one problem to count, not an empty one: its plists would vanish.
+    const names = fs.listDirStrict ? await fs.listDirStrict(d) : await fs.listDir(d);
+    if (names === undefined) {
+      wrappers.push(`${d} complex dir: unlistable`);
+      continue;
+    }
+    for (const n of names.filter((x) => x.endsWith(".plist")).sort()) {
       const obj = await fs.plistJson?.(`${d}/${n}`);
       if (obj === undefined) {
         wrappers.push(`${d}/${n} complex plist: unreadable`);
@@ -215,6 +240,11 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       }
       // Resolve the script to its real path, read that path, then resolve again: the file read and the file judged are one.
       const real = fs.realPath ? await fs.realPath(run.script) : resolve(run.script);
+      // A program that is a link to a launcher (dash, osascript...) runs another file: counted, whatever its own name is.
+      if (run.shebang && real !== undefined && LAUNCHERS.test(base(real))) {
+        wrappers.push(`${d}/${n} runs ${run.script}`);
+        continue;
+      }
       // The head and the link count come from one open (meta.links); no link is followed at the resolved path.
       const m1: { links?: number; noFollow?: boolean } = { noFollow: true };
       const body = real === undefined ? undefined : await fs.readHead?.(fs.realPath ? real : run.script, SCRIPT_BYTES, m1);
@@ -225,7 +255,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       }
       // The second look comes before any skip, so no path is left out of the count before it has been resolved twice.
       const again = fs.realPath ? await fs.realPath(run.script) : real;
-      const stable = again === real;
+      let stable = again === real;
       // Shape (a) with no shebang is a binary program: not counted, once it resolved the same twice and a second read of the
       // head still says binary. An empty file is not a binary: it falls to the owner check and is counted.
       // Whatever the second read says is what is judged from here on (head and link count): a swap is never judged on the
@@ -235,7 +265,10 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       if (stable && run.shebang && body !== "" && !body.startsWith("#!")) {
         const m2: { links?: number; noFollow?: boolean } = { noFollow: true };
         const body2 = await fs.readHead?.(fs.realPath ? real! : run.script, SCRIPT_BYTES, m2);
-        if (body2 !== undefined && body2 !== "" && !body2.startsWith("#!")) continue;
+        // A third lookup after the second read: a path retargeted during that read is unstable, so it is counted, never skipped.
+        if (fs.realPath && (await fs.realPath(run.script)) !== real) stable = false;
+        // A binary with another name (a hard link) is shared with a place outside the directory: counted, not skipped.
+        if (stable && looksBinary(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2) && (m2.links === undefined || m2.links === 1)) continue;
         head = body2 ?? "";
         links = m2.links;
       }

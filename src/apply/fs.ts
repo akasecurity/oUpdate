@@ -16,6 +16,8 @@ export interface ApplyFs {
   isExecutable(path: string): Promise<boolean>;
   /** File names in a directory; [] when it cannot be read. */
   listDir(path: string): Promise<string[]>;
+  /** File names in a directory; [] when it does not exist, undefined when it exists (or is no directory) and cannot be read. */
+  listDirStrict?(path: string): Promise<string[] | undefined>;
   /** The text, or undefined when the file is missing or cannot be read. */
   readFile(path: string): Promise<string | undefined>;
   /** A state file: undefined only when it is missing; any other read failure throws (an unread state is never no state). */
@@ -80,6 +82,13 @@ export const realFs: ApplyFs = {
       return readdirSync(p);
     } catch {
       return [];
+    }
+  },
+  listDirStrict: async (p) => {
+    try {
+      return readdirSync(p);
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === "ENOENT" ? [] : undefined;
     }
   },
   readFile: async (p) => {
