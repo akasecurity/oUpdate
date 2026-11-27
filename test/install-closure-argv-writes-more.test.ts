@@ -38,6 +38,8 @@ const rows: [string, string, Record<string, string>?][] = [
   ["a push through arguments[0]", `${CPX}const args = [];\n(function () { arguments[0].push(${DE}); })(args);\n${run}`],
   ["a write through a destructured container", `${CPX}const args = [];\nconst { l } = { l: args };\nl.push(${DE});\n${run}`],
   ["a write through an array destructured container", `${CPX}const args = [];\nconst [l] = [args];\nl.push(${DE});\n${run}`],
+  ["a one-element container array, written through [0][0]", `${CPX}const args = ["lib/a.js"];\n[args][0][0] = ${DE};\n${run}`],
+  ["Reflect.apply of [].push", `${CPX}const args = [];\nReflect.apply([].push, args, [${DE}]);\n${run}`],
 ];
 for (const [label, body, extra] of rows)
   test(`${label} holds the changed docs/evil.js`, () => {
@@ -168,7 +170,7 @@ test("an unresolved line replay does not stop a later stage job: preinstall echo
   expect(prepass("npm", mk("1.0.0"), mk("1.0.1")).hard.some((s) => s.kind === "install-script")).toBe(true);
 });
 // A cross-hook case of the unresolved line: the line is in one hook, the changed file is run by the other.
-test("an unresolved line with a pipe in one hook does not hide a changed file the other hook runs", () => {
+test("pin: an unresolved line with a pipe in one hook beside a changed file the other hook runs holds (held on the parent too)", () => {
   const mk = (v: string): FileMap =>
     files({
       "package.json": JSON.stringify({ name: "p", version: v, scripts: { preinstall: "echo $FOO | cat && node docs/c.js", postinstall: "node docs/c.js | cat" } }),
@@ -177,27 +179,21 @@ test("an unresolved line with a pipe in one hook does not hide a changed file th
   expect(prepass("npm", mk("1.0.0"), mk("1.0.1")).hard.some((s) => s.kind === "install-script")).toBe(true);
 });
 // A main moved between two plain files holds only when it is a writer file that moved: an unrelated writer in the package does not make the move count as one.
-test("pin: a main moved between plain files is not a self-run target change when only another file writes", () => {
-  const mk = (v: string, main: string): FileMap => loosePair(v, main, { postinstall: "node ." }, PLAIN).set("docs/other.js", enc(WRITER)).set("lib/x.js", enc(WRITER));
+test("pin: a main moved between plain files is not a self-run target change when an unrelated writer runs first", () => {
+  const mk = (v: string, main: string): FileMap =>
+    files({
+      "package.json": JSON.stringify({ name: "p", version: v, main, scripts: { preinstall: "node lib/x.js", postinstall: "node ." } }),
+      "lib/x.js": WRITER,
+      "docs/a.js": PLAIN,
+      "docs/b.js": PLAIN,
+      "docs/changed.js": "console.log(2)\n",
+      "local.js": "1\n",
+    });
   const r = prepass("npm", mk("1.0.0", "docs/a.js"), mk("1.0.1", "docs/b.js"));
   expect(r.hard.some((s) => s.detail?.includes("self-run target"))).toBe(false);
 });
 
-// Shapes the parent holds as well (the fix does not change them): kept as pins so a later change cannot release them.
-const heldBefore: [string, string, Record<string, string>?][] = [
-  ["a one-element container array, written through [0][0]", `${CPX}const args = ["lib/a.js"];\n[args][0][0] = ${DE};\n${run}`],
-  ["[].push.call on the array", `${CPX}const args = [];\n[].push.call(args, ${DE});\n${run}`],
-  ["Reflect.apply of [].push", `${CPX}const args = [];\nReflect.apply([].push, args, [${DE}]);\n${run}`],
-  ["a cross-file write through require", `${CPX}const args = require("./a.js").args;\nrequire("./b.js").args[0] = ${DE};\n${run}`, { "lib/b.js": `module.exports = { args: [] }\n` }],
-  ["a container literal that holds an array literal, written through its key", `${CPX}const o = { l: ["lib/a.js"] };\no.l[0] = ${DE};\ncp.spawnSync(process.execPath, o.l);\n`],
-  ["an array bound with bind and written", `${CPX}const args = [];\nconst add = [].push.bind(args);\nadd(${DE});\n${run}`],
-];
-for (const [label, body, extra] of heldBefore)
-  test(`pin: ${label} holds the changed docs/evil.js (held on the parent too)`, () => {
-    expect(held(body, extra)).toBe(true);
-  });
-
-// What the replay reaches is held on a byte change even when nothing else runs the file,.
+// What the replay reaches is held on a byte change even when nothing else runs the file.
 const looseOnly = (scripts: Record<string, string>, main: string): boolean => {
   const mk = (v: string): FileMap =>
     files({
@@ -210,3 +206,15 @@ const looseOnly = (scripts: Record<string, string>, main: string): boolean => {
 test("the main file an unresolved line runs holds on a byte change", () => {
   expect(looseOnly({ postinstall: "echo $FOO | cat && node ." }, "docs/a.js")).toBe(true);
 });
+
+// Shapes the parent holds as well (the fix does not change them): kept as pins so a later change cannot release them.
+const heldBefore: [string, string, Record<string, string>?][] = [
+  ["[].push.call on the array", `${CPX}const args = [];\n[].push.call(args, ${DE});\n${run}`],
+  ["a cross-file write through require", `${CPX}const args = require("./a.js").args;\nrequire("./b.js").args[0] = ${DE};\n${run}`, { "lib/b.js": `module.exports = { args: [] }\n` }],
+  ["a container literal that holds an array literal, written through its key", `${CPX}const o = { l: ["lib/a.js"] };\no.l[0] = ${DE};\ncp.spawnSync(process.execPath, o.l);\n`],
+  ["an array bound with bind and written", `${CPX}const args = [];\nconst add = [].push.bind(args);\nadd(${DE});\n${run}`],
+];
+for (const [label, body, extra] of heldBefore)
+  test(`pin: ${label} holds the changed docs/evil.js (held on the parent too)`, () => {
+    expect(held(body, extra)).toBe(true);
+  });
