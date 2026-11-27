@@ -5626,6 +5626,18 @@ function widenEvery(ctx: Ctx): void {
   }
 }
 
+// The widening of a `late` tier (what only the read of the written names finds): it takes no file into the reach. The scopes that run after it (the
+// stage pass, the self-run, backslash and bare-line readings) record the files they add beyond the file set, and the sets they are compared on show a
+// main or bin moved between two files; a file set filled first leaves those records empty on both sides, and a literal that names an addon by its
+// stem finds it taken in and raises no stop (script depth). So every file but the manifests goes to the record of its own (ctx.wsFiles, carried as
+// `wsFiles`, held on a byte change) and the reach stays as main had it.
+function widenEveryLate(ctx: Ctx): void {
+  widened = true;
+  if (noWiden) return;
+  const rec = (ctx.wsFiles ??= new Set<string>());
+  for (const [logical, key] of ctx.logical) if (!isManifest(logical)) rec.add(key);
+}
+
 // A non-static JS file with no computed file load keeps its own directory.
 // Python, shell, and extensionless entries use that same floor.
 function narrowWiden(ctx: Ctx, fromKey: string): void {
@@ -5661,6 +5673,8 @@ function widenJsScan(ctx: Ctx, key: string, text: string): void {
   for (const path of tier.lits) addLogical(ctx, path);
   addNative(ctx);
   addScannedLiterals(ctx);
+  if (tier.late && !tier.all) widenEveryLate(ctx);
+  // widenEvery and noteWriteSpawn touch separate state (noteWriteSpawn reads no ctx.files), so their order does not matter.
   if (ws) noteWriteSpawn(ctx);
 }
 
@@ -5682,7 +5696,10 @@ type JsEffect =
   | { t: "pkg"; tests: boolean; flows: boolean }
   | { t: "all" };
 
-export type JsTier = { all: boolean; pkg: boolean; tests: boolean; flows: boolean; same: boolean; dirs: string[]; lits: string[] };
+// `late`: the file widens to every file only after the literals of the files already scanned are read (the read of the written names found it): the
+// widening there would take every file in first, and a literal then finds its file already taken in and raises no stop (script depth) that the scan
+// without the widening raises.
+export type JsTier = { all: boolean; pkg: boolean; tests: boolean; flows: boolean; same: boolean; dirs: string[]; lits: string[]; late?: boolean };
 
 // eval/Function/vm of a value we cannot see can load any file, docs included.
 // A string literal or a read of a literal path is not that shape.
@@ -6611,7 +6628,7 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
   const tier: JsTier = { all: false, pkg: false, tests: false, flows: false, same: false, dirs: [], lits: [] };
   const text = codeOnly(source, [], true) ?? source;
   if (hasUnbounded(text, source)) tier.all = true;
-  const late = { all: false };
+  const late = { all: false, wr: false };
   cls = { text, raw: source, ...pathNames(text), bind: new Map(), memo: new Map(), visiting: new Set(), steps: 0, defSteps: 0, fold: new Map(), foldSteps: 0 };
   try {
     classifyLoads(tier, fromKey, text);
@@ -6629,6 +6646,7 @@ function classifyJsScan(fromKey: string, source: string): JsTier {
     tier.flows = true;
   }
   if (late.all) tier.all = true;
+  else if (late.wr) tier.late = true;
   if (!tier.all && indexKeyUse(source)) {
     tier.all = true;
     indexOnlyAll = true;
@@ -7115,7 +7133,7 @@ function keepsOldStep(s: string, open: number, close: number): boolean {
 }
 // `late.all` is set by a widening that main does not reach: the caller applies it once every later scan has run, so a scan that stops there (the
 // budget) stops as it does on main, and the file is held as a fault instead of released.
-function constPartsWiden(text: string, late: { all: boolean }): boolean {
+function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boolean {
   const c = cls!;
   const budget = 8 * text.length + 100000;
   let spent = 0;
@@ -7125,6 +7143,11 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
   const otherNew = new Set<string>(); // names bound by a parameter list or destructuring only once the strings in it are stepped over
   let useNew = false;
   let widenNew = false; // main's: what the reading inside the arguments of a run call finds
+  const otherWr = new Set<string>(); // names a literal value no longer tells about: written to in place; read apart from `otherNew`, on a memo and a counter of their own
+  let useWr = false;
+  let widenWr = false; // what only the read of the written names finds: read at the exit alone
+  let idxStopped = false; // the index scan stopped at its budget: a write it did not reach is unseen
+  let xs3 = 0; // the work of the index scan, the alias walk and that read: never charged to `xs2`, which is the second read of the string defaults
   let widenStr = false; // the second read's own: what only it finds, read at the exit alone, so main's flag and counter stay as they were
   let poison = false;
   const ids = (s: string): string[] => s.match(/[A-Za-z_$][\w$]*(?![\w$])(?!\s*:)/g) ?? []; // an object key is no binding
@@ -7203,6 +7226,58 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
   names(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>/g, other, params);
   names(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\+\+|--|(?:\*\*|<<|>>>?|[-*/%&|^])=)/g, other);
   names(/(?:\+\+|--)\s*([A-Za-z_$][\w$]*)/g, other);
+  // A name whose value is changed in place: an array pushed to, spliced or filled, written by index, or handed to a call that writes to it
+  // (`args.push(x)`, `args[0] = x`, `Array.prototype.push.call(args, x)`, `Object.assign(o, x)`). Its literal value no longer tells what it holds.
+  const MUT = "push|unshift|splice|fill|copyWithin";
+  const written = new Set<string>();
+  const wnames = (re: RegExp): void => {
+    for (const m of text.matchAll(re)) written.add(m[1]!);
+  };
+  wnames(new RegExp(`(?<![\\w$])([A-Za-z_$][\\w$]*)\\s*(?:\\?\\.|\\.)\\s*(?:${MUT})(?![\\w$])`, "g"));
+  wnames(new RegExp(`(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*(?:\\?\\.\\s*)?\\[\\s*(["'\`])(?:${MUT})\\2\\s*\\]`, "g"));
+  wnames(new RegExp(`\\.\\s*(?:${MUT})\\s*\\.\\s*(?:call|apply)\\s*\\(\\s*([A-Za-z_$][\\w$]*)`, "g"));
+  wnames(/\b(?:Object\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)|Reflect\s*\.\s*(?:set|defineProperty|deleteProperty|setPrototypeOf))\s*\(\s*([A-Za-z_$][\w$]*)/g);
+  // Reflect.apply(fn, thisArg, args) and fn.apply(thisArg, args) take the receiver second: Reflect.apply(Array.prototype.push, args, [x]).
+  wnames(/\bReflect\s*\.\s*apply\s*\(\s*[\w$.][\w$.\s]*?,\s*(?:\(\s*)?([A-Za-z_$][\w$]*)/g);
+  // A parenthesized receiver: (args).push(x).
+  wnames(new RegExp(`(?<![\\w$.])\\(\\s*([A-Za-z_$][\\w$]*)\\s*\\)\\s*(?:\\?\\.|\\.)\\s*(?:${MUT})(?![\\w$])`, "g"));
+  const INDEX_WRITE = /\s*(?:\+\+|--|(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|(?<=\s|\])(?:of|in)(?![\w$]))/y;
+  // The work of this and the next step is counted in `xs3`, never in `spent`: the budget stops of main stay where they were. Past the budget the
+  // steps are not run, which is main's result.
+  for (const m of text.matchAll(/(?<![\w$.])(?:\(\s*)?([A-Za-z_$][\w$]*)\s*(?:\)\s*)?(?:\?\.\s*)?\[/g)) {
+    if (xs3 > budget) {
+      idxStopped = true;
+      break;
+    }
+    const open = (m.index ?? 0) + m[0].length - 1;
+    const end = closeAt(text.slice(open, open + 400), 0);
+    xs3 += end < 0 ? 400 : end + 1;
+    if (end < 0) {
+      written.add(m[1]!); // a bracket that does not close in 400 characters: not told
+      continue;
+    }
+    INDEX_WRITE.lastIndex = open + end + 1;
+    if (INDEX_WRITE.test(text)) written.add(m[1]!);
+  }
+  // The names that hold a value written to through another name (`const b = args; b.push(x)`, `const c = b`) are written to as well. A name that is
+  // given the written one (`const b = args` with `args` written) reads through it.
+  if (written.size) {
+    const edges = new Map<string, string[]>();
+    for (const [n, list] of inits)
+      for (const x of list)
+        // The names a value is made of when it is only names, parentheses and `||`, `&&`, `??`, `?:` (`b = args`, `b = (args)`, `b = args || []`).
+        if (/^[\w$\s()|&?:]+$/.test(x.replace(/\[\s*\]/g, "")))
+          for (const y of ids(x.replace(/\[\s*\]/g, ""))) {
+            (edges.get(n) ?? edges.set(n, []).get(n)!).push(y);
+          }
+    const todo = [...written];
+    for (let t = 0; t < todo.length && xs3 <= budget; t++) {
+      xs3 += 10;
+      for (const x of edges.get(todo[t]!) ?? []) if (!written.has(x)) (written.add(x), todo.push(x));
+    }
+    for (const n of written) otherWr.add(n);
+  }
+  let arrayEscapes = false; // set below once the parameters are known: a parameter written to means any array handed to a call may be changed
   // A parameter list is the (...) before an arrow or a body; a destructuring is the [...] or {...} before `=`, `of` or `in`.
   for (const re of [/\)\s*(?:=>|\{)/g, /[\]}]\s*(?:=(?![=>])|\b(?:of|in)\b)/g]) {
     for (const m of text.matchAll(re)) {
@@ -7221,6 +7296,7 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
       }
     }
   }
+  for (const n of written) if (params.has(n)) arrayEscapes = true;
   // Run functions renamed or held by a name (`{ execSync: run }`, `import { exec as run }`, `const run = cp.execSync`, `promisify(cp.exec)`).
   const runs = new Set<string>();
   names(new RegExp(`\\b(?:${RUN_FN})\\s*(?::|\\bas\\b)\\s*([A-Za-z_$][\\w$]*)`, "g"), runs);
@@ -7257,6 +7333,7 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
         if (r === undefined) {
           const list = inits.get(p);
           if (seen.size >= 200 || poison || other.has(p) || (useNew && otherNew.has(p)) || !list) return false;
+          if (useWr && (otherWr.has(p) || (arrayEscapes && list.some((x) => /^\(*\s*\[/.test(x))))) return false;
           seen.set(p, false);
           prog.push(p);
           r = list.every((x) => ok(x, d + 1));
@@ -7416,7 +7493,7 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
     if (spent + xs > budget) widenNew = true;
     return false;
   };
-  const visit = (segs: string[], dotted: boolean, paren: number): boolean => {
+  const visitStr = (segs: string[], dotted: boolean, paren: number): boolean => {
     if (visitRead(segs, dotted, paren)) return true;
     if (!otherNew.size || widenStr || xs2 > budget) return false;
     // The second read, with the names of `otherNew` bound, on its own memo: its steps are counted in `xs2` (never in `spent` or `xs`), and it sets
@@ -7432,6 +7509,25 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
       seen = saved;
       xs2 += spent - s0;
       spent = s0;
+    }
+    return false;
+  };
+  const visit = (segs: string[], dotted: boolean, paren: number): boolean => {
+    if (visitStr(segs, dotted, paren)) return true;
+    if (!(otherWr.size || arrayEscapes) || widenWr || xs3 > budget) return false;
+    // The read of the names written to in place (and, when `arrayEscapes`, of every array literal), apart from the second read above: on a memo and a counter
+    // of its own (`xs3`), so neither read starves the other and the steps of the second read above are all taken. It sets `widenWr`, applied at the exit.
+    const w0 = spent;
+    const wsaved = seen;
+    seen = new Map();
+    useWr = true;
+    try {
+      if (visitCore(segs, dotted, paren)) widenWr = true;
+    } finally {
+      useWr = false;
+      seen = wsaved;
+      xs3 += spent - w0;
+      spent = w0;
     }
     return false;
   };
@@ -7522,6 +7618,8 @@ function constPartsWiden(text: string, late: { all: boolean }): boolean {
   // The work of main and the work inside run calls, taken together, past the budget: checked at the exit too, where either kind may have grown
   // after the last read inside a run call.
   late.all = widenNew || widenStr || spent + xs > budget;
+  // What only the read of the written names finds, or the budget it passes (the index scan stopped, or the read was not run): applied after the literals are read.
+  late.wr = widenWr || ((otherWr.size > 0 || arrayEscapes || idxStopped) && xs3 > budget);
   return spent > budget;
 }
 
