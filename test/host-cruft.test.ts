@@ -761,4 +761,15 @@ describe("cruft count follow-ups (OUP-368)", () => {
     expect(await stub("/hm/x", "/hm/x/own.sh", "/hm//x")).toBe(1);
     expect(await stub("/hm//x", "/hm//x/scripts/own.sh", "~/scripts")).toBe(0); // control: a directory of its own is still adopted
   });
+  test("the firmlink spelling of home is as broad as home (OUP-368 item 8)", async () => {
+    // Fails at cruft.ts `fold`: /System/Volumes/Data/hm/x names the same directory as /hm/x and is not a prefix match until the firmlink root is dropped.
+    expect(await stub("/hm/x", "/System/Volumes/Data/hm/x/own.sh", "/System/Volumes/Data/hm/x")).toBe(1);
+    expect(await stub("/System/Volumes/Data/hm/x", "/hm/x/own.sh", "/hm/x")).toBe(1);
+    expect(await stub("/hm/x", "/System/Volumes/Data/hm/own.sh", "/System/Volumes/Data/hm")).toBe(1);
+    // A directory of its own under the firmlink spelling is still adopted; so is a name that only starts like the prefix.
+    expect(await stub("/hm/x", "/System/Volumes/Data/hm/x/scripts/own.sh", "/System/Volumes/Data/hm/x/scripts")).toBe(0);
+    expect(await stub("/hm/x", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
+    // Fails at the `(?=\/|$)` of the firmlink strip: without it "/System/Volumes/Database/own" folds to "base/own" and a (relative) home "base/own" would match it.
+    expect(await stub("base/own", "/System/Volumes/Database/own/own.sh", "/System/Volumes/Database/own")).toBe(0);
+  });
 });
