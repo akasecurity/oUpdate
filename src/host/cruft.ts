@@ -72,7 +72,7 @@ export interface Cruft {
   wrappers: string[];
 }
 
-type CruftFs = Pick<ApplyFs, "home" | "listDir" | "readHead" | "realPath" | "plistJson" | "pinFiles">;
+type CruftFs = Pick<ApplyFs, "home" | "listDir" | "listDirStrict" | "readHead" | "realPath" | "plistJson" | "pinFiles">;
 /** How much of a script is read: the shebang and the owner line sit at the top; a later `# owner:` is not seen. */
 const SCRIPT_BYTES = 512;
 /** A head that reads as a binary: a NUL, a control byte other than tab, newline, form feed and CR, or a replacement character (what a Mach-O or ELF magic decodes to). */
@@ -176,7 +176,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // (e) the depth rule still adopts a shared top-level-plus-one directory (/private/tmp, a shared directory under the users root, another user's home);
   // (h) a hard link made between the fstat of the read and the second realPath; (i) `~/scripts/..` through a symlinked home is
   // now broad where it was adopted before: an overcount. Not fixed here (tracked as follow-up rows): a redundant slash in a
-  // symlinked home spelling, and a LaunchAgents directory that cannot be listed (its plists vanish from the count).
+  // symlinked home spelling (fixed since, OUP-368).
   // (f) two names for one owned script inside the adopted dir count as unadopted by design (overcount); (g) a device swapped in
   // between the stat and the open of a script reaches openSync before the descriptor check rejects it (needs write access there).
   const dotted = (p: string) => p.split("/").some((x) => x === "." || x === "..");
@@ -194,7 +194,13 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   const collapsed = `${resolve(adoptedRaw).replace(/\/+$/, "")}/`;
   const realAdopted = realSlash === undefined || [realSlash, plainAdopted, collapsed].some(broad) ? undefined : realSlash;
   for (const d of [`${fs.home}/Library/LaunchAgents`, "/Library/LaunchAgents", "/Library/LaunchDaemons"]) {
-    for (const n of (await fs.listDir(d)).filter((x) => x.endsWith(".plist")).sort()) {
+    // A directory that exists but cannot be listed (no access) is one problem to count, not an empty one: its plists would vanish.
+    const names = fs.listDirStrict ? await fs.listDirStrict(d) : await fs.listDir(d);
+    if (names === undefined) {
+      wrappers.push(`${d} complex dir: unlistable`);
+      continue;
+    }
+    for (const n of names.filter((x) => x.endsWith(".plist")).sort()) {
       const obj = await fs.plistJson?.(`${d}/${n}`);
       if (obj === undefined) {
         wrappers.push(`${d}/${n} complex plist: unreadable`);

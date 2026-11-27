@@ -576,7 +576,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     try {
       const at = (home: string, script: string, dir: string) =>
         cruftCount({
-          fs: { ...realFs, home, listDir: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
+          fs: { ...realFs, home, listDir: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), listDirStrict: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
           configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
         }).then((c) => c.wrappers.length);
       for (const d of ["Accounts", "Elsewhere", "R", "target", "h1", "h1/scripts"]) mkdirSync(join(hm, d), { recursive: true });
@@ -706,7 +706,7 @@ describe("the real plutil read (OUP-349)", () => {
       writeFileSync(join(agents, "sp ace\nnl.plist"), wrap(args));
       execFileSync("mkfifo", [join(agents, "f-fifo.plist")]);
       const t0 = Date.now();
-      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
+      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []), listDirStrict: async (d) => (d.startsWith(root) ? realFs.listDirStrict!(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
       expect(Date.now() - t0).toBeLessThan(3000); // a FIFO never reaches plutil (it would wait out the 5 s timeout)
       const names = c.wrappers.map((w) => w.replace(`${agents}/`, ""));
       expect(names.filter((w) => w.startsWith("a-attr") || w.startsWith("b-pi")).length).toBe(2);
@@ -746,7 +746,7 @@ describe("the real plutil read (OUP-349)", () => {
       writeFileSync(join(agents, "o-lower.plist"), `<?xml version='1.0' encoding='utf-8'?><plist version="1.0"><dict>${args}</dict></plist>`);
       writeFileSync(join(agents, "p-none.plist"), `<?xml version="1.0"?><plist version="1.0"><dict>${args}</dict></plist>`);
       writeFileSync(join(agents, "i-amp.plist"), wrap(`${args}<key>Label</key><string>a&amp;b &lt;c&gt;</string>`));
-      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
+      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []), listDirStrict: async (d) => (d.startsWith(root) ? realFs.listDirStrict!(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
       const names = c.wrappers.map((w) => w.replace(`${agents}/`, ""));
       // Whichever way plutil reads each (an error is "unreadable"), none is adopted; the legit one is.
       expect(names.map((w) => w.slice(0, 1)).sort()).toEqual(["a", "b", "c", "d", "f", "g", "h", "j", "k", "l", "m"]);
@@ -773,14 +773,14 @@ describe("the real plutil read (OUP-349)", () => {
 
 describe("cruft count follow-ups (OUP-368)", () => {
   const owned = "#!/bin/sh\n# owner: me\n";
-  type Over = { realPath?: (p: string) => Promise<string | undefined>; listDir?: (d: string) => Promise<string[]>; listDirOk?: (d: string) => Promise<string[] | undefined>; head?: (p: string, meta?: { links?: number; noFollow?: boolean }) => string | undefined; argv?: string[] };
+  type Over = { realPath?: (p: string) => Promise<string | undefined>; listDir?: (d: string) => Promise<string[]>; listDirStrict?: (d: string) => Promise<string[] | undefined>; head?: (p: string, meta?: { links?: number; noFollow?: boolean }) => string | undefined; argv?: string[] };
   // One plist under home's LaunchAgents running `script`; the number of wrappers counted.
   const stub = (home: string, script: string, dir: string, o: Over = {}) =>
     cruftCount({
       fs: {
         home,
         listDir: o.listDir ?? (async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : [])),
-        ...(o.listDirOk ? { listDirOk: o.listDirOk } : {}),
+        ...(o.listDirStrict ? { listDirStrict: o.listDirStrict } : {}),
         readHead: async (p: string, _n: number, meta?: { links?: number; noFollow?: boolean }) => (p.endsWith(".plist") ? "<plist/>" : o.head ? o.head(p, meta) : owned),
         realPath: o.realPath ?? (async (p: string) => p),
         plistJson: async () => ({ ProgramArguments: o.argv ?? [script] }),
@@ -862,5 +862,32 @@ describe("cruft count follow-ups (OUP-368)", () => {
     // The second read's count is the one judged: first read says one name, second says two.
     let k = 0;
     expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { head: (_p, meta) => { if (meta) meta.links = ++k === 1 ? 1 : 2; return "\u0000ELF"; } })).toBe(1);
+  });
+  test("a LaunchAgents or LaunchDaemons dir that cannot be listed is counted, not read as empty (OUP-368 item 2)", async () => {
+    const A = "/hm/x/Library/LaunchAgents";
+    const unlistable = async (d: string) => (d === A || d === "/Library/LaunchDaemons" ? undefined : []);
+    const wrappersOf = (strict: (d: string) => Promise<string[] | undefined>) =>
+      cruftCount({ fs: { home: "/hm/x", listDir: async () => [], listDirStrict: strict, pinFiles: () => [] }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] }).then((c) => c.wrappers);
+    // Fails at cruft.ts (the listDirStrict check): the plists in an unreadable dir vanished from the count.
+    expect(await wrappersOf(unlistable)).toEqual([`${A} complex dir: unlistable`, "/Library/LaunchDaemons complex dir: unlistable"]);
+    // A missing dir is an empty one, not a problem.
+    expect(await wrappersOf(async () => [])).toEqual([]);
+  });
+  test("realFs.listDirStrict: undefined for a dir it cannot read, [] for a missing one (OUP-368 item 2)", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "oupdate-list-")));
+    const locked = join(root, "locked");
+    mkdirSync(locked);
+    writeFileSync(join(locked, "a.plist"), "x");
+    try {
+      expect(await realFs.listDirStrict!(locked)).toEqual(["a.plist"]);
+      expect(await realFs.listDirStrict!(join(locked, "a.plist"))).toBeUndefined(); // not a directory: not listable
+      nodeFs.chmodSync(locked, 0o000);
+      // Fails at fs.ts listDirStrict (it must not turn an EACCES into []); skipped when the process can read it anyway (root).
+      if (process.getuid?.() !== 0) expect(await realFs.listDirStrict!(locked)).toBeUndefined();
+      expect(await realFs.listDirStrict!(join(root, "missing"))).toEqual([]);
+    } finally {
+      nodeFs.chmodSync(locked, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
