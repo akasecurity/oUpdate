@@ -1060,4 +1060,16 @@ describe("cruft count follow-ups (OUP-370)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  test("a directory whose two listings disagree is one problem to count (OUP-370 item 6)", async () => {
+    const agents = "/hm/x/Library/LaunchAgents";
+    const only = (names: string[]) => async (d: string) => (d === agents ? names : []);
+    // Fails at cruft.ts (the plain listing is never compared with the strict one): the extra plist was either never judged or judged without a word.
+    const both = (listDir: string[], listDirStrict: string[]) => stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { listDir: only(listDir), listDirStrict: async (d: string) => (d === agents ? listDirStrict : []) });
+    // The plain listing has a plist the strict one lacks: the listing is one problem to count, and both plists are judged (each runs an owned script, so they add nothing).
+    expect(await both(["t.plist", "u.plist"], ["t.plist"])).toBe(1);
+    // The strict listing has a plist the plain one lacks.
+    expect(await both(["t.plist"], ["t.plist", "u.plist"])).toBe(1);
+    // Control: the two agree.
+    expect(await both(["t.plist"], ["t.plist"])).toBe(0);
+  });
 });

@@ -210,10 +210,20 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   const realAdopted = realSlash === undefined || [realSlash, plainAdopted, collapsed].some(broad) ? undefined : realSlash;
   for (const d of [`${fs.home}/Library/LaunchAgents`, "/Library/LaunchAgents", "/Library/LaunchDaemons"]) {
     // A directory that exists but cannot be listed (no access) is one problem to count, not an empty one: its plists would vanish.
-    const names = fs.listDirStrict ? await fs.listDirStrict(d) : await fs.listDir(d);
+    let names = fs.listDirStrict ? await fs.listDirStrict(d) : await fs.listDir(d);
     if (names === undefined) {
       wrappers.push(`${d} complex dir: unlistable`);
       continue;
+    }
+    // Two listings of one directory that disagree on a plist: one problem to count, and every plist either one shows is judged.
+    if (fs.listDirStrict) {
+      const plain = (await fs.listDir(d)).filter((x) => x.endsWith(".plist"));
+      const strictSet = new Set(names.filter((x) => x.endsWith(".plist")));
+      const plainSet = new Set(plain);
+      if (plain.some((x) => !strictSet.has(x)) || [...strictSet].some((x) => !plainSet.has(x))) {
+        wrappers.push(`${d} complex dir: listings differ`);
+        names = [...new Set([...names, ...plain])];
+      }
     }
     for (const n of names.filter((x) => x.endsWith(".plist")).sort()) {
       const obj = await fs.plistJson?.(`${d}/${n}`);
