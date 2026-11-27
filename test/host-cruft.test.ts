@@ -1004,4 +1004,16 @@ describe("cruft count follow-ups (OUP-370)", () => {
     // Control: a binary that is not on the list is still skipped.
     expect(await stub("/hm/x", "/usr/bin/true", "/hm/x/scripts", { argv: ["/usr/bin/true", "/hm/x/scripts/own.sh"], head: binHead("/usr/bin/true") })).toBe(0);
   });
+  test("an interpreter that resolves to a launcher is counted (OUP-370 item 7)", async () => {
+    const script = "/hm/x/scripts/own.sh";
+    const to = (from: string, real: string) => async (p: string) => (p === from ? real : p);
+    // Fails at cruft.ts (the interpreter's realPath is never taken): /usr/bin/python3 is a link to dash, which runs the script, and the plist was adopted.
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/usr/bin/python3", script], realPath: to("/usr/bin/python3", "/bin/dash") })).toBe(1);
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/usr/bin/env", "/usr/bin/python3", script], realPath: to("/usr/bin/python3", "/bin/ksh93") })).toBe(1);
+    // An interpreter link that cannot be resolved is counted too.
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/usr/bin/python3", script], realPath: async (p: string) => (p === "/usr/bin/python3" ? undefined : p) })).toBe(1);
+    // Controls: an interpreter that is a link to another interpreter, or no link, is still adopted.
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/usr/bin/python3", script], realPath: to("/usr/bin/python3", "/usr/bin/python3.12") })).toBe(0);
+    expect(await stub("/hm/x", script, "/hm/x/scripts", { argv: ["/usr/bin/env", "/usr/bin/python3", script] })).toBe(0);
+  });
 });

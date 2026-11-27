@@ -238,6 +238,15 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         wrappers.push(`${d}/${n} complex argv: ${launch.argv.slice(0, 4).join(" ")}`);
         continue;
       }
+      // An interpreter that is a link to a launcher (python3 -> dash) runs the script as that launcher would: counted. A lookup that fails counts too.
+      const interpPath = base(launch.argv[0]!) === "env" ? launch.argv[1] : INTERPRETER.test(base(launch.argv[0]!)) ? launch.argv[0] : undefined;
+      if (interpPath !== undefined && fs.realPath) {
+        const interpReal = await fs.realPath(interpPath);
+        if (interpReal === undefined || LAUNCHERS.test(base(interpReal))) {
+          wrappers.push(`${d}/${n} runs ${run.script}`);
+          continue;
+        }
+      }
       // Resolve the script to its real path, read that path, then resolve again: the file read and the file judged are one.
       const real = fs.realPath ? await fs.realPath(run.script) : resolve(run.script);
       // A program that is a link to a launcher (dash, osascript...) runs another file: counted, whatever its own name is.
