@@ -168,6 +168,9 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // (alias.sh -> an outside link -> own.sh); (c) the configured dir being a symlink that retargets during one scan;
   // (d) a different spelling of the same place (case, NFC/NFD, /var for /private/var), which only overcounts.
   // (e) the depth rule still adopts a shared top-level-plus-one directory (/private/tmp, /Users/Shared, another user's home);
+  // (h) a hard link made between the fstat of the read and the second realPath; (i) `~/scripts/..` through a symlinked home is
+  // now broad where it was adopted before: an overcount. Not fixed here (tracked as follow-up rows): a redundant slash in a
+  // symlinked home spelling, and a LaunchAgents directory that cannot be listed (its plists vanish from the count).
   // (f) two names for one owned script inside the adopted dir count as unadopted by design (overcount); (g) a device swapped in
   // between the stat and the open of a script reaches openSync before the descriptor check rejects it (needs write access there).
   const dotted = (p: string) => p.split("/").some((x) => x === "." || x === "..");

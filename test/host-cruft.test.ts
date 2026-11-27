@@ -384,6 +384,8 @@ describe("realFs.readHead opens only a regular file (OUP-367)", () => {
       expect(calls[0]!.flags & nodeFs.constants.O_NOFOLLOW).toBe(nodeFs.constants.O_NOFOLLOW);
       await realFs.readHead!(join(r, "solo"), 9);
       expect(calls[1]!.flags & nodeFs.constants.O_NOFOLLOW).toBe(0);
+      // Fails at fs.ts readHead (the O_NONBLOCK term): a FIFO swapped in after the stat would otherwise wait for a writer forever.
+      expect(calls[0]!.flags & nodeFs.constants.O_NONBLOCK).toBe(nodeFs.constants.O_NONBLOCK);
       // Fails at fs.ts readHead (lstat instead of stat when meta.noFollow): a link at the path never reaches openSync.
       calls.length = 0;
       expect(await realFs.readHead!(join(r, "sl"), 9, { noFollow: true })).toBeUndefined();
@@ -601,6 +603,34 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     } finally {
       rmSync(hm, { recursive: true, force: true });
     }
+  });
+  test("a binary first read and an owned script with two names on the second read is counted: the second read's link count is judged (OUP-367)", async () => {
+    const bin = join(adopted, "links-swap.out");
+    writeFileSync(bin, "x");
+    let n = 0;
+    // Fails at cruft.ts `links = m2.links` (the second read's count): the first read said one name, the second says two.
+    const reads = { readHead: async (p: string, b: number, m?: { links?: number }) => { if (p !== bin) return p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b, m); n++; if (m) m.links = n === 1 ? 1 : 2; return n === 1 ? "\u0001\u0002" : "#!/bin/sh\n# owner: x\n"; } };
+    expect(await host(bin, adopted, reads)).toEqual(runs(bin));
+  });
+  test("both script reads refuse a link at the resolved path, and the plist read does not (OUP-367)", async () => {
+    const bin = join(adopted, "nf.out");
+    writeFileSync(bin, "x");
+    const seen: { p: string; noFollow: boolean | undefined }[] = [];
+    // Fails at cruft.ts (`noFollow: true` of m1, and of m2): dropping it at either call site leaves one read following a link.
+    await host(bin, adopted, { readHead: async (p: string, b: number, m?: { noFollow?: boolean }) => { seen.push({ p, noFollow: m?.noFollow }); return p.endsWith(".plist") ? "<plist/>" : p === bin ? "\u0001\u0002" : realFs.readHead!(p, b); } });
+    const scriptReads = seen.filter((x) => x.p === bin);
+    expect(scriptReads.map((x) => x.noFollow)).toEqual([true, true]);
+    expect(seen.filter((x) => x.p.endsWith(".plist")).every((x) => x.noFollow === undefined)).toBe(true);
+  });
+  test("an NFC/NFD pair does not hide a broad dir (OUP-367)", async () => {
+    // Fails at cruft.ts `.normalize("NFC")` in fold: José spelled decomposed in home and composed in the configured dir.
+    const stub = (home: string, script: string, dir: string) =>
+      cruftCount({
+        fs: { home, listDir: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), readHead: async (p: string) => (p.endsWith(".plist") ? "<plist/>" : owned), realPath: async (p: string) => p, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
+        configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
+      }).then((c) => c.wrappers.length);
+    expect(await stub("/Users/Jose\u0301", "/Users/Jos\u00e9/own.sh", "/Users/Jos\u00e9")).toBe(1);
+    expect(await stub("/Users/Jose\u0301", "/Users/Jos\u00e9/scripts/own.sh", "/Users/Jos\u00e9/scripts")).toBe(0);
   });
   test("a root, a top-level directory, the home dir or an ancestor of it adopts nothing (OUP-367)", async () => {
     const stub = (home: string, script: string, dir: string) =>
