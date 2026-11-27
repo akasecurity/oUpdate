@@ -778,10 +778,10 @@ describe("cruft count follow-ups (OUP-368)", () => {
     expect(await stub("/hm/x", "/hm/X/own.sh", "/hm/X")).toBe(1);
   });
   test("the home dir as given is checked on its own, not only by its real path (OUP-368)", async () => {
-    // Pins cruft.ts:186 `${home}/`: home resolves elsewhere, so only the spelling as given matches the configured dir. Green on the parent by design.
-    const realPath = async (p: string) => (p === "/hm/x" ? "/other/x" : p);
-    expect(await stub("/hm/x", "/hm/x/own.sh", "/hm/x", { realPath })).toBe(1);
+    // Pins cruft.ts:186 `${home}/`: home resolves to /other/x and the configured dir "/hm/x/." to /other2/x, so only its collapsed spelling "/hm/x/" matches home as given. Green on the parent by design.
+    const realPath = async (p: string) => (p === "/hm/x" ? "/other/x" : p === "/hm/x/." ? "/other2/x" : p);
+    expect(await stub("/hm/x", "/other2/x/own.sh", "/hm/x/.", { realPath })).toBe(1);
     // Control: a directory of its own under that home is still adopted.
-    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "~/scripts", { realPath })).toBe(0);
+    expect(await stub("/hm/x", "/other2/x/scripts/own.sh", "/hm/x/scripts/.", { realPath: async (p: string) => (p === "/hm/x" ? "/other/x" : p === "/hm/x/scripts/." ? "/other2/x/scripts" : p) })).toBe(0);
   });
 });
