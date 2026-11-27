@@ -5628,12 +5628,12 @@ function widenEvery(ctx: Ctx): void {
   }
 }
 
-// The widening of a `late` tier: every `.node` file it newly adds stays unsettled for a stem lookup in a later file, so that lookup adds it (and
+// The widening of a `late` tier: every `.node` file it newly takes in (into the gyp set too, in a gyp action) stays unsettled for a stem lookup in a later file, so that lookup adds it (and
 // reaches the scan cap) as the scan without the widening does.
 function widenEveryLate(ctx: Ctx): void {
   if (!noWiden) {
     for (const [logical, key] of ctx.logical) {
-      if (!isManifest(logical) && !ctx.files.has(key) && key.endsWith(".node")) (ctx.lateAddons ??= new Set()).add(key);
+      if (!isManifest(logical) && !(ctx.files.has(key) && (!ctx.fromGyp || ctx.gypFiles.has(key))) && key.endsWith(".node")) (ctx.lateAddons ??= new Set()).add(key);
     }
   }
   widenEvery(ctx);
