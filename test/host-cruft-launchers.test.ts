@@ -366,8 +366,15 @@ describe("env line: what the earlier readers counted stays counted, and the revi
     // Controls: six nested -S, a `--` before the command and a -S with nothing after it are ordinary.
     for (const l of ["#!/usr/bin/env -S -S -S -S -S -S python3", "#!/usr/bin/env -- python3", "#!/usr/bin/env --split-string", "#!/usr/bin/env -S"]) expect({ l, n: await counted(l) }).toEqual({ l, n: 0 });
   });
-  test("a link to a launcher found by a bare word in a later dir is counted", async () => {
-    expect(await counted("#!/usr/bin/env run")).toBe(1);
+  test("a link to a launcher found by a bare word in a later dir than the first is counted", async () => {
+    // /usr/bin/run is a plain file, /bin/run (the second dir) links to dash: a lookup that stops at the first hit would adopt.
+    expect(await script("#!/usr/bin/env run", { links: { "/bin/run": "/bin/dash" } })).toBe(1);
+  });
+  test("a line past the lookup cap is counted when every word is found and harmless; a line under it is adopted", async () => {
+    // The command is an absolute path that resolves, so no word is counted through the command word when its lookup finds nothing.
+    const line = (k: number) => `#!/usr/bin/env /usr/bin/true ${Array.from({ length: k }, (_, i) => `w${i}`).join(" ")}`;
+    expect(await script(line(100))).toBe(0);
+    expect(await script(line(200))).toBe(1);
   });
 
   test("a corpus of 3,000 env lines: the head counts every line either earlier reader counted", async () => {

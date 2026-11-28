@@ -373,6 +373,8 @@ async function badInterpreter(fs: CruftFs, wordList: Word[], dirList: string[] =
     const key = `${x.w}\0${x.cmd ? 1 : 0}${x.name ? 1 : 0}`;
     return seen.has(key) ? false : (seen.add(key), true);
   });
+  // The command word is judged first, so a line past the lookup cap is counted by the cap and not only through a command word that is looked at last.
+  words.sort((x, y) => Number(y.cmd === true) - Number(x.cmd === true));
   const pathDirs = [...new Set(dirList)];
   let lookups = 0;
   for (const { w, cmd, name } of words) {
