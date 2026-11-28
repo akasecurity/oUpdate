@@ -337,7 +337,7 @@ export async function releaseChecksSection(rt: RunCtx) {
         b.rcNotes.push(d.flag);
       }
       if (d.wait && d.failed && d.note) b.rcNotes.push(d.note);
-      if (d.wait) await ownerWait(`its owner could not be ${d.failed ? "restarted" : "restarted yet"} (${d.waitWhy ?? "busy"})`, d.waitWhy ?? "busy");
+      if (d.wait) await ownerWait(d.waitFor === "rollback" ? `its rollback could not be done yet (${d.waitWhy ?? "busy"})` : `its owner could not be ${d.failed ? "restarted" : "restarted yet"} (${d.waitWhy ?? "busy"})`, d.waitWhy ?? "busy");
       else if (d.note) b.rcNotes.push(d.note);
       if (d.failed) {
         b.failed.push(d.failed);

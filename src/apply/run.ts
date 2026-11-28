@@ -201,7 +201,8 @@ async function runApply(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts: ApplyOp
       b.capHits = 0;
     }
     if (res.timedOut && o.soft) {
-      b.capHits++;
+      // Only a brew upgrade counts toward the breaker: a slow read (brew deps, launchctl, tailscale status) is not an upgrade that hit the time box.
+      if (argv[0] === cfg.brew && argv[1] === "upgrade") b.capHits++;
       log.push(`  TIMEOUT after ${o.timeoutMs ?? cfg.timeoutMs} ms: ${argv.join(" ")} — killed with the processes seen under it; skipped, the run goes on`);
       return res;
     }
@@ -474,6 +475,14 @@ async function runApply(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts: ApplyOp
       if (findCheck(cfg.releaseChecks, n)?.builtin && (await brewView(rcEnv.exec, cfg.brew, n, kegDirFor(rcEnv)))?.optState !== "ok") {
         log.push(`  ${last(n)}: the opt link is not read as on a keg — not relinked or restarted here, left to its release check`);
         b.rcNotes.push(`${last(n)} not relinked or restarted, opt link not on a keg (left to its release check)`);
+        b.flagged = true;
+        skipped.add(n);
+        continue;
+      }
+      // A release other than the one the sweep authorized (brew moved on between the decision and the install): the rollback is the only step that may touch its links, and its owner restart the only restart.
+      if (rcPending.get(last(n))?.unauthorized) {
+        log.push(`  ${last(n)}: installed a release that is not the one decided on — not relinked or restarted here, left to its release check`);
+        b.rcNotes.push(`${last(n)} not relinked or restarted, not the release decided on (left to its release check)`);
         b.flagged = true;
         skipped.add(n);
         continue;
