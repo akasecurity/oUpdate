@@ -11689,6 +11689,11 @@ function runLooseJobs(ctx: Ctx): void {
       sc.noEnvIgnore = job.noEnvIgnore;
       dispatchScriptStages(sc, job.text, 0, true);
       carryWriteSpawn(ctx, sc);
+      // A stop of the line is dropped, but a scanner fault is a fault of this package's read, not of the line: the package is held, as the stage pass holds it.
+      if (sc.hold?.startsWith("scanner fault")) {
+        ctx.hold = sc.hold;
+        return;
+      }
       const rec = (ctx.wsFiles ??= new Set<string>());
       for (const k of [...sc.files, ...(sc.selfFiles ?? []), ...(sc.escFiles ?? [])]) rec.add(k);
     }

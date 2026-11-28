@@ -99,3 +99,12 @@ test("a main moved between two writer files and two bins, hooks named as the rev
     });
   expect(holds(mk("1.0.0", "docs/a.js"), mk("1.0.1", "docs/b.js"))).toBe(true);
 });
+
+// A runner word that names no bin of the package reads no self-run target: a main moved between two writer files then releases, as it does without the word.
+// (readSelfTargets is asked with a fresh empty list for it by the marker of a command a scanned file runs; the main record is for the package's own target list only.)
+test("a file that runs npx of another package beside the files that name both writers releases: no main is recorded for it", () => {
+  const body = WRITER + `cp.execSync("npx other-package");\n`;
+  const mk = (v: string, main: string): FileMap =>
+    files({ "package.json": JSON.stringify({ name: "p", version: v, main, scripts: { postinstall: NAMED } }), "x.js": body, "y.js": body, "docs/changed.js": "console.log(2)\n", "local.js": "1\n" });
+  expect(holds(mk("1.0.0", "x.js"), mk("1.0.1", "y.js"))).toBe(false);
+});
