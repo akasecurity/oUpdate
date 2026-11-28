@@ -121,10 +121,38 @@ const rename = (n1: string, n2: string, run: string[], where: "postinstall" | "g
 for (const [n1, n2] of [["p", "q"], ["q", "p"], ["p", "P"], ["@s/p", "@t/p"]] as const)
   for (const run of [["npx", "p"], ["npx", "p@1"], ["npm", "exec", "--", "p"], ["npm", "exec", "--", "p@1"], ["npx", "@s/p"]])
     for (const where of ["postinstall", "gyp", "deps-gyp", "gyp+prepare"] as const)
-      test(`a package renamed ${n1} -> ${n2} holds, the install runs ${run.join(" ")} (${where})`, () => {
+      test(`a package renamed ${n1} -> ${n2} holds through the name in the bin stamp (${run.join(" ")}, ${where}; some rows have no self-run on either side and pin the stamp alone)`, () => {
         expect(rename(n1, n2, run, where)).toBe(true);
       });
 test("control: the same name and the same bin release when the install runs the same files", () => {
   expect(rename("p", "p", ["npx", "p"], "postinstall")).toBe(false);
   expect(rename("p", "p", ["npx", "p"], "gyp")).toBe(false);
+});
+
+// A manifest field that names a file the reader runs without a hook or a gyp file: `prebuild.test` (OUP-373 review round 5). The files the view read are a reason to
+// compare the stamp: a self-run in them is the only record of a moved bin or a rename.
+const prebuild = (n1: string, n2: string, run: string[], dir: string, scripts: Record<string, string> | undefined, retarget: boolean) => {
+  const t = `require("child_process").execSync(${JSON.stringify(`node x.js && node y.js && ${run.join(" ")}`)});\n`;
+  const mk = (v: string, name: string, side: 0 | 1): FileMap =>
+    files({
+      "package.json": JSON.stringify({ name, version: v, prebuild: { test: `${dir}t.js` }, bin: { p: retarget && side ? "y.js" : "x.js" }, ...(scripts ? { scripts } : {}) }),
+      [`${dir}t.js`]: t,
+      "x.js": WRITER,
+      "y.js": WRITER,
+      "docs/changed.js": "console.log(2)\n",
+      "local.js": "1\n",
+    });
+  return holds(mk("1.0.0", n1, 0), mk("1.0.1", n2, retarget ? 1 : 0));
+};
+for (const [dir, scripts] of [["", undefined], ["sub/", undefined], ["", { test: "echo hi" }], ["", { prepack: "echo hi" }]] as [string, Record<string, string> | undefined][])
+  for (const run of [["npx", "p@1"], ["npx", "."], ["npm", "exec", "--", "p@1"]]) {
+    test(`a rename holds when only prebuild.test (${dir || "root"}) runs ${run.join(" ")}${scripts ? ` with ${Object.keys(scripts)[0]} only` : ""}`, () => {
+      expect(prebuild("p", "q", run, dir, scripts, false)).toBe(true);
+    });
+    test(`a bin retargeted between writer files holds when only prebuild.test (${dir || "root"}) runs ${run.join(" ")}${scripts ? ` with ${Object.keys(scripts)[0]} only` : ""}`, () => {
+      expect(prebuild("p", "p", run, dir, scripts, true)).toBe(true);
+    });
+  }
+test("control: prebuild.test with the same name and bin releases", () => {
+  expect(prebuild("p", "p", ["npx", "p@1"], "", undefined, false)).toBe(false);
 });
