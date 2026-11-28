@@ -1093,7 +1093,9 @@ function installClosureSignals(oldFiles: FileMap, newFiles: FileMap): Signal[] {
     const b = newFiles.get(k);
     if (!a || !b || !bytesEqual(a, b)) push(`file ${k}`);
   }
-  if ((oldV.hook || newV.hook) && oldV.binStamp !== newV.binStamp) push("bin");
+  // The bin stamp is compared whenever the install runs anything: an install hook, a gyp file the view read (the implicit node-gyp build of a binding.gyp at any depth, or one a hook reaches), any file the view read (a manifest field that names a file, such as `prebuild.test`, can run one), or a root binding.gyp or `gypfile: true`.
+  const installRuns = oldV.hook || newV.hook || oldV.gyp !== undefined || newV.gyp !== undefined || oldV.files.length > 0 || newV.files.length > 0 || otherInstallEntry(oldFiles, oldV.manifest) || otherInstallEntry(newFiles, newV.manifest);
+  if (installRuns && oldV.binStamp !== newV.binStamp) push("bin");
   // A self-run of a write-and-spawn file that moved: the reach holds both files on each side when a hook names them, so the move is in no reach comparison.
   if ((oldV.selfWs ?? []).join("\0") !== (newV.selfWs ?? []).join("\0")) push("self-run target");
   // A dependency floor that fell, or a spec we cannot read, changes which
