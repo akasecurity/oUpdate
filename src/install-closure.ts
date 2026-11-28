@@ -15570,8 +15570,9 @@ function stampBin(root: Record<string, unknown>): string {
     const value = (directories as Record<string, unknown>).bin;
     if (value !== undefined) directoriesBin = value;
   }
-  // The package name is part of the stamp: a self-run by name (`npx p`, `npm exec -- p@1`) runs the package whose name it is, so a rename moves it. A name that is not a string is no name to npm: it is not compared.
-  return JSON.stringify({ bin: root.bin === undefined ? null : root.bin, directoriesBin, name: typeof root.name === "string" ? root.name : null });
+  // The package name is part of the stamp: a self-run by name (`npx p`, `npm exec -- p@1`) runs the package whose name it is, so a rename moves it. With a string bin npm names the bin String(name) for a truthy name that is not a string (["q"] -> .bin/q, 2 -> .bin/2), so that is compared too; with any other bin a name that is not a string is no name to npm and is not compared.
+  const name = typeof root.name === "string" ? root.name : typeof root.bin === "string" && root.name ? String(root.name) : null;
+  return JSON.stringify({ bin: root.bin === undefined ? null : root.bin, directoriesBin, name });
 }
 
 // npm links a package's bins into the node_modules/.bin of the package that installs it before install and postinstall run, and that

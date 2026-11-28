@@ -227,14 +227,14 @@ export async function releaseChecksSection(rt: RunCtx) {
        * limit an undecided check ends with no verdict (notified, the new version kept, after owed);
        * a decided one is never ended by it: it is notified and goes on waiting.
        */
-      const ownerWait = async (why: string, note: string) => {
+      const ownerWait = async (why: string, note: string, waitsFor: "owner" | "rollback" = "owner") => {
         p.unresolvedWaits = (p.unresolvedWaits ?? 0) + 1;
         await savePending(rcEnv, p);
         const n = p.unresolvedWaits;
         if (n < UNRESOLVED_WAIT_RUNS || (p.verdict && n > UNRESOLVED_WAIT_RUNS) || stoppingNow() || rc.builtin) {
           keep = true;
           log.push(`  release check ${f}: ${why} — the check waits for a later run (${n}/${UNRESOLVED_WAIT_RUNS})`);
-          b.rcNotes.push(`${f} ${to} check waits for its owner (${note})`);
+          b.rcNotes.push(`${f} ${to} check waits for its ${waitsFor} (${note})`);
           return;
         }
         if (p.verdict) {
@@ -337,7 +337,7 @@ export async function releaseChecksSection(rt: RunCtx) {
         b.rcNotes.push(d.flag);
       }
       if (d.wait && d.failed && d.note) b.rcNotes.push(d.note);
-      if (d.wait) await ownerWait(d.waitFor === "rollback" ? `its rollback could not be done yet (${d.waitWhy ?? "busy"})` : `its owner could not be ${d.failed ? "restarted" : "restarted yet"} (${d.waitWhy ?? "busy"})`, d.waitWhy ?? "busy");
+      if (d.wait) await ownerWait(d.waitFor === "rollback" ? `its rollback could not be done yet (${d.waitWhy ?? "busy"})` : `its owner could not be ${d.failed ? "restarted" : "restarted yet"} (${d.waitWhy ?? "busy"})`, d.waitWhy ?? "busy", d.waitFor === "rollback" ? "rollback" : "owner");
       else if (d.note) b.rcNotes.push(d.note);
       if (d.failed) {
         b.failed.push(d.failed);

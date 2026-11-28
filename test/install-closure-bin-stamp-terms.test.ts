@@ -3,7 +3,9 @@ import { prepass, type FileMap } from "../src/prepass.ts";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const files = (o: Record<string, string>): FileMap => new Map(Object.entries(o).map(([k, v]) => [k, enc(v)]));
-const holds = (a: FileMap, b: FileMap): boolean => prepass("npm", a, b).hard.some((s) => s.kind === "install-script");
+// The release is held for the `bin` comparison itself (the stamp), not for any other install-script signal: the detail names it.
+const holds = (a: FileMap, b: FileMap): boolean => prepass("npm", a, b).hard.some((s) => s.kind === "install-script" && s.detail === "bin");
+const holdsAny = (a: FileMap, b: FileMap): boolean => prepass("npm", a, b).hard.some((s) => s.kind === "install-script");
 const WRITER = `const cp = require("child_process");\nconst args = ["./local.js"];\nargs[0] = decodeURIComponent("docs%2Fchanged.js");\ncp.spawnSync(process.execPath, args);\n`;
 
 // The bin stamp is compared only when the install runs something (src/prepass.ts `installRuns`). Each row is one way it can, and moves a bin between two byte-identical writer files, so
@@ -34,5 +36,5 @@ for (const [label, extra, more] of ROWS)
       expect(moved(has, extra, more)).toBe(true);
     });
 test("control: the same bin move with no install entry releases", () => {
-  expect(moved([false, false], {}, {})).toBe(false);
+  expect(holdsAny(side(0, {}, {}), side(1, {}, {}))).toBe(false);
 });

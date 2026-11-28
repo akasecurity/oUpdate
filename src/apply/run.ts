@@ -480,7 +480,8 @@ async function runApply(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts: ApplyOp
         continue;
       }
       // A release other than the one the sweep authorized (brew moved on between the decision and the install): the rollback is the only step that may touch its links, and its owner restart the only restart.
-      if (rcPending.get(last(n))?.unauthorized) {
+      // Only while its release check is configured: with the check removed from the config the record is dropped by the release phase with no rollback, so nothing else would ever relink it.
+      if (findCheck(cfg.releaseChecks, n) && rcPending.get(last(n))?.unauthorized) {
         log.push(`  ${last(n)}: installed a release that is not the one decided on — not relinked or restarted here, left to its release check`);
         b.rcNotes.push(`${last(n)} not relinked or restarted, not the release decided on (left to its release check)`);
         b.flagged = true;

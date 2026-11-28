@@ -85,6 +85,9 @@ describe("the turn in the canary order", () => {
     for (const n of names) expect(/^[A-Za-z0-9._+-]+\.json$/.test(n)).toBe(true);
     expect(recordName("1.80/2")).not.toBe(recordName("1.80_2"));
     expect(recordName("1.80.2")).toBe("1.80.2.json");
+    // A lone low surrogate is a name of its own, not U+FFFD (fails at tailscale-sweep.ts `cp <= 0xdfff` if the range stops at 0xdbff and low surrogates take the Buffer path).
+    expect(recordName("1.0\uDC00")).not.toBe(recordName("1.0\uFFFD"));
+    expect(recordName("1.0\uD800")).not.toBe(recordName("1.0\uFFFD"));
   });
   test("isTailscaleCask: the app, bare or tap-qualified; nothing else", () => {
     expect(["tailscale", "tailscale-app", "homebrew/cask/tailscale-app"].map(isTailscaleCask)).toEqual([true, true, true]);
@@ -481,6 +484,15 @@ describe("the apply run holds tailscale until it is this host's turn", () => {
     expect(r.text).toContain("tailscale: installed a release that is not the one decided on — not relinked or restarted here, left to its release check");
     expect(r.text).not.toContain("restarted: tailscale");
   });
+  test("an unauthorized pending record whose release check is no longer configured does not keep its upgrade from being relinked: no check is left to relink it, and the record is dropped", async () => {
+    // Fails at src/apply/run.ts (the unauthorized skip in the relinkable loop): it skipped on the record alone, so with the check removed from the config nothing relinked the keg and nothing rolled it back.
+    const rec = { formula: "tailscale", full: "tailscale", rack: "/brew/Cellar/tailscale", from: "1.78.0", to: "1.81.0", gated: "1.80.2", beforeRan: false, at: "x", upgradeStarted: true, upgraded: true, verdict: "fail", unauthorized: true, after: "skip", trusted: false, why: "w", tail: ["w"] };
+    const r = await run({ host: "bonus", dry: false, risky: [], formulas: "tailscale", candidates: ["1.80.2"], installed: "1.80.2", files: { "/state.test/release-checks/pending/tailscale.json": JSON.stringify(rec) } });
+    expect(r.text).toContain("release check tailscale: no longer configured — its record is removed");
+    expect(r.text).not.toContain("not the one decided on");
+    expect(r.text).not.toContain("not the release decided on");
+    expect(r.text).not.toContain("not relinked or restarted");
+  });
   test("the sweep lock is taken before anything else reads this host's tailscale state, and its real error is reported", async () => {
     const r = await run({ host: "bonus", dry: false, lock: "throws" });
     expect(r.text).toContain("holding tailscale (tailscale sweep: the sweep lock could not be taken (EROFS: read-only file system))");
@@ -775,6 +787,9 @@ describe("the apply run holds tailscale until it is this host's turn", () => {
     // Fails at src/apply/run-release.ts (the ownerWait call: "its owner could not be restarted yet"): a rollback that waits is said to be a restart that waits.
     expect(first.text).toContain("release check tailscale: its rollback could not be done yet (the opt link could not be read");
     expect(first.text).not.toContain("its owner could not be restarted");
+    // Fails at src/apply/run-release.ts (the rcNotes line of ownerWait): a rollback that waits was summarized as a check that waits for its owner.
+    expect(first.text).toContain("tailscale 1.80.2 check waits for its rollback (the opt link could not be read");
+    expect(first.text).not.toContain("check waits for its owner");
     const kept = JSON.parse(first.files.get(PENDING_TS)!);
     expect(kept.rolledBack).toBeUndefined();
     expect(kept.ended).toBeUndefined();
