@@ -310,6 +310,9 @@ describe("env line: what the earlier readers counted stays counted, and the revi
     await onlyNew('#!/usr/bin/env --split-string "-u/opt/x/alias python3"');
     await onlyNew("#!/usr/bin/env --split-string=-u/opt/x/alias python3");
     await onlyNew('#!/usr/bin/env --split-string --split-string "-u/opt/x/alias python3"');
+    // A value only the inner split reveals: the outer value alone is a word with a blank in it.
+    await onlyNew('#!/usr/bin/env --split-string "--split-string=-u/opt/x/alias python3"');
+    await onlyNew('#!/usr/bin/env --split-string=--split-string\\_"-u/opt/x/alias python3"');
     await onlyNew("#!/usr/bin/env --split-string=--split-string=-u/opt/x/alias python3");
   });
   test("an option value is judged where only the structural read sees it: attached to its option, as a link to a launcher or a path that resolves nowhere", async () => {
@@ -358,11 +361,11 @@ describe("env line: what the earlier readers counted stays counted, and the revi
 
   test("a corpus of 3,000 env lines: the head counts every line either earlier reader counted", async () => {
     let seed = 20261128;
-    const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
+    const rnd = (n: number) => ((seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff) % n);
     const vocab = [
       "-S", "-i", "-u", "-C", "-P", "-iS", "-iSdash", "-vP/opt/evil", "--split-string", "--split-string=python3", "--unset=/opt/x/alias", "--chdir=/missing", "--default-signal",
       "PATH=/usr/bin", "PATH=dash", "FOO=dash", "FOO=bar", "python3", "dash", "bash", "ksh", "run", "X", "missingcmd", "/opt/x/alias", "/opt/x/linkdash", "/missing/x",
-      "/usr/bin/python3", "/usr/bin/python\\3", "'a", "dash", "b'", 'x\\', "dash", "-e", "--exec=dash", "--", "awk", '"dash"', "'dash'", "ruby", "perl", "env", "/usr/bin/env",
+      "/usr/bin/python3", "/usr/bin/python\\3", "'a", "dash", "b'", 'x\\', "dash", "-e", "--exec=dash", "--", "awk", '"dash"', "'dash'", "ruby", "perl", "env", "/usr/bin/env", "/usr/bin/ruby", "npm", "yarn", "bunx", "nawk", "pm2",
     ];
     const lines: string[] = [];
     while (lines.length < 3000) {
@@ -373,6 +376,9 @@ describe("env line: what the earlier readers counted stays counted, and the revi
     }
     // Lines only the second reader counts: a command found nowhere, a quote removed inside -S, a link to a program of another family.
     lines.push("#!/usr/bin/env missingcmd", '#!/usr/bin/env -S "dash"', "#!/usr/bin/env -S 'dash' -e", "#!/usr/bin/env ruby", "#!/usr/bin/env -S ruby -w");
+    // The second reader's own launcher list and interpreter list matter: these lines are counted by it and by no other reader.
+    for (const l of ["#!/usr/bin/env /usr/bin/ruby", "#!/usr/bin/env npm", "#!/usr/bin/env -S pm2 x", "#!/usr/bin/env yarn", "#!/usr/bin/env bunx", "#!/usr/bin/env nawk"]) expect({ l, second: second(l) }).toEqual({ l, second: true });
+    expect(new Set(lines).size).toBeGreaterThan(2100);
     const missed: string[] = [];
     let n1 = 0;
     let n2 = 0;
