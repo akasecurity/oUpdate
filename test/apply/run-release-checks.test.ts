@@ -431,6 +431,15 @@ describe("release checks: review fixes (OUP review of feat/release-checks)", () 
     expect(r.calls.some((c) => c.startsWith("brew upgrade"))).toBe(false);
     expect(r.res.log).toContain("  good-a: not upgraded this run — it depends on gadget, which a release check gates; retried next run");
   });
+  test("2: two dependency reads that time out are not two upgrades that hit the time box: the gated upgrade still runs", async () => {
+    // Fails at src/apply/run.ts (`if (res.timedOut && o.soft) { b.capHits++`): every soft timeout counted, so two slow `brew deps` reads opened the breaker and the gated formula's upgrade was skipped.
+    const r = await rcRun({
+      script: { formulas: "good-a good-b gadget", verbose: "good-a (1.0) < 1.1\ngood-b (1.0) < 1.1\nexample/tap/gadget (1.2.0) < 1.3.0", formulaTaps: { "good-a": "homebrew/core", "good-b": "homebrew/core", gadget: "example/tap" } },
+      answer: (l) => (l.startsWith("brew deps ") && (l.endsWith(" good-a") || l.endsWith(" good-b")) ? { rc: 124, out: "", err: "", timedOut: true } : undefined),
+    });
+    expect(r.calls).toContain("brew upgrade example/tap/gadget");
+    expect(r.res.log.join("\n")).not.toContain("in a row hit the");
+  });
   test("2: unreadable dependencies of a planned upgrade: held (fail closed) while a gated formula is outdated", async () => {
     const r = await rcRun({
       script: { formulas: "good-a gadget", verbose: "good-a (1.0) < 1.1\nexample/tap/gadget (1.2.0) < 1.3.0", formulaTaps: { "good-a": "homebrew/core", gadget: "example/tap" } },

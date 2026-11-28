@@ -197,6 +197,8 @@ export async function brewView(exec: Exec, brew: string, name: string, keg?: Keg
   // about the path (access, I/O): nothing is learned, and it is never taken for a missing link.
   const inCellar = async (path: string, version: string): Promise<"yes" | "no" | "unknown"> => {
     if (!keg) return "yes";
+    // A version is one folder name: "..", "../../etc" or "a/b" would be folded away by join() and read as a keg of the Cellar.
+    if (version === "." || version === ".." || version.includes("/")) return "no";
     if (!cellar) return "unknown";
     let real: string | undefined;
     if (keg.realPath) {
@@ -779,8 +781,10 @@ export interface Decision {
   flag?: string;
   /** The owner could not be restarted yet (busy): the record is kept for a later run. */
   wait?: boolean;
-  /** Why it waits (the owner restart's note). */
+  /** Why it waits (the owner restart's note, or the rollback's reason). */
   waitWhy?: string;
+  /** What is waiting when it is not the owner restart: the rollback, which could not read the link. */
+  waitFor?: "rollback";
   /** A stop arrived: nothing more was written; the record resumes from its last step. */
   stopped?: boolean;
 }
@@ -970,7 +974,7 @@ export async function resume(
     if (!rb.ok && rb.retry) {
       // Not decided: the link could not be read this time. The fail and its hold stand, the record stays, and the next run rolls back (flagged meanwhile).
       env.log.push(`  release check ${f}: rollback waits — ${rb.why}`);
-      return { wait: true, waitWhy: rb.why, note: `${f} ${p.to} FAIL, rollback waits (${rb.why.replaceAll(";", ",")})`, failed };
+      return { wait: true, waitFor: "rollback", waitWhy: rb.why, note: `${f} ${p.to} FAIL, rollback waits (${rb.why.replaceAll(";", ",")})`, failed };
     }
     if (!rb.ok) {
       env.log.push(`  release check ${f}: ROLLBACK FAILED — ${rb.why}`);

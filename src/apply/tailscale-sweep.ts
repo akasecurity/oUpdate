@@ -28,8 +28,18 @@ export interface SweepRecord {
 }
 
 export const recordDir = (stateDir: string) => join(stateDir, "tailscale-sweep");
-/** The file name of a version: every byte outside [A-Za-z0-9.+-] becomes `_` and two hex digits, so two versions never share a file (`_` itself is encoded). */
-export const recordName = (version: string) => `${Buffer.from(version).toString("latin1").replace(/[^A-Za-z0-9.+-]/g, (c) => `_${c.charCodeAt(0).toString(16).padStart(2, "0")}`)}.json`;
+/**
+ * The file name of a version: every byte outside [A-Za-z0-9.+-] becomes `_` and two hex digits, so two versions never share a file (`_` itself is encoded). A lone UTF-16 surrogate has no
+ * UTF-8 bytes (it would all read as U+FFFD, so two of them would share a file): it becomes `_s` and its four hex digits, which no byte escape can spell (s is not a hex digit).
+ */
+export const recordName = (version: string) =>
+  `${[...version]
+    .map((ch) => {
+      const cp = ch.codePointAt(0)!;
+      if (cp >= 0xd800 && cp <= 0xdfff) return `_s${cp.toString(16)}`;
+      return Buffer.from(ch).toString("latin1").replace(/[^A-Za-z0-9.+-]/g, (c) => `_${c.charCodeAt(0).toString(16).padStart(2, "0")}`);
+    })
+    .join("")}.json`;
 export const recordPath = (stateDir: string, version: string) => join(recordDir(stateDir), recordName(version));
 /** The lock a real run holds on this host from its turn check to its end: two runs of one host never decide the sweep at once. */
 export const sweepLockPath = (stateDir: string) => join(recordDir(stateDir), "lock");

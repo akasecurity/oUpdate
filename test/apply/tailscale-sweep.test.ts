@@ -10,7 +10,7 @@ import { ATTEMPTS, KILL_GRACE_MS, maxVerifyMs, parseArgs, PING_TIMEOUT_MS, RETRY
 import { execFile } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { brewView, failOptLink, installedAbove, invalidateRecord, loadPending, pruneOlderKegs, rollback, runCheck, staleSweepRecords, type ReleaseEnv } from "../../src/apply/release-checks.ts";
 import { fakeHost, fakeTypeB, testConfig } from "./host-fixture.ts";
 import { scripted } from "./helpers.ts";
@@ -346,8 +346,8 @@ describe("the verify and its record", () => {
 });
 
 describe("the apply run holds tailscale until it is this host's turn", () => {
-  async function run(o: { host: string; read?: string[]; reader?: string; candidate?: string; candidates?: string[]; dry?: boolean; casks?: string; formulas?: string; lock?: boolean | "throws"; builtin?: boolean; files?: Record<string, string>; installedList?: string; installed?: string; moveAfterCellar?: string; upgradeRc?: number; risky?: string[]; deps?: Record<string, string>; daemon?: "none" | "stopped" | "old"; startUpgraded?: boolean; noOpt?: boolean; optAfter?: "gone" | "unread"; optAfterUpgrade?: boolean; unreadOpt?: boolean; linkedDir?: boolean; currentAfterCellar?: string; failRead?: string[]; failRemove?: string[]; stoppedLabel?: string; statusRc?: number; failWrite?: string[]; lsof?: string[]; ps?: Record<string, { comm?: string; command?: string; ppid?: string }> }) {
-    const h = fakeHost({ formulas: o.formulas ?? "tailscale", verbose: "tailscale (1.78.0) < 1.80.2\ngood-a (1.0) < 1.1", formulaTaps: { tailscale: "homebrew/core", "good-a": "homebrew/core" }, dirs: ["/brew/Cellar", "/brew/Cellar/tailscale/1.78.0", ...(o.linkedDir ? ["/brew/var/homebrew/linked"] : [])], ...(o.daemon === "none" ? { ...(o.files ? { files: o.files } : {}) } : { files: { "/Library/LaunchDaemons/sh.brew.tailscale.plist": "", ...o.files } }), ...(o.upgradeRc ? { upgradeRc: { tailscale: o.upgradeRc } } : {}), ...(o.lsof ? { lsof: o.lsof, ps: o.ps } : {}), ...(o.failWrite ? { failWrite: o.failWrite } : {}), ...(o.failRemove ? { failRemove: o.failRemove } : {}), ...(o.failRead ? { failRead: o.failRead } : {}), ...(o.deps ? { deps: o.deps } : {}), ...(o.installedList ? { answers: { "brew list --formula --full-name": { rc: 0, out: o.installedList } } } : {}), ...(o.casks ? { casks: o.casks, caskTaps: { [o.casks]: "homebrew/cask" } } : {}) });
+  async function run(o: { reviewed?: string; host: string; read?: string[]; reader?: string; candidate?: string; candidates?: string[]; dry?: boolean; casks?: string; formulas?: string; lock?: boolean | "throws"; builtin?: boolean; files?: Record<string, string>; installedList?: string; installed?: string; moveAfterCellar?: string; upgradeRc?: number; risky?: string[]; deps?: Record<string, string>; daemon?: "none" | "stopped" | "old"; startUpgraded?: boolean; noOpt?: boolean; optAfter?: "gone" | "unread"; optAfterUpgrade?: boolean; unreadOpt?: boolean; linkedDir?: boolean; currentAfterCellar?: string; failRead?: string[]; failRemove?: string[]; stoppedLabel?: string; statusRc?: number; failWrite?: string[]; lsof?: string[]; ps?: Record<string, { comm?: string; command?: string; ppid?: string }> }) {
+    const h = fakeHost({ formulas: o.formulas ?? "tailscale", verbose: `tailscale (1.78.0) < ${o.reviewed ?? "1.80.2"}\ngood-a (1.0) < 1.1`, formulaTaps: { tailscale: "homebrew/core", "good-a": "homebrew/core" }, dirs: ["/brew/Cellar", "/brew/Cellar/tailscale/1.78.0", ...(o.linkedDir ? ["/brew/var/homebrew/linked"] : [])], ...(o.daemon === "none" ? { ...(o.files ? { files: o.files } : {}) } : { files: { "/Library/LaunchDaemons/sh.brew.tailscale.plist": "", ...o.files } }), ...(o.upgradeRc ? { upgradeRc: { tailscale: o.upgradeRc } } : {}), ...(o.lsof ? { lsof: o.lsof, ps: o.ps } : {}), ...(o.failWrite ? { failWrite: o.failWrite } : {}), ...(o.failRemove ? { failRemove: o.failRemove } : {}), ...(o.failRead ? { failRead: o.failRead } : {}), ...(o.deps ? { deps: o.deps } : {}), ...(o.installedList ? { answers: { "brew list --formula --full-name": { rc: 0, out: o.installedList } } } : {}), ...(o.casks ? { casks: o.casks, caskTaps: { [o.casks]: "homebrew/cask" } } : {}) });
     const listDir = h.fs.listDir;
     h.fs.listDir = async (d) => (d.startsWith("/state.test/release-checks") || d === "/state.test/tailscale-sweep" ? [...h.files.keys()].filter((k) => k.startsWith(`${d}/`)).map((k) => k.slice(d.length + 1)) : listDir(d));
     // The installed keg's directory is there (brew's view only counts a keg that is in the Cellar).
@@ -473,6 +473,13 @@ describe("the apply run holds tailscale until it is this host's turn", () => {
     expect(r.brew).toContain("brew link tailscale");
     expect([...r.files.keys()].filter((k) => k.includes("tailscale-sweep"))).toEqual([]);
     expect([...r.files.keys()].some((k) => k.includes("release-checks/holds/tailscale"))).toBe(true);
+  });
+  test("a release that is not the one decided on is neither relinked nor restarted by the generic step: its rollback is the only step that touches the link", async () => {
+    // Fails at src/apply/run.ts (the relinkable loop of "relink and restart", which only skips a formula whose opt link is not ok): the unauthorized keg was relinked and its daemon restarted onto it.
+    const r = await run({ host: "bonus", dry: false, candidates: ["1.80.2"], reviewed: "1.81.0", installed: "1.81.0", linkedDir: true });
+    expect(r.text).not.toContain("upgraded but NOT linked");
+    expect(r.text).toContain("tailscale: installed a release that is not the one decided on — not relinked or restarted here, left to its release check");
+    expect(r.text).not.toContain("restarted: tailscale");
   });
   test("the sweep lock is taken before anything else reads this host's tailscale state, and its real error is reported", async () => {
     const r = await run({ host: "bonus", dry: false, lock: "throws" });
@@ -765,6 +772,9 @@ describe("the apply run holds tailscale until it is this host's turn", () => {
     expect(first.text).not.toContain("uninstall tailscale");
     expect(first.text).toContain("rollback waits — the opt link could not be read — nothing is uninstalled, the rollback is asked again next run");
     expect(first.text).not.toContain("ROLLBACK FAILED");
+    // Fails at src/apply/run-release.ts (the ownerWait call: "its owner could not be restarted yet"): a rollback that waits is said to be a restart that waits.
+    expect(first.text).toContain("release check tailscale: its rollback could not be done yet (the opt link could not be read");
+    expect(first.text).not.toContain("its owner could not be restarted");
     const kept = JSON.parse(first.files.get(PENDING_TS)!);
     expect(kept.rolledBack).toBeUndefined();
     expect(kept.ended).toBeUndefined();
@@ -1291,5 +1301,37 @@ describe("pruning older kegs after a pass", () => {
     const live = env({ names: ["1.60.0", "1.62.0"], live: "1.62.0" });
     await pruneOlderKegs(live.e, P);
     expect(live.rm()).toEqual(["/bin/rm -rf /c/Cellar/tailscale/1.60.0"]);
+  });
+});
+
+describe("brewView: a version that is not one path segment names no keg", () => {
+  test("a linked_keg of ../../etc is not the keg in use, with or without the opt link", async () => {
+    // Fails at src/apply/release-checks.ts inCellar (`real === join(cellar, short, version)`): join() folds the ".." away, so the path equals the Cellar's own folder for that version.
+    const view = async (linked: string, installed: string[]) => {
+      const exec: Exec = async (argv) => {
+        const line = argv.join(" ");
+        if (line === "brew info --json=v2 tailscale") return { rc: 0, out: JSON.stringify({ formulae: [{ name: "tailscale", full_name: "tailscale", linked_keg: linked, installed: installed.map((version) => ({ version })) }] }), err: "" };
+        if (line === "brew --prefix") return { rc: 0, out: "/c\n", err: "" };
+        if (line === "brew --cellar") return { rc: 0, out: "/c/Cellar\n", err: "" };
+        return { rc: 1, out: "", err: "" };
+      };
+      return brewView(exec, "brew", "tailscale", { isDir: async () => true, realPath: async (p) => resolvePath(p) });
+    };
+    expect((await view("../../etc", ["1.78.0", "1.80.2"]))?.current).toBeUndefined();
+    expect((await view("..", ["1.78.0", "1.80.2"]))?.current).toBeUndefined();
+    expect((await view("1.80.2", ["1.78.0", "1.80.2"]))?.current).toBe("1.80.2");
+  });
+});
+
+describe("recordName: two versions never share a file", () => {
+  test("lone UTF-16 surrogates are told apart, and every other name is as before", () => {
+    // Fails at src/apply/tailscale-sweep.ts recordName (Buffer.from on the whole string): each lone surrogate becomes U+FFFD, so these two names were equal.
+    expect(recordName("1.0\uD800")).not.toBe(recordName("1.0\uDC00"));
+    expect(recordName("1.0\uD800")).not.toBe(recordName("1.0�"));
+    expect(recordName("1.0\uD800x")).not.toBe(recordName("1.0\uD801x"));
+    // A pair is one character and keeps its UTF-8 bytes; ASCII and an escaped underscore are unchanged.
+    expect(recordName("1.0é")).toBe("1.0_c3_a9.json");
+    expect(recordName("1.0\u{1F600}")).toBe("1.0_f0_9f_98_80.json");
+    expect(recordName("a_b+1.0-x")).toBe("a_5fb+1.0-x.json");
   });
 });
