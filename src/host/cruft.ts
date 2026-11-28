@@ -205,6 +205,8 @@ const unquoted = (w: string): string => w.replace(/["']/g, "");
 type EnvState = { cmd: boolean; path: boolean; bad: boolean };
 /** The long options env has; any other word that starts with two dashes is counted (env may read it as a cluster of short options). */
 const LONG_ENV_OPTIONS = new Set(["--ignore-environment", "--null", "--debug", "--version", "--help", "--unset", "--chdir", "--argv0", "--split-string", "--default-signal", "--ignore-signal", "--block-signal", "--list-signal-handling"]);
+/** The commands whose arguments are no code, as the exact path an env line writes them (no `..`, no other directory, no bare name: a program of that name anywhere else is no such utility). */
+const HARMLESS_COMMANDS = new Set(["/usr/bin/true", "/usr/bin/false"]);
 /** The most -S values nested in each other that are read; one more is counted, not read. */
 const MAX_S_DEPTH = 6;
 /**
@@ -237,6 +239,8 @@ function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): v
       st.bad = true;
       return;
     }
+    // env expands ${VAR} inside a -S value: the words it runs are not the words written here.
+    if (value.includes("${")) st.bad = true;
     // A path as written (quotes, backslashes) is judged too, whatever the split makes of it.
     for (const r of value.split(/\s+/)) if (r.startsWith("/") && (r !== unquoted(r) || r.includes("\\"))) out.push({ w: r });
     parseEnv(splitS(value), out, st, depth + 1);
@@ -251,6 +255,8 @@ function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): v
       const eq = t.indexOf("=");
       // A long option env does not have (`--Sdash`, `--iSdash`, `--P/opt/evil`) may be read as `-` and a cluster of short options: counted.
       if (!LONG_ENV_OPTIONS.has(eq > 0 ? t.slice(0, eq) : t)) st.bad = true;
+      // A changed working directory: the command reads its project files from there (.Rprofile, ipython_config.py, tsconfig, bunfig.toml, .env).
+      if (t === "--chdir" || t.startsWith("--chdir=")) st.bad = true;
       if (t === "--ignore-environment") st.path = true;
       if (eq > 0) {
         // --x=value: the value is judged (a --default-signal value is only ever given after the "=").
@@ -277,6 +283,7 @@ function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): v
       for (let k = 0; k < body.length; k++) {
         const c = body[k]!;
         if (c === "S") return takeS(rest(body.slice(k + 1)));
+        if (c === "C") st.bad = true;
         if ("uCPa".includes(c)) {
           let v = body.slice(k + 1);
           if (v === "") v = tokens[++i] ?? "";
@@ -291,12 +298,20 @@ function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): v
     const eq = t.indexOf("=");
     if (eq > 0 && !t.startsWith("/")) {
       if (t.slice(0, eq) === "PATH") st.path = true;
+      // Only what a judged plist may set stays adopted (TZ, a plain LANG, LC_ALL or LC_CTYPE; PATH is read above): any other variable may make a shell, an interpreter or the loader run
+      // other code first (BASH_ENV, ZDOTDIR, PYTHONPATH, NODE_OPTIONS, RUBYOPT, PERL5OPT, SHELLOPTS, LD_*, DYLD_* ...), so the list is the plist's and not a list of names to catch.
+      if (t.slice(0, eq) !== "PATH" && envProblem({ [t.slice(0, eq)]: t.slice(eq + 1) }) !== undefined) st.bad = true;
       word(t);
       continue;
     }
     // The command word, and every word after it: each as written, and by its name with the quotes removed.
     // An env that runs env reads its own options again: counted.
     if (base(t).toLowerCase() === "env") st.bad = true;
+    // A command with a slash that does not start with one is a path from the working directory (which -C can change): nothing here says what it is.
+    if (t.includes("/") && !t.startsWith("/")) st.bad = true;
+    // An interpreter that is given its program in the arguments env passes on.
+    // A command that is no known interpreter (R, groovy, tsx, ipython, jruby ...) may read code from anything it is given (a script name, a path, an option): any argument is counted, except for the system's true and false, written as their exact paths.
+    if (runsOther(base(t)) ? runsProgramFromArgs(base(t), tokens.slice(i + 1)) : tokens.length > i + 1 && !HARMLESS_COMMANDS.has(t)) st.bad = true;
     for (const r of tokens.slice(i)) {
       const first = !st.cmd && r === t;
       if (first) st.cmd = true;
@@ -304,6 +319,16 @@ function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): v
     }
     return;
   }
+}
+/**
+ * Whether an interpreter is given a program to run in its arguments rather than reading its script: `bash -c x`, `perl -e x`, `node --eval=x`, `python3 -m mod`, `ruby -rlib`,
+ * `bash --rcfile f`, or a file (`python3 ./evil.py`). Only a short list of options that change no program is let through: a shell's -e -f -u -x -v -n (not -l: a login shell reads its startup files) and a lone
+ * -u -B -s -O -q -w -T -W of the others (not -I: an attached directory is code the interpreter loads); every other option (a long one, one with a digit, any other letter) and every word that is not an option is counted. Overcount is fine; a skipped line is a false green.
+ */
+function runsProgramFromArgs(interp: string, args: string[]): boolean {
+  const shell = /^(ba|z|da|k|a|c|tc)?sh$/i.test(interp);
+  const harmless = shell ? /^[-+][efuxvn]+$/ : /^-[uBsOqwTW]+$/;
+  return args.some((a) => !harmless.test(a));
 }
 /** The program words of a #! line as the first reader (OUP-370) took them: the interpreter, and for env every word after it as written. */
 function shebangWordsOld(head: string): Word[] {
@@ -351,7 +376,11 @@ function shebangWordsRound2(head: string): Word[] {
 function shebangWords(head: string): { words: Word[]; count: boolean } {
   const words = [...shebangWordsOld(head), ...shebangWordsRound2(head)];
   const raw = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
-  if (raw[0] === undefined || base(raw[0]).toLowerCase() !== "env") return { words, count: false };
+  if (raw[0] === undefined) return { words, count: false };
+  if (base(raw[0]).toLowerCase() !== "env") {
+    // An interpreter given a program in its arguments (`bash -c exec ...`, `perl -e ...`) runs that, not the script: counted.
+    return { words, count: runsProgramFromArgs(base(raw[0]), raw.slice(1)) };
+  }
   const st: EnvState = { cmd: false, path: false, bad: false };
   parseEnv(raw.slice(1), words, st, 0);
   return { words, count: st.path || st.bad };
@@ -404,6 +433,8 @@ async function badInterpreter(fs: CruftFs, wordList: Word[], dirList: string[] =
     const real = await fs.realPath(w);
     if (real === undefined || LAUNCHERS.test(base(real))) return true;
     if (runsOther(base(w)) && runsOther(base(real)) && family(base(w)) !== family(base(real))) return true;
+    // A name that is none of them linked to one (`/opt/x/bashalias` -> /bin/bash): the family of a name that is not known cannot be compared, so it is counted.
+    if (!runsOther(base(w)) && runsOther(base(real))) return true;
   }
   return false;
 }

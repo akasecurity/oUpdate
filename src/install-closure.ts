@@ -44,7 +44,7 @@ export interface InstallView {
   gyp?: string;
   // Set when a preinstall, install, postinstall, or prepare script is non-empty.
   hook: boolean;
-  // package.json `bin` and `directories.bin`, compared whenever the install runs anything (a hook, or a gyp file the view read; see prepass).
+  // package.json `bin`, `directories.bin` and a string `name`, compared whenever the install runs anything (a hook, a gyp file the view read at any depth, any file the view read, or another install entry; see prepass).
   binStamp: string;
   // Set only when a widening happened (every file, the whole package, a hook's reach, a same or named directory): the same view read
   // with those widenings left out. What a manifest field (main, bin) or a runner reaches by name shows there, where the widening puts every file on
@@ -15570,8 +15570,8 @@ function stampBin(root: Record<string, unknown>): string {
     const value = (directories as Record<string, unknown>).bin;
     if (value !== undefined) directoriesBin = value;
   }
-  // The package name is part of the stamp: a self-run by name (`npx p`, `npm exec -- p@1`) runs the package whose name it is, so a rename moves it.
-  return JSON.stringify({ bin: root.bin === undefined ? null : root.bin, directoriesBin, name: root.name === undefined ? null : root.name });
+  // The package name is part of the stamp: a self-run by name (`npx p`, `npm exec -- p@1`) runs the package whose name it is, so a rename moves it. A name that is not a string is no name to npm: it is not compared.
+  return JSON.stringify({ bin: root.bin === undefined ? null : root.bin, directoriesBin, name: typeof root.name === "string" ? root.name : null });
 }
 
 // npm links a package's bins into the node_modules/.bin of the package that installs it before install and postinstall run, and that

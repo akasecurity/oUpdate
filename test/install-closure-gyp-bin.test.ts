@@ -156,3 +156,11 @@ for (const [dir, scripts] of [["", undefined], ["sub/", undefined], ["", { test:
 test("control: prebuild.test with the same name and bin releases", () => {
   expect(prebuild("p", "p", ["npx", "p@1"], "", undefined, false)).toBe(false);
 });
+
+// npm reads a name only when it is a string: a number, array or object is no name, so changing it moves no self-run and the stamp does not compare it.
+test("a name that is not a string is no name: changing it releases", () => {
+  // Fails at src/install-closure.ts stampBin (`name: root.name === undefined ? null : root.name`): any changed value of `name` moved the stamp.
+  for (const [a, b] of [[1, 2], [[1], [2]], [{ x: 1 }, { x: 2 }], [true, false]] as const) expect({ a, b, held: rename(a as never, b as never, ["npx", "p"], "postinstall") }).toEqual({ a, b, held: false });
+  // And a real rename still holds.
+  expect(rename("p", "q", ["npx", "p"], "postinstall")).toBe(true);
+});
