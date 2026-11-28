@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { cruftCount } from "../src/host/cruft.ts";
 
-const owned = "#!/bin/sh\n# owner: me\n";
+const owned = "#!/opt/x/tool\n# owner: me\n";
 const ELF = "\u0000ELF";
 type Over = {
   argv: string[];
@@ -79,7 +79,7 @@ describe("a script whose #! line runs a launcher through env", () => {
     test(`${line} is counted`, async () => {
       expect(await script(line)).toBe(1);
     });
-  for (const line of ["#!/bin/sh", "#!/usr/bin/env bash", "#!/usr/bin/env -S python3 -u", "#!/usr/bin/env -i FOO=bar bash"])
+  for (const line of ["#!/opt/x/tool", "#!/usr/bin/env bash", "#!/usr/bin/env -S python3 -u", "#!/usr/bin/env -i FOO=bar bash"])
     test(`control: ${line} is adopted`, async () => {
       expect(await script(line)).toBe(0);
     });
@@ -153,10 +153,55 @@ describe("an env word looked up on a known PATH", () => {
   test("the PATH of the plist decides where the word is looked up: /usr/bin is not searched when the PATH is /usr/local/bin", async () => {
     expect(await script("#!/usr/bin/env run", { links: { "/usr/bin/run": "/bin/dash" }, env: { PATH: "/usr/local/bin" } })).toBe(0);
   });
-  test("control: a bare word that is nowhere on the PATH is adopted", async () => {
-    expect(await script("#!/usr/bin/env run", { links: { "/opt/other/run": "/bin/dash" }, env: { PATH: "/usr/bin" } })).toBe(0);
+  test("a link in a dir the PATH does not name is not looked at: the word is found nowhere, so it is counted", async () => {
+    expect(await script("#!/usr/bin/env run", { links: { "/opt/other/run": "/bin/dash" }, env: { PATH: "/usr/bin" }, missing: (p) => p.endsWith("/run") })).toBe(1);
+  });
+  test("a bare interpreter name that links to another family is counted (python3 -> bash, python3 -> env)", async () => {
+    expect(await script("#!/usr/bin/env python3", { links: { "/usr/bin/python3": "/bin/bash" } })).toBe(1);
+    expect(await script("#!/usr/bin/env python3", { links: { "/usr/bin/python3": "/usr/bin/env" } })).toBe(1);
   });
   test("control: a bare word that links to a plain program is adopted", async () => {
     expect(await script("#!/usr/bin/env run", { links: { "/usr/bin/run": "/usr/bin/true" } })).toBe(0);
+  });
+});
+
+describe("env options inside and around a -S value (OUP-372 review round 2)", () => {
+  // Each line runs dash. env reads the words of a -S value as options again, takes quotes off inside it, splits on a backslash-underscore, and takes -S in a cluster of flags.
+  for (const line of [
+    "#!/usr/bin/env -S -Sdash",
+    "#!/usr/bin/env -S -S'dash -e'",
+    "#!/usr/bin/env -S -i -Sdash",
+    "#!/usr/bin/env -Sdash\\_-e",
+    "#!/usr/bin/env -S dash\\_-e",
+    "#!/usr/bin/env -iSdash",
+    "#!/usr/bin/env -vS'da''sh'",
+    "#!/usr/bin/env --split-string=dash",
+    "#!/usr/bin/env --split-string dash -e",
+    "#!/usr/bin/env -S -u X dash",
+    "#!/usr/bin/env -u dash bash",
+    "#!/usr/bin/env -S FOO=1 dash",
+    "#!/usr/bin/env 'dash'",
+    "#!/usr/bin/env \"dash\"",
+  ])
+    test(`${line} is counted`, async () => {
+      expect(await script(line)).toBe(1);
+    });
+  test("a decoded name that does not resolve is counted: -Spy\\'thon3", async () => {
+    expect(await script("#!/usr/bin/env -Spy\\'thon3", { missing: (p) => p.includes("'") })).toBe(1);
+  });
+  test("a command word after an option value is the command: -S -u X missingcmd is counted", async () => {
+    expect(await script("#!/usr/bin/env -S -u X missingcmd", { missing: (p) => p.endsWith("/missingcmd") })).toBe(1);
+  });
+  test("control: an option value that resolves nowhere is not the command in a -S value either", async () => {
+    expect(await script("#!/usr/bin/env -S -u X python3", { missing: (p) => p.endsWith("/X") })).toBe(0);
+  });
+  test("a PATH the line sets changes where the command is looked up, so it is counted: -P and PATH=", async () => {
+    expect(await script("#!/usr/bin/env -P /opt/homebrew/bin python3")).toBe(1);
+    expect(await script("#!/usr/bin/env PATH=/opt/homebrew/bin python3")).toBe(1);
+    expect(await script("#!/usr/bin/env -S PATH=/opt/homebrew/bin python3")).toBe(1);
+  });
+  test("control: -i and a plain variable do not change the lookup", async () => {
+    expect(await script("#!/usr/bin/env -i FOO=bar python3")).toBe(0);
+    expect(await script("#!/usr/bin/env -S -i python3 -u")).toBe(0);
   });
 });
