@@ -79,7 +79,7 @@ describe("a script whose #! line runs a launcher through env", () => {
     test(`${line} is counted`, async () => {
       expect(await script(line)).toBe(1);
     });
-  for (const line of ["#!/opt/x/tool", "#!/usr/bin/env bash", "#!/usr/bin/env -S python3 -u", "#!/usr/bin/env FOO=bar bash", "#!/bin/sh"])
+  for (const line of ["#!/opt/x/tool", "#!/usr/bin/env bash", "#!/usr/bin/env -S python3 -u", "#!/usr/bin/env LANG=C bash", "#!/bin/sh"])
     test(`control: ${line} is adopted`, async () => {
       expect(await script(line)).toBe(0);
     });
@@ -198,7 +198,7 @@ describe("env options inside and around a -S value (OUP-372 review round 2)", ()
     expect(await script("#!/usr/bin/env -S PATH=/opt/homebrew/bin python3")).toBe(1);
   });
   test("control: a plain variable does not change the lookup", async () => {
-    expect(await script("#!/usr/bin/env FOO=bar python3")).toBe(0);
+    expect(await script("#!/usr/bin/env LANG=C python3")).toBe(0);
     expect(await script("#!/usr/bin/env -S python3 -u")).toBe(0);
   });
 });
@@ -355,7 +355,7 @@ describe("env line: what the earlier readers counted stays counted, and the revi
       await onlyNew(l);
   });
   test("controls: ordinary env lines stay adopted", async () => {
-    for (const l of ["#!/usr/bin/env python3", "#!/usr/bin/env --null python3", "#!/usr/bin/env FOO=bar python3", "#!/usr/bin/env -S python3 -u", "#!/usr/bin/env -u FOO python3"])
+    for (const l of ["#!/usr/bin/env python3", "#!/usr/bin/env --null python3", "#!/usr/bin/env LANG=C python3", "#!/usr/bin/env -S python3 -u", "#!/usr/bin/env -u FOO python3"])
       expect({ l, n: await counted(l) }).toEqual({ l, n: 0 });
   });
 
@@ -380,7 +380,8 @@ describe("env line: what the earlier readers counted stays counted, and the revi
     expect(await script(line(140))).toBe(1);
   });
   test("a line of absolute paths that resolve is counted past the lookup cap and adopted under it (by design past the 512 bytes the scan reads: it isolates the cap)", async () => {
-    const line = (k: number) => `#!/usr/bin/env true ${Array.from({ length: k }, (_, i) => `/q/p${i}`).join(" ")}`;
+    // /usr/bin/true is a utility that reads no code, so its arguments are no reason to count (OUP-374): only the cap counts the long line.
+    const line = (k: number) => `#!/usr/bin/env /usr/bin/true ${Array.from({ length: k }, (_, i) => `/q/p${i}`).join(" ")}`;
     expect(await script(line(100))).toBe(0);
     expect(await script(line(600))).toBe(1);
   });
@@ -432,7 +433,7 @@ describe("a line with many words or a long PATH is judged in bounded time (OUP-3
     const t = Date.now();
     const n = await count({
       argv: [OWN],
-      head: () => `#!/usr/bin/env true ${line}\n# owner: me\n`,
+      head: () => `#!/usr/bin/env /usr/bin/true ${line}\n# owner: me\n`,
       ...(dirs ? { env: { PATH: Array(dirs).fill("/bin").join(":") } } : {}),
       missing: (q) => (calls++, /\/a\d*$/.test(q)),
     });
