@@ -101,3 +101,30 @@ test("control: a nested gyp file that no install builds (gypfile: false) with a 
   // gypfile: false, no hook: nothing runs at install, so a bin move alone is no hold (the public main releases it too).
   expect(holds(mk("1.0.0", 0), mk("1.0.1", 1))).toBe(false);
 });
+
+// A self-run by the package's own name (`npx p`, `npm exec -- p@1`, `npx @s/p`) runs the package whose name it is: a rename between two byte-identical writer
+// files, with the bin text unchanged, switches the self-run on or off, so the name is part of what the stamp compares.
+const rename = (n1: string, n2: string, run: string[], where: "postinstall" | "gyp" | "deps-gyp" | "gyp+prepare") => {
+  const rs = run.join(" ");
+  const scripts = where === "postinstall" ? { postinstall: `node x.js && node y.js && ${rs}` } : where === "gyp+prepare" ? { prepare: "echo hi" } : undefined;
+  const mk = (v: string, name: string): FileMap =>
+    files({
+      "package.json": JSON.stringify({ name, version: v, bin: { p: "x.js" }, ...(scripts ? { scripts } : {}) }),
+      "x.js": WRITER,
+      "y.js": WRITER,
+      "docs/changed.js": "console.log(2)\n",
+      "local.js": "1\n",
+      ...(where === "postinstall" ? {} : { [where === "deps-gyp" ? "deps/binding.gyp" : "binding.gyp"]: gyp([...BOTH, run]) }),
+    });
+  return holds(mk("1.0.0", n1), mk("1.0.1", n2));
+};
+for (const [n1, n2] of [["p", "q"], ["q", "p"], ["p", "P"], ["@s/p", "@t/p"]] as const)
+  for (const run of [["npx", "p"], ["npx", "p@1"], ["npm", "exec", "--", "p"], ["npm", "exec", "--", "p@1"], ["npx", "@s/p"]])
+    for (const where of ["postinstall", "gyp", "deps-gyp", "gyp+prepare"] as const)
+      test(`a package renamed ${n1} -> ${n2} holds, the install runs ${run.join(" ")} (${where})`, () => {
+        expect(rename(n1, n2, run, where)).toBe(true);
+      });
+test("control: the same name and the same bin release when the install runs the same files", () => {
+  expect(rename("p", "p", ["npx", "p"], "postinstall")).toBe(false);
+  expect(rename("p", "p", ["npx", "p"], "gyp")).toBe(false);
+});
