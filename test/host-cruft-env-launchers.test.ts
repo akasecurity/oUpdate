@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { cruftCount } from "../src/host/cruft.ts";
 
 const ELF = "\u0000ELF";
-type Over = { head?: string; links?: Record<string, string>; env?: Record<string, string> };
+type Over = { head?: string; links?: Record<string, string>; env?: Record<string, string>; missing?: string[] };
 const OWN = "/hm/x/scripts/own.sh";
 // One plist under /hm/x/Library/LaunchAgents that runs OWN; the number of wrappers counted. Every file but the script and the plist is a binary.
 const count = (shebang: string, o: Over = {}) =>
@@ -15,7 +15,7 @@ const count = (shebang: string, o: Over = {}) =>
         if (meta) Object.assign(meta, { links: 1, dev: 1, ino: 1 });
         return p.endsWith(".plist") ? "<plist/>" : p === OWN ? `${shebang}\n# owner: me\n` : ELF;
       },
-      realPath: async (p: string) => o.links?.[p] ?? p,
+      realPath: async (p: string) => (o.missing?.includes(p) ? undefined : o.links?.[p] ?? p),
       plistJson: async () => ({ ProgramArguments: [OWN], ...(o.env ? { EnvironmentVariables: o.env } : {}) }),
       pinFiles: () => [],
     },
@@ -146,5 +146,67 @@ describe("a #! line macOS env runs as a launcher is counted", () => {
   });
   test("controls: ordinary lines stay adopted", async () => {
     for (const l of ["#!/usr/bin/env python3", "#!/usr/bin/env -S python3 -u", "#!/bin/sh -e", "#!/bin/bash", "#!/usr/bin/env LANG=C python3", "#!/usr/bin/env TZ=UTC python3", "#!/usr/bin/env LC_ALL=en_US.UTF-8 python3", "#!/bin/bash -eu", "#!/usr/bin/python3 -u -B", "#!/usr/bin/env -S bash -e", "#!/usr/bin/perl -w", "#!/usr/bin/env /usr/bin/true a b", "#!/usr/bin/env LANG=C python3", "#!/usr/bin/env R", "#!/usr/bin/env /usr/bin/false x", "#!/usr/bin/env /usr/bin/true a b", "#!/usr/bin/env true"]) expect({ l, n: await count(l) }).toEqual({ l, n: 0 });
+  });
+});
+
+// OUP-376: the allowed-option lists of runsProgramFromArgs (src/host/cruft.ts: `harmless`) are pinned letter by letter. Each row passes on the code as it is; it fails at the `harmless` regex
+// if that letter is added to its list (a shell reads ~/.bashrc or ~/.zshrc under -i, a shell reads the program from stdin under -s, -o sets an option that can name a file, an interpreter -E/-X/-p/-i runs
+// a path, an environment or a startup file).
+describe("a letter outside a harmless list is counted, one letter at a time", () => {
+  const shells = ["/bin/bash", "/bin/zsh", "/bin/sh"];
+  const others = ["/usr/bin/python3", "/usr/bin/perl", "/usr/bin/ruby", "/usr/local/bin/node"];
+  for (const sh of shells)
+    for (const l of ["i", "s", "o", "E", "X", "p", "l", "c", "m"])
+      test(`${sh} -${l} is counted`, async () => {
+        expect(await count(`#!${sh} -${l}`)).toBe(1);
+      });
+  for (const sh of shells)
+    for (const l of ["e", "f", "u", "x", "v", "n"])
+      test(`control: ${sh} -${l} stays adopted`, async () => {
+        expect(await count(`#!${sh} -${l}`)).toBe(0);
+      });
+  for (const it of others)
+    for (const l of ["i", "E", "X", "p", "I", "e", "m"])
+      test(`${it} -${l} is counted`, async () => {
+        expect(await count(`#!${it} -${l}`)).toBe(1);
+      });
+  for (const it of others)
+    for (const l of ["u", "B", "s", "O", "q", "w", "T", "W"])
+      test(`control: ${it} -${l} stays adopted`, async () => {
+        expect(await count(`#!${it} -${l}`)).toBe(0);
+      });
+});
+
+// OUP-376: the exemption of /usr/bin/true and /usr/bin/false is a path as written, and it does not lift the check of what that path is. The fake file system resolves every other path to itself,
+// so these rows put the path itself in the three states a real host can have. Each fails at src/host/cruft.ts badInterpreter (`real === undefined || ...` for a missing path, the alias-link
+// line `!runsOther(base(w)) && runsOther(base(real))` for a link to a shell or interpreter) if that line is removed.
+describe("the true and false exemption, with the path itself in a state the exemption does not cover", () => {
+  for (const cmd of ["/usr/bin/true", "/usr/bin/false"]) {
+    test(`${cmd} with an argument stays adopted when it is the ordinary binary (control)`, async () => {
+      expect(await count(`#!/usr/bin/env ${cmd} a`)).toBe(0);
+      expect(await count(`#!/usr/bin/env ${cmd} -c x`)).toBe(0);
+    });
+    test(`${cmd} with an argument is counted when the path does not resolve`, async () => {
+      expect(await count(`#!/usr/bin/env ${cmd} a`, { missing: [cmd] })).toBe(1);
+    });
+    for (const target of ["/bin/bash", "/usr/bin/python3"])
+      test(`${cmd} with an argument is counted when it is a link to ${target}`, async () => {
+        expect(await count(`#!/usr/bin/env ${cmd} a`, { links: { [cmd]: target } })).toBe(1);
+      });
+    test(`${cmd} with no argument is counted when it is a link to a shell`, async () => {
+      expect(await count(`#!/usr/bin/env ${cmd}`, { links: { [cmd]: "/bin/bash" } })).toBe(1);
+    });
+  }
+});
+
+// The working-directory option on its own: the command after it is one that is adopted without it (python3 with no argument), so only the -C / --chdir check can count the line.
+// Fails at src/host/cruft.ts parseEnv (`if (c === "C") st.bad = true` for the short form, `t === "--chdir" || t.startsWith("--chdir=")` for the long one).
+describe("env -C and --chdir are counted on a command that is adopted without them", () => {
+  for (const l of ["#!/usr/bin/env -C /opt/x python3", "#!/usr/bin/env -C/opt/x python3", "#!/usr/bin/env -S -C/opt/x python3", "#!/usr/bin/env --chdir /opt/x python3", "#!/usr/bin/env --chdir=/opt/x python3"])
+    test(`${l} is counted`, async () => {
+      expect(await count(l)).toBe(1);
+    });
+  test("control: the same line with no chdir stays adopted", async () => {
+    expect(await count("#!/usr/bin/env python3")).toBe(0);
   });
 });
