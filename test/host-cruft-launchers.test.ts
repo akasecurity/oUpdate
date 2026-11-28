@@ -204,7 +204,7 @@ describe("env options inside and around a -S value (OUP-372 review round 2)", ()
 });
 
 describe("env line: what the earlier readers counted stays counted, and the review round 3 and 4 gaps (OUP-372)", () => {
-  const dashLinks = { "/opt/x/alias": "/bin/dash", "/opt/x/linkdash": "/bin/dash", "/usr/bin/python3": "/bin/dash", "/opt/evil/python3": "/bin/dash" };
+
   const fsLinks: Record<string, string> = { "/opt/x/alias": "/bin/dash", "/opt/x/linkdash": "/bin/dash", "/usr/bin/run": "/bin/dash", "/usr/bin/X": "/bin/ksh", "/usr/bin/ruby": "/bin/bash", "/opt/x/dash": "/opt/x/real" };
   const gone = (p: string) => p.startsWith("/missing") || p.includes("\\") || p.endsWith("/missingcmd");
   const real = (p: string): string | undefined => (gone(p) ? undefined : fsLinks[p] ?? p);
@@ -213,21 +213,25 @@ describe("env line: what the earlier readers counted stays counted, and the revi
   // Two reference judges, each an independent copy of an earlier reader of an env line (not an import): the first (OUP-370, 748cf35e) reads every word as
   // written; the second (OUP-372 round 1, 7a2e2814) removes the quotes inside -S, judges the value of X=value words, looks a bare word up in the dirs of
   // PATH and counts a command found nowhere or a link to a program of another family. The head must count every line either counts.
-  const L1 = /^(?:dash|ksh|awk|xargs|sudo|osascript|nohup)$/;
-  const RUNS = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh|env|dash|ksh|awk|xargs|sudo|osascript|nohup)(?:[0-9.]+)?$/i;
+  // The launcher lists, as the two readers had them (copied from the revisions, case-insensitive).
+  const L748 = /^g?(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid|ash|mksh|yash|busybox|deno|php|lua|luajit|julia|Rscript|pwsh|powershell|awk|gawk|mawk|xcrun|open|launchctl|timeout|gtimeout|stdbuf|su|doas|chroot|unbuffer|flock|ionice|taskset|strace|ltrace|watch|script|screen|tmux|parallel|make|gmake|find|ssh|lldb|gdb|rlwrap|genv|uv|pypy3|nodejs|go|cargo|dotnet|mono|vim|nvim|emacs|sed|m4|gnuplot|dtrace|socat|ncat|nc|tini|dumb-init|entr|watchexec|nix|mise|pkgx|ssh-agent|dbus-launch|shortcuts|automator|runuser|unshare|nsenter|chpst|pkexec|at|batch|pnpm|erl|escript|elixir|racket|guile|nu|elvish|xonsh|rc|osh|ysh|qemu-aarch64|sandbox-exec|taskpolicy|swift|toybox|login|java|npx|uvx|git|docker|sbcl)(?:[0-9]+(?:\.[0-9]+)*)?$/i;
+  const L2 = /^g?(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid|ash|mksh|yash|busybox|deno|php|lua|luajit|julia|Rscript|pwsh|powershell|awk|gawk|mawk|xcrun|open|launchctl|timeout|gtimeout|stdbuf|su|doas|chroot|unbuffer|flock|ionice|taskset|strace|ltrace|watch|script|screen|tmux|parallel|make|gmake|find|ssh|lldb|gdb|rlwrap|genv|uv|pypy3|nodejs|go|cargo|dotnet|mono|vim|nvim|emacs|sed|m4|gnuplot|dtrace|socat|ncat|nc|tini|dumb-init|entr|watchexec|nix|mise|pkgx|ssh-agent|dbus-launch|shortcuts|automator|runuser|unshare|nsenter|chpst|pkexec|at|batch|pnpm|erl|escript|elixir|racket|guile|nu|elvish|xonsh|rc|osh|ysh|qemu-aarch64|sandbox-exec|taskpolicy|swift|toybox|login|java|npx|uvx|git|docker|sbcl|npm|yarn|bunx|nawk|pm2)(?:[0-9]+(?:\.[0-9]+)*)?$/i;
+  const INTERP = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh)(?:[0-9]+(?:\.[0-9]+)*)?$/;
+  const INTERP_ANY = new RegExp(INTERP.source, "i");
+  const runsOther = (n: string): boolean => L2.test(n) || INTERP_ANY.test(n) || n.toLowerCase() === "env";
   const fam = (n: string) => n.toLowerCase().replace(/[0-9.]+$/, "");
-  const envWords = (line: string): string[] => line.slice(2).trim().split(/\s+/).filter(Boolean);
+  const envWords = (line: string): string[] => line.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
   const first = (line: string): boolean => {
     const words = envWords(line);
-    const list = words[0] !== undefined && name(words[0]) === "env" ? words : [words[0]];
+    const list = words[0] !== undefined && name(words[0]).toLowerCase() === "env" ? words : [words[0]];
     for (const w of list) {
       if (w === undefined) continue;
       if (!w.startsWith("/")) {
-        if (L1.test(w)) return true;
+        if (L748.test(w)) return true;
         continue;
       }
       const r = real(w);
-      if (r === undefined || L1.test(name(r))) return true;
+      if (r === undefined || L748.test(name(r))) return true;
     }
     return false;
   };
@@ -264,21 +268,21 @@ describe("env line: what the earlier readers counted stays counted, and the revi
   const judge = (words: string[], cmd: number): boolean => {
     for (const [i, w] of words.entries()) {
       if (!w.startsWith("/")) {
-        if (L1.test(name(w))) return true;
+        if (L2.test(name(w))) return true;
         if (w.startsWith("-") || w.includes("/") || w.includes("=")) continue;
         let found = false;
         for (const d of ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]) {
           const r = real(`${d}/${w}`);
           if (r === undefined) continue;
           found = true;
-          if (L1.test(name(r)) || (RUNS.test(name(r)) && (!RUNS.test(w) || fam(w) !== fam(name(r))))) return true;
+          if (L2.test(name(r)) || (runsOther(name(r)) && !runsOther(w))) return true;
         }
         if (!found && i === cmd) return true;
         continue;
       }
       const r = real(w);
-      if (r === undefined || L1.test(name(r))) return true;
-      if (RUNS.test(name(w)) && RUNS.test(name(r)) && fam(name(w)) !== fam(name(r))) return true;
+      if (r === undefined || L2.test(name(r))) return true;
+      if (runsOther(name(w)) && runsOther(name(r)) && fam(name(w)) !== fam(name(r))) return true;
     }
     return false;
   };
@@ -290,6 +294,11 @@ describe("env line: what the earlier readers counted stays counted, and the revi
   };
 
   // The older readers also count a line with a launcher in a deep -S, a link or a backslash path (they read the words flat), so these are not "only new" lines.
+  // Cases the older readers also count: kept as plain counts of what an option value, a lookup path or an X=value word does.
+  test("plain counts: separated option values, a changed PATH and a tab-separated X=value", async () => {
+    for (const l of ["#!/usr/bin/env -C /opt/x/alias python3", "#!/usr/bin/env -C /missing/x python3", "#!/usr/bin/env -iP/usr/bin python3", "#!/usr/bin/env PATH=dash", "#!/usr/bin/env python3\t--exec=dash"])
+      expect({ l, n: await counted(l) }).toEqual({ l, n: 1 });
+  });
   test("more -S levels than are read are counted, not dropped", async () => {
     for (const n of [6, 7, 8, 9]) {
       expect(await counted(`#!/usr/bin/env ${"-S ".repeat(n)}dash`)).toBe(1);
@@ -297,20 +306,21 @@ describe("env line: what the earlier readers counted stays counted, and the revi
       expect(await counted(`#!/usr/bin/env ${"-S ".repeat(n)}/opt/x/linkdash`)).toBe(1);
     }
   });
-  test("--split-string shrinks its value by one word each time it is read", async () => {
-    await onlyNew('#!/usr/bin/env --split-string --split-string "dash"');
-    await onlyNew('#!/usr/bin/env --split-string --split-string --split-string "dash"');
-    await onlyNew('#!/usr/bin/env --split-string=--split-string "dash"');
+  test("--split-string reads its value as a -S value: an option inside it is read, nested and attached", async () => {
+    await onlyNew('#!/usr/bin/env --split-string "-u/opt/x/alias python3"');
+    await onlyNew("#!/usr/bin/env --split-string=-u/opt/x/alias python3");
+    await onlyNew('#!/usr/bin/env --split-string --split-string "-u/opt/x/alias python3"');
+    await onlyNew("#!/usr/bin/env --split-string=--split-string=-u/opt/x/alias python3");
   });
   test("an option value is judged where only the structural read sees it: attached to its option, as a link to a launcher or a path that resolves nowhere", async () => {
-    for (const l of ["#!/usr/bin/env -u/opt/x/alias python3", "#!/usr/bin/env -C/opt/x/alias python3", "#!/usr/bin/env -a/opt/x/alias python3", "#!/usr/bin/env -C/missing/x python3"]) await onlyNew(l);
+    for (const l of ["#!/usr/bin/env -u FOO=/opt/x/alias python3", "#!/usr/bin/env -u/opt/x/alias python3", "#!/usr/bin/env -C/opt/x/alias python3", "#!/usr/bin/env -a/opt/x/alias python3", "#!/usr/bin/env -C/missing/x python3"]) await onlyNew(l);
   });
   test("an option value that is a path named like a launcher is counted whatever it links to", async () => {
     await onlyNew("#!/usr/bin/env -u /opt/x/dash python3");
     await onlyNew("#!/usr/bin/env -C /opt/x/dash python3");
   });
   test("a path named like a launcher that links to something else is counted as a program word too", async () => {
-    expect(await counted("#!/opt/x/dash")).toBe(1);
+    await onlyNew("#!/opt/x/dash");
   });
   test("the value of an X=value or --x=value word after the command is judged, where the older readers do not see it", async () => {
     for (const l of ['#!/usr/bin/env python3 FOO="dash"', '#!/usr/bin/env python3 --exec="dash"']) await onlyNew(l);
@@ -331,6 +341,7 @@ describe("env line: what the earlier readers counted stays counted, and the revi
       "#!/usr/bin/env -u PATH python3",
       "#!/usr/bin/env --unset=PATH python3",
       "#!/usr/bin/env --ignore-environment python3",
+      "#!/usr/bin/env --unset FOO python3",
       "#!/usr/bin/env PATH=/opt/bin python3",
       "#!/usr/bin/env PATH=/opt/bin",
     ])
@@ -338,7 +349,7 @@ describe("env line: what the earlier readers counted stays counted, and the revi
   });
   test("a long option that env does not have, and an env that runs env, are counted", async () => {
     for (const l of ["#!/usr/bin/env --Sdash python3", "#!/usr/bin/env --iSdash python3", "#!/usr/bin/env --vSdash python3", "#!/usr/bin/env --P/opt/evil python3", "#!/usr/bin/env env python3", "#!/usr/bin/env /usr/bin/env -P /opt/bin python3"])
-      expect({ l, n: await counted(l) }).toEqual({ l, n: 1 });
+      await onlyNew(l);
   });
   test("controls: ordinary env lines stay adopted", async () => {
     for (const l of ["#!/usr/bin/env python3", "#!/usr/bin/env --null python3", "#!/usr/bin/env FOO=bar python3", "#!/usr/bin/env -S python3 -u", "#!/usr/bin/env -u FOO python3"])

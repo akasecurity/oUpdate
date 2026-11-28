@@ -260,7 +260,8 @@ function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): v
       } else if (t === "--unset" || t === "--chdir" || t === "--argv0") {
         const v = tokens[++i];
         if (v !== undefined) {
-          if (t === "--unset" && v === "PATH") st.path = true;
+          // macOS env reads the word after --unset as the variable even when it clears the environment: the lookup path may differ.
+          if (t === "--unset") st.path = true;
           word(v);
         }
       }
