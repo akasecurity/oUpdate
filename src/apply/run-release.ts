@@ -38,6 +38,13 @@ export async function releaseChecksSection(rt: RunCtx) {
       continue;
     }
     if (!rc) {
+      // The sweep record of an unauthorized version is removed first: followers read it until it is gone, and the marker goes with the pending record. While it cannot be removed the record is kept (asked again next run).
+      if (p.invalidate && (stoppingNow() || !(await invalidateRecord(rcEnv, p, () => savePending(rcEnv, p))))) {
+        b.failed.push(`release-check:${f}`);
+        b.flagged = true;
+        b.rcNotes.push(`${f} sweep record ${(p.invalidate ?? []).map((v) => recordPath(cfg.stateDir, v)).join(", ")} still to be removed (followers read it until it is gone)`);
+        continue;
+      }
       log.push(`  release check ${f}: no longer configured — its record is removed`);
       await fs.remove(pendingPath(cfg.stateDir, f));
       continue;
@@ -243,7 +250,7 @@ export async function releaseChecksSection(rt: RunCtx) {
           log.push(`  ${said}`);
           b.failed.push(`release-check:${f}`);
           b.flagged = true;
-          b.rcNotes.push(`${f} ${to} still waits for its owner (${note})`);
+          b.rcNotes.push(`${f} ${to} still waits for its ${waitsFor} (${note})`);
           await notify(`⚠️ <b>${host} ${said}</b>\nStill waiting: each run tries again.\nLog: ${cfg.logFile ?? "-"}`);
           return;
         }

@@ -487,11 +487,29 @@ describe("the apply run holds tailscale until it is this host's turn", () => {
   test("an unauthorized pending record whose release check is no longer configured does not keep its upgrade from being relinked: no check is left to relink it, and the record is dropped", async () => {
     // Fails at src/apply/run.ts (the unauthorized skip in the relinkable loop): it skipped on the record alone, so with the check removed from the config nothing relinked the keg and nothing rolled it back.
     const rec = { formula: "tailscale", full: "tailscale", rack: "/brew/Cellar/tailscale", from: "1.78.0", to: "1.81.0", gated: "1.80.2", beforeRan: false, at: "x", upgradeStarted: true, upgraded: true, verdict: "fail", unauthorized: true, after: "skip", trusted: false, why: "w", tail: ["w"] };
-    const r = await run({ host: "bonus", dry: false, risky: [], formulas: "tailscale", candidates: ["1.80.2"], installed: "1.80.2", files: { "/state.test/release-checks/pending/tailscale.json": JSON.stringify(rec) } });
+    const r = await run({ host: "bonus", dry: false, risky: [], formulas: "tailscale", candidates: ["1.80.2"], installed: "1.80.2", linkedDir: true, files: { "/state.test/release-checks/pending/tailscale.json": JSON.stringify(rec) } });
+    // The generic step relinks the keg and restarts its daemon (no check is left to do either).
+    expect(r.brew).toContain("brew link tailscale");
+    expect(r.brew).toContain("sudo -n launchctl kickstart -k system/sh.brew.tailscale");
     expect(r.text).toContain("release check tailscale: no longer configured — its record is removed");
     expect(r.text).not.toContain("not the one decided on");
     expect(r.text).not.toContain("not the release decided on");
     expect(r.text).not.toContain("not relinked or restarted");
+  });
+  test("a pending record whose release check is no longer configured still has its unauthorized sweep record removed first (followers read it until it is gone), and is kept while that removal fails", async () => {
+    // Fails at src/apply/run-release.ts (the "no longer configured" branch): the pending record was removed before invalidateRecord ran, so the marker was lost and the published record stayed.
+    const rec = recordPath("/state.test", "1.81.0");
+    const marked = { formula: "tailscale", full: "tailscale", rack: "/brew/Cellar/tailscale", from: "1.78.0", to: "1.81.0", gated: "1.80.2", beforeRan: false, at: "x", upgradeStarted: true, upgraded: true, verdict: "fail", unauthorized: true, invalidate: ["1.81.0"], after: "skip", trusted: false, why: "w", tail: ["w"] };
+    const text = `${JSON.stringify({ host: "bonus", version: "1.81.0", status: "verified", at: "x" })}\n`;
+    const r = await run({ host: "bonus", dry: false, risky: [], formulas: "good-a", startUpgraded: true, files: { [PENDING_TS]: JSON.stringify(marked), [rec]: text } });
+    expect(r.files.has(rec)).toBe(false);
+    expect(r.files.has(PENDING_TS)).toBe(false);
+    expect(r.text).toContain("release check tailscale: no longer configured — its record is removed");
+    // A record that cannot be removed is kept with its marker, and asked again next run.
+    const stuck = await run({ host: "bonus", dry: false, risky: [], formulas: "good-a", startUpgraded: true, failRemove: [rec], files: { [PENDING_TS]: JSON.stringify(marked), [rec]: text } });
+    expect(stuck.files.has(rec)).toBe(true);
+    expect(JSON.parse(stuck.files.get(PENDING_TS)!).invalidate).toEqual(["1.81.0"]);
+    expect(stuck.text).not.toContain("no longer configured — its record is removed");
   });
   test("the sweep lock is taken before anything else reads this host's tailscale state, and its real error is reported", async () => {
     const r = await run({ host: "bonus", dry: false, lock: "throws" });
@@ -795,6 +813,13 @@ describe("the apply run holds tailscale until it is this host's turn", () => {
     expect(kept.ended).toBeUndefined();
     const second = await run({ host: "bonus", dry: false, formulas: "good-a", startUpgraded: true, files: Object.fromEntries(first.files) });
     expect(second.text).toContain("uninstall tailscale — ok");
+  });
+  test("an own check whose saved FAIL has waited on its rollback for the threshold of runs says it waits for its rollback, not its owner", async () => {
+    // Fails at src/apply/run-release.ts (the rcNotes line of the verdict branch of ownerWait): it said "still waits for its owner" for a rollback.
+    const rec = { formula: "tailscale", full: "tailscale", rack: "/brew/Cellar/tailscale", from: "1.78.0", to: "1.80.2", gated: "1.80.2", beforeRan: false, at: "x", upgradeStarted: true, upgraded: true, verdict: "fail", unresolvedWaits: 2, after: "skip", trusted: false, why: "w", tail: ["w"] };
+    const r = await run({ host: "bonus", dry: false, builtin: false, formulas: "good-a", startUpgraded: true, unreadOpt: true, files: { [PENDING_TS]: JSON.stringify(rec) } });
+    expect(r.text).toContain("tailscale 1.80.2 still waits for its rollback (the opt link could not be read");
+    expect(r.text).not.toContain("still waits for its owner");
   });
   test("a saved FAIL with no authorized version (a legacy record) is held to the same rule for the built-in check: linked_keg naming the keg is not enough", async () => {
     const rec = { formula: "tailscale", full: "tailscale", rack: "/brew/Cellar/tailscale", from: "1.78.0", to: "1.80.2", beforeRan: false, at: "x", upgradeStarted: true, upgraded: true, verdict: "fail", after: "skip", trusted: false, why: "w", tail: ["w"] };
