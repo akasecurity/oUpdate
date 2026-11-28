@@ -201,66 +201,152 @@ function splitS(value: string): string[] {
   return out;
 }
 const unquoted = (w: string): string => w.replace(/["']/g, "");
+/** State of one read of an env line: `cmd` a command word was met; `path` the lookup path of the command may differ from the plist's (-i, -P, -u PATH, PATH=); `bad` the line is past what is read (counted). */
+type EnvState = { cmd: boolean; path: boolean; bad: boolean };
+/** The most -S values nested in each other that are read; one more is counted, not read. */
+const MAX_S_DEPTH = 6;
 /**
  * The words of an env command line (after env), read as env reads its options: -S (alone, attached, in a cluster such as -iSdash, or --split-string=) takes
- * the rest of the line as a string that is split into words and read again as arguments; -u, -C and -P take a value; VAR=value sets a variable; the first other
+ * the rest of the line as a string that is split into words and read again as arguments; -u, -C, -P and -a take a value; VAR=value sets a variable; the first other
  * word is the command and the words after it are its arguments. Quotes are removed only inside a -S value; a word written with quotes is judged as written
- * and, for its name, with the quotes removed too. `path`: -P or a PATH= word is present, so env looks the command up somewhere the plist does not say.
+ * and, for its name, with the quotes removed too. Every option value, every `X=value` and `--x=value` value and every blank-separated piece of a word is a word
+ * of its own. This only adds words to judge: the judgements of the older readers (shebangWordsOld, shebangWordsRound2) are kept beside it.
  */
-function parseEnv(tokens: string[], out: Word[], st: { cmd: boolean; path: boolean }, depth: number): void {
+function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): void {
+  // A word as written, its name with the quotes removed, each blank-separated piece of it, and the value of an `X=value` word.
+  const word = (w: string, extra: Partial<Word> = {}): void => {
+    if (w === "") return;
+    out.push({ w, ...extra });
+    const bare = unquoted(w);
+    if (bare !== w) out.push({ w: bare, name: true });
+    if (/\s/.test(w)) for (const p of w.split(/\s+/)) if (p !== "") out.push({ w: p });
+    const eq = w.indexOf("=");
+    if (eq > 0 && !w.startsWith("/")) {
+      const v = w.slice(eq + 1);
+      if (v !== "") {
+        out.push({ w: v });
+        if (unquoted(v) !== v) out.push({ w: unquoted(v), name: true });
+        if (/\s/.test(v)) for (const p of v.split(/\s+/)) if (p !== "") out.push({ w: p });
+      }
+    }
+  };
+  const takeS = (value: string): void => {
+    if (depth >= MAX_S_DEPTH) {
+      st.bad = true;
+      return;
+    }
+    // A path as written (quotes, backslashes) is judged too, whatever the split makes of it.
+    for (const r of value.split(/\s+/)) if (r.startsWith("/") && (r !== unquoted(r) || r.includes("\\"))) out.push({ w: r });
+    parseEnv(splitS(value), out, st, depth + 1);
+  };
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
     if (t === "--") continue;
     const rest = (from: string): string => [from, ...tokens.slice(i + 1)].join(" ");
-    const takeS = (value: string): void => {
-      if (depth < 6) {
-        for (const r of value.split(/\s+/)) if (r.startsWith("/") && r !== unquoted(r)) out.push({ w: r });
-        parseEnv(splitS(value), out, st, depth + 1);
+    if (t === "--split-string" && tokens[i + 1] !== undefined) return takeS([tokens[i + 1]!, ...tokens.slice(i + 2)].join(" "));
+    if (t.startsWith("--split-string=")) return takeS(rest(t.slice("--split-string=".length)));
+    if (t.startsWith("--")) {
+      const eq = t.indexOf("=");
+      if (eq > 0) {
+        // --x=value: the value is judged (a --default-signal value is only ever given after the "=").
+        const v = t.slice(eq + 1);
+        if (t.startsWith("--unset=") && v === "PATH") st.path = true;
+        word(v);
+      } else if (t === "--unset" || t === "--chdir" || t === "--argv0") {
+        const v = tokens[++i];
+        if (v !== undefined) {
+          if (t === "--unset" && v === "PATH") st.path = true;
+          word(v);
+        }
       }
-    };
-    if (t === "--split-string" && tokens[i + 1] !== undefined) return takeS(rest(tokens[i + 1]!)) ;
-    const cluster = /^-[A-Za-z0-9]*S/.exec(t);
-    if (!t.startsWith("--") && cluster) return takeS(rest(t.slice(cluster[0].length)));
-    if (t === "-u" || t === "-C" || t === "-P" || t === "--unset" || t === "--chdir" || t === "--default-signal") {
-      if (t === "-P") st.path = true;
-      if (tokens[i + 1] !== undefined) out.push({ w: tokens[++i]!, name: true });
       continue;
     }
-    if (/^-[uCP]./.test(t)) {
-      if (t.startsWith("-P")) st.path = true;
-      out.push({ w: t.slice(2), name: true });
+    if (t === "-") {
+      st.path = true;
       continue;
     }
-    if (t.startsWith("--") && t.includes("=")) {
-      out.push({ w: t.slice(t.indexOf("=") + 1), name: true });
+    if (t.startsWith("-")) {
+      // A cluster of one-letter options: S takes the rest of the line; u, C, P and a take a value (the rest of the cluster or the next word); i changes the lookup path.
+      const body = t.slice(1);
+      for (let k = 0; k < body.length; k++) {
+        const c = body[k]!;
+        if (c === "S") return takeS(rest(body.slice(k + 1)));
+        if ("uCPa".includes(c)) {
+          let v = body.slice(k + 1);
+          if (v === "") v = tokens[++i] ?? "";
+          if (c === "P" || (c === "u" && v === "PATH")) st.path = true;
+          word(v);
+          break;
+        }
+        if (c === "i") st.path = true;
+      }
       continue;
     }
-    if (t.startsWith("-")) continue;
     const eq = t.indexOf("=");
     if (eq > 0 && !t.startsWith("/")) {
       if (t.slice(0, eq) === "PATH") st.path = true;
-      else out.push({ w: t.slice(eq + 1) });
+      word(t);
       continue;
     }
     // The command word, and every word after it: each as written, and by its name with the quotes removed.
     for (const r of tokens.slice(i)) {
       const first = !st.cmd && r === t;
       if (first) st.cmd = true;
-      out.push({ w: r, ...(first ? { cmd: true } : {}) });
-      if (unquoted(r) !== r) out.push({ w: unquoted(r), name: true });
+      word(r, first ? { cmd: true } : {});
     }
     return;
   }
 }
-/** The program words of a #! line: the interpreter, and for env the words of its command line (see parseEnv). */
-function shebangWords(head: string): { words: Word[]; path: boolean } {
+/** The program words of a #! line as the first reader (OUP-370) took them: the interpreter, and for env every word after it as written. */
+function shebangWordsOld(head: string): Word[] {
+  const words = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
+  if (words[0] === undefined) return [];
+  if (base(words[0]).toLowerCase() !== "env") return [{ w: words[0] }];
+  return words.map((w) => ({ w }));
+}
+/** The program words of a #! line as the second reader (OUP-372 round 1) took them: for env, the words with the quotes removed inside -S, and each VAR=value or --x=value value. */
+function shebangWordsRound2(head: string): Word[] {
   const raw = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
-  if (raw[0] === undefined) return { words: [], path: false };
-  if (base(raw[0]).toLowerCase() !== "env") return { words: [{ w: raw[0] }], path: false };
+  if (raw[0] === undefined) return [];
+  if (base(raw[0]).toLowerCase() !== "env") return [{ w: raw[0] }];
   const words: Word[] = [{ w: raw[0] }];
-  const st = { cmd: false, path: false };
+  let cmd = false;
+  const add = (w: string, command: boolean): void => {
+    if (w === "") return;
+    const isCmd = command && !cmd && !w.startsWith("-") && !w.includes("=");
+    if (isCmd) cmd = true;
+    words.push({ w, ...(isCmd ? { cmd: true } : {}) });
+    const eq = w.indexOf("=");
+    if (eq > 0 && !w.startsWith("/")) words.push({ w: w.slice(eq + 1) });
+  };
+  for (let i = 1; i < raw.length; i++) {
+    const w = raw[i]!;
+    if (w.startsWith("-S")) {
+      const rest = [w.slice(2), ...raw.slice(i + 1)].join(" ");
+      for (const t of rest.split(/\s+/)) if (t.startsWith("/") && /["']/.test(t)) words.push({ w: t });
+      for (const t of rest.replace(/["']/g, "").split(/\s+/)) add(t, true);
+      break;
+    }
+    if (w === "-u" || w === "-C" || w === "-P" || w === "--unset" || w === "--chdir") {
+      words.push({ w });
+      if (raw[i + 1] !== undefined) words.push({ w: raw[++i]! });
+      continue;
+    }
+    add(w, true);
+  }
+  return words;
+}
+/**
+ * The program words of a #! line: the union of what each reader of the line takes (the older ones are kept, so a line counted once is counted still) and
+ * the words of parseEnv. `count`: the line is counted whatever its words are (a changed lookup path, or more -S levels than are read).
+ */
+function shebangWords(head: string): { words: Word[]; count: boolean } {
+  const words = [...shebangWordsOld(head), ...shebangWordsRound2(head)];
+  const raw = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
+  if (raw[0] === undefined || base(raw[0]).toLowerCase() !== "env") return { words, count: false };
+  const st: EnvState = { cmd: false, path: false, bad: false };
   parseEnv(raw.slice(1), words, st, 0);
-  return { words, path: st.path && st.cmd };
+  return { words, count: st.path || st.bad };
 }
 /** The family of a program name for the check of a link: python3.12 and python3 are one family, bash and dash are not. */
 const family = (name: string): string => name.toLowerCase().replace(/[0-9.]+$/, "");
@@ -448,7 +534,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       const inside = !dotted(run.script) && stable && (links === undefined || links === 1) && realAdopted !== undefined && real!.startsWith(realAdopted) && (run.script.startsWith(realAdopted) || run.script.startsWith(plainAdopted));
       // Shape (a) runs the file itself, so it must start with #!: a text file with an owner line and no #! cannot be run as the program and is not adopted.
       // The interpreter the script's own #! line names is no launcher and resolves (python3 -> dash runs the script as dash would).
-      const shebangBad = inside && head.startsWith("#!") && (await (async () => { const sw = shebangWords(head); return sw.path || (await badInterpreter(fs, sw.words, envPath)); })());
+      const shebangBad = inside && head.startsWith("#!") && (await (async () => { const sw = shebangWords(head); return sw.count || (await badInterpreter(fs, sw.words, envPath)); })());
       const owned = inside && !shebangBad && (!run.shebang || head.startsWith("#!")) && head.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
       if (!owned) wrappers.push(`${d}/${n} runs ${run.script}`);
     }
