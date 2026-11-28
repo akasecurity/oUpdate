@@ -159,39 +159,73 @@ export function launchScript(l: { program?: string; argv: string[] }): { script:
   return abs(first) ? { script: first, shebang: true } : "complex";
 }
 
-/** The program words of a #! line: the interpreter, and for env every word after it (a command word, an option, an option's value or VAR=val: a launcher named by any of them is counted). */
-function shebangWords(head: string): (string | undefined)[] {
-  const words = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
-  if (words[0] === undefined || base(words[0]).toLowerCase() !== "env") return [words[0]];
-  // env -S splits its value into words and the shell-like quotes in a word are removed: `-Sdash`, `-S 'dash' -e`, `-S"dash"` all name dash.
-  const out: string[] = [words[0]];
-  for (const w of words.slice(1)) {
-    const bare = w.replace(/["']/g, "");
-    const value = bare.startsWith("-S") ? bare.slice(2) : bare;
-    for (const part of value.split(/\s+/)) if (part !== "") out.push(part);
+/**
+ * The program words of a #! line: the interpreter, and for env every word after it (a command word, an option, an option's value or VAR=val: a launcher
+ * named by any of them is counted). `cmd` is the index of the command word env runs (the first word that is no option, option value or VAR=val), or -1.
+ * Quotes are removed only inside the value of -S (env splits that string like a shell); a plain word is the word as written, and an absolute path
+ * in a -S value is also judged as written, so a quote that env removes or keeps never changes which path is judged to a count that is lower.
+ */
+function shebangWords(head: string): { words: string[]; cmd: number } {
+  const raw = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
+  if (raw[0] === undefined) return { words: [], cmd: -1 };
+  if (base(raw[0]).toLowerCase() !== "env") return { words: [raw[0]], cmd: -1 };
+  const words: string[] = [raw[0]];
+  let cmd = -1;
+  const add = (w: string, command: boolean): void => {
+    if (w === "") return;
+    if (command && cmd < 0 && !w.startsWith("-") && !w.includes("=")) cmd = words.length;
+    words.push(w);
+    // A VAR=value or --option=value word also names the value (`--exec=sh`, `FOO=sh`).
+    const eq = w.indexOf("=");
+    if (eq > 0 && !w.startsWith("/")) words.push(w.slice(eq + 1));
+  };
+  for (let i = 1; i < raw.length; i++) {
+    const w = raw[i]!;
+    if (w.startsWith("-S")) {
+      // The rest of the line is the value of -S, split into words with its quotes removed; an absolute path is also tried as written.
+      const rest = [w.slice(2), ...raw.slice(i + 1)].join(" ");
+      for (const t of rest.split(/\s+/)) if (t.startsWith("/") && /["']/.test(t)) words.push(t);
+      for (const t of rest.replace(/["']/g, "").split(/\s+/)) add(t, true);
+      break;
+    }
+    if (w === "-u" || w === "-C" || w === "-P" || w === "--unset" || w === "--chdir") {
+      words.push(w);
+      if (raw[i + 1] !== undefined) words.push(raw[++i]!);
+      continue;
+    }
+    add(w, true);
   }
-  return out;
+  return { words, cmd };
 }
-/** Whether a program path (each word of the list) is a link to a launcher or cannot be resolved, or a bare word names a launcher: it then runs the script as another program would. */
-async function badInterpreter(fs: CruftFs, words: (string | undefined)[], pathDirs: string[] = LAUNCHD_PATH): Promise<boolean> {
-  for (const w of words) {
+/** The family of a program name for the check of a link: python3.12 and python3 are one family, bash and dash are not. */
+const family = (name: string): string => name.toLowerCase().replace(/[0-9.]+$/, "");
+/**
+ * Whether a program path (each word of the list) is a link to a launcher or cannot be resolved, or a bare word names a launcher: it then runs the script as
+ * another program would. A bare word is looked up in every dir of the PATH (env, launchd), and any entry that is a launcher, or an interpreter or env
+ * behind a name that is neither, counts; the command word of an env line that is found nowhere counts too (`cmd` is its index): env would fail, and a lookup
+ * that finds nothing is not a script that is adopted. An absolute path that links to a program of another family (python3 -> bash) counts.
+ */
+async function badInterpreter(fs: CruftFs, words: (string | undefined)[], pathDirs: string[] = LAUNCHD_PATH, cmd = -1): Promise<boolean> {
+  for (const [i, w] of words.entries()) {
     if (w === undefined) continue;
     if (!w.startsWith("/")) {
-      // A word with a slash is a path from the working directory: its name decides. A bare word is looked up in the PATH (env, launchd): the first dir that holds it.
+      // A word with a slash is a path from the working directory: its name decides.
       if (LAUNCHERS.test(base(w))) return true;
       if (w.startsWith("-") || w.includes("/") || w.includes("=") || !fs.realPath) continue;
+      let found = false;
       for (const d of pathDirs) {
         const real = await fs.realPath(`${d}/${w}`);
         if (real === undefined) continue;
-        // A launcher at the end of the link is bad; so is an interpreter or env behind a name that is neither (a link named run to bash).
+        found = true;
         if (LAUNCHERS.test(base(real)) || (runsOther(base(real)) && !runsOther(w))) return true;
-        break;
       }
+      if (!found && i === cmd) return true;
       continue;
     }
     if (!fs.realPath) continue;
     const real = await fs.realPath(w);
     if (real === undefined || LAUNCHERS.test(base(real))) return true;
+    if (runsOther(base(w)) && runsOther(base(real)) && family(base(w)) !== family(base(real))) return true;
   }
   return false;
 }
@@ -346,7 +380,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       const inside = !dotted(run.script) && stable && (links === undefined || links === 1) && realAdopted !== undefined && real!.startsWith(realAdopted) && (run.script.startsWith(realAdopted) || run.script.startsWith(plainAdopted));
       // Shape (a) runs the file itself, so it must start with #!: a text file with an owner line and no #! cannot be run as the program and is not adopted.
       // The interpreter the script's own #! line names is no launcher and resolves (python3 -> dash runs the script as dash would).
-      const shebangBad = inside && head.startsWith("#!") && (await badInterpreter(fs, shebangWords(head), envPath));
+      const shebangBad = inside && head.startsWith("#!") && (await (async () => { const sw = shebangWords(head); return badInterpreter(fs, sw.words, envPath, sw.cmd); })());
       const owned = inside && !shebangBad && (!run.shebang || head.startsWith("#!")) && head.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
       if (!owned) wrappers.push(`${d}/${n} runs ${run.script}`);
     }
