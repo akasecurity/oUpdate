@@ -27,7 +27,11 @@ const INTERPRETER = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh)(?:[0-9]+(?:\.[
 /** Programs that run another file or command (shells and launchers the interpreter list lacks): never a binary to skip, by basename (any case), also of the path the program resolves to. A binary with arguments that is not on this list is still skipped. */
 /** The interpreter names in any case: a program of such a name in another case is no binary to skip (interp() still needs the exact name and a standard dir). */
 const INTERPRETER_ANY = new RegExp(INTERPRETER.source, "i");
-const LAUNCHERS = /^g?(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid|ash|mksh|yash|busybox|deno|php|lua|luajit|julia|Rscript|pwsh|powershell|awk|gawk|mawk|xcrun|open|launchctl|timeout|gtimeout|stdbuf|su|doas|chroot|unbuffer|flock|ionice|taskset|strace|ltrace|watch|script|screen|tmux|parallel|make|gmake|find|ssh|lldb|gdb|rlwrap|genv|uv|pypy3|nodejs|go|cargo|dotnet|mono|vim|nvim|emacs|sed|m4|gnuplot|dtrace|socat|ncat|nc|tini|dumb-init|entr|watchexec|nix|mise|pkgx|ssh-agent|dbus-launch|shortcuts|automator|runuser|unshare|nsenter|chpst|pkexec|at|batch|pnpm|erl|escript|elixir|racket|guile|nu|elvish|xonsh|rc|osh|ysh|qemu-aarch64|sandbox-exec|taskpolicy|swift|toybox|login|java|npx|uvx|git|docker|sbcl)(?:[0-9]+(?:\.[0-9]+)*)?$/i;
+const LAUNCHERS = /^g?(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid|ash|mksh|yash|busybox|deno|php|lua|luajit|julia|Rscript|pwsh|powershell|awk|gawk|mawk|xcrun|open|launchctl|timeout|gtimeout|stdbuf|su|doas|chroot|unbuffer|flock|ionice|taskset|strace|ltrace|watch|script|screen|tmux|parallel|make|gmake|find|ssh|lldb|gdb|rlwrap|genv|uv|pypy3|nodejs|go|cargo|dotnet|mono|vim|nvim|emacs|sed|m4|gnuplot|dtrace|socat|ncat|nc|tini|dumb-init|entr|watchexec|nix|mise|pkgx|ssh-agent|dbus-launch|shortcuts|automator|runuser|unshare|nsenter|chpst|pkexec|at|batch|pnpm|erl|escript|elixir|racket|guile|nu|elvish|xonsh|rc|osh|ysh|qemu-aarch64|sandbox-exec|taskpolicy|swift|toybox|login|java|npx|uvx|git|docker|sbcl|npm|yarn|bunx|nawk|pm2)(?:[0-9]+(?:\.[0-9]+)*)?$/i;
+/** A program that runs another file or command: a launcher, an interpreter (any case) or env. The real path of a program, or a word of an argument string, that is one of these is no binary to skip. */
+const runsOther = (name: string): boolean => LAUNCHERS.test(name) || INTERPRETER_ANY.test(name) || name.toLowerCase() === "env";
+/** The dirs launchd searches for a bare program word when the plist sets no PATH. */
+const LAUNCHD_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 /** Where an interpreter (and, alone in /usr/bin, env) must sit to be one: a program of that name anywhere else is "complex". */
 const INTERPRETER_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
 /** The system dirs a judged plist's PATH may name (each entry exactly one of these). */
@@ -155,23 +159,251 @@ export function launchScript(l: { program?: string; argv: string[] }): { script:
   return abs(first) ? { script: first, shebang: true } : "complex";
 }
 
-/** The program words of a #! line: the interpreter, and for env every word after it (a command word, an option, an option's value or VAR=val: a launcher named by any of them is counted). */
-function shebangWords(head: string): (string | undefined)[] {
-  const words = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
-  if (words[0] === undefined || base(words[0]).toLowerCase() !== "env") return [words[0]];
-  return words;
+/** A word of an interpreter line to judge. `cmd`: the command env runs. `name`: only its basename is tested against the launchers (a quote-stripped copy, or an option value): it is no path to look up. */
+type Word = { w: string; cmd?: boolean; name?: boolean };
+/** A -S value as env splits it: quotes removed, `\_` and unquoted blanks end a word, a backslash takes the next character as it is. */
+function splitS(value: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let has = false;
+  let q = "";
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i]!;
+    if (q === "'") {
+      if (c === "'") q = "";
+      else cur += c;
+    } else if (c === "\\" && i + 1 < value.length) {
+      const n = value[++i]!;
+      if (n === "_" && q === "") {
+        if (has) out.push(cur);
+        cur = "";
+        has = false;
+      } else {
+        cur += n === "_" ? " " : n;
+        has = true;
+      }
+    } else if (q === '"') {
+      if (c === '"') q = "";
+      else cur += c;
+    } else if (c === "'" || c === '"') {
+      q = c;
+      has = true;
+    } else if (/\s/.test(c)) {
+      if (has) out.push(cur);
+      cur = "";
+      has = false;
+    } else {
+      cur += c;
+      has = true;
+    }
+  }
+  if (has) out.push(cur);
+  return out;
 }
-/** Whether a program path (each word of the list) is a link to a launcher or cannot be resolved, or a bare word names a launcher: it then runs the script as another program would. */
-async function badInterpreter(fs: CruftFs, words: (string | undefined)[]): Promise<boolean> {
-  for (const w of words) {
-    if (w === undefined) continue;
-    if (!w.startsWith("/")) {
-      if (LAUNCHERS.test(w)) return true;
+const unquoted = (w: string): string => w.replace(/["']/g, "");
+/** State of one read of an env line: `cmd` a command word was met; `path` the lookup path of the command may differ from the plist's (-i, -P, -u PATH, PATH=); `bad` the line is past what is read (counted). */
+type EnvState = { cmd: boolean; path: boolean; bad: boolean };
+/** The long options env has; any other word that starts with two dashes is counted (env may read it as a cluster of short options). */
+const LONG_ENV_OPTIONS = new Set(["--ignore-environment", "--null", "--debug", "--version", "--help", "--unset", "--chdir", "--argv0", "--split-string", "--default-signal", "--ignore-signal", "--block-signal", "--list-signal-handling"]);
+/** The most -S values nested in each other that are read; one more is counted, not read. */
+const MAX_S_DEPTH = 6;
+/**
+ * The words of an env command line (after env), read as env reads its options: -S (alone, attached, in a cluster such as -iSdash, or --split-string=) takes
+ * the rest of the line as a string that is split into words and read again as arguments; -u, -C, -P and -a take a value; VAR=value sets a variable; the first other
+ * word is the command and the words after it are its arguments. Quotes are removed only inside a -S value; a word written with quotes is judged as written
+ * and, for its name, with the quotes removed too. Every option value, every `X=value` and `--x=value` value and every blank-separated piece of a word is a word
+ * of its own. This only adds words to judge: the judgements of the older readers (shebangWordsOld, shebangWordsRound2) are kept beside it.
+ */
+function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): void {
+  // A word as written, its name with the quotes removed, each blank-separated piece of it, and the value of an `X=value` word.
+  const word = (w: string, extra: Partial<Word> = {}): void => {
+    if (w === "") return;
+    out.push({ w, ...extra });
+    const bare = unquoted(w);
+    if (bare !== w) out.push({ w: bare, name: true });
+    if (/\s/.test(w)) for (const p of w.split(/\s+/)) if (p !== "") out.push({ w: p });
+    const eq = w.indexOf("=");
+    if (eq > 0 && !w.startsWith("/")) {
+      const v = w.slice(eq + 1);
+      if (v !== "") {
+        out.push({ w: v });
+        if (unquoted(v) !== v) out.push({ w: unquoted(v), name: true });
+        if (/\s/.test(v)) for (const p of v.split(/\s+/)) if (p !== "") out.push({ w: p });
+      }
+    }
+  };
+  const takeS = (value: string): void => {
+    if (depth >= MAX_S_DEPTH) {
+      st.bad = true;
+      return;
+    }
+    // A path as written (quotes, backslashes) is judged too, whatever the split makes of it.
+    for (const r of value.split(/\s+/)) if (r.startsWith("/") && (r !== unquoted(r) || r.includes("\\"))) out.push({ w: r });
+    parseEnv(splitS(value), out, st, depth + 1);
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t === "--") continue;
+    const rest = (from: string): string => [from, ...tokens.slice(i + 1)].join(" ");
+    if (t === "--split-string" && tokens[i + 1] !== undefined) return takeS([tokens[i + 1]!, ...tokens.slice(i + 2)].join(" "));
+    if (t.startsWith("--split-string=")) return takeS(rest(t.slice("--split-string=".length)));
+    if (t.startsWith("--")) {
+      const eq = t.indexOf("=");
+      // A long option env does not have (`--Sdash`, `--iSdash`, `--P/opt/evil`) may be read as `-` and a cluster of short options: counted.
+      if (!LONG_ENV_OPTIONS.has(eq > 0 ? t.slice(0, eq) : t)) st.bad = true;
+      if (t === "--ignore-environment") st.path = true;
+      if (eq > 0) {
+        // --x=value: the value is judged (a --default-signal value is only ever given after the "=").
+        const v = t.slice(eq + 1);
+        if (t.startsWith("--unset=") && v === "PATH") st.path = true;
+        word(v);
+      } else if (t === "--unset" || t === "--chdir" || t === "--argv0") {
+        const v = tokens[++i];
+        if (v !== undefined) {
+          // macOS env runs the word after a bare --unset as the command, with an empty environment: the lookup path may differ.
+          if (t === "--unset") st.path = true;
+          word(v);
+        }
+      }
       continue;
     }
+    if (t === "-") {
+      st.path = true;
+      continue;
+    }
+    if (t.startsWith("-")) {
+      // A cluster of one-letter options: S takes the rest of the line; u, C, P and a take a value (the rest of the cluster or the next word); i changes the lookup path.
+      const body = t.slice(1);
+      for (let k = 0; k < body.length; k++) {
+        const c = body[k]!;
+        if (c === "S") return takeS(rest(body.slice(k + 1)));
+        if ("uCPa".includes(c)) {
+          let v = body.slice(k + 1);
+          if (v === "") v = tokens[++i] ?? "";
+          if (c === "P" || (c === "u" && v === "PATH")) st.path = true;
+          word(v);
+          break;
+        }
+        if (c === "i") st.path = true;
+      }
+      continue;
+    }
+    const eq = t.indexOf("=");
+    if (eq > 0 && !t.startsWith("/")) {
+      if (t.slice(0, eq) === "PATH") st.path = true;
+      word(t);
+      continue;
+    }
+    // The command word, and every word after it: each as written, and by its name with the quotes removed.
+    // An env that runs env reads its own options again: counted.
+    if (base(t).toLowerCase() === "env") st.bad = true;
+    for (const r of tokens.slice(i)) {
+      const first = !st.cmd && r === t;
+      if (first) st.cmd = true;
+      word(r, first ? { cmd: true } : {});
+    }
+    return;
+  }
+}
+/** The program words of a #! line as the first reader (OUP-370) took them: the interpreter, and for env every word after it as written. */
+function shebangWordsOld(head: string): Word[] {
+  const words = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
+  if (words[0] === undefined) return [];
+  if (base(words[0]).toLowerCase() !== "env") return [{ w: words[0] }];
+  return words.map((w) => ({ w }));
+}
+/** The program words of a #! line as the second reader (OUP-372 round 1) took them: for env, the words with the quotes removed inside -S, and each VAR=value or --x=value value. */
+function shebangWordsRound2(head: string): Word[] {
+  const raw = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
+  if (raw[0] === undefined) return [];
+  if (base(raw[0]).toLowerCase() !== "env") return [{ w: raw[0] }];
+  const words: Word[] = [{ w: raw[0] }];
+  let cmd = false;
+  const add = (w: string, command: boolean): void => {
+    if (w === "") return;
+    const isCmd = command && !cmd && !w.startsWith("-") && !w.includes("=");
+    if (isCmd) cmd = true;
+    words.push({ w, ...(isCmd ? { cmd: true } : {}) });
+    const eq = w.indexOf("=");
+    if (eq > 0 && !w.startsWith("/")) words.push({ w: w.slice(eq + 1) });
+  };
+  for (let i = 1; i < raw.length; i++) {
+    const w = raw[i]!;
+    if (w.startsWith("-S")) {
+      const rest = [w.slice(2), ...raw.slice(i + 1)].join(" ");
+      for (const t of rest.split(/\s+/)) if (t.startsWith("/") && /["']/.test(t)) words.push({ w: t });
+      for (const t of rest.replace(/["']/g, "").split(/\s+/)) add(t, true);
+      break;
+    }
+    if (w === "-u" || w === "-C" || w === "-P" || w === "--unset" || w === "--chdir") {
+      words.push({ w });
+      if (raw[i + 1] !== undefined) words.push({ w: raw[++i]! });
+      continue;
+    }
+    add(w, true);
+  }
+  return words;
+}
+/**
+ * The program words of a #! line: the union of what each reader of the line takes (the older ones are kept, so a line counted once is counted still) and
+ * the words of parseEnv. `count`: the line is counted whatever its words are (a changed lookup path, or more -S levels than are read).
+ */
+function shebangWords(head: string): { words: Word[]; count: boolean } {
+  const words = [...shebangWordsOld(head), ...shebangWordsRound2(head)];
+  const raw = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
+  if (raw[0] === undefined || base(raw[0]).toLowerCase() !== "env") return { words, count: false };
+  const st: EnvState = { cmd: false, path: false, bad: false };
+  parseEnv(raw.slice(1), words, st, 0);
+  return { words, count: st.path || st.bad };
+}
+/** The most path lookups one line may need; a line past it is counted. */
+const LOOKUP_CAP = 512;
+/** The family of a program name for the check of a link: python3.12 and python3 are one family, bash and dash are not. */
+const family = (name: string): string => name.toLowerCase().replace(/[0-9.]+$/, "");
+/**
+ * Whether a program path (each word of the list) is a link to a launcher or cannot be resolved, or a bare word names a launcher: it then runs the script as
+ * another program would. A bare word is looked up in every dir of the PATH (env, launchd), and any entry that is a launcher, or an interpreter or env
+ * behind a name that is neither or of another family, counts; the command word of an env line that is found nowhere counts too: env would fail, and a lookup
+ * that finds nothing is not a script that is adopted. An absolute path that links to a program of another family (python3 -> bash) counts.
+ */
+async function badInterpreter(fs: CruftFs, wordList: Word[], dirList: string[] = LAUNCHD_PATH): Promise<boolean> {
+  // The same word, and the same dir, is judged once; a line that needs more than LOOKUP_CAP lookups is counted (words x dirs would stall the scan).
+  const seen = new Set<string>();
+  const words = wordList.filter((x) => {
+    const key = `${x.w}\0${x.cmd ? 1 : 0}${x.name ? 1 : 0}`;
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
+  // The command word is judged first, so a line past the lookup cap is counted by the cap and not only through a command word that is looked at last.
+  words.sort((x, y) => Number(y.cmd === true) - Number(x.cmd === true));
+  const pathDirs = [...new Set(dirList)];
+  let lookups = 0;
+  for (const { w, cmd, name } of words) {
+    if (name) {
+      if (LAUNCHERS.test(base(w))) return true;
+      continue;
+    }
+    if (!w.startsWith("/")) {
+      // A word with a slash is a path from the working directory: its name decides.
+      if (LAUNCHERS.test(base(w))) return true;
+      if (w.startsWith("-") || w.includes("/") || w.includes("=") || !fs.realPath) continue;
+      let found = false;
+      for (const d of pathDirs) {
+        if (++lookups > LOOKUP_CAP) return true;
+        const real = await fs.realPath(`${d}/${w}`);
+        if (real === undefined) continue;
+        found = true;
+        if (runsOther(base(real)) && (!runsOther(w) || family(w) !== family(base(real)))) return true;
+      }
+      if (!found && cmd) return true;
+      continue;
+    }
+    // The name of the path is a launcher's whatever it links to: counted.
+    if (LAUNCHERS.test(base(w))) return true;
     if (!fs.realPath) continue;
+    if (++lookups > LOOKUP_CAP) return true;
     const real = await fs.realPath(w);
     if (real === undefined || LAUNCHERS.test(base(real))) return true;
+    if (runsOther(base(w)) && runsOther(base(real)) && family(base(w)) !== family(base(real))) return true;
   }
   return false;
 }
@@ -268,18 +500,24 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         continue;
       }
       // A program given a launcher or an interpreter by name as an argument may start it (an unknown native dispatcher): it is no binary to skip.
-      const argRuns = launch.argv.slice(1).some((w) => LAUNCHERS.test(base(w)) || INTERPRETER_ANY.test(base(w)) || base(w).toLowerCase() === "env");
+      // An argument string (`-c "curl x | sh"`) names a program in any of its words: each word between blanks and shell operators is looked at.
+      const argRuns = launch.argv.slice(1).some((w) => runsOther(base(w)) || w.split(/[\s|;&()`$<>'"\\]+/).some((t) => t !== "" && runsOther(base(t))));
       // An interpreter that is a link to a launcher (python3 -> dash) runs the script as that launcher would: counted. A lookup that fails counts too.
       // env itself is looked at the same way, and so is the interpreter a script's own #! line names (below).
       const interpWords = base(launch.argv[0]!).toLowerCase() === "env" ? [launch.argv[0]!, launch.argv[1]] : INTERPRETER_ANY.test(base(launch.argv[0]!)) ? [launch.argv[0]] : [];
-      if (await badInterpreter(fs, interpWords)) {
+      const envPath = (() => {
+        const e = Object.entries(obj).find(([k]) => k.toLowerCase() === "environmentvariables")?.[1];
+        const pv = e && typeof e === "object" ? Object.entries(e as Record<string, unknown>).find(([k]) => k === "PATH")?.[1] : undefined;
+        return typeof pv === "string" && pv !== "" ? pv.split(":") : LAUNCHD_PATH;
+      })();
+      if (await badInterpreter(fs, interpWords.filter((x): x is string => x !== undefined).map((w) => ({ w })), envPath)) {
         wrappers.push(`${d}/${n} runs ${run.script}`);
         continue;
       }
       // Resolve the script to its real path, read that path, then resolve again: the file read and the file judged are one.
       const real = fs.realPath ? await fs.realPath(run.script) : resolve(run.script);
       // A program that is a link to a launcher (dash, osascript...) runs another file: counted, whatever its own name is.
-      if (run.shebang && real !== undefined && LAUNCHERS.test(base(real))) {
+      if (run.shebang && real !== undefined && runsOther(base(real))) {
         wrappers.push(`${d}/${n} runs ${run.script}`);
         continue;
       }
@@ -320,7 +558,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       const inside = !dotted(run.script) && stable && (links === undefined || links === 1) && realAdopted !== undefined && real!.startsWith(realAdopted) && (run.script.startsWith(realAdopted) || run.script.startsWith(plainAdopted));
       // Shape (a) runs the file itself, so it must start with #!: a text file with an owner line and no #! cannot be run as the program and is not adopted.
       // The interpreter the script's own #! line names is no launcher and resolves (python3 -> dash runs the script as dash would).
-      const shebangBad = inside && head.startsWith("#!") && (await badInterpreter(fs, shebangWords(head)));
+      const shebangBad = inside && head.startsWith("#!") && (await (async () => { const sw = shebangWords(head); return sw.count || (await badInterpreter(fs, sw.words, envPath)); })());
       const owned = inside && !shebangBad && (!run.shebang || head.startsWith("#!")) && head.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
       if (!owned) wrappers.push(`${d}/${n} runs ${run.script}`);
     }
