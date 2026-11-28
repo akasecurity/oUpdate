@@ -5,8 +5,9 @@ import { groupAlive, type Exec } from "./exec.ts";
 import { basename, dirname, join } from "node:path";
 import { kegHolders, lsofMaps, type Holder, type KegEnv } from "./kegs.ts";
 import { matchOwner, ownerDir, ownerFiles, ownerOps, parsePrint, type OwnerWaiterEnv, type QueuedOwner } from "./owner-waiter.ts";
-import { asUser, brewView, resume, findCheck, holdFailed, pendingPath, readHold, runHook, savePending, type PendingCheck } from "./release-checks.ts";
+import { adoptInstalled, asUser, brewView, installedAbove, kegDirFor, failOptLink, failUnauthorized, invalidateRecord, resume, findCheck, holdFailed, pendingPath, readHold, runHook, savePending, type PendingCheck } from "./release-checks.ts";
 import { restartUpgraded } from "./restarts.ts";
+import { recordPath, recordText } from "./tailscale-sweep.ts";
 import { type RunCtx, last, liveRestartPid, named, ownerArgvKey, ownerArgvs } from "./run-ctx.ts";
 
 /** How long a release check waits for the owner waiter's lock before its check waits for a later run. */
@@ -20,7 +21,7 @@ const AFTER_WITHHELD_RUNS = 3;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export async function releaseChecksSection(rt: RunCtx) {
-  const { opts, dryRun, now, host, log, b, x, notify, step, rcEnv, rcPending, mergeOwners, rcStopOff, stoppingNow, afterOwed, expectedKeg, retiredFor, ownerLock, clock, restartOpts, cfg, fs, exec, waiterEnv } = rt;
+  const { opts, dryRun, now, host, stamp, log, b, x, notify, step, rcEnv, rcPending, mergeOwners, rcStopOff, stoppingNow, afterOwed, expectedKeg, retiredFor, ownerLock, clock, restartOpts, cfg, fs, exec, waiterEnv } = rt;
   if (!rcPending.size) {
     await startDeferredWaiter(rt);
     return;
@@ -42,14 +43,125 @@ export async function releaseChecksSection(rt: RunCtx) {
       continue;
     }
     let keep = false;
+    /** The saved verdict's sweep record could not be written again: the record stays, so the next run tries again. */
+    let republishFailed = false;
+    /**
+     * This host's sweep record for the saved verdict: present and saying the same (host, version, status) is enough; missing or another one is written again. False when the write fails
+     * (logged, flagged): the pending record is then kept and the next run tries again, every run until it lands.
+     */
+    const republish = async (): Promise<boolean> => {
+      const path = recordPath(cfg.stateDir, p.to!);
+      const status = p.verdict === "pass" ? "verified" : "failed";
+      let text: string | undefined;
+      try {
+        text = await rcEnv.readFile(path);
+      } catch (e) {
+        // A record that cannot be read (a directory, no access) is no reason to hold the rollback back. It may still be replaceable (no read permission in a writable directory):
+        // the verdict is written over it once (an atomic replace); if that fails too it is reported, the pending record kept, asked again next run.
+        try {
+          await rcEnv.writeFile(path, recordText({ host, version: p.to!, status, at: stamp }));
+          log.push(`  release check ${f}: the sweep record ${path} could not be read (${errText(e)}) — replaced with the ${status} verdict`);
+          return true;
+        } catch {
+          b.failed.push(`release-check:${f}`);
+          b.flagged = true;
+          b.rcNotes.push(`${f} sweep record ${path} unreadable`);
+          log.push(`  release check ${f}: WARNING — the sweep record ${path} could not be read (${errText(e)}) nor replaced — the pending record is kept, asked again next run`);
+          return false;
+        }
+      }
+      let same = false;
+      try {
+        const j = text === undefined ? undefined : (JSON.parse(text.trim()) as { host?: unknown; version?: unknown; status?: unknown });
+        same = !!j && j.host === host && j.version === p.to && j.status === status;
+      } catch {
+        same = false;
+      }
+      if (same) return true;
+      try {
+        await rcEnv.writeFile(path, recordText({ host, version: p.to!, status, at: stamp }));
+        log.push(`  release check ${f}: the sweep record for ${p.to} (${status}) was ${text === undefined ? "missing" : "not the verdict"} — written again`);
+        return true;
+      } catch (e) {
+        b.failed.push(`release-check:${f}`);
+        b.flagged = true;
+        log.push(`  release check ${f}: WARNING — the sweep record for ${p.to} could not be written (${errText(e)}) — the pending record is kept, asked again next run`);
+        return false;
+      }
+    };
     let locked = false;
     /** The pid of a restart process still running as root: no `after`, no lock release, no waiter beside it. */
     const helperHeld = () => liveRestartPid(restartOpts.helperRunning, p.formula, ownerArgvs(cfg.staleOwners, [...(findCheck(cfg.releaseChecks, f)?.owners ?? []), ...(p.owners ?? []).map((q) => q.label)]));
     const lockPath = ownerFiles(ownerDir(cfg.stateDir)).lock;
     try {
+      // A record of an unauthorized version still to be removed (the removal failed, or the run died before it): removed before anything else, every run until it is gone.
+      if (p.invalidate && !stoppingNow() && !dryRun && !(await invalidateRecord(rcEnv, p, () => savePending(rcEnv, p)))) {
+        republishFailed = true;
+        b.failed.push(`release-check:${f}`);
+        b.flagged = true;
+        b.rcNotes.push(`${f} sweep record ${(p.invalidate ?? []).map((v) => recordPath(cfg.stateDir, v)).join(", ")} still to be removed (followers read it until it is gone)`);
+      }
+      // A confirmed fail is published before anything else, an ended record included: the rollback never waits on it, but the followers must read it (every run until it lands).
+      if (rc.builtin && p.verdict === "fail" && !p.unauthorized && p.to && !stoppingNow() && !dryRun && !(await republish())) republishFailed = true;
       if (p.ended) {
         b.rcNotes.push(`${f}: after owed by an earlier run`);
         continue;
+      }
+      // The tailscale check never trusts a saved version: the installed keg is read now, on every recovery, undecided or saved PASS (a PASS is republished and its older kegs pruned
+      // only for the keg that is installed now). A keg that cannot be read keeps the record pending (an upgrade that was started is never dropped before a version is read and decided).
+      if (rc.builtin && (!p.verdict || p.verdict === "pass") && !p.rolledBack && !stoppingNow() && !dryRun) {
+        const seen = await brewView(rcEnv.exec, cfg.brew, p.full, kegDirFor(rcEnv));
+        // The version in use is the opt link's keg alone (never linked_keg or the one keg installed): a link that is unread keeps the record pending, one that is positively missing or
+        // names no keg is a confirmed fail of the version on the record (a record with none stays pending).
+        const stand = seen?.optState === "ok" ? seen.opt : undefined;
+        // With the link bad, the version is the authorized keg when brew names it or the rack lists it (a version saved from a fallback link, or any other keg, is never preferred).
+        const badTo = seen?.optState === "bad" ? await installedAbove(rcEnv, p, seen) : undefined;
+        const badLink = !!badTo && badTo !== p.from;
+        // A record whose version is the previous one is no upgrade (a legacy shape): the unchanged handling below takes it.
+        const noUpgrade = !!p.to && p.to === p.from && !p.verdict;
+        if (!stand && !badLink && !noUpgrade) {
+          // A link that was read and is positively missing or names no keg, with no keg to blame (none on the record, none named by brew, none authorized in the rack): said as it is.
+          const bad = seen?.optState === "bad";
+          log.push(bad
+            ? `  release check ${f}: the opt link is missing or names no keg and no installed keg can be named — the check stays pending, nothing is rolled back (docs/tailscale-upgrades.md, "A check that stays pending, and the manual rollback")`
+            : `  release check ${f}: the installed version could not be read — the check stays pending, asked again next run`);
+          b.rcNotes.push(bad ? `${f} opt link missing or on no keg, no keg to blame, check pending (manual rollback recipe in the docs)` : `${f} installed version unreadable, check pending`);
+          b.failed.push(`release-check:${f}`);
+          b.flagged = true;
+          keep = true;
+          // A PASS whose keg cannot be read now is not shown to the fleet meanwhile: the verified record is taken away, republished once the read confirms it. Only this host's own record is
+          // removed (invalidateRecord reads the owner again); a removal that is refused or fails keeps the marker on the record, the check pending and the run flagged, every run until it lands.
+          if (p.verdict === "pass" && p.to) {
+            p.invalidate = [...new Set([...(p.invalidate ?? []), p.to])];
+            await savePending(rcEnv, p).catch((e) => log.push(`  release check ${f}: WARNING — the pending record could not be saved (${errText(e)}); the removal is tried anyway`));
+            if (!(await invalidateRecord(rcEnv, p, () => savePending(rcEnv, p)))) {
+              republishFailed = true;
+              b.rcNotes.push(`${f} sweep record ${(p.invalidate ?? []).map((v) => recordPath(cfg.stateDir, v)).join(", ")} still to be removed (followers read it until it is gone)`);
+            }
+          }
+          continue;
+        }
+        if (p.verdict === "pass" && p.to && (badLink || stand !== p.to)) {
+          // The host was changed since the PASS (rolled back by hand, another release): that PASS says nothing about this keg.
+          log.push(`  release check ${f}: the saved PASS was for ${p.to}, the installed version is ${stand ?? "not named by the opt link"} — the PASS is dropped`);
+          // A verified record this host published for it must not stand for a version that is no longer in use: removed first. A removal that fails never holds the decision back
+          // (the keg in use is checked and rolled back as any other): a marker on the pending record keeps asking, every run, until the file is gone.
+          p.invalidate = [...new Set([...(p.invalidate ?? []), p.to])];
+          await savePending(rcEnv, p).catch((e) => log.push(`  release check ${f}: WARNING — the pending record could not be saved (${errText(e)}); the removal is tried anyway`));
+          if (!(await invalidateRecord(rcEnv, p, () => savePending(rcEnv, p)))) {
+            republishFailed = true;
+            b.failed.push(`release-check:${f}`);
+            b.flagged = true;
+            b.rcNotes.push(`${f} sweep record ${(p.invalidate ?? []).map((v) => recordPath(cfg.stateDir, v)).join(", ")} still to be removed (followers read it until it is gone)`);
+          }
+          delete p.verdict;
+          delete p.tail;
+          delete p.why;
+        }
+        if (badLink) {
+          p.to = badTo;
+          await failOptLink(rcEnv, p, () => savePending(rcEnv, p));
+        } else if (stand) p.to = stand;
       }
       // A record that names no version change (to === from, as written before this was checked) is no upgrade.
       if (p.to && p.to === p.from && !p.verdict) {
@@ -59,8 +171,18 @@ export async function releaseChecksSection(rt: RunCtx) {
       }
       if (!p.to && p.from && !p.unchanged) {
         // A stopped run may have upgraded without recording it.
-        const v = await brewView(rcEnv.exec, cfg.brew, p.full);
-        if (v?.current && v.current !== p.from) p.to = v.current;
+        const v = await brewView(rcEnv.exec, cfg.brew, p.full, kegDirFor(rcEnv));
+        if (rc.builtin) await adoptInstalled(rcEnv, p, v, () => savePending(rcEnv, p));
+        else if (v?.current && v.current !== p.from) p.to = v.current;
+      }
+      // The tailscale check authorizes one version: whatever is installed now (a run that died after the install, an upgrade that exited nonzero but changed the
+      // keg) is compared to it every time, and another release is a confirmed fail, never adopted.
+      if ((rc.builtin || p.gated) && !stoppingNow() && !dryRun) await failUnauthorized(rcEnv, p, () => savePending(rcEnv, p));
+      // A saved PASS whose sweep record is missing or says something else (the run died between the two writes) is published again: followers never wait on a verdict already made.
+      if (rc.builtin && !stoppingNow() && !dryRun && p.to && !p.unauthorized && p.verdict === "pass" && !(await republish())) {
+        republishFailed = true;
+        // Nothing else is decided or pruned before the PASS is published: the next run publishes it, every run until it lands.
+        continue;
       }
       // Answers read while stopping are not answers: nothing is decided from them.
       if (stoppingNow()) continue;
@@ -72,6 +194,14 @@ export async function releaseChecksSection(rt: RunCtx) {
           log.push(`  ${why}`);
           b.rcNotes.push(`${f} upgrade changed nothing (still ${p.from}), no check`);
           await notify(`⚠️ <b>${host} ${why}</b>\nNo upgrade to check: nothing is rolled back, ${p.from} is kept.\nLog: ${cfg.logFile ?? "-"}`);
+        } else if ((p.upgraded || p.to) && rc.builtin) {
+          // The tailscale check never adopts a version it could not read: it stays pending (previous keg protected) and asks again next run.
+          log.push(`  release check ${f}: the installed version could not be read (before ${p.from || "?"}) — the check stays pending, asked again next run`);
+          b.rcNotes.push(`${f} installed version unreadable, check pending`);
+          b.failed.push(`release-check:${f}`);
+          b.flagged = true;
+          keep = true;
+          continue;
         } else if (p.upgraded || p.to) {
           // Never a silent skip: no verdict, said so.
           const why = `release check ${f}: not run — the installed version could not be read (before ${p.from || "?"}, after ${p.to || "?"})`;
@@ -101,7 +231,7 @@ export async function releaseChecksSection(rt: RunCtx) {
         p.unresolvedWaits = (p.unresolvedWaits ?? 0) + 1;
         await savePending(rcEnv, p);
         const n = p.unresolvedWaits;
-        if (n < UNRESOLVED_WAIT_RUNS || (p.verdict && n > UNRESOLVED_WAIT_RUNS) || stoppingNow()) {
+        if (n < UNRESOLVED_WAIT_RUNS || (p.verdict && n > UNRESOLVED_WAIT_RUNS) || stoppingNow() || rc.builtin) {
           keep = true;
           log.push(`  release check ${f}: ${why} — the check waits for a later run (${n}/${UNRESOLVED_WAIT_RUNS})`);
           b.rcNotes.push(`${f} ${to} check waits for its owner (${note})`);
@@ -175,6 +305,10 @@ export async function releaseChecksSection(rt: RunCtx) {
           // The version the owners must run after the restart: every other keg of the formula is stale.
           const expect = join(p.rack, phase === "new" ? to : p.from);
           const jobs = await requiredJobs(rt, f, keg, expect);
+          // A risky tailscale with no daemon to restart (no plist found, no stale-keg job) cannot be shown to run the new version: could not run, never a pass.
+          if (!jobs.length && phase === "new" && f === "tailscale" && cfg.riskyKeepPrevious.some((q) => q.split("/").at(-1) === "tailscale")) {
+            return { kind: "busy" as const, note: "no tailscale daemon found to restart (no sh.brew.tailscale, homebrew.mxcl.tailscale or com.tailscale.tailscaled plist)" };
+          }
           // The whole set on the record before any restart: a resumed rollback restarts the same owners.
           const all = mergeOwners(p.owners ?? [], jobs);
           if (all.length !== (p.owners ?? []).length) {
@@ -196,6 +330,12 @@ export async function releaseChecksSection(rt: RunCtx) {
         },
         scan: (expect) => kegPids(rt, p.rack, expect),
       });
+      // A fail whose record could not be written inside the deciding run: the rollback went on, the pending record stays until the failed record lands.
+      if (rc.builtin && p.verdict === "fail" && !p.unauthorized && p.to && !stoppingNow() && !dryRun && !(await republish())) republishFailed = true;
+      if (d.flag) {
+        b.flagged = true;
+        b.rcNotes.push(d.flag);
+      }
       if (d.wait && d.failed && d.note) b.rcNotes.push(d.note);
       if (d.wait) await ownerWait(`its owner could not be ${d.failed ? "restarted" : "restarted yet"} (${d.waitWhy ?? "busy"})`, d.waitWhy ?? "busy");
       else if (d.note) b.rcNotes.push(d.note);
@@ -259,7 +399,7 @@ export async function releaseChecksSection(rt: RunCtx) {
             p.beforeRan = false;
           }
           // The record goes only once the check is over and no after is owed.
-          if (p.ended && !(owed && !p.afterRan) && !withheld) {
+          if (p.ended && !(owed && !p.afterRan) && !withheld && !republishFailed && !p.invalidate) {
             await fs.remove(pendingPath(cfg.stateDir, f));
             rcPending.delete(f);
           } else await savePending(rcEnv, p);
@@ -547,6 +687,17 @@ async function requiredJobs(rt: RunCtx, f: string, keg: string, expect?: string)
         ...(owner.restart ? { restart: owner.restart } : {}), ...(owner.healthWithinSec ? { healthWithinSec: owner.healthWithinSec } : {}) });
     }
     break;
+  }
+  // Tailscale: the daemon on this host is named by the plist it runs from (the Homebrew service, or the vendor's system daemon), and its restart is required:
+  // a verify that passes against a daemon nothing restarted onto the new keg would record the host verified on a version it never ran.
+  const daemons = cfg.riskyKeepPrevious.some((q) => q.split("/").at(-1) === "tailscale") && f === "tailscale" ? ["sh.brew.tailscale", "homebrew.mxcl.tailscale", "com.tailscale.tailscaled"] : [];
+  for (const label of daemons) {
+    const where = (await fs.exists(`/Library/LaunchDaemons/${label}.plist`)) ? "system" : (await fs.exists(`${fs.home}/Library/LaunchAgents/${label}.plist`)) ? `gui/${fs.uid}` : "";
+    if (!where || jobs.some((q) => q.label === label)) continue;
+    const owner = matchOwner(cfg.staleOwners, label);
+    jobs.push({ label, target: `${where}/${label}`, pid: "?", keg, required: true, named: true, ...(expect ? { expect } : {}), ...(owner?.probe ? { probe: owner.probe } : {}), ...(owner?.health ? { health: owner.health } : {}),
+      ...(owner?.restart ? { restart: owner.restart } : {}), ...(owner?.healthWithinSec ? { healthWithinSec: owner.healthWithinSec } : {}) });
+    named.add(label);
   }
   // The check's named owners: always required, matched literally, with the staleOwners entry's probe/health/restart when one matches.
   for (const label of findCheck(cfg.releaseChecks, f)?.owners ?? []) {

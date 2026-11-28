@@ -71,6 +71,8 @@ export async function staleKegStep(rt: RunCtx): Promise<void> {
     releaseRacks: racks,
     // Only what brew upgraded unchecked this run, whatever came after (a planned one held or failed is an ordinary package).
     leavePkgs: new Set([...rt.rcUnchecked].filter(([, u]) => u.ran).map(([f]) => f)),
+    // A run without the sweep lock leaves the risky packages to the run that has it (their owners are its to restart or roll back).
+    lockedPkgs: new Set(rt.sweepLock.held === false ? cfg.riskyKeepPrevious.map(last) : []),
     trackStuck: (still) => track("stale-keg", still) ?? [],
     log,
   });

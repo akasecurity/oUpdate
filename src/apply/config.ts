@@ -2,13 +2,14 @@
 // the "apply" object of oupdate's config file. Paths must be absolute. An unknown key or a wrong
 // type is an error, so a typo never silently turns a guard off.
 
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { expandEnv } from "../env.ts";
 import type { Caps } from "./chunked.ts";
 import type { DeferredService } from "./waiter.ts";
 import type { LabelRestart } from "./kegs.ts";
 import type { AppBundle } from "./appbundle.ts";
 import { RESTART_ARGV_MAX, type StaleOwner } from "./owner-waiter.ts";
+import { DEFAULT_CANARY_ORDER, DEFAULT_RISKY_KEEP_PREVIOUS, verifyPeers } from "./tailscale-sweep.ts";
 import { validateReviewerSpec, type ReviewerSpec } from "../adapters/reviewer/spec.ts";
 
 export interface RestartHelper {
@@ -33,6 +34,8 @@ export interface ReleaseCheck {
   retries: number;
   /** Per attempt, and per before/after command (default 900). */
   timeoutSec: number;
+  /** The check the config makes for tailscale (tailscale-verify.ts): a run that does not upgrade tailscale behaves as if it were not there. */
+  builtin?: boolean;
   /** Run right before the formula's upgrade (only when it is upgraded this run). */
   before?: string[];
   /** Run once the check passed, could not run, or the restored version passed; also when the run stops before any verdict. */
@@ -146,8 +149,19 @@ export interface ApplyConfig {
    * counted as FAILED in the brew line; it never aborts the run. Absent: no check runs.
    */
   postUpgradeCheck?: Record<string, string[]>;
-  /** Release checks of gated formulae (see ReleaseCheck and release-checks.ts). Absent: none. */
+  /** Release checks of gated formulae (see ReleaseCheck and release-checks.ts). Absent: none. A risky package without one gets the built-in tailscale verify. */
   releaseChecks?: ReleaseCheck[];
+  /**
+   * Packages whose previous version is kept through an upgrade and rolled back on a failed verify (default ["tailscale"]). Each needs a releaseChecks
+   * entry, except tailscale, which has a built-in verify (tailscale-verify.ts) and a one-host-at-a-time turn (tailscale-sweep.ts).
+   */
+  riskyKeepPrevious: string[];
+  /** The hosts in the order tailscale is upgraded, first the canary (default bonus, ai, max, startup, build, mini, dev). A host not in it never upgrades tailscale. */
+  tailscaleCanaryOrder: string[];
+  /** argv that prints the verified hosts for a version (the version is appended); absent: only the first host of the order may upgrade tailscale. */
+  tailscaleSweepRead?: string[];
+  /** argv that replaces the built-in local verify (exit 0 pass, 1 fail, other: could not run), e.g. one that pings from a peer. */
+  tailscaleVerify?: string[];
   /** Per command; a command past it is killed and its phase marked failed. */
   timeoutMs: number;
   /**
@@ -174,7 +188,7 @@ export const DEFAULTS = {
 
 const KEYS = new Set([
   "host", "stateDir", "logFile", "brew", "npm", "claudeCode", "lsof", "officialTaps", "typeBTaps", "upstreamTaps", "approvedTapsFile", "policyFile", "adoptedScriptsDir", "hostPrefixes", "pinRoots",
-  "caskExclude", "inPlaceCasks", "heldByDesign", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "jobRunners", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "timeoutMs", "upgradeTimeoutMs", "npmRegistry", "caps",
+  "caskExclude", "inPlaceCasks", "heldByDesign", "stuckAfter", "sensitive", "deferred", "restartHelper", "labelRestart", "staleKegUnlisted", "jobRunners", "staleOwners", "appBundles", "notify", "reviewer", "postUpgradeCheck", "releaseChecks", "riskyKeepPrevious", "tailscaleCanaryOrder", "tailscaleSweepRead", "tailscaleVerify", "timeoutMs", "upgradeTimeoutMs", "npmRegistry", "caps",
 ]);
 const SERVICE_KEYS = ["name", "waiter", "holdFile", "quarantineFile", "outcomeFile", "restartLog"] as const;
 
@@ -314,6 +328,50 @@ function releaseCheck(v: unknown, i: number, seen: Set<string>): ReleaseCheck {
     ...(v.ownerUnloaded === "upgrade" ? { ownerUnloaded: "upgrade" as const } : {}) };
 }
 
+/** An absolute-path argv of the tailscale keys: non-empty, at most RESTART_ARGV_MAX entries, each a plain argument. */
+function absArgv(a: Obj, k: string, where: string): string[] | undefined {
+  const v = a[k];
+  if (v === undefined) return undefined;
+  if (!Array.isArray(v) || v.length === 0 || v.length > RESTART_ARGV_MAX || !v.every(argWord) || !isAbsolute(v[0] as string)) {
+    throw new Error(`${where}.${k} must be an argv of at most ${RESTART_ARGV_MAX} non-empty strings whose first entry is an absolute path`);
+  }
+  return [...(v as string[])];
+}
+
+const HOST_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * The keys of the Tailscale sweep, and the release checks of the risky packages: each package of riskyKeepPrevious has a releaseChecks entry (tailscale gets the
+ * built-in one: tailscale-verify.ts, run with the host, the state dir and the next two hosts of the order). Any other risky package must bring its own.
+ */
+function tailscaleKeys(a: Obj, w: string, host: string, stateDir: string, checks: ReleaseCheck[] | undefined) {
+  const risky = list(a, "riskyKeepPrevious", w) ?? [...DEFAULT_RISKY_KEEP_PREVIOUS];
+  if (new Set(risky.map((q) => q.split("/").at(-1))).size !== risky.length) throw new Error(`${w}.riskyKeepPrevious lists a package twice`);
+  const order = list(a, "tailscaleCanaryOrder", w, true) ?? [...DEFAULT_CANARY_ORDER];
+  if (new Set(order).size !== order.length) throw new Error(`${w}.tailscaleCanaryOrder lists a host twice`);
+  for (const h of order) if (!HOST_NAME.test(h)) throw new Error(`${w}.tailscaleCanaryOrder: ${JSON.stringify(h)} is not a host name`);
+  const read = absArgv(a, "tailscaleSweepRead", w);
+  const verify = absArgv(a, "tailscaleVerify", w);
+  const out = checks ? [...checks] : [];
+  const have = new Set(out.map((c) => c.formula.split("/").at(-1)!));
+  for (const pkg of risky) {
+    const short = pkg.split("/").at(-1)!;
+    if (short === "tailscale" && have.has(short)) throw new Error(`${w}.releaseChecks: tailscale is a risky package, so its check is the built-in verify (set tailscaleVerify to change what it runs); an own check needs riskyKeepPrevious without tailscale`);
+    if (have.has(short)) continue;
+    if (short !== "tailscale") throw new Error(`${w}.riskyKeepPrevious: ${pkg} needs a releaseChecks entry (only tailscale has a built-in verify)`);
+    const peers = verifyPeers(order, host);
+    out.push({
+      formula: pkg,
+      command: [process.execPath, join(import.meta.dir, "tailscale-verify.ts"), "--host", host, "--state", stateDir, "--peers", peers.join(","), ...(verify ? ["--", ...verify] : [])],
+      // The verify retries inside itself and writes its record once, from the final verdict: the release check runs it once.
+      retries: 0,
+      timeoutSec: 600,
+      builtin: true,
+    });
+  }
+  return { risky, order, ...(read ? { read } : {}), ...(verify ? { verify } : {}), ...(out.length ? { releaseChecks: out } : {}) };
+}
+
 /** Parses the config file's text, ${NAME} read from env; `host` is the fallback when the file names none. */
 export function parseApplyConfig(text: string, fallbackHost: string, env: Record<string, string | undefined> = process.env): ApplyConfig {
   const expanded = expandEnv(text, env);
@@ -382,8 +440,11 @@ export function parseApplyConfig(text: string, fallbackHost: string, env: Record
     if (!isObj(a.caps)) throw new Error(`${w}.caps must be an object`);
     caps = { lines: posInt(a.caps, "lines", `${w}.caps`), maxChunks: posInt(a.caps, "maxChunks", `${w}.caps`), bytes: posInt(a.caps, "bytes", `${w}.caps`) };
   }
+  const host = str(a, "host", w) ?? fallbackHost;
+  const releaseChecks = a.releaseChecks !== undefined ? (a.releaseChecks as unknown[]).map((v, i) => releaseCheck(v, i, seenChecks)) : undefined;
+  const sweep = tailscaleKeys(a, w, host, stateDir, releaseChecks);
   return {
-    host: str(a, "host", w) ?? fallbackHost,
+    host,
     stateDir,
     logFile: path(a, "logFile", w),
     brew: str(a, "brew", w) ?? DEFAULTS.brew,
@@ -415,7 +476,11 @@ export function parseApplyConfig(text: string, fallbackHost: string, env: Record
     appBundles: ((a.appBundles as unknown[] | undefined) ?? []).map(appBundle),
     notify: list(a, "notify", w),
     postUpgradeCheck,
-    ...(a.releaseChecks !== undefined ? { releaseChecks: (a.releaseChecks as unknown[]).map((v, i) => releaseCheck(v, i, seenChecks)) } : {}),
+    ...(sweep.releaseChecks ? { releaseChecks: sweep.releaseChecks } : {}),
+    riskyKeepPrevious: sweep.risky,
+    tailscaleCanaryOrder: sweep.order,
+    ...(sweep.read ? { tailscaleSweepRead: sweep.read } : {}),
+    ...(sweep.verify ? { tailscaleVerify: sweep.verify } : {}),
     reviewer: a.reviewer === undefined ? undefined : validateReviewerSpec(a.reviewer),
     timeoutMs: posInt(a, "timeoutMs", w) ?? DEFAULTS.timeoutMs,
     upgradeTimeoutMs: posInt(a, "upgradeTimeoutMs", w, 2147483647) ?? DEFAULTS.upgradeTimeoutMs,

@@ -31,8 +31,8 @@ describe("parseApplyConfig", () => {
     expect(parseApplyConfig(cfg({ stateDir: "/state.test", postUpgradeCheck: { git: ["git", "--version"] } }), "hosta").postUpgradeCheck).toEqual({ git: ["git", "--version"] });
   });
   test("releaseChecks: off by default; formula + command, retries 1 and timeoutSec 900 by default, optional before/after/runAs", () => {
-    expect(parseApplyConfig(cfg({ stateDir: "/state.test" }), "hosta").releaseChecks).toBeUndefined();
-    const c = parseApplyConfig(cfg({ stateDir: "/state.test", releaseChecks: [
+    expect(parseApplyConfig(cfg({ stateDir: "/state.test", riskyKeepPrevious: [] }), "hosta").releaseChecks).toBeUndefined();
+    const c = parseApplyConfig(cfg({ stateDir: "/state.test", riskyKeepPrevious: [], releaseChecks: [
       { formula: "gadget", command: ["/opt/gate.test/check", "--quick"] },
       { formula: "other", command: ["/opt/gate.test/other"], retries: 0, timeoutSec: 60, before: ["svcctl", "off", "--now"], after: ["svcctl", "on"], runAs: "svc-user", owners: ["com.example.other-server"] },
       { formula: "third", command: ["/opt/gate.test/third"], owners: ["com.example.third-server"], ownerUnloaded: "upgrade" },

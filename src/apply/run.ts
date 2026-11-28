@@ -45,7 +45,7 @@ import { linkageCheck, relinkUpgraded, type KegEnv } from "./kegs.ts";
 import { linkageRepair } from "./reinstall.ts";
 import { type NpmRun } from "./npm.ts";
 import { ownerDir, ownerWaiterReport, realHttpStatus, realReleaseLock, realTakeLock, type QueuedOwner } from "./owner-waiter.ts";
-import { brewView, findCheck, shortName, loadPending, runHook, savePending, type PendingCheck, type ReleaseEnv } from "./release-checks.ts";
+import { adoptInstalled, brewView, kegDirFor, findCheck, shortName, loadPending, runHook, savePending, type PendingCheck, type ReleaseEnv } from "./release-checks.ts";
 import { heldFromPinned } from "./pins.ts";
 import { preflight } from "./preflight.ts";
 import { makeRunRecord } from "./run-record.ts";
@@ -55,6 +55,7 @@ import { awaitingTapApproval, typeBUpgrades, type TypeBEnv, type TypeBOptions } 
 import { handoff, waiterReport, type DeferredService, type WaiterEnv } from "./waiter.ts";
 import { brewSection, casksSection, appBundlesSection, cleanup, gkEnv } from "./run-brew.ts";
 import { releaseChecksSection } from "./run-release.ts";
+import { sweepLockPath } from "./tailscale-sweep.ts";
 import { claudeCodeStep, finishRun, npmStep, postUpgradeChecks, staleKegStep } from "./run-steps.ts";
 import { PhaseTimeout, last, liveRestartPid, makeNotify, ownerArgvs, newBrewState, type ApplyOptions, type ApplyResult, type RunCtx, type RunState } from "./run-ctx.ts";
 export { runsUnderBrewBun, holdRunningBun, named, makeNotify } from "./run-ctx.ts";
@@ -120,7 +121,31 @@ export async function gatekeeperAction(cfg: ApplyConfig, exec: Exec, action: "ap
   return { lines, rc: count(released, /Gatekeeper — released (\d+) file/) > 0 ? 0 : 1 };
 }
 
+/**
+ * Tailscale: a real run holds this host's sweep lock from before any pending check is read to the end of the run, released in a finally (two runs of one host never
+ * decide the sweep at once). A run that cannot take it leaves tailscale alone: no turn check, no upgrade, no recovery, no write of its pending record; it only protects
+ * the previous keg from cleanup.
+ */
 export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts: ApplyOptions): Promise<ApplyResult> {
+  const ownerLock = opts.ownerLock ?? { take: realTakeLock, release: realReleaseLock };
+  const sweepLock: { path: string; held: boolean | undefined; why: string } = { path: sweepLockPath(cfg.stateDir), held: undefined, why: "" };
+  if (!opts.dryRun && cfg.riskyKeepPrevious.some((q) => q.split("/").at(-1) === "tailscale")) {
+    try {
+      sweepLock.held = await ownerLock.take(sweepLock.path);
+      if (!sweepLock.held) sweepLock.why = "another run of this host holds the sweep lock";
+    } catch (e) {
+      sweepLock.held = false;
+      sweepLock.why = `the sweep lock could not be taken (${e instanceof Error ? e.message : String(e)})`;
+    }
+  }
+  try {
+    return await runApply(cfg, exec, fs, opts, sweepLock);
+  } finally {
+    if (sweepLock.held) await ownerLock.release(sweepLock.path).catch(() => undefined);
+  }
+}
+
+async function runApply(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts: ApplyOptions, sweepLock: { path: string; held: boolean | undefined; why: string }): Promise<ApplyResult> {
   const { dryRun } = opts;
   const now = opts.now ?? new Date();
   const today = day(now);
@@ -274,9 +299,10 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   };
   let quarantined: DeferredService | undefined;
   for (const s of cfg.deferred) if (!quarantined && (await fs.exists(s.quarantineFile))) quarantined = s;
-  // A release check keeps its formula's previous keg: no install cleanup at all then (brew's periodic
+  // The previous version of each risky package (tailscale) is kept for good: no install cleanup at all on a host that has a risky list (brew's periodic cleanup after any upgrade would remove it), and
+  // the run's own cleanup always leaves those packages out. A release check keeps its formula's previous keg the same way: no install cleanup at all then (brew's periodic
   // cleanup after any upgrade would remove it too); the run's own cleanup step skips that formula.
-  const installEnv = { HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1", ...(quarantined || cfg.releaseChecks?.length ? { HOMEBREW_NO_INSTALL_CLEANUP: "1" } : {}) };
+  const installEnv = { HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1", ...(quarantined || cfg.releaseChecks?.some((c) => !c.builtin) || cfg.riskyKeepPrevious.length ? { HOMEBREW_NO_INSTALL_CLEANUP: "1" } : {}) };
 
   // Release checks: the upgrades whose check has not decided (this run's and any a stopped run left),
   // and the staleOwners jobs of their previous kegs, restarted inline before the check.
@@ -290,12 +316,17 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       return t;
     }),
     writeFile: fs.writeFile, remove: fs.remove, isDir: fs.isDir, listDir: fs.listState ?? fs.listDir,
+    ...(fs.realPath ? { realPath: fs.realPath } : {}), ...(fs.isSymlink ? { isSymlink: fs.isSymlink } : {}), ...(fs.kind ? { kind: fs.kind } : {}), riskyKeep: cfg.riskyKeepPrevious.map((q) => q.split("/").at(-1)!),
     notify, log, stamp,
   };
+  const ownerLock = opts.ownerLock ?? { take: realTakeLock, release: realReleaseLock };
   const rcPending = new Map<string, PendingCheck>();
   /** Formulae whose pending record is unreadable: held from upgrades, their kegs kept from cleanup. */
   const rcBroken: string[] = [];
   for (const p of await loadPending(rcEnv, log, rcBroken, (cfg.releaseChecks ?? []).map((c) => shortName(c.formula)))) rcPending.set(p.formula, p);
+  // A run without the sweep lock does not touch the tailscale check at all (no recovery, no write of its record, nothing from the stale-keg step): it is left out of
+  // this run's pending set, and the cleanup protection below is all it does.
+  if (sweepLock.held === false) for (const k of [...rcPending.keys()]) if (findCheck(cfg.releaseChecks, k)?.builtin) rcPending.delete(k);
   const rcThisRun = new Set<string>();
   const rcUnchecked = new Map<string, { owners: string[]; name: string; ran?: boolean }>();
   const rcJobs = new Map<string, QueuedOwner[]>();
@@ -351,9 +382,11 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
     try {
       // An upgrade that changed nothing is never taken for one by a later version change.
       if (!p.to && !p.ended && p.from && !p.unchanged) {
-        const v = await brewView(rcEnv.exec, cfg.brew, p.full);
-        if (v?.current && v.current !== p.from) {
-          p.to = v.current;
+        const v = await brewView(rcEnv.exec, cfg.brew, p.full, kegDirFor(rcEnv));
+        // The tailscale check reads the version from the opt link alone: brew's fallback links never name it (adoptInstalled).
+        if (findCheck(cfg.releaseChecks, p.full)?.builtin) await adoptInstalled(rcEnv, p, v, () => savePending(rcEnv, p));
+        else if (v?.current && v.current !== p.from) p.to = v.current;
+        if (p.to && p.to !== p.from) {
           p.upgraded = true;
           await savePending(rcEnv, p);
           log.push(`  release check ${p.formula}: ${said} ${p.from} → ${p.to} — checked this run`);
@@ -378,7 +411,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   const retiredFor = (p: PendingCheck, keg: string) => dirname(keg) === p.rack && keg !== expectedKeg(p);
   /** Gated formulae outdated (held ones too) or not installed this run: an upgrade that depends on one waits. */
   const gatedOutdated: string[] = [];
-  const ownerLock = opts.ownerLock ?? { take: realTakeLock, release: realReleaseLock };
+  const sweepGated = new Map<string, string>();
   const clock = opts.ownerClock ?? { now: () => Date.now(), sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)), httpStatus: realHttpStatus };
   const restartOpts = {
     deferred: cfg.deferred, helper: cfg.restartHelper, labelRestart: cfg.labelRestart, staleKegUnlisted: cfg.staleKegUnlisted, detachedLog: join(cfg.stateDir, "restart.log"), ownerHanded, helperRunning,
@@ -388,7 +421,7 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
   const record = makeRunRecord({ fs, stateDir: cfg.stateDir, host, now, stamp, dryRun, log });
   const rt: RunCtx = {
     opts, cfg, fs, exec, dryRun, now, host, r, tb, log, stamp, b, brewHeld, brewHeldBase, record, x, notify, step, tbEnv, tbOpts, brewFailed, quarantined, installEnv,
-    rcEnv, rcPending, rcBroken, rcThisRun, rcUnchecked, rcJobs, mergeOwners, rcStopOff, stoppingNow, afterOwed, oweAfter, expectedKeg, retiredFor, gatedOutdated,
+    rcEnv, rcPending, rcBroken, rcThisRun, rcUnchecked, rcJobs, mergeOwners, rcStopOff, stoppingNow, afterOwed, oweAfter, expectedKeg, retiredFor, gatedOutdated, sweepGated, sweepLock,
     ownerLock, clock, restartOpts, waiterEnv, kegEnv, ownerHanded, helperRunning, track, recoverTo, releaseRacks, npmFailed, st,
   };
 
@@ -432,10 +465,25 @@ export async function applyHost(cfg: ApplyConfig, exec: Exec, fs: ApplyFs, opts:
       log.push(`restart: ${last(n)} not restarted — upgraded unchecked, its owner is not loaded`);
       b.rcNotes.push(`${last(n)} upgraded unchecked, owner not loaded`);
     }
-    const rl = await relinkUpgraded(kegEnv, b.upgraded, { brew: cfg.brew, log });
+    // The built-in tailscale check's formula whose opt link is bad or unread is neither relinked nor restarted here: `brew link` links the newest keg left, not the authorized one, and a
+    // daemon restarted onto a bad link stays down if the rollback is then refused. Both are left to its release check (its rollback and its owner restart). Residual: brew's own link step
+    // failing while the opt link cannot be read at once leaves the prefix links missing until the check decides (docs/tailscale-upgrades.md).
+    const relinkable: string[] = [];
+    const skipped = new Set<string>();
+    for (const n of b.upgraded) {
+      if (findCheck(cfg.releaseChecks, n)?.builtin && (await brewView(rcEnv.exec, cfg.brew, n, kegDirFor(rcEnv)))?.optState !== "ok") {
+        log.push(`  ${last(n)}: the opt link is not read as on a keg — not relinked or restarted here, left to its release check`);
+        b.rcNotes.push(`${last(n)} not relinked or restarted, opt link not on a keg (left to its release check)`);
+        b.flagged = true;
+        skipped.add(n);
+        continue;
+      }
+      relinkable.push(n);
+    }
+    const rl = await relinkUpgraded(kegEnv, relinkable, { brew: cfg.brew, log });
     b.relinkNote = rl.note;
     // A formula upgraded unchecked (its owner unloaded on purpose) is never restarted: no kickstart, helper or owner command.
-    await restartUpgraded({ exec: x, restartExec: waiterEnv.exec, exists: fs.exists, spawnDetached: fs.spawnDetached, home: fs.home, uid: fs.uid }, b.upgraded.filter((n) => !rcUnchecked.has(last(n))), { ...restartOpts, into: b.restarted });
+    await restartUpgraded({ exec: x, restartExec: waiterEnv.exec, exists: fs.exists, spawnDetached: fs.spawnDetached, home: fs.home, uid: fs.uid }, b.upgraded.filter((n) => !rcUnchecked.has(last(n)) && !skipped.has(n)), { ...restartOpts, into: b.restarted });
     if (b.restarted.length) log.push(`restarted: ${b.restarted.join(" ")}`);
   });
   await step("brew", "cleanup", async () => {

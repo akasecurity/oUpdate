@@ -60,6 +60,7 @@ function env(s: Script = {}) {
     if (argv[0] === "brew") {
       const rest = argv.slice(1).join(" ");
       if (rest === "--prefix") return { rc: 0, out: "/brew\n", err: "" };
+      if (rest === "--cellar") return { rc: 0, out: "/brew/Cellar\n", err: "" };
       if (rest.startsWith("info --json=v2")) return { rc: 0, out: JSON.stringify({ formulae: [{ full_name: "example/tap/gadget", linked_keg: linked || null, installed: [...kegs].sort().map((version) => ({ version })), versions: { stable: "1.3.0" }, revision: 0 }] }), err: "" };
       if (rest === "trust --formula --json=v1") return { rc: 0, out: JSON.stringify(s.trusted ?? []), err: "" };
       if (rest === "uninstall example/tap/gadget") {
