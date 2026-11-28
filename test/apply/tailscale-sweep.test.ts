@@ -9,7 +9,7 @@ import { DEFAULT_CANARY_ORDER, recordDir, isTailscaleCask, parseSweepList, readS
 import { ATTEMPTS, KILL_GRACE_MS, maxVerifyMs, parseArgs, PING_TIMEOUT_MS, RETRY_WAIT_MS, runCommand, SETTLE_MS, STATUS_TIMEOUT_MS, verify, type Run } from "../../src/apply/tailscale-verify.ts";
 import { execFile } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { brewView, failOptLink, installedAbove, invalidateRecord, loadPending, pruneOlderKegs, rollback, runCheck, staleSweepRecords, type ReleaseEnv } from "../../src/apply/release-checks.ts";
 import { fakeHost, fakeTypeB, testConfig } from "./host-fixture.ts";
@@ -216,7 +216,7 @@ describe("the verify and its record", () => {
     const goodStatus = JSON.stringify({ BackendState: "Running", Version: "1.80.2-tabc", Self: { Online: true } });
     const pingFlood: Run = (argv) => (argv[1] === "status" ? Promise.resolve({ rc: 0, out: goodStatus }) : runCommand(["sh", "-c", "yes | head -c 12000000"], 10_000));
     expect(await verify(args, { ...base.deps, run: pingFlood, settleMs: 0, retryMs: 0 })).toBe(1);
-    expect((await runCommand(["sh", "-c", "kill -USR1 $$"], 5000)).rc).toBe(128 + 30);
+    expect((await runCommand(["sh", "-c", "kill -USR1 $$"], 5000)).rc).toBe(128 + constants.signals.SIGUSR1);
     // The limit is counted in bytes over the whole output: one byte past it, in the only chunk there is, is cut; exactly at it is not.
     const exact = await runCommand(["sh", "-c", "head -c 8388608 /dev/zero"], 10_000);
     expect([exact.rc, exact.cut]).toEqual([0, undefined]);
