@@ -21,7 +21,7 @@ const AFTER_WITHHELD_RUNS = 3;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export async function releaseChecksSection(rt: RunCtx) {
-  const { opts, dryRun, now, host, stamp, log, b, x, notify, step, rcEnv, rcPending, mergeOwners, rcStopOff, stoppingNow, afterOwed, expectedKeg, retiredFor, ownerLock, clock, restartOpts, cfg, fs, exec, waiterEnv } = rt;
+  const { opts, dryRun, now, host, stamp, log, b, x, notify, step, rcEnv, rcPending, mergeOwners, rcStopOff, stoppingNow, afterOwed, expectedKeg, retiredFor, ownerLock, sweepLock, clock, restartOpts, cfg, fs, exec, waiterEnv } = rt;
   if (!rcPending.size) {
     await startDeferredWaiter(rt);
     return;
@@ -39,7 +39,28 @@ export async function releaseChecksSection(rt: RunCtx) {
     }
     if (!rc) {
       // The sweep record of an unauthorized version is removed first: followers read it until it is gone, and the marker goes with the pending record. While it cannot be removed the record is kept (asked again next run).
-      if (p.invalidate && (stoppingNow() || !(await invalidateRecord(rcEnv, p, () => savePending(rcEnv, p))))) {
+      // Under the sweep lock: a run that took it at the start has it; any other (the config no longer lists tailscale, so none was taken) takes it for this removal, and a run of the old config that holds it
+      // keeps the record to a later run, so the read of the record and its removal are never interleaved with that run's own decision.
+      let removed = false;
+      if (p.invalidate && !stoppingNow()) {
+        const own = sweepLock.held === true;
+        let lockTaken = own;
+        if (!own) {
+          try {
+            lockTaken = await ownerLock.take(sweepLock.path);
+          } catch {
+            lockTaken = false;
+          }
+        }
+        if (lockTaken) {
+          try {
+            removed = await invalidateRecord(rcEnv, p, () => savePending(rcEnv, p));
+          } finally {
+            if (!own) await ownerLock.release(sweepLock.path).catch(() => undefined);
+          }
+        } else log.push(`  release check ${f}: WARNING — the sweep lock is held by another run — its sweep record is not removed, asked again next run`);
+      }
+      if (p.invalidate && !removed) {
         b.failed.push(`release-check:${f}`);
         b.flagged = true;
         b.rcNotes.push(`${f} sweep record ${(p.invalidate ?? []).map((v) => recordPath(cfg.stateDir, v)).join(", ")} still to be removed (followers read it until it is gone)`);

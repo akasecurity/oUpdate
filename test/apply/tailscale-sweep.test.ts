@@ -349,7 +349,7 @@ describe("the verify and its record", () => {
 });
 
 describe("the apply run holds tailscale until it is this host's turn", () => {
-  async function run(o: { reviewed?: string; host: string; read?: string[]; reader?: string; candidate?: string; candidates?: string[]; dry?: boolean; casks?: string; formulas?: string; lock?: boolean | "throws"; builtin?: boolean; files?: Record<string, string>; installedList?: string; installed?: string; moveAfterCellar?: string; upgradeRc?: number; risky?: string[]; deps?: Record<string, string>; daemon?: "none" | "stopped" | "old"; startUpgraded?: boolean; noOpt?: boolean; optAfter?: "gone" | "unread"; optAfterUpgrade?: boolean; unreadOpt?: boolean; linkedDir?: boolean; currentAfterCellar?: string; failRead?: string[]; failRemove?: string[]; stoppedLabel?: string; statusRc?: number; failWrite?: string[]; lsof?: string[]; ps?: Record<string, { comm?: string; command?: string; ppid?: string }> }) {
+  async function run(o: { stopping?: boolean; reviewed?: string; host: string; read?: string[]; reader?: string; candidate?: string; candidates?: string[]; dry?: boolean; casks?: string; formulas?: string; lock?: boolean | "throws"; builtin?: boolean; files?: Record<string, string>; installedList?: string; installed?: string; moveAfterCellar?: string; upgradeRc?: number; risky?: string[]; deps?: Record<string, string>; daemon?: "none" | "stopped" | "old"; startUpgraded?: boolean; noOpt?: boolean; optAfter?: "gone" | "unread"; optAfterUpgrade?: boolean; unreadOpt?: boolean; linkedDir?: boolean; currentAfterCellar?: string; failRead?: string[]; failRemove?: string[]; stoppedLabel?: string; statusRc?: number; failWrite?: string[]; lsof?: string[]; ps?: Record<string, { comm?: string; command?: string; ppid?: string }> }) {
     const h = fakeHost({ formulas: o.formulas ?? "tailscale", verbose: `tailscale (1.78.0) < ${o.reviewed ?? "1.80.2"}\ngood-a (1.0) < 1.1`, formulaTaps: { tailscale: "homebrew/core", "good-a": "homebrew/core" }, dirs: ["/brew/Cellar", "/brew/Cellar/tailscale/1.78.0", ...(o.linkedDir ? ["/brew/var/homebrew/linked"] : [])], ...(o.daemon === "none" ? { ...(o.files ? { files: o.files } : {}) } : { files: { "/Library/LaunchDaemons/sh.brew.tailscale.plist": "", ...o.files } }), ...(o.upgradeRc ? { upgradeRc: { tailscale: o.upgradeRc } } : {}), ...(o.lsof ? { lsof: o.lsof, ps: o.ps } : {}), ...(o.failWrite ? { failWrite: o.failWrite } : {}), ...(o.failRemove ? { failRemove: o.failRemove } : {}), ...(o.failRead ? { failRead: o.failRead } : {}), ...(o.deps ? { deps: o.deps } : {}), ...(o.installedList ? { answers: { "brew list --formula --full-name": { rc: 0, out: o.installedList } } } : {}), ...(o.casks ? { casks: o.casks, caskTaps: { [o.casks]: "homebrew/cask" } } : {}) });
     const listDir = h.fs.listDir;
     h.fs.listDir = async (d) => (d.startsWith("/state.test/release-checks") || d === "/state.test/tailscale-sweep" ? [...h.files.keys()].filter((k) => k.startsWith(`${d}/`)).map((k) => k.slice(d.length + 1)) : listDir(d));
@@ -394,7 +394,7 @@ describe("the apply run holds tailscale until it is this host's turn", () => {
     };
     const res = await applyHost(
       testConfig({ host: o.host, logFile: "/log.test/h.log", riskyKeepPrevious: o.risky ?? ["tailscale"], tailscaleCanaryOrder: DEFAULT_CANARY_ORDER, ...(o.read ? { tailscaleSweepRead: o.read } : {}), releaseChecks: o.risky?.length === 0 ? [] : [{ formula: "tailscale", command: ["/opt/x/verify"], retries: 1, timeoutSec: 60, ...(o.builtin ?? true ? { builtin: true } : {}) }] }),
-      exec, h.fs, { dryRun: o.dry ?? true, ownerLock: { take: async (p) => { locks.push(`take ${p}`); if (o.lock === "throws") throw new Error("EROFS: read-only file system"); return o.lock ?? true; }, release: async (p) => void locks.push(`release ${p}`) }, reviewer: scripted([], "APPROVE\nno attack indicators found").r, typeB: fakeTypeB(0).typeB },
+      exec, h.fs, { dryRun: o.dry ?? true, ...(o.stopping ? { isStopping: () => true } : {}), ownerLock: { take: async (p) => { locks.push(`take ${p}`); if (o.lock === "throws") throw new Error("EROFS: read-only file system"); return o.lock ?? true; }, release: async (p) => void locks.push(`release ${p}`) }, reviewer: scripted([], "APPROVE\nno attack indicators found").r, typeB: fakeTypeB(0).typeB },
     );
     return { ...res, files: h.files, filesAtUpgrade: () => filesAtUpgrade, optsOf: (prefix: string) => h.callOpts.filter((c) => c.line.startsWith(prefix)).map((c) => c.opts), calls, locks, envOf: (prefix: string) => h.callOpts.filter((c) => c.line.startsWith(prefix)).map((c) => c.opts?.env), text: [...res.log, ...res.summary].join("\n"), brew: h.calls };
   }
@@ -510,6 +510,36 @@ describe("the apply run holds tailscale until it is this host's turn", () => {
     expect(stuck.files.has(rec)).toBe(true);
     expect(JSON.parse(stuck.files.get(PENDING_TS)!).invalidate).toEqual(["1.81.0"]);
     expect(stuck.text).not.toContain("no longer configured — its record is removed");
+  });
+  describe("a pending record whose release check was removed, with its unauthorized sweep record still published", () => {
+    const rec = recordPath("/state.test", "1.81.0");
+    const marked = { formula: "tailscale", full: "tailscale", rack: "/brew/Cellar/tailscale", from: "1.78.0", to: "1.81.0", gated: "1.80.2", beforeRan: false, at: "x", upgradeStarted: true, upgraded: true, verdict: "fail", unauthorized: true, invalidate: ["1.81.0"], after: "skip", trusted: false, why: "w", tail: ["w"] };
+    const text = `${JSON.stringify({ host: "bonus", version: "1.81.0", status: "verified", at: "x" })}\n`;
+    const base = { host: "bonus", dry: false, risky: [] as string[], formulas: "good-a", startUpgraded: true };
+    test("a run that is stopping keeps the pending record and its marker, and removes nothing", async () => {
+      // Fails at src/apply/run-release.ts (the `stoppingNow()` term of the removed-check branch): without it the stopping run removed the sweep record and the pending record.
+      const r = await run({ ...base, stopping: true, files: { [PENDING_TS]: JSON.stringify(marked), [rec]: text } });
+      expect(r.files.has(rec)).toBe(true);
+      expect(JSON.parse(r.files.get(PENDING_TS)!).invalidate).toEqual(["1.81.0"]);
+    });
+    test("a removal that fails keeps the record, and the next run removes both", async () => {
+      // Fails at src/apply/run-release.ts (the `invalidateRecord` term): a failed removal still dropped the pending record, so the next run had nothing to retry.
+      const first = await run({ ...base, failRemove: [rec], files: { [PENDING_TS]: JSON.stringify(marked), [rec]: text } });
+      expect(first.files.has(rec)).toBe(true);
+      expect(first.files.has(PENDING_TS)).toBe(true);
+      const second = await run({ ...base, files: Object.fromEntries(first.files) });
+      expect(second.files.has(rec)).toBe(false);
+      expect(second.files.has(PENDING_TS)).toBe(false);
+    });
+    test("the sweep record is removed under the sweep lock, taken for it when this run did not take one (tailscale left the risky list)", async () => {
+      // Fails at src/apply/run-release.ts (the removed-check branch): it removed the record without the lock, racing a run of the old config that holds it.
+      const held = await run({ ...base, lock: false, files: { [PENDING_TS]: JSON.stringify(marked), [rec]: text } });
+      expect(held.files.has(rec)).toBe(true);
+      expect(JSON.parse(held.files.get(PENDING_TS)!).invalidate).toEqual(["1.81.0"]);
+      const free = await run({ ...base, files: { [PENDING_TS]: JSON.stringify(marked), [rec]: text } });
+      expect(free.files.has(rec)).toBe(false);
+      expect(free.locks).toEqual(["take /state.test/tailscale-sweep/lock", "release /state.test/tailscale-sweep/lock"]);
+    });
   });
   test("the sweep lock is taken before anything else reads this host's tailscale state, and its real error is reported", async () => {
     const r = await run({ host: "bonus", dry: false, lock: "throws" });
