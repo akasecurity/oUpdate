@@ -261,7 +261,7 @@ let tookBackslash = false;
 // happened in this read (widened), and a read that leaves all of them out (noWiden).
 let widened = false;
 let noWiden = false;
-// The replay of an unresolved line (runLooseJobs) reads with `noWiden` and still records what a writer file holds: those records touch no reach set.
+// The replay of an unresolved line (runLooseJobs) reads with `noWiden` and still makes the records of a writer file it runs (widenEveryLate, noteWriteSpawn): they touch no reach set.
 let inLoose = false;
 function words(cmd: string): string[] {
   // No quote, backslash or tilde: the words are the runs between blanks.
@@ -5692,7 +5692,7 @@ function widenJsScan(ctx: Ctx, key: string, text: string): void {
 // the docs is a file the release shows when its bytes change. They go to a record of their own (ctx.wsFiles, carried as `wsFiles`, read after every reach
 // comparison like npmFiles): the reach, the tier flags and the details the other rules compute are exactly what they were. Once per context.
 function noteWriteSpawn(ctx: Ctx): void {
-  if (noWiden || ctx.wsDone) return;
+  if ((noWiden && !inLoose) || ctx.wsDone) return;
   ctx.wsDone = true;
   const rec = (ctx.wsFiles ??= new Set<string>());
   for (const [logical, key] of ctx.logical) if (!isManifest(logical) && !isDocSurface(logical)) rec.add(key);
@@ -7266,7 +7266,7 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
     const end = closeAt(text.slice(open, open + 400), 0);
     xs3 += end < 0 ? 400 : end + 1;
     if (end < 0) return []; // no receiver read: recv() takes the empty text as unknown
-    return splitTop(text.slice(open + 1, open + end), ",");
+    return splitTop(text.slice(open + 1, open + end), ",", false); // already charged to xs3 above
   };
   const callSites: [RegExp, (args: string[]) => void][] = [
     // A call on a name, a bracket or a paren that is changed in place: `)`, `]`, `}` or a member name before `.push(`.
@@ -9903,8 +9903,8 @@ function strLit(expr: string): string | undefined {
   return t.slice(1, -1);
 }
 
-function splitTop(src: string, sep: "," | "+"): string[] {
-  jsStep(src.length + 1);
+function splitTop(src: string, sep: "," | "+", charge = true): string[] {
+  if (charge) jsStep(src.length + 1);
   const out: string[] = [];
   let cur = "";
   let depth = 0;
@@ -10984,7 +10984,7 @@ function noteRootMain(ctx: Ctx): void {
   }
   const name = (rel ? nodeFile(ctx, rel) ?? nodeFile(ctx, `${rel}/index`) : undefined) ?? nodeFile(ctx, "index");
   if (!name) return;
-  if (!ctx.inEsc) (ctx.selfRan ??= new Set()).add(name);
+  (ctx.selfRan ??= new Set()).add(name);
   markHookFile(ctx, name);
   addLogical(ctx, name);
 }
@@ -11672,8 +11672,6 @@ function runLooseJobs(ctx: Ctx): void {
   const make = ctx.freshStage;
   ctx.looseJobs = undefined;
   if (!jobs || !make || ctx.hold) return;
-  const sc = make();
-  sc.stagePass = true;
   // The read names what the line names: a widening (every file, a directory) is left out, as the parent read nothing of the line and a package that
   // only the unresolved word could reach through a widening stays quiet; `widened` is put back so the narrow read is asked for as before.
   const savedNoWiden = noWiden;
@@ -11682,6 +11680,9 @@ function runLooseJobs(ctx: Ctx): void {
   inLoose = true;
   try {
     for (const job of jobs.values()) {
+      // A context of its own per line: a stop in one line ends that line only, and each context carries what it holds to the parent once.
+      const sc = make();
+      sc.stagePass = true;
       sc.cwd = job.cwd;
       sc.ignoreHooks = job.ignoreHooks;
       sc.noEnvIgnore = job.noEnvIgnore;
@@ -11699,6 +11700,9 @@ function runLooseJobs(ctx: Ctx): void {
 
 // The files a write-and-spawn file of the stage pass put in play go to the parent's record (the stage context is dropped).
 function carryWriteSpawn(ctx: Ctx, sc: Ctx): void {
+  // The self-run targets and the writer files of the stage context: selfWs is read on the parent, whichever context ran the self-run.
+  for (const k of sc.selfRan ?? []) (ctx.selfRan ??= new Set<string>()).add(k);
+  for (const k of sc.wsWriters ?? []) (ctx.wsWriters ??= new Set<string>()).add(k);
   if (!sc.wsFiles?.size) return;
   const rec = (ctx.wsFiles ??= new Set<string>());
   for (const k of sc.wsFiles) rec.add(k);
@@ -15726,7 +15730,7 @@ export function shebangCommand(first: string): string[] | undefined {
 // (selfGyp) are kept apart too, and the gyp read of a package only a self-run reached gyp for runs as a self-run.
 // The self-run reads of one trigger: each target once, and none that a read already took in, in a single copy of the records.
 function readSelfTargets(ctx: Ctx, targets: string[]): void {
-  if (!ctx.inEsc) for (const t of targets) (ctx.selfRan ??= new Set()).add(t);
+  for (const t of targets) (ctx.selfRan ??= new Set()).add(t);
   // Nothing left to read: every target self-read (selfBinsRead holds only self.targets), or a pass under this same binsRead found none left
   // (neither record ever drops an entry, so that stays true).
   // Inside the backslash reading a self-run reads on the records of that reading only: the real self-run records are left alone.
