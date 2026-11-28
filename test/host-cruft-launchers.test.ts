@@ -370,11 +370,19 @@ describe("env line: what the earlier readers counted stays counted, and the revi
     // /usr/bin/run is a plain file, /bin/run (the second dir) links to dash: a lookup that stops at the first hit would adopt.
     expect(await script("#!/usr/bin/env run", { links: { "/bin/run": "/bin/dash" } })).toBe(1);
   });
-  test("a line past the lookup cap is counted when every word is found and harmless; a line under it is adopted", async () => {
-    // The command is an absolute path that resolves, so no word is counted through the command word when its lookup finds nothing.
-    const line = (k: number) => `#!/usr/bin/env /usr/bin/true ${Array.from({ length: k }, (_, i) => `w${i}`).join(" ")}`;
+  test("a line past the lookup cap is counted when every word is found and harmless; a line under it is adopted (inside the 512 bytes the scan reads)", async () => {
+    // The command is an absolute path that resolves, so no word is counted through the command word when its lookup finds nothing. Two letters per word: the line, its
+    // owner line and the words stay inside the 512 bytes of a script that are read.
+    const two = (k: number) => Array.from({ length: k }, (_, i) => `${"xyzqwj"[Math.floor(i / 26)]}${String.fromCharCode(97 + (i % 26))}`);
+    const line = (k: number) => `#!/usr/bin/env /usr/bin/true ${two(k).join(" ")}`;
+    expect(line(140).length + "\n# owner: me\n".length).toBeLessThan(512);
     expect(await script(line(100))).toBe(0);
-    expect(await script(line(200))).toBe(1);
+    expect(await script(line(140))).toBe(1);
+  });
+  test("a line of absolute paths that resolve is counted past the lookup cap and adopted under it (by design past the 512 bytes the scan reads: it isolates the cap)", async () => {
+    const line = (k: number) => `#!/usr/bin/env true ${Array.from({ length: k }, (_, i) => `/q/p${i}`).join(" ")}`;
+    expect(await script(line(100))).toBe(0);
+    expect(await script(line(600))).toBe(1);
   });
 
   test("a corpus of 3,000 env lines: the head counts every line either earlier reader counted", async () => {
@@ -417,38 +425,39 @@ describe("env line: what the earlier readers counted stays counted, and the revi
 });
 
 describe("a line with many words or a long PATH is judged in bounded time (OUP-372)", () => {
-  // `missing` is asked once per lookup: it counts them. Every word `aN` is found nowhere (the command word then counts the line).
+  // `missing` is asked once per lookup: it counts them. The command is `true` (found, harmless); every word `aN` is found nowhere and is no command, so only the
+  // cap, or the verdict on a command that is missing, can count the line.
   const run = async (line: string, dirs?: number) => {
     let calls = 0;
     const t = Date.now();
     const n = await count({
       argv: [OWN],
-      head: () => `${line}\n# owner: me\n`,
+      head: () => `#!/usr/bin/env true ${line}\n# owner: me\n`,
       ...(dirs ? { env: { PATH: Array(dirs).fill("/bin").join(":") } } : {}),
       missing: (q) => (calls++, /\/a\d*$/.test(q)),
     });
     return { n, calls, ms: Date.now() - t };
   };
   const words = (k: number) => Array.from({ length: k }, (_, i) => `a${i}`).join(" ");
-  test("49,000 repeated PATH dirs and 232 distinct words: one dir is looked at, in under 1 s", async () => {
-    const r = await run(`#!/usr/bin/env ${words(232)}`, 49000);
-    expect(r.n).toBe(1);
-    expect(r.calls).toBeLessThan(600);
+  test("49,000 repeated PATH dirs and 232 distinct words: one dir is looked at (232 lookups, adopted), in under 1 s", async () => {
+    const r = await run(words(232), 49000);
+    expect(r.n).toBe(0);
+    expect(r.calls).toBeLessThan(260);
     expect(r.ms).toBeLessThan(1000);
   });
   test("a repeated PATH dir is looked at once: 3 words and 49,000 copies of /bin make 3 lookups", async () => {
-    const r = await run(`#!/usr/bin/env ${words(3)}`, 49000);
-    expect(r.n).toBe(1);
-    expect(r.calls).toBeLessThan(10);
+    const r = await run(words(3), 49000);
+    expect(r.n).toBe(0);
+    expect(r.calls).toBeLessThan(12);
   });
-  test("49,000 distinct words are counted after the lookup cap, not after 49,000 x 4 lookups", async () => {
-    const r = await run(`#!/usr/bin/env ${words(49000)}`);
+  test("49,000 distinct words harmless to a found command are counted by the cap, not after 49,000 x 4 lookups (by design past the 512 bytes the scan reads: it isolates the cap)", async () => {
+    const r = await run(words(49000));
     expect(r.n).toBe(1);
     expect(r.calls).toBeLessThan(700);
   });
   test("a repeated word is looked up once: 5,000 copies of one word found nowhere", async () => {
-    const r = await run(`#!/usr/bin/env ${Array(5000).fill("a").join(" ")}`);
-    expect(r.n).toBe(1);
+    const r = await run(Array(5000).fill("a").join(" "));
+    expect(r.n).toBe(0);
     expect(r.calls).toBeLessThan(30);
   });
 });
