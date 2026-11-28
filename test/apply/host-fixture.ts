@@ -1,6 +1,7 @@
 // A scripted host for the apply run: brew, lsof, launchctl, npm and the notify command answer from
 // a script, as the previous updater's brew mocks did, and the file system is in memory. Every command
 // line is recorded in order, so tests can assert on what ran and in which order.
+import { DEFAULT_CANARY_ORDER } from "../../src/apply/tailscale-sweep.ts";
 import type { ApplyConfig } from "../../src/apply/config.ts";
 import { DEFAULTS } from "../../src/apply/config.ts";
 import type { Exec, ExecResult } from "../../src/apply/exec.ts";
@@ -50,6 +51,12 @@ export interface HostScript {
   fullNames?: Record<string, string>;
   /** Paths whose writeFile throws (a full or read-only disk). */
   failWrite?: string[];
+  /** Paths whose lstat fails (an entry that cannot be statted). */
+  failStat?: string[];
+  /** Paths whose removal throws. */
+  failRemove?: string[];
+  /** Paths whose read throws (a directory where the file should be, no access). */
+  failRead?: string[];
   /** The whole answer for a command line (exact): its rc and what it prints. */
   answers?: Record<string, { rc: number; out: string; err?: string; truncated?: true }>;
   /** Successive lsof answers: stdout, or stdout with something on stderr (exit 0 either way). */
@@ -172,15 +179,22 @@ export function fakeHost(s: HostScript = {}) {
     uid: 501,
     exists: async (p) => files.has(p) || dirs.has(p),
     isDir: async (p) => dirs.has(p),
+    realPath: async (p) => p,
+    isSymlink: async () => false,
+    kind: async (p) => ((s.failStat ?? []).includes(p) ? undefined : dirs.has(p) ? "dir" : "file"),
     isExecutable: async (p) => (s.executables ?? []).includes(p),
     listDir: async () => [],
-    readFile: async (p) => files.get(p),
+    readFile: async (p) => {
+      if ((s.failRead ?? []).includes(p)) throw new Error("EISDIR: illegal operation on a directory");
+      return files.get(p);
+    },
     writeFile: async (p, t) => {
       if ((s.failWrite ?? []).includes(p)) throw new Error("ENOSPC: no space left on device");
       writes.push(p);
       files.set(p, t);
     },
     remove: async (p) => {
+      if ((s.failRemove ?? []).includes(p)) throw new Error("EPERM: operation not permitted");
       writes.push(`rm ${p}`);
       files.delete(p);
     },
@@ -217,6 +231,8 @@ export function testConfig(over: Partial<ApplyConfig> = {}): ApplyConfig {
     timeoutMs: 1000,
     upgradeTimeoutMs: 500,
     npmRegistry: DEFAULTS.npmRegistry,
+    riskyKeepPrevious: [],
+    tailscaleCanaryOrder: DEFAULT_CANARY_ORDER,
     ...over,
   };
 }

@@ -9,6 +9,11 @@ import { LSOF_STREAM_BYTES, isStopping, killLive, realExec, resetStopping, runSt
 import { applyHost } from "../../src/apply/run.ts";
 import { fakeHost, fakeTypeB, testConfig, type HostScript } from "./host-fixture.ts";
 import { scripted } from "./helpers.ts";
+import { execFile } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseSweepList, recordPath, turnFor } from "../../src/apply/tailscale-sweep.ts";
 
 const CHECK: ReleaseCheck = { formula: "example/tap/gadget", command: ["/opt/gate.test/check"], retries: 1, timeoutSec: 900, before: ["svcctl", "off", "--now"], after: ["svcctl", "on"] };
 const PENDING = "/state.test/release-checks/pending/gadget.json";
@@ -31,7 +36,8 @@ interface Rc {
   /** Keg-only: brew info says linked_keg null; the opt link is the version. */
   kegOnly?: boolean;
   /** The opt link cannot be read (and brew info names no linked keg). */
-  optUnreadable?: boolean;
+  /** The opt link and linked_keg cannot be read: always, or only once the upgrade has run (the baseline is read before it). */
+  optUnreadable?: boolean | "after";
   /** The version installed at the start (default 1.2.0). */
   startLinked?: string;
   /** A signal arrives when this command line runs: oupdate is stopping from then on (as realExec, nothing starts unless forced). */
@@ -57,13 +63,13 @@ interface Rc {
 async function rcRun(o: Rc = {}) {
   let clockT = 0;
   const candidate = o.candidate ?? "1.3.0";
-  const dirs = ["/brew/Cellar", ...(o.noPrevKeg ? [] : ["/brew/Cellar/gadget/1.2.0"]), ...(o.startLinked ? [`/brew/Cellar/gadget/${o.startLinked}`] : [])];
+  const dirs = ["/brew/Cellar", ...(o.noPrevKeg && o.startLinked ? [] : ["/brew/Cellar/gadget/1.2.0"]), ...(o.startLinked ? [`/brew/Cellar/gadget/${o.startLinked}`] : [])];
   const h = fakeHost({
     formulas: "gadget",
     verbose: `example/tap/gadget (1.2.0) < ${candidate}`,
     formulaTaps: { gadget: "example/tap" },
     lsof: [LSOF_HEAD],
-    dirs,
+    dirs: dirs.filter((d) => !(o.noPrevKeg && d.endsWith("/gadget/1.2.0"))),
     files: o.files,
     ...o.script,
   });
@@ -75,6 +81,7 @@ async function rcRun(o: Rc = {}) {
   /** A kickstart -k ends the job's process (the pid its launchctl print last named) and its children: gone from the scripted lsof. */
   const jobPid = new Map<string, string>();
   const gone = new Set<string>();
+  const unreadable = () => o.optUnreadable === true || (o.optUnreadable === "after" && kegs.has(candidate));
   const exec: Exec = async (argv, opt = {}) => {
     const line = argv.join(" ");
     const kick = /launchctl kickstart -k (\S+)$/.exec(line);
@@ -110,9 +117,9 @@ async function rcRun(o: Rc = {}) {
       return { rc: 0, out, err: "" };
     };
     if (line === "brew info --json=v2 gadget" || line === "brew info --json=v2 example/tap/gadget") {
-      return ok(JSON.stringify({ formulae: [{ name: "gadget", full_name: "example/tap/gadget", tap: "example/tap", keg_only: !!o.kegOnly, linked_keg: o.kegOnly || o.optUnreadable ? null : linked || null, installed: [...kegs].sort().map((version) => ({ version })), versions: { stable: candidate }, revision: 0 }] }));
+      return ok(JSON.stringify({ formulae: [{ name: "gadget", full_name: "example/tap/gadget", tap: "example/tap", keg_only: !!o.kegOnly, linked_keg: o.kegOnly || unreadable() ? null : linked || null, installed: [...kegs].sort().map((version) => ({ version })), versions: { stable: candidate }, revision: 0 }] }));
     }
-    if (line === "/usr/bin/readlink /brew/opt/gadget") return o.optUnreadable || !linked ? { rc: 1, out: "", err: "" } : ok(`../Cellar/gadget/${linked}\n`);
+    if (line === "/usr/bin/readlink /brew/opt/gadget") return unreadable() || !linked ? { rc: 1, out: "", err: "" } : ok(`../Cellar/gadget/${linked}\n`);
     if (line === "brew link --force example/tap/gadget") {
       linked = [...kegs].sort().at(-1) ?? "";
       return ok();
@@ -150,6 +157,8 @@ async function rcRun(o: Rc = {}) {
       linked = candidate;
       kegs.add(candidate);
       dirs.push(`/brew/Cellar/gadget/${candidate}`);
+      // The previous keg's directory is there for brew's view before the upgrade (a keg counts only when it is in the Cellar); noPrevKeg loses it with the upgrade.
+      if (o.noPrevKeg) dirs.splice(dirs.indexOf("/brew/Cellar/gadget/1.2.0"), 1);
     }
     return r;
   };
@@ -1527,6 +1536,7 @@ describe("release checks: review round 6 (2eeb039)", () => {
     try {
       let helperCalls = 0;
       let upgraded = false;
+      let prefixAfterUpgrade = 0;
       const r = await rcRun({
         cfg: { restartHelper: { path: HELPER, packages: ["gadget"] }, staleOwners: [{ match: "org.example.custom" }], releaseChecks: [CHECK] },
         script: { lsof: [STALE], ps: { "78": { comm: "gadget", command: "gadget serve", ppid: "1" } } },
@@ -1544,7 +1554,8 @@ describe("release checks: review round 6 (2eeb039)", () => {
           }
           if (line === "brew upgrade example/tap/gadget") upgraded = true;
           // Only the relink step's `brew --prefix` runs through the phase-stopping exec: its timeout is a phase timeout there.
-          if (o.timeoutPrefix && upgraded && line === "brew --prefix") return { rc: 124, out: "", err: "", timedOut: true };
+          // The first one after the upgrade is brew's view of the installed keg (it needs the prefix to count a keg as installed); the later ones are the relink step's.
+          if (o.timeoutPrefix && upgraded && line === "brew --prefix" && ++prefixAfterUpgrade > 1) return { rc: 124, out: "", err: "", timedOut: true };
           return undefined;
         },
       });
@@ -2657,5 +2668,365 @@ describe("a check whose owner is left unloaded on purpose (ownerUnloaded: upgrad
     const r = await rcRun({ cfg: cfgOf([A]), ...owners({ [A]: { state: "running" } }) });
     expect(r.flow).toEqual(["svcctl off --now", "brew upgrade example/tap/gadget", `sudo -n launchctl kickstart -k system/${A}`, "/opt/gate.test/check GATE_VERSION=1.3.0", "svcctl on"]);
     expect(r.res.log.some((l) => l.includes("upgraded unchecked"))).toBe(false);
+  });
+});
+
+// The case the Tailscale sweep exists for (OUP-325): an upgrade whose verify fails is rolled back, the host's record says failed, and the next host holds.
+// The scripted host is the fake brew; the stub tailscale is a shell script; the verifier is the real tailscale-verify.ts run as a subprocess.
+describe("a tailscale-shaped check: upgrade, failed verify, rollback, failed record, the next host holds", () => {
+  const VERIFY = join(import.meta.dir, "../../src/apply/tailscale-verify.ts");
+  const setup = () => {
+    const dir = mkdtempSync(join(tmpdir(), "tsroll-"));
+    const state = join(dir, "state");
+    const mark = join(dir, "pingfail");
+    writeFileSync(mark, "");
+    const bin = join(dir, "tailscale");
+    writeFileSync(bin, `#!/bin/sh\ncase "$1" in\n status) echo "{\\"BackendState\\":\\"Running\\",\\"Version\\":\\"$GATE_VERSION\\",\\"Self\\":{\\"Online\\":true}}";;\n ping) [ -f "${mark}" ] && exit 1; exit 0;;\nesac\n`);
+    chmodSync(bin, 0o755);
+    const check: ReleaseCheck = { formula: "example/tap/gadget", command: [process.execPath, VERIFY, "--host", "ai", "--state", state, "--peers", "max"], retries: 0, timeoutSec: 60, builtin: true };
+    const ran: string[] = [];
+    // The real verifier for the candidate's check; a restored version is checked with the ping working again (the marker is gone).
+    const answer = (_line: string, argv: string[], opt: Parameters<Exec>[1]) => {
+      if (argv[0] !== process.execPath) return undefined;
+      const version = opt?.env?.GATE_VERSION ?? "";
+      ran.push(version);
+      if (version === "1.2.0") rmSync(mark, { force: true });
+      return new Promise<{ rc: number; out: string; err: string }>((resolve) => {
+        execFile(argv[0]!, argv.slice(1), { env: { ...process.env, GATE_VERSION: version, ...(opt?.env?.GATE_PHASE ? { GATE_PHASE: opt.env.GATE_PHASE } : {}), TAILSCALE_BIN: bin, TAILSCALE_VERIFY_TEST: "1", TAILSCALE_VERIFY_RETRY_MS: "0", TAILSCALE_VERIFY_SETTLE_MS: "0" }, timeout: 60_000 }, (e, out, err) => {
+          const code = e ? (typeof (e as NodeJS.ErrnoException).code === "number" ? ((e as NodeJS.ErrnoException).code as unknown as number) : 125) : 0;
+          resolve({ rc: code, out: String(out), err: String(err) });
+        });
+      });
+    };
+    return { dir, state, check, answer, ran };
+  };
+  test("verify exit 1: the new keg is uninstalled, the previous relinked, the release held, the record on disk says failed, and the next host holds", async () => {
+    const t = setup();
+    const r = await rcRun({ cfg: { releaseChecks: [t.check] }, answer: t.answer });
+    expect(t.ran).toEqual(["1.3.0", "1.2.0"]);
+    expect(r.calls).toContain("brew uninstall example/tap/gadget");
+    expect(r.calls).toContain("brew link example/tap/gadget");
+    expect(r.linked()).toBe("1.2.0");
+    expect(r.files.has(HOLD)).toBe(true);
+    expect(JSON.parse(readFileSync(recordPath(t.state, "1.3.0"), "utf8"))).toMatchObject({ host: "ai", version: "1.3.0", status: "failed" });
+    // The restored version's check answers but writes nothing: the failed record of 1.3.0 is the only one, and 1.2.0 (which passed) has none.
+    expect(readdirSync(join(t.state, "tailscale-sweep"))).toEqual(["1.3.0.json"]);
+    // What a reader prints from the records: the next host, asked for 1.3.0, holds at ai.
+    const printed = readdirSync(join(t.state, "tailscale-sweep")).map((n) => JSON.parse(readFileSync(join(t.state, "tailscale-sweep", n), "utf8")) as { host: string; version: string; status: string }).map((x) => `${x.host} ${x.version}${x.status === "failed" ? " failed" : ""}`).join("\n");
+    expect(turnFor("max", ["ai", "max"], parseSweepList(printed, "1.3.0"), true)).toEqual({ go: false, why: "the sweep stopped at ai: its verify failed" });
+    rmSync(t.dir, { recursive: true, force: true });
+  });
+  test("an owner that cannot be restarted onto the candidate is a failed verify: rolled back, held and recorded failed, the verifier never run", async () => {
+    const t = setup();
+    const gui = "gui/501 = {\n\tservices = {\n\t\t      77      - \torg.example.gadget\n\t}\n}\n";
+    const gone = (line: string) => (line === "launchctl print gui/501" ? { rc: 0, out: gui, err: "" } : line === "launchctl print gui/501/org.example.gadget" ? { rc: 113, out: "", err: "not found" } : undefined);
+    const r = await rcRun({
+      cfg: { releaseChecks: [t.check], staleOwners: [{ match: "org.example.gadget", probe: ["/opt/svc.test/idle"] }] },
+      script: { lsof: [`${LSOF_HEAD}gadget 77 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.2.0/bin/gadget\n`], ps: { "77": { comm: "gadget", command: "gadget serve", ppid: "1" } } },
+      answer: (line, argv, opt) => gone(line) ?? t.answer(line, argv, opt),
+    });
+    expect(t.ran).toEqual([]);
+    expect(r.calls).toContain("brew uninstall example/tap/gadget");
+    expect(r.calls).toContain("brew link example/tap/gadget");
+    expect(r.files.has(HOLD)).toBe(true);
+    expect(JSON.parse(r.files.get("/state.test/tailscale-sweep/1.3.0.json")!)).toMatchObject({ version: "1.3.0", status: "failed" });
+    expect(existsSync(recordPath(t.state, "1.3.0"))).toBe(false);
+    rmSync(t.dir, { recursive: true, force: true });
+  });
+});
+
+describe("a tailscale-shaped check that cannot decide, or has no sweep lock", () => {
+  const check: ReleaseCheck = { formula: "example/tap/gadget", command: ["/opt/gate.test/check"], retries: 0, timeoutSec: 60, builtin: true };
+  test("could not run (an exit other than 0 or 1): the pending record and the previous keg stay, nothing is uninstalled, the next run asks again", async () => {
+    const r = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [3] } });
+    expect(r.files.has(PENDING)).toBe(true);
+    expect(r.calls).not.toContain("brew uninstall example/tap/gadget");
+    expect(r.calls.filter((c) => c.startsWith("/opt/gate.test/check"))).toEqual(["/opt/gate.test/check GATE_VERSION=1.3.0"]);
+    expect(JSON.parse(r.files.get(PENDING)!).verdict).toBeUndefined();
+    // Other formulas keep the end: a check that cannot run is no verdict and the record goes.
+    const other = await rcRun({ cfg: { releaseChecks: [{ ...check, builtin: undefined }] }, check: { "1.3.0": [3] } });
+    expect(other.files.has(PENDING)).toBe(false);
+  });
+  test("a check that keeps failing to decide is never ended by the wait limit", async () => {
+    const first = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [3] } });
+    const pending = { ...JSON.parse(first.files.get(PENDING)!), unresolvedWaits: 99 };
+    const second = await rcRun({
+      cfg: { releaseChecks: [check] }, check: { "1.3.0": [3] }, files: { [PENDING]: JSON.stringify(pending) },
+      script: { formulas: "good-a", verbose: "good-a (1.0) < 1.1", formulaTaps: { "good-a": "example/tap" } }, startLinked: "1.3.0",
+    });
+    expect(second.files.has(PENDING)).toBe(true);
+    expect(second.res.log.some((l) => l.includes("not run —") && l.includes("runs"))).toBe(false);
+  });
+  test("recovery: a pending record that authorized another version than the one installed is a confirmed fail: rolled back and held, the check never run on it", async () => {
+    const first = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [3] } });
+    const pending = { ...JSON.parse(first.files.get(PENDING)!), gated: "1.2.5" };
+    const r = await rcRun({ cfg: { releaseChecks: [check] }, files: { [PENDING]: JSON.stringify(pending) }, startLinked: "1.3.0" });
+    expect(r.calls.some((c) => c === "/opt/gate.test/check GATE_VERSION=1.3.0")).toBe(false);
+    expect(r.calls).toContain("brew uninstall example/tap/gadget");
+    expect(r.files.has(HOLD)).toBe(true);
+    // The same record with the authorized version (the exact spelling) installed is checked as usual; `1.3.0_1` would not be.
+    const ok = await rcRun({ cfg: { releaseChecks: [check] }, files: { [PENDING]: JSON.stringify({ ...pending, gated: "1.3.0" }) }, startLinked: "1.3.0" });
+    expect(ok.calls).toContain("/opt/gate.test/check GATE_VERSION=1.3.0");
+  });
+  test("a failed sweep record that cannot be written never turns the fail into no verdict: the verdict is saved first and the rollback goes on", async () => {
+    const gui = "gui/501 = {\n\tservices = {\n\t\t      77      - \torg.example.gadget\n\t}\n}\n";
+    const gone = (line: string) => (line === "launchctl print gui/501" ? { rc: 0, out: gui, err: "" } : line === "launchctl print gui/501/org.example.gadget" ? { rc: 113, out: "", err: "not found" } : undefined);
+    const r = await rcRun({
+      cfg: { releaseChecks: [check], staleOwners: [{ match: "org.example.gadget", probe: ["/opt/svc.test/idle"] }] },
+      script: { lsof: [`${LSOF_HEAD}gadget 77 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.2.0/bin/gadget\n`], ps: { "77": { comm: "gadget", command: "gadget serve", ppid: "1" } }, failWrite: ["/state.test/tailscale-sweep/1.3.0.json"] },
+      answer: gone,
+    });
+    expect(r.res.log.some((l) => l.includes("the failed sweep record for 1.3.0 could not be written"))).toBe(true);
+    expect(r.calls).toContain("brew uninstall example/tap/gadget");
+    expect(r.files.has(HOLD)).toBe(true);
+  });
+  test("recovery: an installed version other than the authorized one is rolled back and held, with no sweep record for a release never tested", async () => {
+    const first = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [3] } });
+    const r = await rcRun({ cfg: { releaseChecks: [check] }, files: { [PENDING]: JSON.stringify({ ...JSON.parse(first.files.get(PENDING)!), gated: "1.2.5" }) }, startLinked: "1.3.0" });
+    expect([...r.files.keys()].filter((k) => k.includes("tailscale-sweep"))).toEqual([]);
+  });
+  test("a failing gate (the owner restart the gate makes fails on recovery) is a failed verify too: rolled back, held and recorded failed, never waiting for ever", async () => {
+    const first = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [3] } });
+    const saved = JSON.parse(first.files.get(PENDING)!);
+    expect(saved.ownerRestarted).toBe(true);
+    const gui = "gui/501 = {\n\tservices = {\n\t\t      77      - \torg.example.gadget\n\t}\n}\n";
+    const gone = (line: string) => (line === "launchctl print gui/501" ? { rc: 0, out: gui, err: "" } : line === "launchctl print gui/501/org.example.gadget" ? { rc: 113, out: "", err: "not found" } : undefined);
+    const r = await rcRun({
+      cfg: { releaseChecks: [check], staleOwners: [{ match: "org.example.gadget", probe: ["/opt/svc.test/idle"] }] },
+      script: { lsof: [`${LSOF_HEAD}gadget 77 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.2.0/bin/gadget\n`, `${LSOF_HEAD}gadget 77 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.2.0/bin/gadget\n`], ps: { "77": { comm: "gadget", command: "gadget serve", ppid: "1" } } },
+      files: { [PENDING]: JSON.stringify(saved) }, startLinked: "1.3.0", answer: gone,
+    });
+    expect(r.calls.some((c) => c === "/opt/gate.test/check GATE_VERSION=1.3.0")).toBe(false);
+    expect(r.calls).toContain("brew uninstall example/tap/gadget");
+    expect(r.files.has(HOLD)).toBe(true);
+    expect(JSON.parse(r.files.get("/state.test/tailscale-sweep/1.3.0.json")!)).toMatchObject({ version: "1.3.0", status: "failed" });
+  });
+  test("the authorization compare is exact: a revision of the authorized version (1.3.0_1 for 1.3.0) is another release", async () => {
+    const first = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [3] } });
+    const r = await rcRun({ cfg: { releaseChecks: [check] }, files: { [PENDING]: JSON.stringify(JSON.parse(first.files.get(PENDING)!)) }, startLinked: "1.3.0_1", script: { dirs: ["/brew/Cellar/gadget/1.3.0_1"] } });
+    expect(r.calls.some((c) => c.startsWith("/opt/gate.test/check GATE_VERSION=1.3.0"))).toBe(false);
+    expect(r.files.has(HOLD)).toBe(true);
+  });
+  test("a pending record with no authorized version (written before it was kept) authorizes nothing: the installed version is rolled back and held, never checked or published", async () => {
+    const first = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [3] } });
+    const { gated: _g, ...legacy } = JSON.parse(first.files.get(PENDING)!);
+    const r = await rcRun({ cfg: { releaseChecks: [check] }, files: { [PENDING]: JSON.stringify(legacy) }, startLinked: "1.3.0" });
+    expect(r.calls.some((c) => c === "/opt/gate.test/check GATE_VERSION=1.3.0")).toBe(false);
+    expect(r.calls).toContain("brew uninstall example/tap/gadget");
+    expect(r.files.has(HOLD)).toBe(true);
+    expect([...r.files.keys()].filter((k) => k.includes("tailscale-sweep"))).toEqual([]);
+  });
+  test("a saved verdict whose sweep record is missing (a run that died between the two writes) is published again, once", async () => {
+    const first = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [3] } });
+    for (const [verdict, status] of [["pass", "verified"], ["fail", "failed"]] as const) {
+      const r = await rcRun({ cfg: { releaseChecks: [check] }, files: { [PENDING]: JSON.stringify({ ...JSON.parse(first.files.get(PENDING)!), verdict, after: verdict === "pass" ? "run" : "skip" }) }, startLinked: "1.3.0" });
+      expect(JSON.parse(r.files.get("/state.test/tailscale-sweep/1.3.0.json")!)).toMatchObject({ version: "1.3.0", status });
+    }
+    const present = await rcRun({ cfg: { releaseChecks: [check] }, files: { [PENDING]: JSON.stringify({ ...JSON.parse(first.files.get(PENDING)!), verdict: "pass", after: "run" }), "/state.test/tailscale-sweep/1.3.0.json": '{"host":"hosta","version":"1.3.0","status":"verified","at":"y"}\n' }, startLinked: "1.3.0" });
+    expect(JSON.parse(present.files.get("/state.test/tailscale-sweep/1.3.0.json")!).at).toBe("y");
+    // A file that is there but says another version or status is not the verdict: written again.
+    for (const wrong of ['{"host":"hosta","version":"1.3.0","status":"failed","at":"y"}\n', '{"host":"hosta","version":"1.2.9","status":"verified","at":"y"}\n', "not json"]) {
+      const w = await rcRun({ cfg: { releaseChecks: [check] }, files: { [PENDING]: JSON.stringify({ ...JSON.parse(first.files.get(PENDING)!), verdict: "pass", after: "run" }), "/state.test/tailscale-sweep/1.3.0.json": wrong }, startLinked: "1.3.0" });
+      expect(JSON.parse(w.files.get("/state.test/tailscale-sweep/1.3.0.json")!)).toMatchObject({ version: "1.3.0", status: "verified" });
+    }
+  });
+  test("a passed verify keeps the previous keg for good: older kegs are replaced by it, the verified and the previous stay, and the run's cleanup never names a risky package", async () => {
+    const r = await rcRun({
+      cfg: { releaseChecks: [check], riskyKeepPrevious: ["gadget"] },
+      onFs: (fs) => {
+        const list = fs.listDir;
+        fs.listDir = async (d) => (d === "/brew/Cellar/gadget" ? ["1.0.0", "1.1.0", ".DS_Store", "a b", "1.2.0", "1.3.0"] : list(d));
+      },
+    });
+    expect(r.brew).toContain("release check: gadget 1.3.0 PASS");
+    const rm = r.calls.filter((c) => c.startsWith("/bin/rm"));
+    expect(rm).toEqual(["/bin/rm -rf /brew/Cellar/gadget/1.0.0", "/bin/rm -rf /brew/Cellar/gadget/1.1.0"]);
+    expect(r.calls.filter((c) => c.startsWith("brew cleanup")).every((c) => !c.split(" ").includes("gadget"))).toBe(true);
+    expect(r.calls.some((c) => c.startsWith("brew cleanup"))).toBe(true);
+    // A failed check that rolls back removes nothing: both kegs stay.
+    const failed = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [1] }, onFs: (fs) => { const list = fs.listDir; fs.listDir = async (d) => (d === "/brew/Cellar/gadget" ? ["1.0.0", "1.2.0", "1.3.0"] : list(d)); } });
+    expect(failed.calls.some((c) => c.startsWith("/bin/rm"))).toBe(false);
+  });
+  test("a risky package with its own (not the built-in) check is pruned after a pass too, and one that is not risky is not", async () => {
+    const list = (fs: { listDir: (d: string) => Promise<string[]> }) => {
+      const l = fs.listDir;
+      fs.listDir = async (d) => (d === "/brew/Cellar/gadget" ? ["1.0.0", "1.2.0", "1.3.0"] : l(d));
+    };
+    const own = { ...check, builtin: undefined };
+    const risky = await rcRun({ cfg: { releaseChecks: [own], riskyKeepPrevious: ["gadget"] }, onFs: list });
+    expect(risky.calls.filter((c) => c.startsWith("/bin/rm"))).toEqual(["/bin/rm -rf /brew/Cellar/gadget/1.0.0"]);
+    const plain = await rcRun({ cfg: { releaseChecks: [own], riskyKeepPrevious: [] }, onFs: list });
+    expect(plain.calls.some((c) => c.startsWith("/bin/rm"))).toBe(false);
+  });
+  test("a rollback is refused before anything is uninstalled when a keg newer than the previous one is in the rack (brew link would pick it)", async () => {
+    const list = (names: string[]) => (fs: { listDir: (d: string) => Promise<string[]> }) => {
+      const l = fs.listDir;
+      fs.listDir = async (d) => (d === "/brew/Cellar/gadget" ? names : l(d));
+    };
+    const refused = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [1] }, onFs: list(["1.2.0", "1.2.5", "1.3.0"]) });
+    expect(refused.calls).not.toContain("brew uninstall example/tap/gadget");
+    expect(refused.res.log.join("\n")).toContain("1.2.5 in /brew/Cellar/gadget is newer than 1.2.0 (or not told apart from it), so brew link would pick it");
+    const fine = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [1] }, onFs: list(["1.1.0", "1.2.0", "1.3.0"]) });
+    expect(fine.calls).toContain("brew uninstall example/tap/gadget");
+  });
+  test("the rollback check fails closed: a rack that cannot be read, or a keg directory that cannot be ordered, refuses before anything is uninstalled", async () => {
+    const unreadable = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [1] }, onFs: (fs) => { const l = fs.listDir; fs.listDir = async (d) => { if (d === "/brew/Cellar/gadget") throw new Error("EIO"); return l(d); }; } });
+    expect(unreadable.calls).not.toContain("brew uninstall example/tap/gadget");
+    expect(unreadable.res.log.join("\n")).toContain("/brew/Cellar/gadget could not be read (EIO); nothing is uninstalled");
+    const odd = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [1] }, script: { dirs: ["/brew/Cellar/gadget/9.9-rc1"] }, onFs: (fs) => { const l = fs.listDir; fs.listDir = async (d) => (d === "/brew/Cellar/gadget" ? ["1.2.0", "1.3.0", "9.9-rc1"] : l(d)); } });
+    expect(odd.calls).not.toContain("brew uninstall example/tap/gadget");
+    expect(odd.res.log.join("\n")).toContain("9.9-rc1 in /brew/Cellar/gadget cannot be ordered against 1.2.0");
+  });
+  test("a rack entry that cannot be statted refuses the rollback before anything is uninstalled (nothing is guessed about what brew link would pick)", async () => {
+    const r = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [1] }, script: { failStat: ["/brew/Cellar/gadget/odd"] }, onFs: (fs) => { const l = fs.listDir; fs.listDir = async (d) => (d === "/brew/Cellar/gadget" ? ["1.2.0", "1.3.0", "odd"] : l(d)); } });
+    expect(r.calls).not.toContain("brew uninstall example/tap/gadget");
+    expect(r.res.log.join("\n")).toContain("odd in /brew/Cellar/gadget could not be statted; nothing is uninstalled");
+  });
+  test("the candidate itself listed but not statted refuses the rollback (it is not taken for uninstalled); a keg that ties the previous one in another spelling counts as newer", async () => {
+    const list = (names: string[]) => (fs: { listDir: (d: string) => Promise<string[]> }) => {
+      const l = fs.listDir;
+      fs.listDir = async (d) => (d === "/brew/Cellar/gadget" ? names : l(d));
+    };
+    const toStat = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [1] }, script: { failStat: ["/brew/Cellar/gadget/1.3.0"] }, onFs: list(["1.2.0", "1.3.0"]) });
+    expect(toStat.calls).not.toContain("brew uninstall example/tap/gadget");
+    expect(toStat.res.log.join("\n")).toContain("1.3.0 in /brew/Cellar/gadget could not be statted — not guessing whether it is installed; nothing is uninstalled");
+    const tie = await rcRun({ cfg: { releaseChecks: [check] }, check: { "1.3.0": [1] }, onFs: list(["1.2.0", "1.2_0", "1.3.0"]) });
+    expect(tie.calls).not.toContain("brew uninstall example/tap/gadget");
+    expect(tie.res.log.join("\n")).toContain("1.2_0 in /brew/Cellar/gadget is newer than 1.2.0 (or not told apart from it)");
+  });
+  test("a keg view that cannot be read after the relink does not skip the restart and the check of the restored version: it goes on, flagged", async () => {
+    let linkedBack = false;
+    const r = await rcRun({
+      cfg: { releaseChecks: [check] }, check: { "1.3.0": [1] },
+      answer: async (line) => {
+        if (line === "brew link example/tap/gadget") linkedBack = true;
+        // After the relink brew's opt link cannot be read (brew --prefix fails).
+        if (linkedBack && line === "brew --prefix") return { rc: 1, out: "", err: "" };
+        return undefined;
+      },
+    });
+    expect(r.calls).toContain("brew link example/tap/gadget");
+    expect(r.calls).toContain("/opt/gate.test/check GATE_VERSION=1.2.0");
+    expect(r.res.log.join("\n")).toContain("the opt link could not be read after the relink");
+    expect(r.res.log.join("\n")).not.toContain("ROLLBACK FAILED");
+  });
+  test("after the relink, a link that is read as missing or dangling is a failed rollback (never a restart onto nothing); a link that could not be read at all goes on, and the restored check can still fail", async () => {
+    const missing = async (target: string | undefined) => {
+      let linkedBack = false;
+      return rcRun({
+        cfg: { releaseChecks: [check] }, check: { "1.3.0": [1], "1.2.0": [1] },
+        answer: async (line) => {
+          if (line === "brew link example/tap/gadget") linkedBack = true;
+          if (linkedBack && line === "/usr/bin/readlink /brew/opt/gadget") return target === undefined ? { rc: 1, out: "", err: "" } : { rc: 0, out: `${target}\n`, err: "" };
+          return undefined;
+        },
+      });
+    };
+    for (const target of [undefined, "../Cellar/gadget/9.9.9"]) {
+      const r = await missing(target);
+      expect(r.res.log.join("\n")).toContain("ROLLBACK FAILED — brew link example/tap/gadget left the opt link missing or not on a keg, not on 1.2.0");
+      expect(r.calls).not.toContain("/opt/gate.test/check GATE_VERSION=1.2.0");
+    }
+    // Read failures only: the restored version is checked, and its failure is reported as such.
+    let linkedBack = false;
+    const unread = await rcRun({
+      cfg: { releaseChecks: [check] }, check: { "1.3.0": [1], "1.2.0": [1] },
+      answer: async (line) => {
+        if (line === "brew link example/tap/gadget") linkedBack = true;
+        if (linkedBack && line === "brew --prefix") return { rc: 1, out: "", err: "" };
+        return undefined;
+      },
+    });
+    expect(unread.calls).toContain("/opt/gate.test/check GATE_VERSION=1.2.0");
+    expect(unread.notices().some((n) => n.includes("FAILED and the restored 1.2.0 FAILED too"))).toBe(true);
+  });
+  test("a rollback recorded by an earlier run is checked against the link again before the owners are restarted onto it", async () => {
+    const rec = { formula: "gadget", full: "example/tap/gadget", rack: "/brew/Cellar/gadget", from: "1.2.0", to: "1.3.0", gated: "1.3.0", verdict: "fail", rolledBack: true, after: "skip", trusted: false, beforeRan: false, at: "x", upgraded: true, upgradeStarted: true };
+    const r = await rcRun({
+      cfg: { releaseChecks: [check] }, files: { [PENDING]: JSON.stringify(rec) }, startLinked: "1.2.0",
+      answer: async (line) => (line === "/usr/bin/readlink /brew/opt/gadget" ? { rc: 1, out: "", err: "" } : undefined),
+    });
+    expect(r.res.log.join("\n")).toContain("ROLLBACK FAILED — the opt link is missing or not on a keg, not on 1.2.0, though the rollback was recorded");
+    expect(r.calls).not.toContain("/opt/gate.test/check GATE_VERSION=1.2.0");
+  });
+  test("a PASS whose older kegs cannot be pruned because the opt link cannot be read is flagged in the result, not silent", async () => {
+    let checked = false;
+    const r = await rcRun({
+      cfg: { releaseChecks: [check], riskyKeepPrevious: ["gadget"] },
+      onFs: (fs) => { const l = fs.listDir; fs.listDir = async (d) => (d === "/brew/Cellar/gadget" ? ["1.0.0", "1.2.0", "1.3.0"] : l(d)); },
+      answer: async (line) => {
+        if (line.startsWith("/opt/gate.test/check")) checked = true;
+        if (checked && line === "/usr/bin/readlink /brew/opt/gadget") return { rc: 124, out: "", err: "" };
+        return undefined;
+      },
+    });
+    expect(r.calls.some((c) => c.startsWith("/bin/rm"))).toBe(false);
+    expect(r.res.summary.join("\n")).toContain("older kegs not pruned (its opt link could not be read");
+  });
+  test("the tailscale check never adopts a version it could not read: with the installed version unreadable after the upgrade the record stays pending", async () => {
+    const r = await rcRun({ cfg: { releaseChecks: [check] }, optUnreadable: "after" });
+    expect(r.files.has(PENDING)).toBe(true);
+    const other = await rcRun({ cfg: { releaseChecks: [{ ...check, builtin: undefined }] }, optUnreadable: "after" });
+    expect(other.files.has(PENDING)).toBe(false);
+  });
+  /** An owner of gadget that still maps the removed keg: the process gate restarts it before the restored check. */
+  const staleOwner = () => {
+    let prints = 0;
+    return {
+      cfg: { releaseChecks: [check], staleOwners: [{ match: "org.example.gadget", probe: ["/opt/svc.test/idle"] }] },
+      script: { lsof: [`${LSOF_HEAD}gadget 77 u txt REG 1,4 1 2 /brew/Cellar/gadget/1.3.0/bin/gadget\n`], ps: { "77": { comm: "gadget", command: "gadget serve", ppid: "1" } } },
+      answer: (line: string, argv: string[]) => {
+        if (line === "launchctl print gui/501") return { rc: 0, out: "gui/501 = {\n\tservices = {\n\t\t      77      - \torg.example.gadget\n\t}\n}\n", err: "" };
+        if (line === "launchctl print gui/501/org.example.gadget") {
+          prints++;
+          return { rc: 0, out: `\tstate = running\n\tpid = ${prints <= 2 ? 77 : 88}\n\tpath = /home.test/Library/LaunchAgents/org.example.gadget.plist\n`, err: "" };
+        }
+        if (argv[0]!.endsWith("lsof") && argv.includes("-p")) return { rc: 0, out: `${LSOF_HEAD}gadget ${argv[argv.indexOf("-p") + 1]} u txt REG 1,4 1 2 /brew/Cellar/gadget/1.2.0/bin/gadget\n`, err: "" };
+        return undefined;
+      },
+    };
+  };
+  const rolled = { formula: "gadget", full: "example/tap/gadget", rack: "/brew/Cellar/gadget", from: "1.2.0", to: "1.3.0", gated: "1.3.0", verdict: "fail", rolledBack: true, ownerRestarted: true, after: "skip", trusted: false, beforeRan: false, at: "x", upgraded: true, upgradeStarted: true };
+  test("a resumed restored check with the restart flag already saved reads the link again first: a link that is gone ends it with no owner restart and no check", async () => {
+    const o = staleOwner();
+    const r = await rcRun({ cfg: o.cfg, script: o.script, files: { [PENDING]: JSON.stringify({ ...rolled, restoredOwnerRestarted: true }) }, startLinked: "1.2.0", answer: (line, argv) => (line === "/usr/bin/readlink /brew/opt/gadget" ? { rc: 1, out: "", err: "" } : o.answer(line, argv)) });
+    expect(r.res.log.join("\n")).toContain("ROLLBACK FAILED — the opt link is missing or not on a keg, not on 1.2.0, though the rollback was recorded");
+    expect(r.calls.filter((c) => c.includes("kickstart"))).toEqual([]);
+    expect(r.calls).not.toContain("/opt/gate.test/check GATE_VERSION=1.2.0");
+  });
+  test("the same resume with the link unread says so as the first run does, notifies, and goes on to the restart and the restored check", async () => {
+    for (const restarted of [false, true]) {
+      const o = staleOwner();
+      const r = await rcRun({ cfg: o.cfg, script: o.script, files: { [PENDING]: JSON.stringify({ ...rolled, restoredOwnerRestarted: restarted }) }, startLinked: "1.2.0", answer: (line, argv) => (line === "brew --prefix" ? { rc: 1, out: "", err: "" } : o.answer(line, argv)) });
+      expect(r.res.log.join("\n")).toContain("the opt link could not be read after the relink — 1.2.0 is not confirmed linked; its restart and check go on");
+      expect(r.notices().some((n) => n.includes("rolled back, the opt link could not be read after the relink"))).toBe(true);
+      expect(r.res.log.join("\n")).not.toContain("ROLLBACK FAILED");
+      expect(r.calls).toContain("/opt/gate.test/check GATE_VERSION=1.2.0");
+      // The owner is restarted onto the restored version (by the restart step, or by the gate when the flag was saved), then the check runs.
+      expect(r.calls.some((c) => c.includes("kickstart -k gui/501/org.example.gadget"))).toBe(true);
+    }
+  });
+  test("a realpath that fails for access or I/O after the relink is an unread link: the rollback goes on to the restart and the restored check; a path that is not there is a failed rollback", async () => {
+    const run = async (real: (p: string) => Promise<string | undefined>) => {
+      let linkedBack = false;
+      return rcRun({
+        cfg: { releaseChecks: [check] }, check: { "1.3.0": [1], "1.2.0": [0] },
+        answer: async (line) => (line === "brew link example/tap/gadget" ? ((linkedBack = true), undefined) : undefined),
+        onFs: (fs) => { fs.realPath = async (p) => (linkedBack && p === "/brew/Cellar/gadget/1.2.0" ? real(p) : p); },
+      });
+    };
+    const denied = await run(async () => { throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }); });
+    expect(denied.res.log.join("\n")).toContain("the opt link could not be read after the relink");
+    expect(denied.res.log.join("\n")).not.toContain("ROLLBACK FAILED");
+    expect(denied.calls).toContain("/opt/gate.test/check GATE_VERSION=1.2.0");
+    const absent = await run(async () => undefined);
+    expect(absent.res.log.join("\n")).toContain("ROLLBACK FAILED — brew link example/tap/gadget left the opt link missing or not on a keg, not on 1.2.0");
+    expect(absent.calls).not.toContain("/opt/gate.test/check GATE_VERSION=1.2.0");
+  });
+  test("a resumed restored check whose brew info cannot be read says so and notifies as the unread branch does, and goes on", async () => {
+    const o = staleOwner();
+    const r = await rcRun({ cfg: o.cfg, script: o.script, files: { [PENDING]: JSON.stringify({ ...rolled, restoredOwnerRestarted: false }) }, startLinked: "1.2.0", answer: (line, argv) => (line.startsWith("brew info --json=v2") ? { rc: 1, out: "", err: "" } : o.answer(line, argv)) });
+    expect(r.res.log.join("\n")).toContain("the opt link could not be read after the relink (brew info failed) — 1.2.0 is not confirmed linked; its restart and check go on");
+    expect(r.notices().some((n) => n.includes("(brew info failed)"))).toBe(true);
   });
 });

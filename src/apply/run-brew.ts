@@ -1,6 +1,8 @@
 // The brew phase's steps of the host apply run (run.ts drives them): the section itself, cleanup, the cask and
 // app-bundle steps, and the brew status line.
 
+import { isTailscaleCask, recordPath, sameVersion, sweepTurn, type Turn } from "./tailscale-sweep.ts";
+import { TAILSCALE } from "./tailscale-verify.ts";
 import { join } from "node:path";
 import { appBundleUpgrade, realAppNet } from "./appbundle.ts";
 import { upgradeUnits } from "./dependents.ts";
@@ -8,7 +10,7 @@ import type { ApplyConfig, ReleaseCheck } from "./config.ts";
 import { LOG_ONLY, type Exec } from "./exec.ts";
 import { gkCheck, gkRelease, gkSnapshot, realGates, type GkEnv, type GkOptions } from "./gatekeeper.ts";
 import { caskRunning, lsofMaps, type KegEnv } from "./kegs.ts";
-import { asUser, brewView, findCheck, holdPath, holdState, pendingPath, runHook, savePending, trustState, type PendingCheck } from "./release-checks.ts";
+import { adoptInstalled, candidateRecordHold, staleSweepRecords, asUser, brewView, kegDirFor, failUnauthorized, findCheck, holdPath, holdState, pendingPath, runHook, savePending, trustState, type PendingCheck } from "./release-checks.ts";
 import { pinFilter } from "./pins.ts";
 import { loadApprovedTaps, outdatedVersions, tapIn } from "./taps.ts";
 import { reviewedVersion, typeAReview, versionMismatch } from "./typea.ts";
@@ -162,6 +164,8 @@ export async function brewSection(rt: RunCtx) {
     // release included) with no before, check or rollback. A failed list: every gated formula counts.
     const inst = await x([cfg.brew, "list", "--formula", "--full-name"]);
     const have = inst.rc === 0 ? words(inst.out).map(last) : [];
+    // The tailscale app (a cask) is gated like the formula while tailscale is risky: a cask or formula that would pull it in waits.
+    if (cfg.riskyKeepPrevious.some((q) => last(q) === "tailscale") && !gatedOutdated.includes("tailscale-app")) gatedOutdated.push("tailscale-app");
     for (const c of cfg.releaseChecks) {
       const n = last(c.formula);
       if (!have.includes(n) && !gatedOutdated.includes(n)) gatedOutdated.push(n);
@@ -198,6 +202,9 @@ export async function brewSection(rt: RunCtx) {
     else casks = p.kept;
   }
 
+  // Tailscale goes one host at a time: this host waits for its turn in the canary order (tailscale-sweep.ts).
+  ({ formulas, casks } = await sweepGate(rt, formulas, casks));
+
   // Release checks: a held release is not upgraded to (a newer one is); a dry run says what it would do.
   if (cfg.releaseChecks?.length) {
     const keep: string[] = [];
@@ -212,7 +219,7 @@ export async function brewSection(rt: RunCtx) {
       if (open) {
         // Never a second upgrade over an unfinished one: its from stays the rollback baseline.
         log.push(`  holding ${f} (its release check of ${open.from || "?"} → ${open.to ?? "?"} is not finished — finished first)`);
-        holdOf(b, "formula", n, "its release check is not finished");
+        holdOf(b, "formula", n, open.invalidate?.length ? `its sweep record of ${open.invalidate.join(", ")} is still to be removed` : "its release check is not finished");
         b.rcHeldNames.push(n);
         continue;
       }
@@ -223,7 +230,7 @@ export async function brewSection(rt: RunCtx) {
         b.rcHeldNames.push(n);
         continue;
       }
-      const view = await brewView(rcEnv.exec, cfg.brew, n);
+      const view = await brewView(rcEnv.exec, cfg.brew, n, kegDirFor(rcEnv));
       const hs = await holdState(rcEnv, f);
       if (hs.unreadable) {
         log.push(`  holding ${f} (its release check hold ${holdPath(cfg.stateDir, f)} is unreadable — fix or remove it)`);
@@ -501,7 +508,8 @@ export async function cleanup(rt: RunCtx) {
   log.push("--- brew cleanup ---");
   // A quarantined service's reviewed keg, and a formula whose release check has not decided (its
   // previous keg is the rollback): clean everything else by name.
-  const skip = [...(quarantined ? [quarantined.name] : []), ...rcPending.keys(), ...rcBroken];
+  // A risky package (tailscale) is never cleaned: its previous keg stays after a pass until the next verified upgrade replaces it with the then-previous one.
+  const skip = [...new Set([...(quarantined ? [quarantined.name] : []), ...rcPending.keys(), ...rcBroken, ...cfg.riskyKeepPrevious.map(last)])];
   if (skip.length) {
     const fl = await x([cfg.brew, "list", "--formula", "--full-name"]);
     const cl = await x([cfg.brew, "list", "--cask"]);
@@ -532,11 +540,14 @@ async function notWaiting(rt: RunCtx, names: string[], cask = false): Promise<st
   for (const n of names) {
     // Every planned upgrade, a gated formula (on another gated one) and a cask (its formula dependencies) too.
     // Only a formula is exempt from its own name: a cask named like a gated formula is another package.
-    const d = await x([cfg.brew, "deps", ...DECLARED_DEPS, ...(cask ? ["--cask"] : []), n]);
+    // soft: a read that fails or times out holds only this package (logged below), never the whole brew phase.
+    const d = await x([cfg.brew, "deps", ...DECLARED_DEPS, ...(cask ? ["--cask"] : []), n], { soft: true });
     // Every line a package name, or the list is unreadable.
     const deps = d.rc === 0 ? words(d.out) : [];
     const read = d.rc === 0 && deps.every((dep) => PKG_NAME.test(dep));
-    const hit = read ? deps.find((dep) => gatedOutdated.includes(last(dep)) && (cask || last(dep) !== last(n))) : undefined;
+    // The tailscale app, by either token, is always a gated dependency of a cask (its formula is gated by the outdated and installed lists).
+    const appTokens = cask && cfg.riskyKeepPrevious.some((q) => last(q) === "tailscale") ? ["tailscale", "tailscale-app"] : [];
+    const hit = read ? deps.find((dep) => (gatedOutdated.includes(last(dep)) && (cask || last(dep) !== last(n))) || appTokens.includes(last(dep))) : undefined;
     if (!read) log.push(`  ${last(n)}: not upgraded this run — its dependencies could not be read while ${gatedOutdated.join(" ")} is gated by a release check`);
     else if (hit) log.push(`  ${last(n)}: not upgraded this run — it depends on ${last(hit)}, which a release check gates; retried next run`);
     else {
@@ -620,19 +631,68 @@ async function upgradeFormula(rt: RunCtx, full: string): Promise<number | "held"
   const rc = findCheck(cfg.releaseChecks, full);
   if (!rc) return (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true, ...LOG_ONLY })).rc;
   const f = last(full);
-  const view = await brewView(rcEnv.exec, cfg.brew, full);
+  const view = await brewView(rcEnv.exec, cfg.brew, full, kegDirFor(rcEnv));
   const cel = await x([cfg.brew, "--cellar", f]);
   const rack = cel.rc === 0 ? cel.out.trim() : "";
   // The rollback needs all three: the version in use, its rack, and whether brew trusts the formula
   // (uninstall drops the trust). Any unread: not upgraded, never upgraded without a rollback.
   const trusted = view ? await trustState(rcEnv.exec, cfg.brew, view.full) : undefined;
-  const why = !view?.current ? "the version in use could not be read" : !rack.startsWith("/") ? "its cellar could not be read" : trusted === undefined ? "its trust state could not be read" : "";
+  // The tailscale check's baseline is the opt link's keg: a version named only by linked_keg or the one keg installed is not read (nothing is installed on a guess).
+  const why = !view?.current || (rc.builtin && view.optState !== "ok") ? "the version in use could not be read" : !rack.startsWith("/") ? "its cellar could not be read" : trusted === undefined ? "its trust state could not be read" : "";
   if (!view?.current || why || trusted === undefined) {
     log.push(`  ${f}: not upgraded — release check: ${why}`);
     b.rcNotes.push(`${f} not upgraded, ${why}`);
     return 1;
   }
-  const p: PendingCheck = { formula: f, full, rack, from: view.current, trusted, beforeRan: false, at: stamp };
+  // The version the turn was decided on (re-read right before the install, below).
+  const gated = rt.sweepGated.get(f);
+  // The version this upgrade is authorized to install: the one the sweep decided on; a builtin check that no sweep decided (none in a real config) authorizes the candidate read now.
+  const authorized = gated ?? (rc.builtin ? view.candidate : undefined);
+  const p: PendingCheck = { formula: f, full, rack, from: view.current, trusted, beforeRan: false, at: stamp, ...(authorized !== undefined ? { gated: authorized } : {}) };
+  // The host's own older record of the version is removed at the start of an attempt, before anything is written for it, so an older verified or failed one never stands for this attempt. A
+  // record that names another host, no host or cannot be read is not removed and holds the attempt (below); one that cannot be removed (a directory at its path, no access) holds the attempt: nothing is installed, and the pending record is written with the marker in its first save (ended, the version in
+  // its invalidate list), so every later run asks again and a later candidate is held until the file is gone. A marker that cannot be saved holds the attempt without leaving a plain record.
+  if (gated !== undefined) {
+    // Only a record that names this host is this host's to delete: another host's, a hostless, malformed or unreadable one holds the attempt, named, the file left.
+    const held = await candidateRecordHold(rcEnv, gated);
+    if (held !== undefined) {
+      log.push(`  ${f}: not upgraded — ${held}; nothing is installed`);
+      b.rcNotes.push(`${f} not upgraded, ${held.replaceAll(";", ",")}`);
+      b.flagged = true;
+      holdOf(b, "formula", full, `tailscale sweep: ${held}`);
+      return "held";
+    }
+    try {
+      await rt.fs.remove(recordPath(cfg.stateDir, gated));
+    } catch (e) {
+      const why = `the sweep record ${recordPath(cfg.stateDir, gated)} could not be removed (${e instanceof Error ? e.message : String(e)})`;
+      log.push(`  ${f}: not upgraded — ${why}; nothing is installed`);
+      b.rcNotes.push(`${f} not upgraded, ${why}`);
+      b.flagged = true;
+      holdOf(b, "formula", full, `tailscale sweep: ${why}`);
+      const marked: PendingCheck = { ...p, invalidate: [gated], ended: true };
+      try {
+        await savePending(rcEnv, marked);
+        rcPending.set(f, marked);
+      } catch (e2) {
+        log.push(`  ${f}: WARNING — the marker could not be saved (${e2 instanceof Error ? e2.message : String(e2)}); the attempt is held again next run`);
+      }
+      return "held";
+    }
+  }
+  // Nothing remembers a record that could not be removed when its marker could not be saved either: the directory is read, and a record of another version this host did not just verify
+  // holds the attempt, every run, until it is gone. Nothing is installed.
+  if (gated !== undefined) {
+    const stale = await staleSweepRecords(rcEnv, p.from, gated);
+    if (stale.length) {
+      const why = `the sweep directory still holds ${stale.join("; ")}`;
+      log.push(`  ${f}: not upgraded — ${why}; nothing is installed`);
+      b.rcNotes.push(`${f} not upgraded, ${why.replaceAll(";", ",")}`);
+      b.flagged = true;
+      holdOf(b, "formula", full, `tailscale sweep: ${why}`);
+      return "held";
+    }
+  }
   rcPending.set(f, p);
   rcThisRun.add(f);
   // Written before before runs: a run that dies from here on leaves it, and the next run owes after.
@@ -647,14 +707,35 @@ async function upgradeFormula(rt: RunCtx, full: string): Promise<number | "held"
       return 1;
     }
   }
+  // The version of the turn, read again right before the install (the cellar, trust and record steps above took time): brew installs by name, so this is the
+  // last point the decision can be held to. The host's record of the version is removed here, at the start of an attempt, so an older verified one never
+  // stands for it. A candidate that moved: nothing installed, the pending record dropped, the next run decides again.
+  if (gated !== undefined) {
+    const fresh = await brewView(rcEnv.exec, cfg.brew, full, kegDirFor(rcEnv));
+    if (fresh?.candidate !== gated || fresh.current !== p.from || (rc.builtin && fresh.opt !== p.from)) {
+      // Not the version the turn was decided on, or the version in use is no longer the one the rollback would return to (or cannot be read: no install on an unreadable baseline).
+      const why = fresh?.candidate !== gated ? `brew now offers ${fresh?.candidate ?? "no version"}, the tailscale sweep decided on ${gated}` : rc.builtin && fresh.opt !== p.from ? `the opt link ${fresh.optState === "unread" ? "could not be read" : fresh.opt ? `names ${fresh.opt}` : "is missing or names no keg"}, not the ${p.from} it would roll back to` : `the version in use is ${fresh.current ?? "unreadable"}, not the ${p.from} it would roll back to`;
+      log.push(`  ${f}: not upgraded — ${why}; the next run decides again`);
+      b.rcNotes.push(`${f} not upgraded, ${fresh?.candidate !== gated ? `the candidate changed from ${gated}` : "the baseline changed or could not be read"}`);
+      holdOf(b, "formula", full, `tailscale sweep: ${fresh?.candidate !== gated ? `the candidate changed from ${gated}` : "the version in use changed or could not be read"}`);
+      rcPending.delete(f);
+      rcThisRun.delete(f);
+      rt.rcStopOff.get(f)?.();
+      rt.rcStopOff.delete(f);
+      await rt.fs.remove(pendingPath(cfg.stateDir, f));
+      return "held";
+    }
+  }
   // On the record before the upgrade: from here a stop or an error before the verdict owes after, before or not.
   // Owed only once written: a write that fails stops the upgrade, and a run that upgraded nothing owes none.
   await savePending(rcEnv, { ...p, upgradeStarted: true });
   p.upgradeStarted = true;
   const code = (await x([cfg.brew, "upgrade", full], { env: installEnv, timeoutMs: cfg.upgradeTimeoutMs, soft: true, ...LOG_ONLY })).rc;
   if (code === 0) {
-    const now = await brewView(rcEnv.exec, cfg.brew, full);
-    if (now?.current && now.current === p.from) {
+    const now = await brewView(rcEnv.exec, cfg.brew, full, kegDirFor(rcEnv));
+    // The tailscale check reads the version from the opt link alone (see adoptInstalled): a version only linked_keg names is never taken for the one in use.
+    const inUse = rc.builtin ? (now?.optState === "ok" ? now.opt : undefined) : now?.current;
+    if (inUse && inUse === p.from) {
       // brew exited 0 without changing the version in use (another updater installed the candidate
       // first, or brew had nothing to do): no upgrade, so no check and no rollback (the version in
       // use may be the only keg). after is owed as for an upgrade that did not complete.
@@ -663,12 +744,101 @@ async function upgradeFormula(rt: RunCtx, full: string): Promise<number | "held"
       log.push(`  release check ${f}: brew upgrade exited 0 but ${f} is still ${p.from} — no upgrade, no check`);
     } else {
       p.upgraded = true;
-      if (now?.current) p.to = now.current;
+      if (rc.builtin) await adoptInstalled(rcEnv, p, now, () => savePending(rcEnv, p));
+      else if (now?.current) p.to = now.current;
+      // Not the version the turn was decided on (the candidate moved after the last read): a confirmed fail, never checked and never recorded verified.
+      if (authorized !== undefined) await failUnauthorized(rcEnv, p, () => savePending(rcEnv, p));
       await savePending(rcEnv, p);
       log.push(`  release check ${f}: ${p.from || "?"} → ${p.to ?? "?"}, the previous keg kept until the check decides`);
     }
   }
   return code;
+}
+
+/**
+ * Tailscale goes one host at a time. The formula waits until every host before this one in the canary order is verified on the version brew offers (and is
+ * refused on a host that is not in the order); the version the turn was decided on is kept for the upgrade, which holds if brew offers another by then. A real
+ * run holds this host's sweep lock from before it reads any pending check (run.ts); a run without it holds tailscale. The tailscale cask (the GUI app) is manual
+ * only: the apply run never upgrades it while tailscale is a risky package.
+ */
+async function sweepGate(rt: RunCtx, formulas: string[], casks: string[]): Promise<{ formulas: string[]; casks: string[] }> {
+  const { cfg, log, b, x, rcEnv, sweepGated, sweepLock } = rt;
+  if (!cfg.riskyKeepPrevious.some((p) => last(p) === "tailscale")) return { formulas, casks };
+  const keptCasks: string[] = [];
+  for (const k of casks) {
+    if (!isTailscaleCask(last(k))) {
+      keptCasks.push(k);
+      continue;
+    }
+    log.push(`  holding ${last(k)} (tailscale sweep: the tailscale app is updated by hand, never by the apply run)`);
+    holdOf(b, "cask", k, "tailscale sweep: the tailscale app is updated by hand");
+  }
+  const keep: string[] = [];
+  for (const n of formulas) {
+    if (last(n) !== "tailscale") {
+      keep.push(n);
+      continue;
+    }
+    const lockOff = sweepLock.held === false;
+    const view = lockOff ? undefined : await brewView(rcEnv.exec, cfg.brew, n, kegDirFor(rcEnv));
+    const version = view?.candidate;
+    const turn: Turn = lockOff
+      ? { go: false, why: sweepLock.why }
+      : version
+        ? await sweepTurn({ exec: x, host: cfg.host, order: cfg.tailscaleCanaryOrder, read: cfg.tailscaleSweepRead, version })
+        : { go: false, why: "the version to install could not be read" };
+    // Before anything is installed: the daemon is there and runs the version in use now. A host whose daemon is missing, stopped or on another version would fail the
+    // restart or the verify after the install (a fleet-visible failure, or a check pending for ever): it is held here, with no record and no effect on the fleet.
+    // (A dry run reports the turn only.)
+    const notReady = turn.go && !rt.dryRun ? await daemonNotReady(rt, view?.current) : "";
+    if (turn.go && notReady) {
+      log.push(`  holding ${last(n)} (tailscale sweep: ${notReady}; nothing is installed)`);
+      holdOf(b, "formula", n, `tailscale sweep: ${notReady}`);
+      // This host's turn is stuck and every host after it waits: flagged in the result, with the way out in docs/tailscale-upgrades.md ("A host that holds the sweep").
+      b.flagged = true;
+      b.rcNotes.push(`tailscale held at this host's turn: ${notReady} (later hosts wait; docs/tailscale-upgrades.md)`);
+      continue;
+    }
+    if (turn.go) {
+      keep.push(n);
+      sweepGated.set(last(n), version!);
+      // A release check keeps the previous keg: no install cleanup for this run (also set at the start of the run on every host with a risky list).
+      rt.installEnv.HOMEBREW_NO_INSTALL_CLEANUP = "1";
+      continue;
+    }
+    log.push(`  holding ${last(n)} (tailscale sweep: ${turn.why})`);
+    holdOf(b, "formula", n, `tailscale sweep: ${turn.why}`);
+  }
+  return { formulas: keep, casks: keptCasks };
+}
+
+/** Why the tailscale daemon of this host is not ready for an upgrade (no plist, not running, or running a version other than the one in use), or "" when it is. */
+async function daemonNotReady(rt: RunCtx, current: string | undefined): Promise<string> {
+  const { x, fs } = rt;
+  const labels = ["sh.brew.tailscale", "homebrew.mxcl.tailscale", "com.tailscale.tailscaled"];
+  // The same labels and places the owner restart requires: every plist that exists, one target each (the system daemon before the user agent). One that is not running
+  // would fail the restart after the install, and a fleet `failed` with it.
+  const targets: string[] = [];
+  for (const label of labels) {
+    if (await fs.exists(`/Library/LaunchDaemons/${label}.plist`)) targets.push(`system/${label}`);
+    else if (await fs.exists(`${fs.home}/Library/LaunchAgents/${label}.plist`)) targets.push(`gui/${fs.uid}/${label}`);
+  }
+  if (!targets.length) return `no tailscale daemon plist found (${labels.join(", ")})`;
+  for (const target of targets) {
+    const printed = await x(["launchctl", "print", target], { soft: true });
+    if (printed.rc !== 0 || !/state = running/.test(printed.out)) return `${target} is not running`;
+  }
+  const st = await x([TAILSCALE, "status", "--json"], { soft: true });
+  if (st.rc !== 0) return `tailscale status exited ${st.rc}, the daemon's version could not be read`;
+  let daemon: unknown;
+  try {
+    daemon = (JSON.parse(st.out) as { Version?: unknown } | null)?.Version;
+  } catch {
+    daemon = undefined;
+  }
+  if (typeof daemon !== "string" || !current) return `the running daemon's version could not be read`;
+  if (!sameVersion(daemon, current)) return `the daemon runs ${daemon}, not the ${current} in use`;
+  return "";
 }
 
 /** Records why a name is held, as data, under its kind and full name; the first hold of that stays. */

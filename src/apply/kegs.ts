@@ -182,6 +182,11 @@ export interface KegOptions {
    * deleted kegs is reported, never restarted (no kickstart, handoff, helper, owner command or waiter job).
    */
   leavePkgs?: ReadonlySet<string>;
+  /**
+   * Packages whose release check belongs to another run of this host (this run did not get the sweep lock): a process on a stale keg of theirs is reported, never restarted
+   * (the run that holds the lock restarts and rolls back; a restart from here would race it).
+   */
+  lockedPkgs?: ReadonlySet<string>;
 }
 
 /**
@@ -569,6 +574,12 @@ export async function staleKegCheck(env: KegEnv, o: KegOptions): Promise<StaleKe
       add(stale, h.pkg);
       mark(h.pkg, "orphans", h.pid);
       add(unresolved, `${h.pkg}(upgraded unchecked, not restarted)`);
+      return;
+    }
+    if (o.lockedPkgs?.has(h.pkg)) {
+      log.push(staleLine, `    ${h.pkg}: its release check belongs to another run of this host (the sweep lock) — pid ${h.pid} is reported, never restarted here`);
+      add(stale, h.pkg);
+      mark(h.pkg, "reported", h.pid);
       return;
     }
     if (await isSelf(h.pid)) {

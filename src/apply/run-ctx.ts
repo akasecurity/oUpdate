@@ -276,6 +276,10 @@ export interface RunCtx {
   expectedKeg: (p: PendingCheck) => string;
   retiredFor: (p: PendingCheck, keg: string) => boolean;
   gatedOutdated: string[];
+  /** Tailscale: the version the sweep's turn was decided on, by short name; the upgrade runs only while brew still offers it. */
+  sweepGated: Map<string, string>;
+  /** This host's tailscale sweep lock (a real run with tailscale risky): `held` false means this run leaves tailscale alone, `why` says why. */
+  sweepLock: { path: string; held: boolean | undefined; why: string };
   ownerLock: NonNullable<ApplyOptions["ownerLock"]>;
   clock: NonNullable<ApplyOptions["ownerClock"]>;
   restartOpts: Omit<NonNullable<Parameters<typeof restartUpgraded>[2]>, "into">;

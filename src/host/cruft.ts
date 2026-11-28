@@ -436,11 +436,22 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   // between the stat and the open of a script reaches openSync before the descriptor check rejects it (needs write access there).
   const dotted = (p: string) => p.split("/").some((x) => x === "." || x === "..");
   // An fs with no realPath (a test fake) has no links: the lexically resolved path (resolve()) is its real path. A lookup that fails adopts nothing.
-  const realRaw = fs.realPath ? await fs.realPath(adoptedRaw) : resolve(adoptedRaw);
+  // realPath throws for an access or I/O error (release checks tell that from a missing path); here either one is a lookup that failed, which adopts nothing.
+  const realOf = async (path: string): Promise<string | undefined> => {
+    try {
+      return await fs.realPath!(path);
+    } catch {
+      return undefined;
+    }
+  };
+  const realRaw = fs.realPath ? await realOf(adoptedRaw) : resolve(adoptedRaw);
   const plainAdopted = `${adoptedRaw}/`;
   // A root, a top-level directory, the home dir or an ancestor of it is too broad to be a scripts directory: it adopts
   // nothing (an overcount is the fail-closed side). Home is checked as given and by its real path.
-  const homeReal = (fs.realPath ? await fs.realPath(home) : undefined) ?? home;
+  const homeLookup = fs.realPath ? await realOf(home) : undefined;
+  const homeReal = homeLookup ?? home;
+  // A home that cannot be resolved (and an fs that can resolve links) leaves it unknown whether the configured dir is an ancestor of the real home: nothing is adopted.
+  const homeFailed = !!fs.realPath && homeLookup === undefined;
   // Spellings only widen the test: names are folded (case, NFC, runs of slashes; the /System/Volumes/Data firmlink root is handled in `spellings` below), and the configured dir is also taken with its "." and ".."
   // collapsed as text, so Alias/. and Alias/dir/.. count as Alias. Wrong-spelling only overcounts.
   const fold = (x: string) => x.normalize("NFC").toLowerCase().replace(/\/{2,}/g, "/");
@@ -455,7 +466,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   const broad = (d: string) => d.split("/").filter(Boolean).length < 2 || [`${home}/`, `${homeReal}/`].some((h) => spellings(h).some((hs) => hs.startsWith(fold(d))));
   const realSlash = realRaw === undefined ? undefined : `${realRaw.replace(/\/+$/, "")}/`;
   const collapsed = `${resolve(adoptedRaw).replace(/\/+$/, "")}/`;
-  const realAdopted = realSlash === undefined || [realSlash, plainAdopted, collapsed].some(broad) ? undefined : realSlash;
+  const realAdopted = realSlash === undefined || homeFailed || [realSlash, plainAdopted, collapsed].some(broad) ? undefined : realSlash;
   for (const d of [`${fs.home}/Library/LaunchAgents`, "/Library/LaunchAgents", "/Library/LaunchDaemons"]) {
     // A directory that exists but cannot be listed (no access) is one problem to count, not an empty one: its plists would vanish.
     let names = fs.listDirStrict ? await fs.listDirStrict(d) : await fs.listDir(d);
@@ -515,7 +526,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         continue;
       }
       // Resolve the script to its real path, read that path, then resolve again: the file read and the file judged are one.
-      const real = fs.realPath ? await fs.realPath(run.script) : resolve(run.script);
+      const real = fs.realPath ? await realOf(run.script) : resolve(run.script);
       // A program that is a link to a launcher (dash, osascript...) runs another file: counted, whatever its own name is.
       if (run.shebang && real !== undefined && runsOther(base(real))) {
         wrappers.push(`${d}/${n} runs ${run.script}`);
@@ -530,7 +541,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         continue;
       }
       // The second look comes before any skip, so no path is left out of the count before it has been resolved twice.
-      const again = fs.realPath ? await fs.realPath(run.script) : real;
+      const again = fs.realPath ? await realOf(run.script) : real;
       let stable = again === real;
       // Shape (a) with no shebang is a binary program: not counted, once it resolved the same twice and a second read of the
       // head still says binary. An empty file is not a binary: it falls to the owner check and is counted.
@@ -542,7 +553,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         const m2: { links?: number; noFollow?: boolean; dev?: number; ino?: number } = { noFollow: true };
         const body2 = await fs.readHead?.(fs.realPath ? real! : run.script, SCRIPT_BYTES, m2);
         // A third lookup after the second read: a path retargeted during that read is unstable, so it is counted, never skipped.
-        if (fs.realPath && (await fs.realPath(run.script)) !== real) stable = false;
+        if (fs.realPath && (await realOf(run.script)) !== real) stable = false;
         // A binary with another name (a hard link) is shared with a place outside the directory: counted, not skipped.
         if (stable && !argRuns && isBinaryProgram(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && isBinaryProgram(body2) && m1.links === 1 && m2.links === 1 && m1.dev !== undefined && m1.ino !== undefined && m2.dev === m1.dev && m2.ino === m1.ino) continue;
         head = body2 ?? "";

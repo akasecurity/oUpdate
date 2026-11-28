@@ -453,7 +453,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
   symlinkSync(join(root, "nowhere"), join(adopted, "dangling.sh"));
   const host = (script: string, dir: string, over: Record<string, unknown> = {}) =>
     cruftCount({
-      fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number; noFollow?: boolean }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), realPath: hostReal, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [], ...over },
+      fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number; noFollow?: boolean }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), realPath: async (p: string) => (p === "/h" ? p : hostReal(p)), plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [], ...over },
       configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
     }).then((c) => c.wrappers);
   const runs = (s: string) => [`${A}/t.plist runs ${s}`];
@@ -839,6 +839,26 @@ describe("cruft count follow-ups (OUP-368)", () => {
       configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
     }).then((c) => c.wrappers.length);
 
+  test("a realpath that throws (an untraversable directory) adopts nothing and never aborts the count", async () => {
+    const denied = (only?: string) => async (p: string) => {
+      if (only === undefined || p === only) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      return p;
+    };
+    // Fails at cruft.ts `realOf`: without its catch the script's lookup rejects and cruftCount throws.
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "~/scripts", { realPath: denied("/hm/x/scripts/own.sh") })).toBe(1);
+    // The adopted dir and home failing too: nothing is adopted, the script is counted.
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "~/scripts", { realPath: denied() })).toBe(1);
+    // Control: the same script resolving is adopted and not counted.
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "~/scripts")).toBe(0);
+  });
+  test("a home that cannot be resolved adopts nothing: the dir may be an ancestor of the real home", async () => {
+    // The configured dir is the real home's parent as the lookup would show; with only the home lookup failing, the lexical home must not stand in for it.
+    const real = async (p: string) => (p === "/hm/x" ? undefined : p);
+    // Fails at cruft.ts `homeFailed`: the lexical fallback adopts the script (0 counted).
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts", { realPath: real })).toBe(1);
+    // Control: the home resolving adopts it.
+    expect(await stub("/hm/x", "/hm/x/scripts/own.sh", "/hm/x/scripts")).toBe(0);
+  });
   test("a redundant slash in the home spelling does not hide a broad dir (OUP-368 item 1)", async () => {
     // Fails at cruft.ts `broad`: "/hm//x/" does not start with "/hm/x/" until runs of slashes are folded to one.
     expect(await stub("/hm//x", "/hm/x/own.sh", "/hm/x")).toBe(1);

@@ -35,8 +35,12 @@ export interface ApplyFs {
   mtimeMs?(path: string): Promise<number | undefined>;
   /** The first `bytes` bytes as text of a regular file (a link to one counts); undefined when it is missing, unreadable or not a regular file (a FIFO or device is never opened: the kind is checked by a stat first, then again on the open descriptor). */
   readHead?(path: string, bytes: number, meta?: { links?: number; noFollow?: boolean; dev?: number; ino?: number }): Promise<string | undefined>;
-  /** The path with every symlink resolved (fs.realpathSync.native, which follows a link before a ".." after it), or undefined when it cannot be (missing, a loop, no access). */
+  /** The path with every symlink resolved (fs.realpathSync.native, which follows a link before a ".." after it), or undefined when there is no such path (missing, dangling, a loop, a file in the way); an access or I/O error is thrown, so a caller can tell "not there" from "could not look". */
   realPath?(path: string): Promise<string | undefined>;
+  /** What the path itself is (lstat): undefined when it cannot be statted. */
+  kind?(path: string): Promise<"dir" | "file" | "link" | undefined>;
+  /** Whether the path itself is a symlink (lstat); false when it is missing. */
+  isSymlink?(path: string): Promise<boolean>;
   /**
    * A property list read by the OS's own parser (/usr/bin/plutil, the reader launchd's files are written for), as the
    * parsed top-level object. undefined for anything else: not a regular file, over 256 KiB, no plutil, a non-zero exit,
@@ -134,11 +138,28 @@ export const realFs: ApplyFs = {
       return undefined;
     }
   },
+  kind: async (p) => {
+    try {
+      const s = lstatSync(p);
+      return s.isSymbolicLink() ? "link" : s.isDirectory() ? "dir" : "file";
+    } catch {
+      return undefined;
+    }
+  },
+  isSymlink: async (p) => {
+    try {
+      return lstatSync(p).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  },
   realPath: async (p) => {
     try {
       return realpathSync.native(p);
-    } catch {
-      return undefined;
+    } catch (e) {
+      // No such path (missing, dangling, a file in the way, a loop) is an answer; an access or I/O error is not, and is thrown.
+      if (["ENOENT", "ENOTDIR", "ELOOP"].includes((e as NodeJS.ErrnoException).code ?? "")) return undefined;
+      throw e;
     }
   },
   readHead: async (p, bytes, meta) => {

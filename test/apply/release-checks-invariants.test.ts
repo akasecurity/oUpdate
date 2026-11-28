@@ -524,7 +524,8 @@ function violations(c: Case, w: Awaited<ReturnType<typeof explore>>): string[] {
     if (owedAt >= 0) {
       // Counted from the upgrade (after is saved with the verdict that owes it, so it may come
       // first); with before, from the last before: an after already run for it (a wait) discharges it.
-      const upgradeAt = ev.findIndex((e) => e.k === "pending" && upgraded(e.rec));
+      // A stop right after the upgrade saves the record as upgraded before its version is read (no `to` yet): the after the stop path runs then is this upgrade's.
+      const upgradeAt = ev.findIndex((e) => e.k === "pending" && (upgraded(e.rec) || (e.rec.upgraded === true && e.rec.to === undefined)));
       const lastBefore = ev.slice(0, owedAt).findLastIndex((e) => e.k === "before" && e.ok);
       const afters = ev.slice(lastBefore >= 0 ? lastBefore : upgradeAt).filter((e) => e.k === "after" && e.ok).length;
       if (afters < 1) out.push("I1: an upgraded check that passed, could not run or was restored to a passing version never discharged after");
