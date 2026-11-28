@@ -203,87 +203,155 @@ describe("env options inside and around a -S value (OUP-372 review round 2)", ()
   });
 });
 
-describe("env line: what the earlier readers counted stays counted, and the review round 3 gaps (OUP-372)", () => {
+describe("env line: what the earlier readers counted stays counted, and the review round 3 and 4 gaps (OUP-372)", () => {
   const dashLinks = { "/opt/x/alias": "/bin/dash", "/opt/x/linkdash": "/bin/dash", "/usr/bin/python3": "/bin/dash", "/opt/evil/python3": "/bin/dash" };
-  const counted = (line: string, extra: Partial<Over> = {}) => script(line, extra);
-  test("more -S levels than are read are counted, not dropped", async () => {
-    for (const n of [6, 7, 8, 9]) {
-      expect(await counted(`#!/usr/bin/env ${"-S ".repeat(n)}dash`)).toBe(1);
-      expect(await counted(`#!/usr/bin/env ${"-S ".repeat(n)}missingcmd`, { missing: (p) => p.endsWith("/missingcmd") })).toBe(1);
-      expect(await counted(`#!/usr/bin/env ${"-S ".repeat(n)}/opt/x/linkdash`, { links: dashLinks })).toBe(1);
-    }
-  });
-  test("--split-string shrinks its value by one word each time it is read", async () => {
-    expect(await counted("#!/usr/bin/env --split-string --split-string dash")).toBe(1);
-    expect(await counted("#!/usr/bin/env --split-string --split-string --split-string dash")).toBe(1);
-  });
-  test("every option value is judged: a link to a launcher or a path that resolves nowhere is counted", async () => {
-    const lines = [
-      "#!/usr/bin/env -u /opt/x/alias python3",
-      "#!/usr/bin/env -C /opt/x/alias python3",
-      "#!/usr/bin/env --unset=/opt/x/alias python3",
-      "#!/usr/bin/env --split-string=/opt/x/linkdash",
-      "#!/usr/bin/env --default-signal /opt/x/linkdash",
-      "#!/usr/bin/env -u X python3",
-    ];
-    for (const l of lines) expect({ l, n: await counted(l, { links: { ...dashLinks, "/usr/bin/X": "/bin/dash" } }) }).toEqual({ l, n: 1 });
-    for (const l of ["#!/usr/bin/env -C /missing bash", "#!/usr/bin/env --chdir=/missing bash", "#!/usr/bin/env --split-string=/missing/x"])
-      expect({ l, n: await counted(l, { missing: (p) => p.startsWith("/missing") }) }).toEqual({ l, n: 1 });
-    expect(await counted("#!/usr/bin/env --split-string=python3", { links: dashLinks })).toBe(1);
-  });
-  test("the value of an X=value or --x=value word anywhere on the line is judged", async () => {
-    for (const l of ["#!/usr/bin/env python3 FOO=dash", "#!/usr/bin/env -S python3 FOO=dash", "#!/usr/bin/env python3 --exec=dash", "#!/usr/bin/env python3\t--exec=dash"])
-      expect({ l, n: await counted(l) }).toEqual({ l, n: 1 });
-  });
-  test("a word with a quoted or escaped blank has each piece judged", async () => {
-    for (const l of ["#!/usr/bin/env -S python3 'a dash b'", "#!/usr/bin/env -S python3 x\\ dash", '#!/usr/bin/env -S python3 "x dash'])
-      expect({ l, n: await counted(l) }).toEqual({ l, n: 1 });
-  });
-  test("a path written with a backslash is judged as written too", async () => {
-    expect(await counted("#!/usr/bin/env -S /usr/bin/python\\3", { missing: (p) => p.includes("\\") })).toBe(1);
-  });
-  test("a changed lookup path is counted: -P or -i in a cluster, -u PATH, PATH= with or without a command", async () => {
-    const lines = [
-      "#!/usr/bin/env -iP/usr/bin python3",
-      "#!/usr/bin/env -iP /opt/evil python3",
-      "#!/usr/bin/env -vP/opt/evil python3",
-      "#!/usr/bin/env -S -iP /opt/evil python3",
-      "#!/usr/bin/env -i run",
-      "#!/usr/bin/env -u PATH run",
-      "#!/usr/bin/env --unset=PATH run",
-      "#!/usr/bin/env PATH=dash",
-      "#!/usr/bin/env PATH=/missing",
-      "#!/usr/bin/env -P /missing",
-    ];
-    for (const l of lines) expect({ l, n: await counted(l, { links: { ...dashLinks, "/usr/bin/run": "/bin/dash" } }) }).toEqual({ l, n: 1 });
-  });
-
-  // A reference judge frozen from the first reader (OUP-370, 748cf35e): every word of an env line as written; a bare word that names a launcher, an absolute path
-  // that links to one or resolves nowhere, counts. The head must count every line it counts.
-  const FROZEN = /^(?:dash|ksh|awk|xargs|sudo|osascript|nohup|env)$/;
-  const fsLinks: Record<string, string> = { ...dashLinks, "/usr/bin/run": "/bin/dash", "/usr/bin/X": "/bin/ksh" };
+  const fsLinks: Record<string, string> = { "/opt/x/alias": "/bin/dash", "/opt/x/linkdash": "/bin/dash", "/usr/bin/run": "/bin/dash", "/usr/bin/X": "/bin/ksh", "/usr/bin/ruby": "/bin/bash", "/opt/x/dash": "/opt/x/real" };
   const gone = (p: string) => p.startsWith("/missing") || p.includes("\\") || p.endsWith("/missingcmd");
-  const frozen = (line: string): boolean => {
-    const words = line.slice(2).trim().split(/\s+/).filter(Boolean);
-    const list = words[0] !== undefined && words[0].split("/").pop() === "env" ? words : [words[0]];
+  const real = (p: string): string | undefined => (gone(p) ? undefined : fsLinks[p] ?? p);
+  const name = (p: string) => p.split("/").pop()!;
+
+  // Two reference judges, each an independent copy of an earlier reader of an env line (not an import): the first (OUP-370, 748cf35e) reads every word as
+  // written; the second (OUP-372 round 1, 7a2e2814) removes the quotes inside -S, judges the value of X=value words, looks a bare word up in the dirs of
+  // PATH and counts a command found nowhere or a link to a program of another family. The head must count every line either counts.
+  const L1 = /^(?:dash|ksh|awk|xargs|sudo|osascript|nohup)$/;
+  const RUNS = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh|env|dash|ksh|awk|xargs|sudo|osascript|nohup)(?:[0-9.]+)?$/i;
+  const fam = (n: string) => n.toLowerCase().replace(/[0-9.]+$/, "");
+  const envWords = (line: string): string[] => line.slice(2).trim().split(/\s+/).filter(Boolean);
+  const first = (line: string): boolean => {
+    const words = envWords(line);
+    const list = words[0] !== undefined && name(words[0]) === "env" ? words : [words[0]];
     for (const w of list) {
       if (w === undefined) continue;
       if (!w.startsWith("/")) {
-        if (FROZEN.test(w) && w !== "env") return true;
+        if (L1.test(w)) return true;
         continue;
       }
-      const real = gone(w) ? undefined : fsLinks[w] ?? w;
-      if (real === undefined || (FROZEN.test(real.split("/").pop()!) && real.split("/").pop() !== "env")) return true;
+      const r = real(w);
+      if (r === undefined || L1.test(name(r))) return true;
     }
     return false;
   };
-  test("a corpus of 3,000 env lines: the head counts every line the first reader counted", async () => {
+  const second = (line: string): boolean => {
+    const raw = envWords(line);
+    if (raw[0] === undefined) return false;
+    if (name(raw[0]).toLowerCase() !== "env") return judge([raw[0]], -1);
+    const words: string[] = [raw[0]];
+    let cmd = -1;
+    const add = (w: string): void => {
+      if (w === "") return;
+      if (cmd < 0 && !w.startsWith("-") && !w.includes("=")) cmd = words.length;
+      words.push(w);
+      const eq = w.indexOf("=");
+      if (eq > 0 && !w.startsWith("/")) words.push(w.slice(eq + 1));
+    };
+    for (let i = 1; i < raw.length; i++) {
+      const w = raw[i]!;
+      if (w.startsWith("-S")) {
+        const rest = [w.slice(2), ...raw.slice(i + 1)].join(" ");
+        for (const t of rest.split(/\s+/)) if (t.startsWith("/") && /["']/.test(t)) words.push(t);
+        for (const t of rest.replace(/["']/g, "").split(/\s+/)) add(t);
+        break;
+      }
+      if (w === "-u" || w === "-C" || w === "-P" || w === "--unset" || w === "--chdir") {
+        words.push(w);
+        if (raw[i + 1] !== undefined) words.push(raw[++i]!);
+        continue;
+      }
+      add(w);
+    }
+    return judge(words, cmd);
+  };
+  const judge = (words: string[], cmd: number): boolean => {
+    for (const [i, w] of words.entries()) {
+      if (!w.startsWith("/")) {
+        if (L1.test(name(w))) return true;
+        if (w.startsWith("-") || w.includes("/") || w.includes("=")) continue;
+        let found = false;
+        for (const d of ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]) {
+          const r = real(`${d}/${w}`);
+          if (r === undefined) continue;
+          found = true;
+          if (L1.test(name(r)) || (RUNS.test(name(r)) && (!RUNS.test(w) || fam(w) !== fam(name(r))))) return true;
+        }
+        if (!found && i === cmd) return true;
+        continue;
+      }
+      const r = real(w);
+      if (r === undefined || L1.test(name(r))) return true;
+      if (RUNS.test(name(w)) && RUNS.test(name(r)) && fam(name(w)) !== fam(name(r))) return true;
+    }
+    return false;
+  };
+  const counted = (line: string, extra: Partial<Over> = {}) => script(line, { links: fsLinks, missing: gone, ...extra });
+  // A line only the structural read counts: the head counts it and neither reference judge does, so no older reader can produce the count.
+  const onlyNew = async (line: string): Promise<void> => {
+    expect({ line, first: first(line), second: second(line) }).toEqual({ line, first: false, second: false });
+    expect({ line, n: await counted(line) }).toEqual({ line, n: 1 });
+  };
+
+  // The older readers also count a line with a launcher in a deep -S, a link or a backslash path (they read the words flat), so these are not "only new" lines.
+  test("more -S levels than are read are counted, not dropped", async () => {
+    for (const n of [6, 7, 8, 9]) {
+      expect(await counted(`#!/usr/bin/env ${"-S ".repeat(n)}dash`)).toBe(1);
+      expect(await counted(`#!/usr/bin/env ${"-S ".repeat(n)}missingcmd`)).toBe(1);
+      expect(await counted(`#!/usr/bin/env ${"-S ".repeat(n)}/opt/x/linkdash`)).toBe(1);
+    }
+  });
+  test("--split-string shrinks its value by one word each time it is read", async () => {
+    await onlyNew('#!/usr/bin/env --split-string --split-string "dash"');
+    await onlyNew('#!/usr/bin/env --split-string --split-string --split-string "dash"');
+    await onlyNew('#!/usr/bin/env --split-string=--split-string "dash"');
+  });
+  test("an option value is judged where only the structural read sees it: attached to its option, as a link to a launcher or a path that resolves nowhere", async () => {
+    for (const l of ["#!/usr/bin/env -u/opt/x/alias python3", "#!/usr/bin/env -C/opt/x/alias python3", "#!/usr/bin/env -a/opt/x/alias python3", "#!/usr/bin/env -C/missing/x python3"]) await onlyNew(l);
+  });
+  test("an option value that is a path named like a launcher is counted whatever it links to", async () => {
+    await onlyNew("#!/usr/bin/env -u /opt/x/dash python3");
+    await onlyNew("#!/usr/bin/env -C /opt/x/dash python3");
+  });
+  test("a path named like a launcher that links to something else is counted as a program word too", async () => {
+    expect(await counted("#!/opt/x/dash")).toBe(1);
+  });
+  test("the value of an X=value or --x=value word after the command is judged, where the older readers do not see it", async () => {
+    for (const l of ['#!/usr/bin/env python3 FOO="dash"', '#!/usr/bin/env python3 --exec="dash"']) await onlyNew(l);
+  });
+  // The older readers also see a launcher inside a quoted or escaped blank of a -S value (they remove its quotes), so these are not "only new" lines.
+  test("a word with a quoted or escaped blank has each piece judged", async () => {
+    for (const l of ["#!/usr/bin/env -S python3 'a dash b'", "#!/usr/bin/env -S python3 x\\ dash", '#!/usr/bin/env -S python3 "x dash']) expect({ l, n: await counted(l) }).toEqual({ l, n: 1 });
+  });
+  test("a path written with a backslash is judged as written too", async () => {
+    expect(await counted("#!/usr/bin/env -S /usr/bin/python\\3")).toBe(1);
+  });
+  test("a changed lookup path is counted with a benign command: -i, -P, -u PATH, --unset=PATH, --ignore-environment, PATH=", async () => {
+    for (const l of [
+      "#!/usr/bin/env -i python3",
+      "#!/usr/bin/env -vP/opt/bin python3",
+      "#!/usr/bin/env -P /opt/bin python3",
+      "#!/usr/bin/env -S -vP /opt/bin python3",
+      "#!/usr/bin/env -u PATH python3",
+      "#!/usr/bin/env --unset=PATH python3",
+      "#!/usr/bin/env --ignore-environment python3",
+      "#!/usr/bin/env PATH=/opt/bin python3",
+      "#!/usr/bin/env PATH=/opt/bin",
+    ])
+      await onlyNew(l);
+  });
+  test("a long option that env does not have, and an env that runs env, are counted", async () => {
+    for (const l of ["#!/usr/bin/env --Sdash python3", "#!/usr/bin/env --iSdash python3", "#!/usr/bin/env --vSdash python3", "#!/usr/bin/env --P/opt/evil python3", "#!/usr/bin/env env python3", "#!/usr/bin/env /usr/bin/env -P /opt/bin python3"])
+      expect({ l, n: await counted(l) }).toEqual({ l, n: 1 });
+  });
+  test("controls: ordinary env lines stay adopted", async () => {
+    for (const l of ["#!/usr/bin/env python3", "#!/usr/bin/env --null python3", "#!/usr/bin/env FOO=bar python3", "#!/usr/bin/env -S python3 -u", "#!/usr/bin/env -u FOO python3"])
+      expect({ l, n: await counted(l) }).toEqual({ l, n: 0 });
+  });
+
+  test("a corpus of 3,000 env lines: the head counts every line either earlier reader counted", async () => {
     let seed = 20261128;
     const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
     const vocab = [
       "-S", "-i", "-u", "-C", "-P", "-iS", "-iSdash", "-vP/opt/evil", "--split-string", "--split-string=python3", "--unset=/opt/x/alias", "--chdir=/missing", "--default-signal",
       "PATH=/usr/bin", "PATH=dash", "FOO=dash", "FOO=bar", "python3", "dash", "bash", "ksh", "run", "X", "missingcmd", "/opt/x/alias", "/opt/x/linkdash", "/missing/x",
-      "/usr/bin/python3", "/usr/bin/python\\3", "'a", "dash", "b'", 'x\\', "dash", "-e", "--exec=dash", "--", "awk",
+      "/usr/bin/python3", "/usr/bin/python\\3", "'a", "dash", "b'", 'x\\', "dash", "-e", "--exec=dash", "--", "awk", '"dash"', "'dash'", "ruby", "perl", "env", "/usr/bin/env",
     ];
     const lines: string[] = [];
     while (lines.length < 3000) {
@@ -292,14 +360,23 @@ describe("env line: what the earlier readers counted stays counted, and the revi
       for (let k = 0; k < n; k++) w.push(vocab[rnd(vocab.length)]!);
       lines.push(`#!/usr/bin/env ${w.join(" ")}`);
     }
+    // Lines only the second reader counts: a command found nowhere, a quote removed inside -S, a link to a program of another family.
+    lines.push("#!/usr/bin/env missingcmd", '#!/usr/bin/env -S "dash"', "#!/usr/bin/env -S 'dash' -e", "#!/usr/bin/env ruby", "#!/usr/bin/env -S ruby -w");
     const missed: string[] = [];
-    let counts = 0;
+    let n1 = 0;
+    let n2 = 0;
+    let only2 = 0;
     for (const l of lines) {
-      if (!frozen(l)) continue;
-      counts++;
-      if ((await script(l, { links: fsLinks, missing: gone })) !== 1) missed.push(l);
+      const a = first(l);
+      const b = second(l);
+      if (a) n1++;
+      if (b) n2++;
+      if (b && !a) only2++;
+      if ((a || b) && (await counted(l)) !== 1) missed.push(l);
     }
-    expect(counts).toBeGreaterThan(500);
+    expect(n1).toBeGreaterThan(500);
+    expect(only2).toBeGreaterThan(50);
+    expect(n2).toBeGreaterThanOrEqual(n1);
     expect(missed).toEqual([]);
   });
 });

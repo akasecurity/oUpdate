@@ -203,6 +203,8 @@ function splitS(value: string): string[] {
 const unquoted = (w: string): string => w.replace(/["']/g, "");
 /** State of one read of an env line: `cmd` a command word was met; `path` the lookup path of the command may differ from the plist's (-i, -P, -u PATH, PATH=); `bad` the line is past what is read (counted). */
 type EnvState = { cmd: boolean; path: boolean; bad: boolean };
+/** The long options env has; any other word that starts with two dashes is counted (env may read it as a cluster of short options). */
+const LONG_ENV_OPTIONS = new Set(["--ignore-environment", "--null", "--debug", "--version", "--help", "--unset", "--chdir", "--argv0", "--split-string", "--default-signal", "--ignore-signal", "--block-signal", "--list-signal-handling"]);
 /** The most -S values nested in each other that are read; one more is counted, not read. */
 const MAX_S_DEPTH = 6;
 /**
@@ -247,6 +249,9 @@ function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): v
     if (t.startsWith("--split-string=")) return takeS(rest(t.slice("--split-string=".length)));
     if (t.startsWith("--")) {
       const eq = t.indexOf("=");
+      // A long option env does not have (`--Sdash`, `--iSdash`, `--P/opt/evil`) may be read as `-` and a cluster of short options: counted.
+      if (!LONG_ENV_OPTIONS.has(eq > 0 ? t.slice(0, eq) : t)) st.bad = true;
+      if (t === "--ignore-environment") st.path = true;
       if (eq > 0) {
         // --x=value: the value is judged (a --default-signal value is only ever given after the "=").
         const v = t.slice(eq + 1);
@@ -289,6 +294,8 @@ function parseEnv(tokens: string[], out: Word[], st: EnvState, depth: number): v
       continue;
     }
     // The command word, and every word after it: each as written, and by its name with the quotes removed.
+    // An env that runs env reads its own options again: counted.
+    if (base(t).toLowerCase() === "env") st.bad = true;
     for (const r of tokens.slice(i)) {
       const first = !st.cmd && r === t;
       if (first) st.cmd = true;
@@ -376,6 +383,8 @@ async function badInterpreter(fs: CruftFs, words: Word[], pathDirs: string[] = L
       if (!found && cmd) return true;
       continue;
     }
+    // The name of the path is a launcher's whatever it links to: counted.
+    if (LAUNCHERS.test(base(w))) return true;
     if (!fs.realPath) continue;
     const real = await fs.realPath(w);
     if (real === undefined || LAUNCHERS.test(base(real))) return true;
