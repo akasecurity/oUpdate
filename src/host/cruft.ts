@@ -25,7 +25,9 @@ export const CRUFT_BACKUP_PREFIXES = ["config.json.bak-", "config.json.pre-oq4e"
 /** Interpreters shapes (b) and (c) accept, by basename (versioned names such as python3.12 included). */
 const INTERPRETER = /^(?:python3?|ruby|perl|node|bun|bash|zsh|sh)(?:[0-9]+(?:\.[0-9]+)*)?$/;
 /** Programs that run another file or command (shells and launchers the interpreter list lacks): never a binary to skip, by basename (any case), also of the path the program resolves to. A binary with arguments that is not on this list is still skipped. */
-const LAUNCHERS = /^(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid)$/i;
+/** The interpreter names in any case: a program of such a name in another case is no binary to skip (interp() still needs the exact name and a standard dir). */
+const INTERPRETER_ANY = new RegExp(INTERPRETER.source, "i");
+const LAUNCHERS = /^g?(?:dash|ksh|ksh93|tcsh|csh|fish|osascript|nohup|caffeinate|arch|nice|xargs|sudo|tclsh|wish|expect|time|exec|command|setsid|ash|mksh|yash|busybox|deno|php|lua|luajit|julia|Rscript|pwsh|powershell|awk|gawk|mawk|xcrun|open|launchctl|timeout|gtimeout|stdbuf|su|doas|chroot|unbuffer|flock|ionice|taskset|strace|ltrace|watch|script|screen|tmux|parallel|make|gmake|find|ssh|lldb|gdb|rlwrap|genv|uv|pypy3|nodejs|go|cargo|dotnet|mono|vim|nvim|emacs|sed|m4|gnuplot|dtrace|socat|ncat|nc|tini|dumb-init|entr|watchexec|nix|mise|pkgx|ssh-agent|dbus-launch|shortcuts|automator|runuser|unshare|nsenter|chpst|pkexec|at|batch|pnpm|erl|escript|elixir|racket|guile|nu|elvish|xonsh|rc|osh|ysh|qemu-aarch64|sandbox-exec|taskpolicy|swift|toybox|login|java|npx|uvx|git|docker|sbcl)(?:[0-9]+(?:\.[0-9]+)*)?$/i;
 /** Where an interpreter (and, alone in /usr/bin, env) must sit to be one: a program of that name anywhere else is "complex". */
 const INTERPRETER_DIRS = ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"];
 /** The system dirs a judged plist's PATH may name (each entry exactly one of these). */
@@ -75,13 +77,8 @@ export interface Cruft {
 type CruftFs = Pick<ApplyFs, "home" | "listDir" | "listDirStrict" | "readHead" | "realPath" | "plistJson" | "pinFiles">;
 /** How much of a script is read: the shebang and the owner line sit at the top; a later `# owner:` is not seen. */
 const SCRIPT_BYTES = 512;
-/** A head that reads as a binary: a NUL, a control byte other than tab, newline, form feed and CR, or a replacement character (what a Mach-O or ELF magic decodes to). */
-const looksBinary = (h: string) => {
-  // A multibyte character cut by the end of a full-size head decodes to one trailing U+FFFD (the head is then at least the read bound
-  // in bytes): that one is the cut, not a binary. A U+FFFD anywhere else still is one.
-  const t = Buffer.byteLength(h) >= SCRIPT_BYTES && h.endsWith("\ufffd") ? h.slice(0, -1) : h;
-  return /[\u0000-\u0008\u000b\u000e-\u001f\ufffd]/.test(t);
-};
+/** A head that is a program, not a text file that has a control byte or U+FFFD in it: a NUL, or the lead of two U+FFFD a Mach-O magic decodes to (an ELF header has a NUL in its first bytes). */
+const isBinaryProgram = (h: string) => h.includes("\u0000") || h.startsWith("\ufffd\ufffd");
 const base = (p: string) => p.split("/").at(-1)!;
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -153,9 +150,30 @@ export function launchScript(l: { program?: string; argv: string[] }): { script:
   // A launcher is no binary to skip: it runs whatever file or command it is given, so the plist is counted.
   if (LAUNCHERS.test(base(first))) return "complex";
   // A program named env or like an interpreter that is not in a standard place is not trusted to be one.
-  if (base(first) === "env") return first === "/usr/bin/env" && interp(argv[1]) && abs(argv[2]) ? { script: argv[2], shebang: false } : "complex";
-  if (INTERPRETER.test(base(first))) return interp(first) && abs(argv[1]) ? { script: argv[1], shebang: false } : "complex";
+  if (base(first).toLowerCase() === "env") return first === "/usr/bin/env" && interp(argv[1]) && abs(argv[2]) ? { script: argv[2], shebang: false } : "complex";
+  if (INTERPRETER_ANY.test(base(first))) return interp(first) && abs(argv[1]) ? { script: argv[1], shebang: false } : "complex";
   return abs(first) ? { script: first, shebang: true } : "complex";
+}
+
+/** The program words of a #! line: the interpreter, and for env every word after it (a command word, an option, an option's value or VAR=val: a launcher named by any of them is counted). */
+function shebangWords(head: string): (string | undefined)[] {
+  const words = head.slice(2).split("\n", 1)[0]!.trim().split(/\s+/).filter(Boolean);
+  if (words[0] === undefined || base(words[0]).toLowerCase() !== "env") return [words[0]];
+  return words;
+}
+/** Whether a program path (each word of the list) is a link to a launcher or cannot be resolved, or a bare word names a launcher: it then runs the script as another program would. */
+async function badInterpreter(fs: CruftFs, words: (string | undefined)[]): Promise<boolean> {
+  for (const w of words) {
+    if (w === undefined) continue;
+    if (!w.startsWith("/")) {
+      if (LAUNCHERS.test(w)) return true;
+      continue;
+    }
+    if (!fs.realPath) continue;
+    const real = await fs.realPath(w);
+    if (real === undefined || LAUNCHERS.test(base(real))) return true;
+  }
+  return false;
 }
 
 export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: string[]; ownerlessConfigValues: string[]; adoptedScriptsDir?: string }): Promise<Cruft> {
@@ -208,10 +226,21 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
   const realAdopted = realSlash === undefined || [realSlash, plainAdopted, collapsed].some(broad) ? undefined : realSlash;
   for (const d of [`${fs.home}/Library/LaunchAgents`, "/Library/LaunchAgents", "/Library/LaunchDaemons"]) {
     // A directory that exists but cannot be listed (no access) is one problem to count, not an empty one: its plists would vanish.
-    const names = fs.listDirStrict ? await fs.listDirStrict(d) : await fs.listDir(d);
+    let names = fs.listDirStrict ? await fs.listDirStrict(d) : await fs.listDir(d);
+    // Two listings of one directory that disagree on a plist: one problem to count, and every plist either one shows is judged. A strict listing
+    // that fails is the problem alone when the plain one is empty; the plists the plain listing shows are judged too.
+    const plain = fs.listDirStrict ? (await fs.listDir(d)).filter((x) => x.endsWith(".plist")) : [];
     if (names === undefined) {
       wrappers.push(`${d} complex dir: unlistable`);
-      continue;
+      if (plain.length === 0) continue;
+      names = plain;
+    } else if (fs.listDirStrict) {
+      const strictSet = new Set(names.filter((x) => x.endsWith(".plist")));
+      const plainSet = new Set(plain);
+      if (plain.some((x) => !strictSet.has(x)) || [...strictSet].some((x) => !plainSet.has(x))) {
+        wrappers.push(`${d} complex dir: listings differ`);
+        names = [...new Set([...names, ...plain])];
+      }
     }
     for (const n of names.filter((x) => x.endsWith(".plist")).sort()) {
       const obj = await fs.plistJson?.(`${d}/${n}`);
@@ -238,6 +267,15 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         wrappers.push(`${d}/${n} complex argv: ${launch.argv.slice(0, 4).join(" ")}`);
         continue;
       }
+      // A program given a launcher or an interpreter by name as an argument may start it (an unknown native dispatcher): it is no binary to skip.
+      const argRuns = launch.argv.slice(1).some((w) => LAUNCHERS.test(base(w)) || INTERPRETER_ANY.test(base(w)) || base(w).toLowerCase() === "env");
+      // An interpreter that is a link to a launcher (python3 -> dash) runs the script as that launcher would: counted. A lookup that fails counts too.
+      // env itself is looked at the same way, and so is the interpreter a script's own #! line names (below).
+      const interpWords = base(launch.argv[0]!).toLowerCase() === "env" ? [launch.argv[0]!, launch.argv[1]] : INTERPRETER_ANY.test(base(launch.argv[0]!)) ? [launch.argv[0]] : [];
+      if (await badInterpreter(fs, interpWords)) {
+        wrappers.push(`${d}/${n} runs ${run.script}`);
+        continue;
+      }
       // Resolve the script to its real path, read that path, then resolve again: the file read and the file judged are one.
       const real = fs.realPath ? await fs.realPath(run.script) : resolve(run.script);
       // A program that is a link to a launcher (dash, osascript...) runs another file: counted, whatever its own name is.
@@ -246,7 +284,7 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
         continue;
       }
       // The head and the link count come from one open (meta.links); no link is followed at the resolved path.
-      const m1: { links?: number; noFollow?: boolean } = { noFollow: true };
+      const m1: { links?: number; noFollow?: boolean; dev?: number; ino?: number } = { noFollow: true };
       const body = real === undefined ? undefined : await fs.readHead?.(fs.realPath ? real : run.script, SCRIPT_BYTES, m1);
       // A script that is missing or cannot be read (a FIFO, no access) is unadopted: it is not left out of the count.
       if (body === undefined) {
@@ -263,12 +301,12 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       let head = body;
       let links = m1.links;
       if (stable && run.shebang && body !== "" && !body.startsWith("#!")) {
-        const m2: { links?: number; noFollow?: boolean } = { noFollow: true };
+        const m2: { links?: number; noFollow?: boolean; dev?: number; ino?: number } = { noFollow: true };
         const body2 = await fs.readHead?.(fs.realPath ? real! : run.script, SCRIPT_BYTES, m2);
         // A third lookup after the second read: a path retargeted during that read is unstable, so it is counted, never skipped.
         if (fs.realPath && (await fs.realPath(run.script)) !== real) stable = false;
         // A binary with another name (a hard link) is shared with a place outside the directory: counted, not skipped.
-        if (stable && looksBinary(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && looksBinary(body2) && (m2.links === undefined || m2.links === 1)) continue;
+        if (stable && !argRuns && isBinaryProgram(body) && body2 !== undefined && body2 !== "" && !body2.startsWith("#!") && isBinaryProgram(body2) && m1.links === 1 && m2.links === 1 && m1.dev !== undefined && m1.ino !== undefined && m2.dev === m1.dev && m2.ino === m1.ino) continue;
         head = body2 ?? "";
         links = m2.links;
       }
@@ -280,7 +318,10 @@ export async function cruftCount(a: { fs: CruftFs; configDir: string; pinRoots: 
       // Accepted lows (a)-(d) are listed where realAdopted is built: they need write access in the adopted dir, where an
       // owned script can be edited anyway, or only overcount.
       const inside = !dotted(run.script) && stable && (links === undefined || links === 1) && realAdopted !== undefined && real!.startsWith(realAdopted) && (run.script.startsWith(realAdopted) || run.script.startsWith(plainAdopted));
-      const owned = inside && head.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
+      // Shape (a) runs the file itself, so it must start with #!: a text file with an owner line and no #! cannot be run as the program and is not adopted.
+      // The interpreter the script's own #! line names is no launcher and resolves (python3 -> dash runs the script as dash would).
+      const shebangBad = inside && head.startsWith("#!") && (await badInterpreter(fs, shebangWords(head)));
+      const owned = inside && !shebangBad && (!run.shebang || head.startsWith("#!")) && head.split("\n", 6).slice(0, 5).some((l) => OWNER_LINE.test(l));
       if (!owned) wrappers.push(`${d}/${n} runs ${run.script}`);
     }
   }
