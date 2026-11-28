@@ -6,7 +6,7 @@ import { scannerFaultCount } from "../src/install-closure.ts";
 const enc = (s: string) => new TextEncoder().encode(s);
 const files = (o: Record<string, string>): FileMap => new Map(Object.entries(o).map(([k, v]) => [k, enc(v)]));
 
-// The receiver scan of a call charges the span it splits at its commas (splitTop) on top of its own count. A file of 16,348 characters (250 spaces after the
+// The receiver scan of a call charges the span it splits at its commas (splitTop) on top of its own count. A file of 16,247 characters (250 spaces after the
 // comma of an `Object.assign({}, ...)`, 650 nested `require("./a.js", ...)` calls and 3,624 trailing spaces) faults the scan because of that second charge;
 // without it the file passes and a release that only bumps the version is let through. The charge is a fail-closed overhold and it stays. This test pins code
 // that did not change in this review round: it goes red when the charge is removed again.

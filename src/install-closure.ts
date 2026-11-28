@@ -44,7 +44,7 @@ export interface InstallView {
   gyp?: string;
   // Set when a preinstall, install, postinstall, or prepare script is non-empty.
   hook: boolean;
-  // package.json `bin` and `directories.bin`, compared only while a hook exists.
+  // package.json `bin` and `directories.bin`, compared whenever the install runs anything (a hook, or a gyp file the view read; see prepass).
   binStamp: string;
   // Set only when a widening happened (every file, the whole package, a hook's reach, a same or named directory): the same view read
   // with those widenings left out. What a manifest field (main, bin) or a runner reaches by name shows there, where the widening puts every file on

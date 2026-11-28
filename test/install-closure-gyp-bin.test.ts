@@ -8,8 +8,8 @@ const holds = (a: FileMap, b: FileMap): boolean => prepass("npm", a, b).hard.som
 const gyp = (acts: string[][]) =>
   JSON.stringify({ targets: [{ target_name: "t", actions: acts.map((a, i) => ({ action_name: `a${i}`, action: a, inputs: [], outputs: [`o${i}`] })) }] });
 
-// A package with no install hook runs only its binding.gyp (the implicit node-gyp build): no bin stamp applies there (it is compared only while a hook exists), so
-// a bin retargeted between two byte-identical writer files shows only in the files a self-run records. Both sides name bin "p" and x.js, y.js are the same file.
+// A package with no install hook runs only its binding.gyp (the implicit node-gyp build). The bin stamp is compared for it too (whenever the install runs anything),
+// so a bin retargeted between two byte-identical writer files is held by the stamp. Both sides name bin "p" and x.js, y.js are the same file.
 const binMove = (pkg: (side: 0 | 1) => Record<string, unknown>, acts: string[][]) => {
   const mk = (v: string, side: 0 | 1): FileMap =>
     files({ "package.json": JSON.stringify({ name: "p", version: v, ...pkg(side) }), "x.js": WRITER, "y.js": WRITER, "docs/changed.js": "console.log(2)\n", "local.js": "1\n", "binding.gyp": gyp(acts) });
@@ -64,5 +64,40 @@ test("a bin moved between two plain files holds in a package whose only install 
 test("control: a bin moved between two plain files in a package that runs nothing at install releases", () => {
   const mk = (v: string, side: 0 | 1): FileMap =>
     files({ "package.json": JSON.stringify({ name: "p", version: v, scripts: { test: "echo hi" }, ...bin(side) }), "x.js": "console.log(1)\n", "y.js": "console.log(1)\n" });
+  expect(holds(mk("1.0.0", 0), mk("1.0.1", 1))).toBe(false);
+});
+
+// A binding.gyp at any depth is an implicit build for the reader, so the bin stamp is compared for it too (not only for a root one).
+const nested = (gypPath: string, form: "actions" | "sources" | "runner", run: string[], pkg: (side: 0 | 1) => Record<string, unknown>, scripts?: Record<string, string>) => {
+  const gypText = form === "sources" ? JSON.stringify({ targets: [{ target_name: "a", sources: [...BOTH, run].map((a) => `<!(${a.join(" ")})`) }] }) : gyp([...BOTH, form === "runner" ? ["node", "runner.js"] : run]);
+  const mk = (v: string, side: 0 | 1): FileMap =>
+    files({
+      "package.json": JSON.stringify({ name: "p", version: v, ...(scripts ? { scripts } : {}), ...pkg(side) }),
+      "x.js": WRITER,
+      "y.js": WRITER,
+      "docs/changed.js": "console.log(2)\n",
+      "local.js": "1\n",
+      [gypPath]: gypText,
+      ...(form === "runner" ? { "runner.js": `require("child_process").execSync(${JSON.stringify(run.join(" "))});\n` } : {}),
+    });
+  return holds(mk("1.0.0", 0), mk("1.0.1", 1));
+};
+for (const [gypPath, form] of [["deps/binding.gyp", "actions"], ["src/binding.gyp", "sources"], ["a/b/c/binding.gyp", "actions"], ["deps/binding.gyp", "runner"]] as const)
+  for (const run of [["npx", "."], ["npm", "exec", "."], ["npm", "exec", "--", "p"], ["npx", "p"]])
+    test(`a bin moved between two writer files holds with the gyp file at ${gypPath} (${form}): ${run.join(" ")}`, () => {
+      expect(nested(gypPath, form, run, bin)).toBe(true);
+    });
+for (const [label, pkg] of [
+  ["as a string", (s: 0 | 1) => ({ bin: s ? "y.js" : "x.js" })],
+  ["removed", (s: 0 | 1) => (s ? {} : { bin: { p: "x.js" } })],
+  ["added", (s: 0 | 1) => (s ? { bin: { p: "y.js" } } : {})],
+] as [string, (s: 0 | 1) => Record<string, unknown>][])
+  test(`a bin ${label} between two writer files holds with a nested gyp file and no install hook`, () => {
+    expect(nested("deps/binding.gyp", "actions", ["npx", "."], pkg, { prepack: "echo hi" })).toBe(true);
+  });
+test("control: a nested gyp file that no install builds (gypfile: false) with a bin move releases, as the public main does", () => {
+  const mk = (v: string, side: 0 | 1): FileMap =>
+    files({ "package.json": JSON.stringify({ name: "p", version: v, gypfile: false, ...bin(side) }), "x.js": "console.log(1)\n", "y.js": "console.log(1)\n", "deps/binding.gyp": gyp([["node", "-e", "1"]]) });
+  // gypfile: false, no hook: nothing runs at install, so a bin move alone is no hold (the public main releases it too).
   expect(holds(mk("1.0.0", 0), mk("1.0.1", 1))).toBe(false);
 });
