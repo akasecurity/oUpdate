@@ -356,6 +356,8 @@ function shebangWords(head: string): { words: Word[]; count: boolean } {
   parseEnv(raw.slice(1), words, st, 0);
   return { words, count: st.path || st.bad };
 }
+/** The most path lookups one line may need; a line past it is counted. */
+const LOOKUP_CAP = 512;
 /** The family of a program name for the check of a link: python3.12 and python3 are one family, bash and dash are not. */
 const family = (name: string): string => name.toLowerCase().replace(/[0-9.]+$/, "");
 /**
@@ -364,7 +366,15 @@ const family = (name: string): string => name.toLowerCase().replace(/[0-9.]+$/, 
  * behind a name that is neither or of another family, counts; the command word of an env line that is found nowhere counts too: env would fail, and a lookup
  * that finds nothing is not a script that is adopted. An absolute path that links to a program of another family (python3 -> bash) counts.
  */
-async function badInterpreter(fs: CruftFs, words: Word[], pathDirs: string[] = LAUNCHD_PATH): Promise<boolean> {
+async function badInterpreter(fs: CruftFs, wordList: Word[], dirList: string[] = LAUNCHD_PATH): Promise<boolean> {
+  // The same word, and the same dir, is judged once; a line that needs more than LOOKUP_CAP lookups is counted (words x dirs would stall the scan).
+  const seen = new Set<string>();
+  const words = wordList.filter((x) => {
+    const key = `${x.w}\0${x.cmd ? 1 : 0}${x.name ? 1 : 0}`;
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
+  const pathDirs = [...new Set(dirList)];
+  let lookups = 0;
   for (const { w, cmd, name } of words) {
     if (name) {
       if (LAUNCHERS.test(base(w))) return true;
@@ -376,10 +386,11 @@ async function badInterpreter(fs: CruftFs, words: Word[], pathDirs: string[] = L
       if (w.startsWith("-") || w.includes("/") || w.includes("=") || !fs.realPath) continue;
       let found = false;
       for (const d of pathDirs) {
+        if (++lookups > LOOKUP_CAP) return true;
         const real = await fs.realPath(`${d}/${w}`);
         if (real === undefined) continue;
         found = true;
-        if (LAUNCHERS.test(base(real)) || (runsOther(base(real)) && (!runsOther(w) || family(w) !== family(base(real))))) return true;
+        if (runsOther(base(real)) && (!runsOther(w) || family(w) !== family(base(real)))) return true;
       }
       if (!found && cmd) return true;
       continue;
@@ -387,6 +398,7 @@ async function badInterpreter(fs: CruftFs, words: Word[], pathDirs: string[] = L
     // The name of the path is a launcher's whatever it links to: counted.
     if (LAUNCHERS.test(base(w))) return true;
     if (!fs.realPath) continue;
+    if (++lookups > LOOKUP_CAP) return true;
     const real = await fs.realPath(w);
     if (real === undefined || LAUNCHERS.test(base(real))) return true;
     if (runsOther(base(w)) && runsOther(base(real)) && family(base(w)) !== family(base(real))) return true;

@@ -359,6 +359,17 @@ describe("env line: what the earlier readers counted stays counted, and the revi
       expect({ l, n: await counted(l) }).toEqual({ l, n: 0 });
   });
 
+  test("env pins: nested -S past the cap counts a benign command, a bare - and -- are read", async () => {
+    for (const n of [7, 8, 9]) await onlyNew(`#!/usr/bin/env ${"-S ".repeat(n)}python3`);
+    await onlyNew("#!/usr/bin/env - python3");
+    await onlyNew("#!/usr/bin/env - date");
+    // Controls: six nested -S, a `--` before the command and a -S with nothing after it are ordinary.
+    for (const l of ["#!/usr/bin/env -S -S -S -S -S -S python3", "#!/usr/bin/env -- python3", "#!/usr/bin/env --split-string", "#!/usr/bin/env -S"]) expect({ l, n: await counted(l) }).toEqual({ l, n: 0 });
+  });
+  test("a link to a launcher found by a bare word in a later dir is counted", async () => {
+    expect(await counted("#!/usr/bin/env run")).toBe(1);
+  });
+
   test("a corpus of 3,000 env lines: the head counts every line either earlier reader counted", async () => {
     let seed = 20261128;
     const rnd = (n: number) => ((seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff) % n);
@@ -395,5 +406,42 @@ describe("env line: what the earlier readers counted stays counted, and the revi
     expect(only2).toBeGreaterThan(50);
     expect(n2).toBeGreaterThanOrEqual(n1);
     expect(missed).toEqual([]);
+  });
+});
+
+describe("a line with many words or a long PATH is judged in bounded time (OUP-372)", () => {
+  // `missing` is asked once per lookup: it counts them. Every word `aN` is found nowhere (the command word then counts the line).
+  const run = async (line: string, dirs?: number) => {
+    let calls = 0;
+    const t = Date.now();
+    const n = await count({
+      argv: [OWN],
+      head: () => `${line}\n# owner: me\n`,
+      ...(dirs ? { env: { PATH: Array(dirs).fill("/bin").join(":") } } : {}),
+      missing: (q) => (calls++, /\/a\d*$/.test(q)),
+    });
+    return { n, calls, ms: Date.now() - t };
+  };
+  const words = (k: number) => Array.from({ length: k }, (_, i) => `a${i}`).join(" ");
+  test("49,000 repeated PATH dirs and 232 distinct words: one dir is looked at, in under 1 s", async () => {
+    const r = await run(`#!/usr/bin/env ${words(232)}`, 49000);
+    expect(r.n).toBe(1);
+    expect(r.calls).toBeLessThan(600);
+    expect(r.ms).toBeLessThan(1000);
+  });
+  test("a repeated PATH dir is looked at once: 3 words and 49,000 copies of /bin make 3 lookups", async () => {
+    const r = await run(`#!/usr/bin/env ${words(3)}`, 49000);
+    expect(r.n).toBe(1);
+    expect(r.calls).toBeLessThan(10);
+  });
+  test("49,000 distinct words are counted after the lookup cap, not after 49,000 x 4 lookups", async () => {
+    const r = await run(`#!/usr/bin/env ${words(49000)}`);
+    expect(r.n).toBe(1);
+    expect(r.calls).toBeLessThan(700);
+  });
+  test("a repeated word is looked up once: 5,000 copies of one word found nowhere", async () => {
+    const r = await run(`#!/usr/bin/env ${Array(5000).fill("a").join(" ")}`);
+    expect(r.n).toBe(1);
+    expect(r.calls).toBeLessThan(30);
   });
 });
