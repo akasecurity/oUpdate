@@ -10,6 +10,10 @@ import { parseApplyConfig } from "../src/apply/config.ts";
 import { cruftCount, cruftLines, launchScript, plistLaunch, safeName, sourceProblem } from "../src/host/cruft.ts";
 import { parseHostCommand } from "../src/host/cli.ts";
 
+/** The real path of a file: the system interpreter dirs answer with the path itself, so no fixture depends on what the host links /bin/sh, /bin/bash or /usr/bin/env to (dash on Linux, a real binary on macOS). Everything else is the real lookup. */
+const SYSTEM_BIN = /^(?:\/bin|\/usr\/bin|\/usr\/local\/bin|\/opt\/homebrew\/bin)\//;
+const hostReal = async (p: string): Promise<string | undefined> => (SYSTEM_BIN.test(p) ? p : realFs.realPath!(p));
+
 /** A plist as the OS parser gives it: the fake plistJson reads the JSON text kept under the plist's name. */
 const plist = (...args: string[]) => JSON.stringify({ Label: "x", ProgramArguments: args });
 
@@ -449,7 +453,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
   symlinkSync(join(root, "nowhere"), join(adopted, "dangling.sh"));
   const host = (script: string, dir: string, over: Record<string, unknown> = {}) =>
     cruftCount({
-      fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number; noFollow?: boolean }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), realPath: realFs.realPath!, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [], ...over },
+      fs: { home: "/h", listDir: async (d: string) => (d === A ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number; noFollow?: boolean }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), realPath: hostReal, plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [], ...over },
       configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
     }).then((c) => c.wrappers);
   const runs = (s: string) => [`${A}/t.plist runs ${s}`];
@@ -492,7 +496,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     // `realAdopted !== undefined` term in cruft.ts:246, where startsWith(undefined) would look for the string "undefined".
     const ghost = join(root, "no-such-dir", "own.sh");
     const odd = "undefined/own.sh";
-    expect(await host(ghost, join(root, "no-such-dir"), { realPath: async (p: string) => (p === ghost ? odd : realFs.realPath!(p)), readHead: async (p: string, n: number) => (p === odd ? owned : p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n)) })).toEqual(runs(ghost));
+    expect(await host(ghost, join(root, "no-such-dir"), { realPath: async (p: string) => (p === ghost ? odd : hostReal(p)), readHead: async (p: string, n: number) => (p === odd ? owned : p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n)) })).toEqual(runs(ghost));
     // A dot segment that does resolve still adopts the files really inside it.
     expect(await host(own, `${adopted}/.`)).toEqual([]);
     // The plain prefix is the configured string, never resolve()d (cruft.ts:176): toSub -> scripts/sub, so outside/toSub/.. is
@@ -507,7 +511,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     expect(await host(bin, adopted)).toEqual([]);
     let n = 0;
     // Fails at the order of cruft.ts:224 (second realPath), :225 (`stable`) and :232 (binary skip): the binary shortcut returned before the second realPath, so a swapped path counted as 0.
-    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++n === 2 ? join(outside, "x.sh") : realFs.realPath!(p)) })).toEqual(runs(bin));
+    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++n === 2 ? join(outside, "x.sh") : hostReal(p)) })).toEqual(runs(bin));
   });
   test("the file read and the file judged are one: a path that resolves differently on the second look is unadopted", async () => {
     const script = join(adopted, "job.sh");
@@ -516,18 +520,18 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     const reads: string[] = [];
     let n = 0;
     // The first resolution says outside (owned), the second says inside: readHead read the outside file, the check sees the inside one.
-    const retarget = { realPath: async (p: string) => (p === script ? (++n === 1 ? elsewhere : inside) : realFs.realPath!(p)), readHead: async (p: string, b: number) => { reads.push(p); return p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b); } };
+    const retarget = { realPath: async (p: string) => (p === script ? (++n === 1 ? elsewhere : inside) : hostReal(p)), readHead: async (p: string, b: number) => { reads.push(p); return p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, b); } };
     // Outside first, inside second: cruft.ts:225 (`stable`) and cruft.ts:246 (`real!.startsWith`) each block this fixture alone, so it pins neither; the next two fixtures pin `stable`.
     expect(await host(script, adopted, retarget)).toEqual(runs(script));
     expect(reads).toContain(elsewhere); // what was read is the first resolved path, not the one as given
     // The dangerous direction: inside first (owned, adopted), outside second. Fails at cruft.ts:225 (`stable`) if `again === real` is dropped.
     let k = 0;
-    expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside && ++k === 2 ? elsewhere : realFs.realPath!(p)) })).toEqual(runs(inside));
+    expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside && ++k === 2 ? elsewhere : hostReal(p)) })).toEqual(runs(inside));
     // Fails at cruft.ts:225 (`stable`) too: a second resolution that fails is unadopted, not adopted.
     let m = 0;
-    expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside && ++m === 2 ? undefined : realFs.realPath!(p)) })).toEqual(runs(inside));
+    expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside && ++m === 2 ? undefined : hostReal(p)) })).toEqual(runs(inside));
     // And a script that does not resolve at all is counted, not left out.
-    expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside ? undefined : realFs.realPath!(p)) })).toEqual(runs(inside));
+    expect(await host(inside, adopted, { realPath: async (p: string) => (p === inside ? undefined : hostReal(p)) })).toEqual(runs(inside));
   });
   test("an empty direct script is counted, and a binary is still not (OUP-367)", async () => {
     const empty = join(adopted, "empty.sh");
@@ -589,7 +593,7 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     try {
       const at = (home: string, script: string, dir: string) =>
         cruftCount({
-          fs: { ...realFs, home, listDir: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), listDirStrict: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
+          fs: { ...realFs, realPath: hostReal, home, listDir: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), listDirStrict: async (d: string) => (d === `${home}/Library/LaunchAgents` ? ["t.plist"] : []), readHead: async (p: string, n: number, m?: { links?: number }) => (p.endsWith(".plist") ? "<plist/>" : realFs.readHead!(p, n, m)), plistJson: async () => ({ ProgramArguments: [script] }), pinFiles: () => [] },
           configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [], adoptedScriptsDir: dir,
         }).then((c) => c.wrappers.length);
       for (const d of ["Accounts", "Elsewhere", "R", "target", "h1", "h1/scripts"]) mkdirSync(join(hm, d), { recursive: true });
@@ -667,10 +671,10 @@ describe("adoption resolves symlinks (OUP-366)", () => {
     expect(await host(bin, adopted)).toEqual([]);
     let n = 0;
     // Fails at cruft.ts (the realPath after the second read): the lookups before it agree, only the third says outside, and the skip came first.
-    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++n === 3 ? join(outside, "x.sh") : realFs.realPath!(p)) })).toEqual(runs(bin));
+    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++n === 3 ? join(outside, "x.sh") : hostReal(p)) })).toEqual(runs(bin));
     // A third lookup that fails counts too.
     let k = 0;
-    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++k === 3 ? undefined : realFs.realPath!(p)) })).toEqual(runs(bin));
+    expect(await host(bin, adopted, { realPath: async (p: string) => (p === bin && ++k === 3 ? undefined : hostReal(p)) })).toEqual(runs(bin));
   });
   test("a directory component swapped for a link after the lookup is counted: O_NOFOLLOW covers the last component only (OUP-368 item 6)", async () => {
     mkdirSync(join(adopted, "sub"), { recursive: true });
@@ -752,7 +756,7 @@ describe("the real plutil read (OUP-349)", () => {
       writeFileSync(join(agents, "sp ace\nnl.plist"), wrap(args));
       execFileSync("mkfifo", [join(agents, "f-fifo.plist")]);
       const t0 = Date.now();
-      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []), listDirStrict: async (d) => (d.startsWith(root) ? realFs.listDirStrict!(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
+      const c = await cruftCount({ fs: { ...realFs, realPath: hostReal, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []), listDirStrict: async (d) => (d.startsWith(root) ? realFs.listDirStrict!(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
       expect(Date.now() - t0).toBeLessThan(3000); // a FIFO never reaches plutil (it would wait out the 5 s timeout)
       const names = c.wrappers.map((w) => w.replace(`${agents}/`, ""));
       expect(names.filter((w) => w.startsWith("a-attr") || w.startsWith("b-pi")).length).toBe(2);
@@ -792,7 +796,7 @@ describe("the real plutil read (OUP-349)", () => {
       writeFileSync(join(agents, "o-lower.plist"), `<?xml version='1.0' encoding='utf-8'?><plist version="1.0"><dict>${args}</dict></plist>`);
       writeFileSync(join(agents, "p-none.plist"), `<?xml version="1.0"?><plist version="1.0"><dict>${args}</dict></plist>`);
       writeFileSync(join(agents, "i-amp.plist"), wrap(`${args}<key>Label</key><string>a&amp;b &lt;c&gt;</string>`));
-      const c = await cruftCount({ fs: { ...realFs, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []), listDirStrict: async (d) => (d.startsWith(root) ? realFs.listDirStrict!(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
+      const c = await cruftCount({ fs: { ...realFs, realPath: hostReal, home: root, listDir: async (d) => (d.startsWith(root) ? realFs.listDir(d) : []), listDirStrict: async (d) => (d.startsWith(root) ? realFs.listDirStrict!(d) : []) }, configDir: "/cfg", pinRoots: [], ownerlessConfigValues: [] });
       const names = c.wrappers.map((w) => w.replace(`${agents}/`, ""));
       // Whichever way plutil reads each (an error is "unreadable"), none is adopted; the legit one is.
       expect(names.map((w) => w.slice(0, 1)).sort()).toEqual(["a", "b", "c", "d", "f", "g", "h", "j", "k", "l", "m"]);
