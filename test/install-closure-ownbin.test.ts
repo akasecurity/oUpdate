@@ -54,6 +54,16 @@ describe("a command that names one of the package's own bins runs that bin's fil
   test("a bin string is named by the package name without its scope", () => {
     expect(reaches({ bin: "bin/cli", scripts: { postinstall: "tool" } })).toBe(true);
   });
+  // npm names a string bin String(name) for a truthy name that is not a string (["tool"] -> .bin/tool, 7 -> .bin/7), as the bin stamp reads it. Fails at src/install-closure.ts ownBins (the string-bin branch needs a string name).
+  test("a bin string of a package whose name is not a string is named by String(name)", () => {
+    expect(reaches({ name: ["tool"], bin: "bin/cli", scripts: { postinstall: "tool" } })).toBe(true);
+    expect(reaches({ name: 7, bin: "bin/cli", scripts: { postinstall: "7" } })).toBe(true);
+  });
+  test("control: a falsy name names no bin, and the name of another package is no bin of this one", () => {
+    expect(reaches({ name: 0, bin: "bin/cli", scripts: { postinstall: "tool" } })).toBe(false);
+    expect(reaches({ name: ["other"], bin: "bin/cli", scripts: { postinstall: "tool" } })).toBe(false);
+    expect(reaches({ name: ["tool"], bin: { tool: "bin/cli" }, scripts: { postinstall: "tool" } })).toBe(true);
+  });
   test("a .js target", () => {
     expect(reaches({ bin: { tool: "bin/cli.js" }, scripts: { postinstall: "tool" } }, { "bin/cli.js": cli })).toBe(true);
   });

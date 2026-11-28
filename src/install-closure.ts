@@ -15591,7 +15591,8 @@ function ownBins(root: Record<string, unknown>, logical: Map<string, string>): M
     else out.set(n, [target]);
   };
   const bin = root.bin;
-  if (typeof bin === "string" && typeof root.name === "string") add(root.name, bin);
+  // A truthy name that is not a string is String(name) to npm (as in stampBin).
+  if (typeof bin === "string" && (typeof root.name === "string" || root.name)) add(String(root.name), bin);
   else if (bin && typeof bin === "object" && !Array.isArray(bin)) {
     for (const [k, v] of Object.entries(bin as Record<string, unknown>)) if (typeof v === "string") add(k, v);
   }
