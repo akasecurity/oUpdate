@@ -213,7 +213,8 @@ interface Ctx {
   escGyp?: boolean;
   arRec?: { marks: { seen: Set<string>; seenNoHooks: Set<string>; scanned: Set<string>; gypScanned: Set<string>; ranSh: Set<string> }; bins: Set<string>; files: Set<string>; missing: Set<string>; scripts: Record<string, string>; gyp: boolean };
   // The package's own name and what running the package itself runs (npx ., npm exec -- <name>): every bin, or main with no bin.
-  self: { name: string; targets: string[] };
+  // `main`: the file `node .` runs, set only when the package has no bin (the targets are then [main]): the only self-run target selfWs compares.
+  self: { name: string; targets: string[]; main?: string };
   // The command being dispatched is only looked up, listed or asked for help (command -v tool, sudo -l tool, npm exec --help tool):
   // nothing in it runs, so no bin of this package is read for it or for what it would redispatch. Set and restored around it.
   noBinLookup?: boolean;
@@ -7266,7 +7267,7 @@ function constPartsWiden(text: string, late: { all: boolean; wr: boolean }): boo
     const end = closeAt(text.slice(open, open + 400), 0);
     xs3 += end < 0 ? 400 : end + 1;
     if (end < 0) return []; // no receiver read: recv() takes the empty text as unknown
-    return splitTop(text.slice(open + 1, open + end), ",", false); // already charged to xs3 above
+    return splitTop(text.slice(open + 1, open + end), ",");
   };
   const callSites: [RegExp, (args: string[]) => void][] = [
     // A call on a name, a bracket or a paren that is changed in place: `)`, `]`, `}` or a member name before `.push(`.
@@ -9903,8 +9904,8 @@ function strLit(expr: string): string | undefined {
   return t.slice(1, -1);
 }
 
-function splitTop(src: string, sep: "," | "+", charge = true): string[] {
-  if (charge) jsStep(src.length + 1);
+function splitTop(src: string, sep: "," | "+"): string[] {
+  jsStep(src.length + 1);
   const out: string[] = [];
   let cur = "";
   let depth = 0;
@@ -15730,7 +15731,8 @@ export function shebangCommand(first: string): string[] | undefined {
 // (selfGyp) are kept apart too, and the gyp read of a package only a self-run reached gyp for runs as a self-run.
 // The self-run reads of one trigger: each target once, and none that a read already took in, in a single copy of the records.
 function readSelfTargets(ctx: Ctx, targets: string[]): void {
-  for (const t of targets) (ctx.selfRan ??= new Set()).add(t);
+  // A bin target is not recorded: a bin that moves is held by the bin stamp, and a record of every bin file makes the two sides' sets alike.
+  if (ctx.self.main !== undefined && targets === ctx.self.targets) (ctx.selfRan ??= new Set()).add(ctx.self.main);
   // Nothing left to read: every target self-read (selfBinsRead holds only self.targets), or a pass under this same binsRead found none left
   // (neither record ever drops an entry, so that stays true).
   // Inside the backslash reading a self-run reads on the records of that reading only: the real self-run records are left alone.
@@ -16078,7 +16080,7 @@ function installViewCore(files: FileMap): InstallView {
   ctx.bins = ownBins(root, indexed.logical);
   const binTargets = [...new Set([...ctx.bins.values()].flat())];
   const mainFile = typeof root.main === "string" ? inPackage(root.main) : undefined;
-  ctx.self = { name: typeof root.name === "string" ? root.name : "", targets: binTargets.length ? binTargets : [mainFile ?? "index.js"] };
+  ctx.self = { name: typeof root.name === "string" ? root.name : "", targets: binTargets.length ? binTargets : [mainFile ?? "index.js"], ...(binTargets.length ? {} : { main: mainFile ?? "index.js" }) };
   const done = (gyp?: string) => finish(ctx, manifest, gyp, hook, stamp);
   const scripts = root.scripts;
   ctx.raw = scripts && typeof scripts === "object" && !Array.isArray(scripts) ? (scripts as Record<string, unknown>) : {};
